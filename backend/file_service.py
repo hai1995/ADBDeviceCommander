@@ -13,6 +13,7 @@ import tempfile
 import uuid
 
 from core.constants import adb_kwargs, parse_ls_output, posix_join, safe_name
+from core import tmpfiles
 
 
 def shq(text) -> str:
@@ -113,6 +114,10 @@ class FileService:
             return {"text": r.stdout, "local": None}, None
         # 失败（可能大文件/二进制）或输出超限：尝试 pull
         try:
+            # 先清理上一轮遗留的临时副本：这类文件每次「查看」都会新增一份，
+            # 没人删就会在 %TEMP% 里一直堆积（几百 MB 的日志看几次就吃掉几个 GB）。
+            # 保留最新 8 个 + 10 分钟宽限，保证正在看的这一份不会被删掉。
+            tmpfiles.sweep_view_files(keep_newest=8, min_age_s=600.0)
             tmp = os.path.join(
                 tempfile.gettempdir(),
                 "adb_view_%s_%s" % (uuid.uuid4().hex[:8],

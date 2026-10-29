@@ -351,3 +351,91 @@ def test_apk_install_allowed_again_after_batch_finishes(api, monkeypatch,
     assert api.apk_install()["ok"] is True
     assert _wait(lambda: api._apk_batch is None), "批次结束后账要清空"
     assert api.apk_install()["ok"] is True
+
+
+# ---------------------------------------------------------------- 诊断包
+def test_diag_collect_rejects_without_device(api):
+    api.devices.device_checked = {}
+    res = api.diag_collect(None, True, 2000)
+    assert res["ok"] is False and res["reason"] == "no_device"
+    assert any("勾选" in t for t in _status_texts(api))
+
+
+def test_diag_collect_runs_in_background_and_reports(api, monkeypatch, tmp_path):
+    """正常路径：后台线程跑完 -> tool 事件带路径 + diag_state 复位 + toast 汇总。"""
+    import core.diag as diag_mod
+
+    calls = []
+
+    def fake_collect(adb, serial, out_dir, **kw):
+        calls.append((adb, serial, out_dir, kw))
+        path = str(tmp_path / ("diag_%s.zip" % serial))
+        return path, {"serial": serial, "device": {"model": "Pixel"},
+                      "parts": [{"name": "device.txt", "ok": True}]}, None
+
+    # controller 里 import 的是同一个模块对象，改它就是改调用方看到的 collect
+    monkeypatch.setattr(diag_mod, "collect", fake_collect)
+    api.devices.device_checked = {"A1": True}
+
+    res = api.diag_collect(None, True, 5000)
+    assert res["ok"] is True and res["devices"] == ["A1"]
+    assert _wait(lambda: not api._diag_running)
+
+    assert len(calls) == 1
+    assert calls[0][1] == "A1"
+    assert calls[0][3]["with_logcat"] is True
+    assert calls[0][3]["logcat_lines"] == 5000
+
+    events = api.bus.take()
+    kinds = [e["kind"] for e in events]
+    assert "diag_state" in kinds
+    diag_states = [e["payload"]["running"] for e in events
+                   if e["kind"] == "diag_state"]
+    assert diag_states[0] is True and diag_states[-1] is False
+    tools = [e["payload"] for e in events
+             if e["kind"] == "tool" and e["payload"].get("type") == "diag"]
+    assert tools and tools[0]["path"].endswith("diag_A1.zip")
+
+
+def test_diag_collect_refuses_while_running(api, monkeypatch):
+    """已有一批在收集时第二次点击直接拒绝（不要排队出两个时间点不同的包）。"""
+    api._diag_running = True
+    res = api.diag_collect(None, True, 2000)
+    assert res["ok"] is False and res["reason"] == "busy"
+    assert any("正在收集" in t for t in _status_texts(api))
+
+
+def test_diag_collect_failure_reports_and_resets(api, monkeypatch):
+    import core.diag as diag_mod
+
+    monkeypatch.setattr(diag_mod, "collect",
+                        lambda *a, **kw: (None, None, "保存目录不可写"))
+    api.devices.device_checked = {"A1": True}
+    api.diag_collect(None, False, 2000)
+    assert _wait(lambda: not api._diag_running)
+    texts = _status_texts(api)
+    assert any("诊断包失败" in t for t in texts)
+
+
+def test_diag_collect_survives_collect_exception(api, monkeypatch):
+    """collect 自己抛异常时也要复位按钮态（否则「收集诊断包」永久锁死）。"""
+    import core.diag as diag_mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(diag_mod, "collect", boom)
+    api.devices.device_checked = {"A1": True}
+    api.diag_collect(None, False, 2000)
+    assert _wait(lambda: not api._diag_running)
+    assert any("内部错误" in t for t in _status_texts(api))
+
+
+def test_diag_options_reads_prefs(api):
+    import core.prefs as prefs
+    prefs.save_prefs({"diag_with_logcat": False, "diag_logcat_lines": 5000})
+    opt = api.diag_options()
+    assert opt["ok"] is True
+    assert opt["with_logcat"] is False
+    assert opt["logcat_lines"] == 5000
+    assert opt["running"] is False

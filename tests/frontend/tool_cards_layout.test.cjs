@@ -53,6 +53,7 @@ const CARDS = [
   { id: "shot-card", toggle: "shot-toggle", body: "shot-body", key: "shot_collapsed" },
   { id: "rec-card", toggle: "rec-toggle", body: "rec-body", key: "rec_collapsed" },
   { id: "apk-card", toggle: "apk-toggle", body: "apk-body", key: "apk_collapsed" },
+  { id: "diag-card", toggle: "diag-toggle", body: "diag-body", key: "diag_collapsed" },
   { id: "scrcpy-card", toggle: "scrcpy-toggle", body: "scrcpy-body", key: "scrcpy_collapsed" },
 ];
 
@@ -104,16 +105,16 @@ const folded = (doc, id) => doc.getElementById(id).classList.contains("collapsed
     process.exit(fail ? 1 : 0);
   }, 60000);
 
-  console.log("[1] 结构：四张卡竖排、各自带折叠标题与内容区");
+  console.log("[1] 结构：五张卡竖排、各自带折叠标题与内容区");
   {
     const doc = new JSDOM(html).window.document;
     const tools = doc.querySelector('section.tab[data-tab="tools"]');
     ok(!!tools, "工具页 section 存在");
 
     const cards = Array.from(tools.querySelectorAll(":scope > .tool-card"));
-    ok(cards.length === 4, "四张卡都是 section 的直接子元素（实际 " + cards.length + "）");
-    ok(cards.map((c) => c.id).join(",") === "shot-card,rec-card,apk-card,scrcpy-card",
-       "自上而下：截图 → 录屏 → 应用安装 → 投屏（实际 " + cards.map((c) => c.id).join(",") + "）");
+    ok(cards.length === 5, "五张卡都是 section 的直接子元素（实际 " + cards.length + "）");
+    ok(cards.map((c) => c.id).join(",") === "shot-card,rec-card,apk-card,diag-card,scrcpy-card",
+       "自上而下：截图 → 录屏 → 应用安装 → 诊断包 → 投屏（实际 " + cards.map((c) => c.id).join(",") + "）");
     ok(!tools.querySelector(".tool-pair"), "没有并排用的 .tool-pair 容器");
 
     CARDS.forEach((d) => {
@@ -158,16 +159,18 @@ const folded = (doc, id) => doc.getElementById(id).classList.contains("collapsed
     const { window, calls } = await boot();
     const doc = window.document;
     ok(await waitFor(() => !!doc.getElementById("shot-toggle"), 4000, "页面就绪"),
-       "四张卡渲染完成");
+       "五张卡渲染完成");
     ok(!folded(doc, "shot-card") && !folded(doc, "rec-card")
-       && !folded(doc, "apk-card") && !folded(doc, "scrcpy-card"),
-       "初始四张卡都是展开态");
+       && !folded(doc, "apk-card") && !folded(doc, "diag-card")
+       && !folded(doc, "scrcpy-card"),
+       "初始五张卡都是展开态");
 
     click(doc, doc.getElementById("shot-toggle"));
     await sleep(80);
     ok(folded(doc, "shot-card"), "点截图标题 → 截图卡收起");
     ok(!folded(doc, "rec-card"), "录屏卡不受影响");
     ok(!folded(doc, "apk-card"), "应用安装卡不受影响");
+    ok(!folded(doc, "diag-card"), "诊断包卡不受影响");
     ok(!folded(doc, "scrcpy-card"), "投屏卡不受影响");
     ok(doc.getElementById("shot-toggle").getAttribute("aria-expanded") === "false",
        "收起后 aria-expanded=false");

@@ -62,8 +62,13 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
 """
 import os
 import sys
+import threading
 
 from core.constants import PROJECT_ROOT, resource_path
+
+# save_prefs 的「读-合并-写」整体互斥锁（见 save_prefs 的说明）。
+# 模块级：所有调用方共用同一把，跨线程串行化写入。
+_SAVE_LOCK = threading.Lock()
 
 PREFS_FILE = "config.json"
 # 早期版本（第三轮及以前）用的配置文件名。启动时若 config.json 缺失而本文件
@@ -137,6 +142,13 @@ PREFS_DEFAULTS = {
     "apk_replace": True,
     "apk_downgrade": False,
     "apk_grant": False,
+    # 诊断包（一键收集设备信息 / 日志尾部 / 进程 / 应用 / ANR）：
+    #   diag_with_logcat   是否包含 logcat 尾部（默认包含：排障时最常要的就是它）
+    #   diag_logcat_lines  尾部行数（默认 2000 ≈ 300 KB 文本，压缩后几十 KB）
+    #   diag_collapsed     诊断卡收起态
+    "diag_with_logcat": True,
+    "diag_logcat_lines": 2000,
+    "diag_collapsed": False,
     # 投屏：用户手动指定的 scrcpy 目录 / 可执行文件（空 = 自动探测）
     "scrcpy_path": "",
     # 备用投屏（没装 scrcpy 时用）：播放器路径、分辨率、码率、低帧率预览帧率。
@@ -180,6 +192,9 @@ INT_RANGES = {
     "cmd_timeout": (0, 3600),
     # 无线调试端口：1024 以下是系统保留端口（非 root 绑不上），65535 是上限
     "wifi_port": (1024, 65535),
+    # 诊断包 logcat 行数：下限 100（再少没有排障价值），上限与 core.diag 的
+    # MAX_LOGCAT_LINES 一致（5 万行 ≈ 7 MB，压缩后 1~2 MB，能随手发出去）
+    "diag_logcat_lines": (100, 50000),
 }
 
 # 旧版键名 → 新键名（录屏「指针显示」从 screenrecord --show-pointer 参数改为
@@ -404,10 +419,17 @@ def _atomic_write(prefs: dict) -> bool:
     config.json 就变成空文件或半截 JSON，下次启动 save_dir / adb_dir / 各开关
     全部悄悄回到默认值，用户毫无察觉。所有写入路径（save_prefs / 一次性迁移）
     都必须走这里，不允许各处自己 open。
+
+    临时文件用**唯一名**（pid + 随机串）而不是固定的 `config.json.tmp`：
+    两个线程同时落盘时（设置保存 / 记住上次无线地址 / 录屏选项回写可能并发），
+    固定名会让两个写入流互相截断对方的临时文件，os.replace 之后文件内容可能
+    是「半份 A + 半份 B」的坏 JSON。唯一名让每次写入各写各的，谁先 replace
+    谁生效，最后完成的那个的完整内容胜出。
     """
     import json
+    import uuid
     p = prefs_path()
-    tmp = p + ".tmp"
+    tmp = "%s.%s.tmp" % (p, uuid.uuid4().hex[:8])
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(prefs, f, ensure_ascii=False, indent=2)
@@ -589,15 +611,21 @@ def save_prefs(patch: dict) -> dict:
 
     写入走 _atomic_write（临时文件 + os.replace），见那里的截断风险说明。
     读取同时兼容带 BOM 的文件（记事本另存为 UTF-8 会写 BOM）。
+
+    **读-改-写必须整体持锁**：界面保存设置（save_settings）、记住上次无线地址
+    （_wifi_remember）、录屏选项回写可能来自不同线程。没有这把锁时，两处几乎
+    同时进来会各自读到同一份旧内容、各自合并、后写的把先写的**整块覆盖掉**
+    —— 表现就是「刚改的开关过一会儿自己弹回去了」，且极难复现。
     """
     if not isinstance(patch, dict) or not patch:
         return load_prefs()
     # patch 同样清洗：非法值纠正后再合并（而不是原样写进文件）
     clean_patch, _w = sanitize_prefs(patch)
-    prefs = load_prefs()
-    prefs.update(clean_patch)
-    _atomic_write(prefs)
-    return prefs
+    with _SAVE_LOCK:
+        prefs = load_prefs()
+        prefs.update(clean_patch)
+        _atomic_write(prefs)
+        return prefs
 
 
 def apply_adb_dir(adb_dir, env=None) -> bool:

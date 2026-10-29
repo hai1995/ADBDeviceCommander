@@ -60,8 +60,22 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
     接受的写法（都在真实粘贴里见过）：
       `192.168.1.23` / `192.168.1.23:5555` / `adb connect 192.168.1.23:5555`
       / `tcp://192.168.1.23:5555/` / `[fe80::1]:5555`
+
+    入参先做类型防御：本函数是 wifi_connect 的校验入口，收到的是 JSON 传过来的
+    任意值。早期实现直接 `text.strip()`，前端/脚本传个数字（`192.168.1.23` 被
+    JS 当数值序列化时有发生）就会抛 AttributeError，界面上只看到一句
+    「调用后端失败：'int' object has no attribute 'strip'」。
+
+    非字符串一律**明确拒绝**而不是 str() 后继续：`True` 会变成主机名 "True"、
+    `192` 会变成 "192:5555"，两者都能过白名单，然后在 adb connect 阶段失败，
+    用户看到的是「连接超时」——与真正的原因（传错了类型）毫无关系。
     """
-    raw = (text or "").strip()
+    if text is None:
+        return "", "请输入设备 IP（或 IP:端口）"
+    if not isinstance(text, str):
+        return "", "地址格式不正确：应为文本形式的 IP 或 IP:端口（收到 %s）" % (
+            type(text).__name__)
+    raw = text.strip()
     if not raw:
         return "", "请输入设备 IP（或 IP:端口）"
 

@@ -116,8 +116,8 @@ console.log("\n[B2] 文件区多选：方块复选框（与全局开关区分，
 console.log("\n[C] 结构完整性：复选框集合未被意外改动");
 {
   const boxes = html.match(/<input type="checkbox"/g) || [];
-  ok(boxes.length === 27,
-    "index.html 静态复选框为 27 个（keep-input×1 + 监控级别×6 + 抓取级别×6 + Logcat×3 + 工具×5 + APK 安装选项×3 + 全选×1 + 命令编辑「仅输入」×1 + 应用包名「含系统应用」×1）"
+  ok(boxes.length === 28,
+    "index.html 静态复选框为 28 个（keep-input×1 + 监控级别×6 + 抓取级别×6 + Logcat×3 + 工具×5 + APK 安装选项×3 + 诊断包×1 + 全选×1 + 命令编辑「仅输入」×1 + 应用包名「含系统应用」×1）"
     + " -> 实际 " + boxes.length);
   ok(!/appearance:\s*checkbox/.test(css),
     "没有任何地方把开关退回原生 appearance:checkbox");

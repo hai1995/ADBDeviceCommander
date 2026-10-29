@@ -1931,3 +1931,10 @@ body.cmd-sorting .cmd-chip .chip-popup { display: none !important; }
   font: 400 var(--fs-sm) var(--font-mono); color: var(--text);
   max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 工具卡里「上一次产物在哪」的一行（诊断包用）：与 apk-file 同一手感，但语义
+   独立 —— 前者是「待安装的本地包」，这里是「刚生成的结果」，将来改一个不影响
+   另一个。 */
+.tool-result {
+  font: 400 var(--fs-sm) var(--font-mono); color: var(--text);
+  max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

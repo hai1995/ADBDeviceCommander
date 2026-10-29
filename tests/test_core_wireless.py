@@ -200,3 +200,24 @@ def test_normalize_reports_bad_ip_as_ip_not_hostname(bad):
 def test_normalize_still_accepts_numeric_hostname_free_of_dots():
     """纯数字的主机名（热点偶尔这样发）不该被 IP 校验拦下。"""
     assert w.normalize_endpoint("12345") == ("12345:5555", "")
+
+
+# ---------------------------------------------------------------------------
+# 入参防御：wifi_connect 的 address 来自 JSON，什么类型都可能
+# ---------------------------------------------------------------------------
+def test_normalize_endpoint_non_string_inputs_do_not_raise():
+    """校验函数不该以异常收场：收到数字 / 布尔 / 列表都要给中文错误。
+
+    回归：早期实现直接 text.strip()，前端把 `192.168.1.23` 当数值序列化时
+    界面只看到「调用后端失败：'int' object has no attribute 'strip'」。
+    """
+    for bad in (192, 192.168, True, False, [], {}, 1.5):
+        addr, err = w.normalize_endpoint(bad)
+        assert addr == ""
+        assert err, "非字符串输入必须给出可读原因，而不是抛异常"
+
+
+def test_normalize_endpoint_string_forms_still_work():
+    """类型防御不能误伤正常的字符串写法。"""
+    assert w.normalize_endpoint("172.16.0.9") == ("172.16.0.9:5555", "")
+    assert w.normalize_endpoint("  172.16.0.9:6000  ") == ("172.16.0.9:6000", "")

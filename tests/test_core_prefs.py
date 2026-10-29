@@ -319,16 +319,18 @@ _BOOL_KEY_TO_HTML_ID = {
     "apk_replace": "apk-replace",
     "apk_downgrade": "apk-downgrade",
     "apk_grant": "apk-grant",
+    # 诊断包（工具页「诊断包」卡的复选框）
+    "diag_with_logcat": "diag-logcat",
 }
 
 # 没有对应 HTML 复选框的布尔键：设备栏收起是「标题前的 « / » 按钮切换」、
-# 三张工具卡（截图 / 录屏 / 投屏）收起是「标题栏整条点击」切换，都不存在
+# 四张工具卡（截图 / 录屏 / 安装 / 诊断包 / 投屏）收起是「标题栏整条点击」切换，都不存在
 # 「界面默认勾选」可对齐，故不参与下面的逐项比对。
 # 显式列出（而非放宽断言）：将来真加了复选框的键必须登记进映射表，
 # 不允许被顺手塞进这个豁免名单。
 _NO_HTML_CHECKBOX_KEYS = {"sidebar_collapsed",
                           "shot_collapsed", "rec_collapsed", "scrcpy_collapsed",
-                          "apk_collapsed"}
+                          "apk_collapsed", "diag_collapsed"}
 
 
 def _html_checkbox_checked():
@@ -677,3 +679,64 @@ def test_cmd_timeout_defaults_and_clamps(monkeypatch, tmp_path):
     assert clean["cmd_timeout"] == 120
     clean, warns = prefs.sanitize_prefs({"cmd_timeout": "soon"})
     assert clean["cmd_timeout"] == 120
+
+
+# ---------------------------------------------------------------------------
+# 并发写入：读-改-写必须整体互斥
+# ---------------------------------------------------------------------------
+def _slow_atomic_write(monkeypatch, delay=0.05):
+    """把落盘人为放慢，把「读-合并-写」之间的竞态窗口撑大到必现。"""
+    import time as _t
+    real = prefs._atomic_write
+
+    def slow(p):
+        _t.sleep(delay)
+        return real(p)
+
+    monkeypatch.setattr(prefs, "_atomic_write", slow)
+
+
+def test_concurrent_saves_do_not_lose_updates(monkeypatch, tmp_path):
+    """两个线程同时改不同键：谁都不能把对方的改动覆盖掉。
+
+    没有 _SAVE_LOCK 时，两边各自读到同一份旧内容、各自合并、后写的整份盖掉
+    先写的 —— 表现是「刚改的开关过一会儿自己弹回去了」，且极难复现。
+    """
+    import threading
+    p = _patch_path(monkeypatch, tmp_path)
+    _slow_atomic_write(monkeypatch)
+    prefs.save_prefs({"save_dir": "seed"})
+
+    def worker(key, val):
+        prefs.save_prefs({key: val})
+
+    t1 = threading.Thread(target=worker, args=("adb_dir", r"D:\pt"))
+    t2 = threading.Thread(target=worker, args=("wifi_port", 6000))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    with open(p, encoding="utf-8") as f:
+        raw = json.load(f)
+    assert raw.get("save_dir") == "seed"
+    assert raw.get("adb_dir") == r"D:\pt"
+    assert raw.get("wifi_port") == 6000
+
+
+def test_atomic_write_uses_unique_temp_name(monkeypatch, tmp_path):
+    """临时文件名必须唯一：固定名会让并发写入互相截断成半份 JSON。"""
+    p = _patch_path(monkeypatch, tmp_path)
+    seen = []
+    real_open = open
+
+    def spy(path, *a, **kw):
+        if isinstance(path, str) and path != p:
+            seen.append(path)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", spy)
+    prefs.save_prefs({"save_dir": "a"})
+    prefs.save_prefs({"save_dir": "b"})
+    # 至少两次写入（首次保存还会顺带触发一次「录屏默认值迁移」落盘），
+    # 关键是每个临时文件名都不同且都紧跟配置路径
+    assert len(seen) >= 2
+    assert len(set(seen)) == len(seen)
+    assert all(s.startswith(p) and s.endswith(".tmp") for s in seen)

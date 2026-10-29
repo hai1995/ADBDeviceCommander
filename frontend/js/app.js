@@ -44,6 +44,9 @@
     apkPick: $("apk-pick"), apkInstall: $("apk-install"), apkFile: $("apk-file"),
     apkReplace: $("apk-replace"), apkDowngrade: $("apk-downgrade"),
     apkGrant: $("apk-grant"),
+    // 诊断包（设备信息 / 日志尾部 / 进程 / 应用 / ANR 一次收齐）
+    diagCollect: $("diag-collect"), diagLogcat: $("diag-logcat"),
+    diagLines: $("diag-lines"), diagResult: $("diag-result"),
     // 无线调试（Wi-Fi ADB）
     btnWifi: $("btn-wifi"), wifiModal: $("wifi-modal"),
     wifiAddr: $("wifi-addr"), wifiConnect: $("wifi-connect"),
@@ -59,6 +62,7 @@
     shotCard: $("shot-card"), shotToggle: $("shot-toggle"),
     recCard: $("rec-card"), recToggle: $("rec-toggle"),
     apkCard: $("apk-card"), apkToggle: $("apk-toggle"),
+    diagCard: $("diag-card"), diagToggle: $("diag-toggle"),
     scrcpyCard: $("scrcpy-card"), scrcpyToggle: $("scrcpy-toggle"),
     // 投屏（调用本机 scrcpy）
     toolScrcpy: $("tool-scrcpy"), scrcpyDetect: $("tool-scrcpy-detect"),
@@ -504,7 +508,29 @@
     }
   }
 
-  /* ---------------- 事件路由 ---------------- */
+  /* ---------------- 事件路由 ----------------
+     逐条兜底：pollOnce 用递归 setTimeout 续约，任何一个 handler 抛异常都会让
+     那一次续约**根本执行不到** —— 事件轮询从此彻底停止，界面表现为「日志不
+     再滚、状态栏不再动、设备不刷新、会话按钮卡住」，只能重开程序。
+     真实触发过：某台设备 logcat 行里混进非预期结构（协议漂移 / 手改 payload），
+     或某个渲染函数踩到空节点。这里按事件逐条隔离，同一类事件只提示一次
+     （坏数据可能每 400ms 来一条，不能让它把状态栏刷爆）。 */
+  const _evErrNotified = Object.create(null);
+  function safeHandleEvent(ev) {
+    try {
+      handleEvent(ev);
+    } catch (e) {
+      const kind = (ev && ev.kind) || "?";
+      if (_evErrNotified[kind]) return;
+      _evErrNotified[kind] = true;
+      const msg = (e && e.message) ? e.message : String(e);
+      try {
+        pushStatus("err", "事件处理失败（" + kind + "）：" + msg
+          + " —— 已跳过该事件，后续事件继续处理");
+      } catch (_) { /* 状态栏本身出错也不能再往外抛 */ }
+    }
+  }
+
   function handleEvent(ev) {
     const p = ev.payload || {};
     switch (ev.kind) {
@@ -528,11 +554,21 @@
         if (p.type === "clear") clearStatus();
         else if (["ok", "info", "err", "warn"].includes(p.type))
           pushStatus(p.type, p.text || "", p.toast ? { toast: true } : undefined);
+        else if (p.type === "diag" && p.path) {
+          // 诊断包产物：卡片里留一行指向结果 —— 状态栏/toast 会被后面的消息刷走，
+          // 而「刚才那个包到底存哪了」是紧接着要用的信息。
+          if (els.diagResult) {
+            els.diagResult.textContent = String(p.path).split(/[\\/]/).pop() || p.path;
+            els.diagResult.title = p.path;
+            els.diagResult.classList.remove("dim");
+          }
+        }
         break;
       case "stop_state": els.btnStop.disabled = !p.running; break;
       case "rec_state": setRecRunning(!!p.running); break;
       case "shot_state": setShotRunning(!!p.running); break;
       case "apk_state": setApkRunning(!!p.running); break;
+      case "diag_state": setDiagRunning(!!p.running); break;
       case "logcat": onLogcat(p); break;
       case "logcat_capture": onLogcatCapture(p); break;
       case "file": onFile(p); break;
@@ -589,16 +625,26 @@
     // 大批量（logcat 洪流，单次即取满行预算）时不等待间隔、立即续取：
     // 总线积压越快排空，前端渲染追上新数据的延迟越低。
     let pollMs = 400;
+    // try/finally 是这里的硬约束：无论 take_events 失败、还是某条事件处理抛错，
+    // 续约都必须发生。否则轮询链一断，界面就永久冻在那一刻（没有任何自愈路径，
+    // 因为下一次续约正是被跳过的那个 setTimeout）。
     const pollOnce = async () => {
-      const events = await callApi(api.take_events());
-      const flooded = !!(events && events.length >= 200);
-      if (events && events.length) {
-        if (pollMs !== 400) pollMs = 400;
-        events.forEach(handleEvent);
-      } else if (pollMs !== 500) {
-        pollMs = 500;
+      let flooded = false;
+      try {
+        const events = await callApi(api.take_events());
+        flooded = !!(events && events.length >= 200);
+        if (events && events.length) {
+          if (pollMs !== 400) pollMs = 400;
+          events.forEach(safeHandleEvent);
+        } else if (pollMs !== 500) {
+          pollMs = 500;
+        }
+      } catch (e) {
+        /* callApi 已兜住桥接异常；能走到这里说明是事件分发之外的意外
+           （例如 events 不是数组）。保持沉默但绝不中断轮询。 */
+      } finally {
+        setTimeout(pollOnce, flooded ? 0 : pollMs);
       }
-      setTimeout(pollOnce, flooded ? 0 : pollMs);
     };
     setTimeout(pollOnce, pollMs);
     setTimeout(() => { if (!booted) setPill("未就绪", "err"); }, 5000);
@@ -736,6 +782,19 @@
     }
     if (els.apkGrant && typeof s.apk_grant === "boolean") {
       els.apkGrant.checked = s.apk_grant;
+    }
+    // ---- 诊断包选项（默认值同样只写在 core/prefs.py 一处）----
+    if (els.diagLogcat && typeof s.diag_with_logcat === "boolean") {
+      els.diagLogcat.checked = s.diag_with_logcat;
+      if (els.diagLines) els.diagLines.disabled = !s.diag_with_logcat;
+    }
+    if (els.diagLines && s.diag_logcat_lines != null) {
+      const want = String(s.diag_logcat_lines);
+      // 只回填下拉里存在的档位：用户把手改的 777 读进来时，select.value 赋一个
+      // 不存在的值会变成空字符串，界面上就是「行数」那格莫名其妙空白。
+      const hit = Array.prototype.some.call(
+        els.diagLines.options, (o) => o.value === want);
+      if (hit) els.diagLines.value = want;
     }
     if (els.scrcpyPath && typeof s.scrcpy_path === "string") {
       els.scrcpyPath.value = s.scrcpy_path;
@@ -1914,6 +1973,9 @@
     }
     // 应用安装：需要「有受控设备 + 已选安装包 + 不在安装中」
     if (els.apkInstall) els.apkInstall.disabled = !any || !apkPath || apkInFlight;
+    // 诊断包：有受控设备、且没有一批正在收集（收集中再点会排队出两个时间点
+    // 不同的包，后端也直接拒绝，这里把按钮一起锁上是更清楚的反馈）
+    if (els.diagCollect) els.diagCollect.disabled = !any || diagInFlight;
     // 无线调试的「开启 5555」同样要有受控设备（首次必须走 USB）
     if (els.wifiTcpip) els.wifiTcpip.disabled = !any || wifiBusy;
     // 录制中不打断：setRecRunning 已经按 running 锁定了录屏区按钮与选项，
@@ -2092,6 +2154,51 @@
   let apkPath = "";
   let apkInFlight = false;
 
+  /* ---------------- 诊断包 ----------------
+     后端 diag_collect 是「一串 adb 调用 + 写盘 + 打包」，单台 3~6 秒。按钮态
+     与截图 / 安装同套路：点击时乐观禁用（不等事件，秒级耗时里给即时反馈），
+     后端 diag_state 广播是最终对账（完成 / 异常 / 关闭都会回来）。 */
+  let diagInFlight = false;
+
+  function setDiagRunning(running) {
+    diagInFlight = !!running;
+    if (els.diagCollect) els.diagCollect.disabled = diagInFlight
+      || checkedDevices().length === 0;
+    if (!diagInFlight && els.diagLines) els.diagLines.disabled = false;
+    // 收尾时如果卡片上还停在「正在收集…」，说明这一批没有任何产物（失败 /
+    // 关闭窗口），把它复位；有产物时 tool 事件已经先把文件名写上去了。
+    if (!diagInFlight && els.diagResult
+        && els.diagResult.textContent.indexOf("正在收集") === 0) {
+      els.diagResult.textContent = "未收集";
+      els.diagResult.title = "";
+      els.diagResult.classList.add("dim");
+    }
+  }
+
+  async function collectDiag() {
+    if (diagInFlight) return;
+    const withLogcat = !!(els.diagLogcat && els.diagLogcat.checked);
+    const lines = els.diagLines ? Number(els.diagLines.value) || 0 : 0;
+    diagInFlight = true;
+    if (els.diagCollect) els.diagCollect.disabled = true;
+    if (els.diagResult) {
+      els.diagResult.textContent = "正在收集…（单台约 3~6 秒）";
+      els.diagResult.classList.remove("dim");
+    }
+    const res = await callApi(api.diag_collect(null, withLogcat, lines));
+    if (!res || res.ok === false) {
+      diagInFlight = false;
+      syncToolButtons();
+      if (els.diagResult) {
+        els.diagResult.textContent = "未收集";
+        els.diagResult.classList.add("dim");
+      }
+      if (res && res.reason && res.reason !== "busy") {
+        pushStatus("err", "⚠ 收集诊断包未开始：" + res.reason);
+      }
+    }
+  }
+
   function setApkFile(name, sizeText) {
     if (!els.apkFile) return;
     if (!name) {
@@ -2236,6 +2343,7 @@
     { key: "shot_collapsed", card: "shotCard", toggle: "shotToggle" },
     { key: "rec_collapsed", card: "recCard", toggle: "recToggle" },
     { key: "apk_collapsed", card: "apkCard", toggle: "apkToggle" },
+    { key: "diag_collapsed", card: "diagCard", toggle: "diagToggle" },
     { key: "scrcpy_collapsed", card: "scrcpyCard", toggle: "scrcpyToggle" },
   ];
 
@@ -3417,30 +3525,41 @@
   async function perfPollOnce() {
     perfTimer = null;
     if (!hasApi()) return;
-    const cursor = perfCursor();
-    const res = await callApi(api.perf_poll(
-      Object.keys(cursor).length ? cursor : 0));
-    if (res) {
-      if (res.info && res.info.serial) perfInfo = res.info;
-      perfIngest(res);
-      // 后端所有会话都退出（设备掉线 / adb 挂了）时把界面拉回停态并说明原因
-      if (typeof res.running === "boolean" && res.running !== perfRunning) {
-        setPerfRunning(res.running);
-        if (!res.running) {
-          let why = res.error || "";
-          if (!why && res.sessions) {
-            for (const k of Object.keys(res.sessions)) {
-              if (res.sessions[k] && res.sessions[k].error) {
-                why = res.sessions[k].error;
-                break;
+    // 同 pollOnce：续约必须无条件发生。perfIngest 里要做排序 / 画图 / 阈值判定，
+    // 任何一个采样点结构异常抛错，都会让曲线永久停在那一帧（界面还显示"采集中"，
+    // 用户以为设备卡了，实际是前端轮询链断了）。
+    try {
+      const cursor = perfCursor();
+      const res = await callApi(api.perf_poll(
+        Object.keys(cursor).length ? cursor : 0));
+      if (res) {
+        if (res.info && res.info.serial) perfInfo = res.info;
+        perfIngest(res);
+        // 后端所有会话都退出（设备掉线 / adb 挂了）时把界面拉回停态并说明原因
+        if (typeof res.running === "boolean" && res.running !== perfRunning) {
+          setPerfRunning(res.running);
+          if (!res.running) {
+            let why = res.error || "";
+            if (!why && res.sessions) {
+              for (const k of Object.keys(res.sessions)) {
+                if (res.sessions[k] && res.sessions[k].error) {
+                  why = res.sessions[k].error;
+                  break;
+                }
               }
             }
+            setPerfState("监控已中断" + (why ? "：" + why : ""), "err", why);
           }
-          setPerfState("监控已中断" + (why ? "：" + why : ""), "err", why);
         }
       }
+    } catch (e) {
+      try {
+        setPerfState("性能数据处理异常：" + ((e && e.message) || e)
+          + "（采样仍在后台继续，曲线可能缺几个点）", "err", "");
+      } catch (_) { /* 提示本身失败也不能中断轮询 */ }
+    } finally {
+      if (perfRunning) perfTimer = setTimeout(perfPollOnce, PERF_POLL_MS);
     }
-    if (perfRunning) perfTimer = setTimeout(perfPollOnce, PERF_POLL_MS);
   }
 
   /* ---------------- 目标应用选择器（下拉 + 模糊搜索） ----------------
@@ -4286,6 +4405,21 @@
      ["apkGrant", "apk_grant"]].forEach(([el, key]) => {
       if (els[el]) els[el].addEventListener("change", () => persistPref(key, !!els[el].checked));
     });
+    // ---- 诊断包 ----
+    if (els.diagCollect) els.diagCollect.addEventListener("click", collectDiag);
+    if (els.diagLogcat) {
+      els.diagLogcat.addEventListener("change", () => {
+        persistPref("diag_with_logcat", !!els.diagLogcat.checked);
+        // 不勾 logcat 时行数无意义：灰掉而不是隐藏（隐藏会让下面的按钮左右跳）
+        if (els.diagLines) els.diagLines.disabled = !els.diagLogcat.checked;
+      });
+    }
+    if (els.diagLines) {
+      els.diagLines.addEventListener("change", () => {
+        const n = Number(els.diagLines.value) || 0;
+        if (n > 0) persistPref("diag_logcat_lines", n);
+      });
+    }
     // ---- 无线调试（Wi-Fi ADB）----
     if (els.btnWifi) els.btnWifi.addEventListener("click", wifiOpen);
     if (els.wifiClose) els.wifiClose.addEventListener("click", wifiClose);

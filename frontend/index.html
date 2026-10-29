@@ -318,6 +318,41 @@
           </div>
         </div>
 
+        <!-- 诊断包：把一次问题的现场证据一次收齐并打成一个 zip。
+             为什么是一个按钮而不是五个功能各点一遍：复现完 bug 之后要发回给
+             开发的东西每次都一样（什么机器 / 系统版本、logcat 尾部、谁在吃内存、
+             装了哪些应用、有没有 ANR），分散去点必然漏一两项，事后补不回来。 -->
+        <div class="tool-card" id="diag-card">
+          <div class="tool-h tool-h--toggle" id="diag-toggle" role="button" tabindex="0"
+               aria-expanded="true" aria-controls="diag-body" title="单击收起 / 展开诊断包选项">
+            诊断包<span class="panel-sub">DIAG</span>
+            <span class="tool-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </span>
+          </div>
+          <div class="tool-body" id="diag-body">
+            <div class="tool-desc">把「这台机器现在什么样」一次收齐：设备信息、<code>getprop</code> 全量、logcat 尾部、内存 TOP、应用清单、ANR / tombstone 线索 —— 打包成一个 zip，直接发给开发。</div>
+            <div class="tool-row">
+              <button id="diag-collect" class="btn accent" data-icon="download" disabled>收集诊断包</button>
+              <label class="chk"><input type="checkbox" id="diag-logcat" checked>含 logcat 尾部</label>
+              <select id="diag-lines" class="inp sel-inp" title="logcat 只取最后 N 行（越大越慢，5 万行约 7 MB）">
+                <option value="1000">1000 行</option>
+                <option value="2000" selected>2000 行</option>
+                <option value="5000">5000 行</option>
+                <option value="20000">20000 行</option>
+                <option value="50000">50000 行</option>
+              </select>
+              <span id="diag-result" class="tool-result dim" title="上一次诊断包的存放位置">尚未收集</span>
+            </div>
+            <ul class="tool-tips">
+              <li>单台设备约 3~6 秒（logcat 占大头）；多台勾选时逐台顺序收集，每台各得一个 zip。</li>
+              <li>某一项读不到（如 <code>/data/anr</code> 无权限）只会让那个文件里写一行中文说明，整包照常产出；缺哪项会写在 <code>meta.json</code> 里。</li>
+              <li>收集过程不影响正在进行的 logcat 监控 / 录屏：它只读，不改设备状态。</li>
+            </ul>
+          </div>
+        </div>
+
         <!-- 投屏：直接调用用户机器上已安装的 scrcpy（不内置、不重打包），
              自动在 PATH / 常见安装目录里找；找不到时可手填 scrcpy(.exe) 全路径。 -->
         <div class="tool-card" id="scrcpy-card">
