@@ -1,0 +1,11 @@
+# 运行 / 构建依赖
+pywebview>=6.0            # Web 版宿主（Windows 基于 WebView2），main.py 必需
+pyinstaller>=5.0          # 打包成 exe（仅构建时需要；由 python build.py 调用）
+
+# 可选（装了会更快：截图写系统剪贴板时的 PNG filter 还原 / BGR 换位向量化，
+# 1080x2400 快 2 倍以上；缺省时 core/clipboard.py 自动回退纯 Python，结果一致）
+numpy>=1.21
+
+# 可选（仅用于重新生成 assets/app.ico 图标，运行时不依赖）
+pillow>=9.0
+

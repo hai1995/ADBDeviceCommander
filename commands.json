@@ -1,0 +1,1140 @@
+[
+  {
+    "id": "Bxu-_Ds",
+    "name": "[通用] 切到BUG目录",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "cd D:\\BUG"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 117
+  },
+  {
+    "id": "FBc3xXg",
+    "name": "[通用] ADB连接状态",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "while($true){ $t=Get-Date -Format \"yyyy-MM-dd HH:mm:ss\"; $d=adb devices | Select-String \"device$\"; if($d){ Write-Host \"[$t] ✅ ADB设备已连接\" -ForegroundColor Green; $d | ForEach-Object { Write-Host \"- $($_.Line.Split()[0])\" -ForegroundColor Cyan } }else{ Write-Host \"[$t] ❌ 未检测到ADB设备\" -ForegroundColor Red }; Start-Sleep 2 }"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 1037
+  },
+  {
+    "id": "XI-nxxx",
+    "name": "[通用] Scrcpy投屏",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "scrcpy"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 326
+  },
+  {
+    "id": "H9YdHoB",
+    "name": "[通用] 抓取Logcat日志",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "cd D:\\BUG; $datetime = Get-Date -Format \"yyyyMMddHHmmss\"; adb logcat > \"车机log-$datetime.log\""
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 235
+  },
+  {
+    "id": "UwC4BMq",
+    "name": "[通用] 获取当前 Activity",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell dumpsys window | findstr \"mCurrentFocus\""
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 54
+  },
+  {
+    "id": "BBF332a",
+    "name": "[通用] 杀掉当前 Activity",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell dumpsys window | sls mCurrentFocus | %{ if ($_ -match '(\\S+)/') { adb shell am force-stop $Matches[1] } }"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 83
+  },
+  {
+    "id": "WUm4Ki5",
+    "name": "[通用] 更新车机时间",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb root"
+      },
+      {
+        "delay": 1000,
+        "command": "$currentDate = Get-Date -Format \"MMddHHmmyyyy.ss\"; adb shell \"date $currentDate\""
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 1000
+  },
+  {
+    "id": "b3Qv6u2",
+    "name": "[通用] 优先使用WIFI",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell settings put global is_allow_apna_use_wifi 1"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 50
+  },
+  {
+    "id": "odt92V1",
+    "name": "[通用] 开启指针位置",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell settings put system pointer_location 1"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 14
+  },
+  {
+    "id": "hDxI3CZ",
+    "name": "[通用] 关闭指针位置",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell settings put system pointer_location 0"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 2
+  },
+  {
+    "id": "6TxMbfH",
+    "name": "[通用] 开启触摸圆点",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell settings put system show_touches 1"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 8
+  },
+  {
+    "id": "4mAsjC7",
+    "name": "[通用] 关闭触摸圆点",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell settings put system show_touches 0"
+      }
+    ],
+    "labels": [
+      "通用"
+    ]
+  },
+  {
+    "id": "MHHykdd",
+    "name": "[通用] 重启ADB服务",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "taskkill /F /IM adb.exe 2>$null"
+      },
+      {
+        "delay": 1000,
+        "command": "D:\\android-sdk\\platform-tools\\adb.exe kill-server"
+      },
+      {
+        "delay": 1000,
+        "command": "D:\\android-sdk\\platform-tools\\adb.exe start-server"
+      },
+      {
+        "delay": 1000,
+        "command": "D:\\android-sdk\\platform-tools\\adb.exe devices"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 289
+  },
+  {
+    "id": "waLmU1T",
+    "name": "[通用] 重启车机",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb reboot"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 108
+  },
+  {
+    "id": "6S_Vi1g",
+    "name": "[通用] 获取车机UI布局",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb root"
+      },
+      {
+        "delay": 1500,
+        "command": "adb remount"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell uiautomator dump /data/local/tmp/车机界面布局.xml"
+      },
+      {
+        "delay": 1000,
+        "command": "adb pull /data/local/tmp/dump.xml D:\\BUG\\车机界面布局.xml"
+      }
+    ],
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 24
+  },
+  {
+    "id": "jRlUyFi",
+    "name": "[通用] 查询APP版本信息",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell dumpsys package  com.mosi.mosc.personalcenter | findStr versionName"
+      }
+    ],
+    "inputOnly": true,
+    "labels": [
+      "通用"
+    ],
+    "clickCount": 6
+  },
+  {
+    "id": "_Th-gt6",
+    "name": "[J01] ROOT密码校验",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell auth Adayo@shell"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 57
+  },
+  {
+    "id": "GOTINDS",
+    "name": "[J01] TOC-切U盘模式",
+    "commands": [
+      {
+        "command": "adb root",
+        "id": "axA1dCk",
+        "delay": 100
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell auth Adayo@shell"
+      },
+      {
+        "command": "adb shell",
+        "delay": 2000
+      },
+      {
+        "command": "echo host > /sys/bus/platform/devices/a600000.ssusb/mode",
+        "delay": 2000
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 44
+  },
+  {
+    "id": "N1f5R7-",
+    "name": "[J01] TOB-切U盘模式",
+    "commands": [
+      {
+        "command": "adb root",
+        "id": "P8DQtct",
+        "delay": 100
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell auth Adayo@shell"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell"
+      },
+      {
+        "command": "echo host > /sys/kernel/debug/usb/31220000.dwc3/mode",
+        "delay": 1000
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 16
+  },
+  {
+    "id": "QCQwhN2",
+    "name": "[J01] 启动服务模式",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell am start -n com.fawvw.hmi.cnsengineeringtestmode/com.fawvw.hmi.cnsengineeringtestmode.ui.MainActivity"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 6
+  },
+  {
+    "id": "TwS9dNM",
+    "name": "[J01] 安装消息APK",
+    "commands": [
+      {
+        "command": "cd D:\\work\\J01\\J01_TOC"
+      },
+      {
+        "delay": 1000,
+        "command": "adb install MessageDemon.apk"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 13
+  },
+  {
+    "id": "Ewg86NI",
+    "name": "[J01] 输入车主账号",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell input text \"15850590137\""
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 23
+  },
+  {
+    "id": "Gk_Z-Vm",
+    "name": "[J01] 输入车主密码",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell input text \"Cc112233qwer\""
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 12
+  },
+  {
+    "id": "zQVsMz0",
+    "name": "[J01] 清除账号缓存",
+    "commands": [
+      {
+        "command": "adb shell pm clear com.mosi.mosc.account",
+        "id": "EO_QF8O",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 4
+  },
+  {
+    "id": "7yifOXx",
+    "name": "[J01] 进入车机日志目录",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "cd /la_log/vendor/fawvw/log/android/logcat"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 7
+  },
+  {
+    "id": "s8wBdqk",
+    "name": "[J01] 拉取蓝牙日志",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb pull /data/misc/bluetooth/logs"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 15
+  },
+  {
+    "id": "GLJjdhX",
+    "name": "[J01] 拉取车机全部日志",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "cd D:\\BUG"
+      },
+      {
+        "delay": 1000,
+        "command": "adb pull /la_log/vendor/fawvw/log/"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 36
+  },
+  {
+    "id": "m4z2GGU",
+    "name": "[J01] 车外扬声器-冷热启动时间",
+    "commands": [
+      {
+        "command": "adb shell am force-stop com.fawvw.hmi.bev.smarthorn",
+        "id": "yvwNPHo",
+        "delay": 100
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell am start -W com.fawvw.hmi.bev.smarthorn/.MainActivityNew"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell input keyevent KEYCODE_HOME"
+      },
+      {
+        "command": "adb shell am start -W com.fawvw.hmi.bev.smarthorn/.MainActivityNew",
+        "delay": 2000
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 56
+  },
+  {
+    "id": "t31-XeZ",
+    "name": "[J01] 云听-冷\\热启动时间",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell am force-stop com.fawvw.radio"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell am start -W com.fawvw.radio/com.fawvw.radio.ui.MainActivity"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell input keyevent KEYCODE_HOME"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell am start -W com.fawvw.radio/com.fawvw.radio.ui.MainActivity"
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 68
+  },
+  {
+    "id": "78YnAcg",
+    "name": "[J01] 系统设置-性能报告生成",
+    "commands": [
+      {
+        "command": "python D:\\Code\\Automation\\max_average.py --path \"D:\\Code\\cei_auto_test\\lib\\report\\memory_leakage\\com.fawvw.hmi.bev.carapp\"",
+        "id": "JAqwMi5",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 1
+  },
+  {
+    "id": "ypK64dV",
+    "name": "[J01] 车外扬声器-性能报告生成",
+    "commands": [
+      {
+        "command": "python D:\\Code\\Automation\\max_average.py --path \"D:\\Code\\cei_auto_test\\lib\\report\\memory_leakage\\com.fawvw.hmi.bev.smarthorn\"",
+        "id": "H5Si-TM",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 3
+  },
+  {
+    "id": "P4klJKS",
+    "name": "[J01] 自动化-激活虚拟环境",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "cd D:\\Code\\cei_auto_test; .\\venv\\Scripts\\Activate.ps1; $env:PYTHONPATH = \"D:\\Code\\cei_auto_test\""
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 6
+  },
+  {
+    "id": "WF5514Z",
+    "name": "[J01] 系统设置-性能测试",
+    "commands": [
+      {
+        "command": "python -m pytest testcase\\J01\\performance\\SystemSettingPerformanceV2.py -s -o log_cli=true --log-cli-level=INFO",
+        "id": "TVF-F6S",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 8
+  },
+  {
+    "id": "CfdZTYz",
+    "name": "[J01] 车外扬声器-性能测试",
+    "commands": [
+      {
+        "command": "python -m pytest testcase\\J01\\performance\\SmartHornPerformanceV2.py -s -o log_cli=true --log-cli-level=INFO",
+        "id": "J5HmSvt",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "J01"
+    ],
+    "clickCount": 1
+  },
+  {
+    "id": "mtPgaeY",
+    "name": "[CEI] 进入工程模式",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell am start -n com.desaysv.dsvengmode/.MainActivity"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 9
+  },
+  {
+    "id": "ud3Ka_z",
+    "name": "[CEI] 保存系统时间",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell am start com.desaysv.dsvengmode/com.desaysv.dsvengmode.system.SystemTimeSetActivity"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell input tap 245 141"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell input tap 1883 835"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 9
+  },
+  {
+    "id": "XOCRqFo",
+    "name": "[CEI] 清除账号缓存",
+    "commands": [
+      {
+        "command": "adb shell pm clear com.fawvw.mw.onlinecore.account",
+        "id": "VHdABmC",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 28
+  },
+  {
+    "id": "sW1IWp0",
+    "name": "[CEI] 拉取车机日志",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb pull /log/logcat/"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 10
+  },
+  {
+    "id": "ZEU0wT-",
+    "name": "[CEI] 进入车机日志目录",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb root"
+      },
+      {
+        "delay": 1000,
+        "command": "adb remount"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell"
+      },
+      {
+        "delay": 1000,
+        "command": "cd /log/logcat"
+      },
+      {
+        "delay": 1000,
+        "command": "ls"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 34
+  },
+  {
+    "id": "6QrII08",
+    "name": "[CEI] 清除车机日志",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb root"
+      },
+      {
+        "delay": 1000,
+        "command": "adb remount"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell"
+      },
+      {
+        "delay": 1000,
+        "command": "cd /log/logcat"
+      },
+      {
+        "delay": 1000,
+        "command": "rm -f *.gz"
+      },
+      {
+        "delay": 1000,
+        "command": "exit"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 33
+  },
+  {
+    "id": "PvSfhNO",
+    "name": "[CEI] 登录 主账户 13002811739",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1397 289"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"13002811739\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"Apptest2026#\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1593 587"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 148
+  },
+  {
+    "id": "CqBHD1J",
+    "name": "[CEI] 登录 代老师 13308090217",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1397 289"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"13308090217\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"Qazwsx147369\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1593 587"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 70
+  },
+  {
+    "id": "vsOQOse",
+    "name": "[CEI] 登录 余伟老师 17363560855",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1397 289"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"17363560855\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"AppTest2024!@#\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1593 587"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 46
+  },
+  {
+    "id": "5D1Kb96",
+    "name": "[CEI] 登录 移动卡 18693172275",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1397 289"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"18693172275\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1411 443"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input text \"Qazwsx147369\""
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell input tap 1593 587"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 49
+  },
+  {
+    "id": "Ow9rWy4",
+    "name": "[CEI] 关闭 account 服务",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell am force-stop com.mosi.mosc.account"
+      },
+      {
+        "delay": 1000,
+        "command": "adb shell am force-stop com.fawvw.mw.onlinecore.account"
+      }
+    ],
+    "inputOnly": false,
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 33
+  },
+  {
+    "id": "jFz7hlO",
+    "name": "[CEI] 启动 account 服务",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "adb shell am startservice -n com.fawvw.mw.onlinecore.account/com.fawvw.mw.onlinecore.CnsAccountService"
+      }
+    ],
+    "inputOnly": false,
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 29
+  },
+  {
+    "id": "-AtFjTz",
+    "name": "[CEI] 个人中心-冷\\热启动时间",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell am force-stop com.mosi.mosc.personalcenter"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell am start -W com.mosi.mosc.personalcenter/com.mosi.mosc.personalcenter.ui.PersonalCenterActivity"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell input keyevent KEYCODE_HOME"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell am start -W com.mosi.mosc.personalcenter/com.mosi.mosc.personalcenter.ui.PersonalCenterActivity"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 56
+  },
+  {
+    "id": "HEB-45D",
+    "name": "[CEI] 支付-冷启动时间",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell am force-stop com.mosi.mosc.payment"
+      },
+      {
+        "delay": 2000,
+        "command": "adb shell am start -W com.mosi.mosc.payment/com.mosi.mosc.payment.ui.PaymentActivity"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 78
+  },
+  {
+    "id": "S6xtbrQ",
+    "name": "[CEI] 绑定VIN码 2U0",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"echo 'LFVV20260711CE2U0' > /data_extra/carinfo.debug.vin\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 12
+  },
+  {
+    "id": "NtY8998",
+    "name": "[CEI] 绑定VIN码 008",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"echo 'LFV3B2D92S3200008' > /data_extra/carinfo.debug.vin\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 4
+  },
+  {
+    "id": "uMlLTYv",
+    "name": "[CEI] 绑定VIN码 009 租车车机",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"echo 'LFVTESTLYCEL20009' > /data_extra/carinfo.debug.vin\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 5
+  },
+  {
+    "id": "m3s-H2x",
+    "name": "[CEI] 绑定VIN码 23",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"echo 'LFV3B2D92S3200023' > /data_extra/carinfo.debug.vin\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 6
+  },
+  {
+    "id": "jkV4XvC",
+    "name": "[CEI] 查看vin码",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"cat /data_extra/carinfo.debug.vin\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 31
+  },
+  {
+    "id": "w9SkmVd",
+    "name": "[CEI] 查看开机VIN码",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"logcat | grep vinNumber\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 41
+  },
+  {
+    "id": "mdPsAMC",
+    "name": "[CEI] 清除VIN码",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "adb shell \"echo '' > /data_extra/carinfo.debug.vin\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 2
+  },
+  {
+    "id": "V7R-TCo",
+    "name": "[CEI] 查看ICCID",
+    "commands": [
+      {
+        "command": "ql_cmd at at+iccid;ql_cmd at at+cnum;ql_cmd at at+cimi;ql_cmd at at+cgsn",
+        "id": "fpQB9O-",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 2
+  },
+  {
+    "id": "R3Ps5Lc",
+    "name": "[CEI] 自动化-激活虚拟环境",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "cd d:\\Code\\mositestframework; .\\venv\\Scripts\\Activate.ps1; $env:PYTHONPATH = \"d:\\Code\\mositestframework\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 41
+  },
+  {
+    "id": "tgt_hbQ",
+    "name": "[CEI] 酷我音乐-自动化用例",
+    "commands": [
+      {
+        "command": "python -m pytest testcase/color_grey_service/performance/CEI_SOP2/KuwoMusic/test_kuwomusic.py -s -o log_cli=true --log-cli-level=INFO",
+        "id": "mPIP-fX",
+        "delay": 100
+      }
+    ],
+    "inputOnly": true,
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 28
+  },
+  {
+    "id": "SjF0jRV",
+    "name": "[CEI] 酷我音乐-单流程测试方法",
+    "commands": [
+      {
+        "delay": 1000,
+        "command": "cd d:\\Code\\mositestframework; .\\venv\\Scripts\\Activate.ps1; $env:PYTHONPATH = \"d:\\Code\\mositestframework\""
+      },
+      {
+        "delay": 500,
+        "command": "python -c \"import time;from testcase.color_grey_service.performance.CEI_SOP2.KuwoMusic.test_kuwomusic import TestCaseMemoryKuwoMusicPerformance;from lib.apps.color_grey_service.cei_sop2.ceisop2_kuwomusic import KuwoMusic;from lib.CaseBase import CaseBase;t=TestCaseMemoryKuwoMusicPerformance();t.kuwo_music=KuwoMusic(CaseBase.mdevice_id);t._flow_start_time=time.time();t._single_test_run();print('单流程执行完毕')\""
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 160
+  },
+  {
+    "id": "9KVUzOR",
+    "name": "[CEI] SOP2-USB升级前执行",
+    "commands": [
+      {
+        "command": "adb root",
+        "id": "omKkEzC",
+        "delay": 100
+      },
+      {
+        "command": "adb enable-verity",
+        "delay": 500
+      },
+      {
+        "delay": 500,
+        "command": "adb reboot"
+      }
+    ],
+    "labels": [
+      "CEI"
+    ],
+    "clickCount": 3
+  },
+  {
+    "id": "TRl_uQU",
+    "name": "[Git] 存储本地更改(stash)",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "git stash push -u"
+      }
+    ],
+    "inputOnly": true,
+    "labels": [
+      "Git"
+    ],
+    "clickCount": 1
+  },
+  {
+    "id": "PnYw5Hp",
+    "name": "[Git] 还原本地更改(stash pop)",
+    "commands": [
+      {
+        "delay": 100,
+        "command": "git stash pop"
+      }
+    ],
+    "labels": [
+      "Git"
+    ],
+    "clickCount": 1
+  },
+  {
+    "id": "wvSBzYQ",
+    "name": "[Appium] 启动服务",
+    "commands": [
+      {
+        "command": "appium --allow-cors",
+        "id": "MGaCLT5",
+        "delay": 100
+      }
+    ],
+    "labels": [
+      "Appium"
+    ],
+    "clickCount": 32
+  }
+]

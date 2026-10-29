@@ -1,0 +1,38 @@
+# Python 运行产物
+__pycache__/
+*.pyc
+
+# 程序异常退出时自动生成的崩溃报告。
+# 实际文件名是 main.py 写的 crash_<时间戳>.log（旧规则写成 crash_report_*.txt，
+# 那个名字没有任何代码会产生，等于根本没忽略任何东西）。
+crash_*.log
+
+# 运行时个人配置（保存目录 / adb 目录 / 截图粘贴板开关 / 各类开关与过滤词）：
+# 属于本机偏好（含本机绝对路径），不该进仓库（build.py 也已把它排除出源码分发包）。
+# config.json 曾在这里漏掉——它和 settings.json 是同一类东西（新版配置文件名），
+# 只忽略 settings.json 等于没忽略现在真正在用的那份。
+settings.json
+config.json
+
+# 调试录音：设备音频回环录出的 wav（adb_devaudio_<序列号>_<时间>.wav），
+# 是运行产物，不是源码；每次写音频测试都会多几个，进仓库只会越攒越乱。
+*.wav
+
+# 推送凭证（GitHub token 等）。详见 tools/push_github.py 与 README「推送」一节。
+.git-credential
+
+# GitHub 推送脚本产生的临时文件
+.git-push-log.txt
+
+# PyInstaller 打包产物
+build/
+dist/
+dist_stage/
+*.spec
+
+# pytest 缓存
+.pytest_cache/
+
+# 前端测试依赖（按需 `cd tests/frontend && npm i jsdom`）
+tests/frontend/node_modules/
+.venv

@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADB 设备指令台</title>
+  <!-- 字体：Chakra Petch（展示/界面）+ JetBrains Mono（终端/数字）+ Noto Sans SC（中文）。
+       font-display:swap 保证 CDN 不可用时先渲染回退字体，不白屏。 -->
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <!-- 多 tab Web 版：设备指令 / Logcat / 工具 / 文件 / 关于。
+       设备栏为全局共享左侧栏（跨 tab 常驻），与旧 Tk 版「设备栏跨页签共享」对齐。
+       后端逻辑在 backend/* + core/*，事件经 bus 推到本页 take_events 轮询。 -->
+  <header class="topbar">
+    <!-- 应用名由原生标题栏展示，此处不再重复（v2026.1014.1545 去重）；
+         版本号见「关于」页。 -->
+    <nav class="tabs" id="tabs">
+      <button class="tab-btn active" data-tab="cmd">设备指令</button>
+      <button class="tab-btn" data-tab="tools">工具</button>
+      <button class="tab-btn" data-tab="perf">性能监控</button>
+      <button class="tab-btn" data-tab="logcat">Logcat</button>
+      <button class="tab-btn" data-tab="files">文件</button>
+      <button class="tab-btn" data-tab="about">关于</button>
+    </nav>
+    <div class="pill idle" id="pill">连接中…</div>
+    <!-- 核心运行信息（全局唯一状态入口，跨 tab 常驻）：横向跑马灯，悬停暂停、
+         点击弹出完整历史。原先的底部常驻状态栏已并入此处（#status 直接住在弹窗里）。 -->
+    <button class="ticker" id="status-ticker" type="button" title="点击查看完整状态信息">
+      <span class="ticker-led" id="ticker-led"></span>
+      <span class="ticker-viewport" id="ticker-viewport">
+        <span class="ticker-track" id="ticker-track">
+          <span class="ticker-seq" id="ticker-seq-a"></span>
+          <!-- 第二份与第一份内容完全相同：滚动到 -50% 时首尾相接，无缝循环 -->
+          <span class="ticker-seq" id="ticker-seq-b" aria-hidden="true"></span>
+        </span>
+      </span>
+      <span class="ticker-count" id="ticker-count">0</span>
+    </button>
+    <!-- 使用原生标题栏（含 min/max/close），无需自绘窗口按钮；遗留的自绘
+         标题栏代码已随 v2026.0908.2228 清理（见 README「v2026.0908.2228」小节）。 -->
+  </header>
+
+  <main class="content">
+    <div class="main-row">
+    <!-- ============ 共享设备栏（跨 tab 常驻） ============ -->
+    <aside class="device-sidebar" id="device-sidebar">
+      <div class="sidebar-head">
+        <!-- 设备栏收起 / 展开：收起后整栏缩为窄轨（见 app.css 的
+             .main-row.sidebar-collapsed）——只留 » 展开钮、设备数徽章与
+             一条竖排「已连接设备」标签，点窄轨空白处也可展开；
+             状态落盘 config.json（sidebar_collapsed），重启恢复。 -->
+        <button id="btn-sidebar-collapse" class="btn tiny sidebar-collapse-btn"
+                type="button" title="收起设备栏（再点一次展开）"
+                aria-expanded="true">«</button>
+        <!-- 计数拆成 数字 + 单位 两个 span：收起态用 CSS 藏掉「台」，
+             窄轨里只留等宽数字徽章；展开态两者合起来仍是「N 台」。 -->
+        <span class="sidebar-title"><span class="sidebar-title-text">已连接设备</span> <span class="count"><span class="count-num" id="dev-count"></span><span class="count-unit" id="dev-count-unit">台</span></span></span>
+        <span class="side-sub">DEVICES</span>
+        <div class="sidebar-actions">
+          <!-- 无线调试（Wi-Fi ADB）：车机 / 长时间稳定性测试时 USB 线常常不够用，
+               在这里输入 IP 或对插着线的设备一键开启 5555 并自动带出 IP。 -->
+          <button id="btn-wifi" class="btn tiny" data-icon="wifi" title="无线调试（Wi-Fi ADB）：连接 / 断开 / 开启 5555">无线</button>
+          <button id="btn-all" class="btn tiny" disabled data-icon="select-all">全选</button>
+          <button id="btn-refresh" class="btn tiny" disabled data-icon="refresh">刷新</button>
+        </div>
+      </div>
+      <div id="device-list" class="device-list"></div>
+    </aside>
+    <!-- 设备栏 ↔ 内容区分隔条：左右拖动改变设备栏宽度（双击重置） -->
+    <div class="splitter" id="sidebar-splitter" title="拖动调整设备栏宽度（双击重置）"></div>
+
+    <!-- ============ tab 内容区 ============ -->
+    <div class="tab-area">
+        <!-- 设备指令 -->
+        <section class="tab active" data-tab="cmd">
+          <div class="cmd-layout">
+            <aside class="panel panel-left" id="cmd-panel-left">
+              <div class="panel-title hint">指令台<span class="panel-sub">COMMANDS</span>
+                <!-- 三个操作按钮统一装进 .panel-actions 右靠齐（容器整体 margin-left:auto），
+                     避免逐按钮 auto 边距把「新建/导入/导出」均匀撑满整行。 -->
+                <span class="panel-actions">
+                  <button id="btn-cmd-new" class="btn tiny" type="button" title="新建命令" data-icon="plus">新建</button>
+                  <button id="btn-cmd-import" class="btn tiny" type="button" title="从 JSON 文件导入命令（备份 / 分享）">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v9"/><path d="M8 8l4 4 4-4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+                    导入</button>
+                  <button id="btn-cmd-export" class="btn tiny" type="button" title="导出命令为 JSON（备份 / 分享）">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12V3"/><path d="M8 7l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+                    导出</button>
+                </span>
+                <input id="cmd-import-file" type="file" accept=".json,.txt,application/json" hidden>
+              </div>
+              <div class="cmd-filterbar">
+                <input id="cmd-filter" type="text" class="inp" autocomplete="off"
+                       placeholder="搜索命令名 / 命令内容…" spellcheck="false">
+                <button id="btn-cmd-clear" class="btn tiny" data-icon="x">清空</button>
+                <span class="cmd-drag-hint" title="按住指令卡约 0.4 秒后拖动即可换位；顺序记在 config.json 的 cmd_order 里">长按卡片可拖动排序</span>
+              </div>
+              <div id="cmd-tags" class="cmd-tags"></div>
+              <div class="cmd-count dim" id="cmd-count"></div>
+              <div id="cmd-groups" class="cmd-groups"></div>
+            </aside>
+            <!-- 指令台 ↔ 指令输出分隔条：左右拖动改变两侧宽度（双击重置） -->
+            <div class="splitter" id="cmd-splitter" title="拖动调整指令台 / 输出宽度（双击重置）"></div>
+            <section class="panel panel-right">
+              <div class="panel-title">
+                指令输出<span class="panel-sub">CONSOLE</span>
+                <button id="btn-clear-console" class="btn tiny" data-icon="trash">清空</button>
+              </div>
+              <div id="console" class="out console"></div>
+
+              <div class="inputbar">
+                <div class="cmd-input-wrap">
+                  <input id="cmd-input" type="text" autocomplete="off"
+                         placeholder="输入任意命令（adb / scrcpy 会自动按受控设备下发）…"
+                         spellcheck="false">
+                  <button id="btn-cmd-input-clear" class="clear-x" type="button" title="清空输入" hidden>×</button>
+                </div>
+                <button id="btn-run" class="btn accent" data-icon="play">执行</button>
+                <button id="btn-stop" class="btn danger" disabled data-icon="stop">停止</button>
+                <!-- 保留输入内容（默认开启）：关闭后每次点「执行」即清空输入框，
+                     适合连发不同命令；开启则保留，方便微调后重发同一条。 -->
+                <label class="chk keep-input" title="开启：执行后保留输入内容（方便改几个字重发）；
+关闭：每次执行后自动清空输入框（适合连发不同命令）">
+                  <input type="checkbox" id="keep-input" checked>保留输入内容
+                </label>
+              </div>
+            </section>
+          </div>
+        </section>
+
+      <!-- ============ Logcat ============ -->
+      <section class="tab" data-tab="logcat">
+        <!-- 共享行：保存目录（抓取落盘 / 监控另存都用它）与缓冲区（监控、抓取
+             读取同一份设备日志范围）。缓冲区是两张卡共用的输入，放在卡外，
+             避免「这张卡里的设置那张卡到底用不用」的疑惑。 -->
+        <div class="savedir-row">
+          <label class="lbl">保存目录</label>
+          <input id="lc-dir" type="text" class="inp grow" placeholder="Logcat 抓取保存目录">
+          <button id="lc-open" class="btn" data-icon="folder">打开</button>
+          <label class="lbl">缓冲区</label>
+          <select id="lc-buf" class="inp sel-inp" title="监控与抓取共同读取的日志缓冲区范围">
+            <option>main（主日志）</option>
+            <option>system（系统）</option>
+            <option>events（事件）</option>
+            <option>crash（崩溃）</option>
+            <!-- 默认「全部」：监控场景先看全量再按需收窄，比默认只有 main
+                 （应用日志）更容易定位到系统/事件/崩溃侧的现场。
+                 buildLcBufferOptions() 会用后端同名单据重建选项并保留当前值，
+                 因此这里的默认值在 boot 后依然生效。 -->
+            <option selected>全部（main+system+events+crash）</option>
+          </select>
+        </div>
+        <!-- 落盘抓取卡：把日志写成本地 txt（与监控相互独立、可同时进行）。
+             唯一打包开关默认开启，且只在点「停止抓取」时生效——抓取过程中
+             不打包、不中断。级别过滤只决定「哪些级别的行写进文件」，与实时
+             监控卡的级别过滤互不影响（监控管视图，抓取管落盘）。
+             放在监控卡**上方**：抓取是更高频的操作（留证据 / 发同事），
+             监控是排障时的深读场景，一屏内先够着高频的。 -->
+        <div class="lc-card">
+          <div class="lc-card-h">落盘抓取<span class="lc-card-sub">CAPTURE · 写入本地 txt，可同时监控</span></div>
+          <div class="lc-ctrls lc-cap">
+            <label class="chk" title="勾选（默认开启）：点「停止抓取」时把这份 txt 打包成 zip（源 txt 清理）。抓取过程中不打包、不中断"><input type="checkbox" id="lc-cap-zipstop" checked>结束后打包 zip</label>
+            <button id="lc-cap-start" class="btn ok" disabled data-icon="play">开始抓取</button>
+            <button id="lc-cap-stop" class="btn" disabled data-icon="stop">停止抓取</button>
+            <span class="lc-status" id="lc-cap-status">空闲</span>
+          </div>
+          <div class="lc-ctrls">
+            <label class="lbl">级别</label>
+            <span id="lc-cap-levels" class="levels" title="只有勾选级别的日志行会写入 txt（默认全选 = 全量抓取；全部取消 = 不写入任何日志行）">
+              <label><input type="checkbox" value="V" checked>V</label>
+              <label><input type="checkbox" value="D" checked>D</label>
+              <label><input type="checkbox" value="I" checked>I</label>
+              <label><input type="checkbox" value="W" checked>W</label>
+              <label><input type="checkbox" value="E" checked>E</label>
+              <label><input type="checkbox" value="F" checked>F</label>
+            </span>
+          </div>
+        </div>
+        <!-- 实时监控卡：只把日志流渲染上屏（不写文件），过滤仅作用于本卡视图；
+             吃满剩余高度，日志视图在卡内生长。 -->
+        <div class="lc-card grow">
+          <div class="lc-card-h">实时监控<span class="lc-card-sub">MONITOR · 仅查看，不写文件</span></div>
+          <div class="lc-ctrls">
+            <span class="lc-dev" id="lc-dev">未选设备</span>
+            <button id="lc-start" class="btn ok" data-icon="play">开始监控</button>
+            <button id="lc-stop" class="btn" disabled data-icon="stop">停止</button>
+            <button id="lc-clear" class="btn" data-icon="trash">清空</button>
+            <button id="lc-save" class="btn" data-icon="download">保存到文件</button>
+            <span class="lc-status" id="lc-status">空闲</span>
+            <span class="lc-counter" id="lc-counter">行数: 0 · 异常: 0</span>
+          </div>
+          <div class="lc-ctrls">
+            <label class="lbl">过滤</label>
+            <input id="lc-filter" type="text" class="inp" placeholder="关键字（不区分大小写）">
+            <label class="lbl">级别</label>
+            <span id="lc-levels" class="levels">
+              <label><input type="checkbox" value="V" checked>V</label>
+              <label><input type="checkbox" value="D" checked>D</label>
+              <label><input type="checkbox" value="I" checked>I</label>
+              <label><input type="checkbox" value="W" checked>W</label>
+              <label><input type="checkbox" value="E" checked>E</label>
+              <label><input type="checkbox" value="F" checked>F</label>
+            </span>
+            <label class="chk"><input type="checkbox" id="lc-only-exc">仅异常</label>
+            <label class="chk"><input type="checkbox" id="lc-autoscroll" checked>自动滚动</label>
+          </div>
+          <div id="lc-view" class="lc-view"></div>
+        </div>
+      </section>
+
+      <!-- ============ 工具 ============ -->
+      <section class="tab" data-tab="tools">
+        <div class="savedir-row">
+          <label class="lbl">保存目录</label>
+          <input id="tool-dir" type="text" class="inp grow" placeholder="截图/录屏保存目录">
+          <button id="tool-open" class="btn" data-icon="folder">打开</button>
+        </div>
+
+        <!-- 工具页三张卡统一自上而下堆叠，每张的标题栏单击可收起。
+             曾把「截图 / 录屏」并成两列：两列内容量差太多、勾选项还被挤成两行，
+             反而更难扫读。改回竖排后靠「逐卡收起」省屏高——想看的展开，不看的
+             收成一行标题（三张卡的收起态各自记忆，互不牵连）。 -->
+        <div class="tool-card" id="shot-card">
+          <!-- 标题栏整条可点：单击收起 / 展开下方全部内容。收起态记在
+               config.json 的 shot_collapsed，下次启动沿用。 -->
+          <div class="tool-h tool-h--toggle" id="shot-toggle" role="button" tabindex="0"
+               aria-expanded="true" aria-controls="shot-body" title="单击收起 / 展开截图选项">
+            设备截图
+            <span class="tool-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </span>
+          </div>
+          <div class="tool-body" id="shot-body">
+            <div class="tool-desc">对受控设备各截一张 PNG（adb exec-out screencap）。</div>
+            <div class="tool-row">
+              <button id="tool-shot" class="btn accent" data-icon="camera">立即截图</button>
+              <label class="chk"><input type="checkbox" id="shot-clipboard" checked>同步至粘贴板</label>
+            </div>
+            <ul class="tool-tips">
+              <li>文件名形如 <code>screenshot_&lt;序列号&gt;_&lt;时间&gt;.png</code>，多台设备各存一张。</li>
+              <li>走后台 adb 直接取帧，不会打断设备当前操作。</li>
+              <li>勾选「同步至粘贴板」时只复制<b>第一张</b>——剪贴板一次只能放一张（图片仍全部存盘），可直接到微信 / QQ / 文档里 Ctrl+V。</li>
+              <li>开关与保存目录都记在 <code>config.json</code>，下次启动沿用。</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="tool-card" id="rec-card">
+          <!-- 标题栏整条可点：单击收起 / 展开下方全部内容（开关项占屏太高）。
+               收起态记在 config.json 的 rec_collapsed，下次启动沿用。 -->
+          <div class="tool-h tool-h--toggle" id="rec-toggle" role="button" tabindex="0"
+               aria-expanded="true" aria-controls="rec-body" title="单击收起 / 展开录屏选项">
+            设备录屏
+            <span class="tool-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </span>
+          </div>
+          <div class="tool-body" id="rec-body">
+            <div class="tool-desc">对受控设备各录一段 MP4（adb screenrecord）。需要复盘时勾上「同步录制 logcat」——日志按<b>全量</b>抓取，不截断也不过滤。</div>
+            <div class="tool-row">
+              <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
+              <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止</button>
+            </div>
+            <!-- 录屏开关：每项按内容宽度排布、随宽度自动换行。
+                 「同步录制 logcat」「结束自动压缩 zip」默认开启（与 core/prefs.py 的
+                 PREFS_DEFAULTS 对齐：默认值只在那里定义一份，此处勾选态必须一致）。
+                 设备音频 / 电脑麦克风两项已移除：采集链路没做完（设备端 tinycap 探测
+                 与 ffmpeg 合成都不可用），留着开关只会让人以为录进去的是有声视频。 -->
+            <div class="rec-opts">
+              <label class="chk"><input type="checkbox" id="rec-logcat" checked>同步录制 logcat</label>
+              <label class="chk"><input type="checkbox" id="rec-zip" checked>结束录制后自动压缩为 zip</label>
+              <!-- 可视化回放辅助（默认开启）：回顾录像时能直观看到「手点了哪儿」。
+                   两项都是设备系统设置的屏幕 overlay（系统开发者选项同款），
+                   不是录屏参数——全 Android 版本可用、不影响录屏启动；
+                   录屏前备份原值并开启，停止录屏时自动恢复设备原设置。 -->
+              <label class="chk"><input type="checkbox" id="rec-pointer-location" checked>指针位置（画面常驻准星，跟随触摸）</label>
+              <label class="chk"><input type="checkbox" id="rec-show-touches" checked>触摸圆点（触摸时屏幕出圆点）</label>
+            </div>
+            <div class="tool-desc dim">logcat 走落盘抓取：<b>全部缓冲区</b>（main / system / events / crash / radio …）＋ <b>全部级别</b>（V/D/I/W/E/F），不做任何过滤与截断，结束录制时随视频一并打包（若勾选压缩）。指针位置 / 触摸圆点为设备系统 overlay（settings put system pointer_location / show_touches），停止录屏时自动恢复设备原设置。</div>
+          </div>
+        </div>
+
+        <!-- 应用安装：把本地 APK 装到受控设备（每台一个后台安装，互不影响）。
+             选项默认「覆盖安装」——测试时反复装同一个包是常态；「允许降级」
+             「授予全部权限」默认关闭：前者会静默压掉设备上的更高版本，后者
+             会掩盖权限相关缺陷，都该由使用者显式决定。 -->
+        <div class="tool-card" id="apk-card">
+          <div class="tool-h tool-h--toggle" id="apk-toggle" role="button" tabindex="0"
+               aria-expanded="true" aria-controls="apk-body" title="单击收起 / 展开安装选项">
+            应用安装 <span class="panel-sub">APK</span>
+            <span class="tool-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </span>
+          </div>
+          <div class="tool-body" id="apk-body">
+            <div class="tool-desc">选择本地 APK 后一键安装到全部受控设备（<code>adb install</code>，走后台线程，可同时装多台）。</div>
+            <div class="tool-row">
+              <button id="apk-pick" class="btn" data-icon="package">选择 APK</button>
+              <button id="apk-install" class="btn accent" data-icon="upload" disabled>安装到受控设备</button>
+              <span id="apk-file" class="apk-file dim">未选择安装包</span>
+            </div>
+            <div class="rec-opts">
+              <label class="chk"><input type="checkbox" id="apk-replace" checked>覆盖安装（-r）</label>
+              <label class="chk"><input type="checkbox" id="apk-downgrade">允许降级（-d）</label>
+              <label class="chk"><input type="checkbox" id="apk-grant">授予全部运行时权限（-g）</label>
+            </div>
+            <ul class="tool-tips">
+              <li>失败原因会翻成中文：签名不一致 → 先卸载旧包；版本降级 → 勾「允许降级」；空间不足 → 清理设备。</li>
+              <li><code>testOnly</code> 调试包会自动改用 <code>-t</code> 重试一次，不用手动改参数。</li>
+              <li>多台设备同时装时逐台独立执行，一台失败不影响其它台；全部结束后汇总一条提示。</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- 投屏：直接调用用户机器上已安装的 scrcpy（不内置、不重打包），
+             自动在 PATH / 常见安装目录里找；找不到时可手填 scrcpy(.exe) 全路径。 -->
+        <div class="tool-card" id="scrcpy-card">
+          <div class="tool-h tool-h--toggle" id="scrcpy-toggle" role="button" tabindex="0"
+               aria-expanded="true" aria-controls="scrcpy-body" title="单击收起 / 展开投屏选项">
+            投屏<span class="panel-sub">SCRCPY</span>
+            <span class="tool-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </span>
+          </div>
+          <div class="tool-body" id="scrcpy-body">
+            <div class="tool-desc">把受控设备画面实时投到电脑上（调用本机 <b>scrcpy</b>，官方投屏工具，不随本程序打包）。多台受控设备会各开一个投屏窗口。</div>
+            <div class="tool-row">
+              <button id="tool-scrcpy" class="btn accent" disabled data-icon="monitor">开启 Scrcpy 投屏</button>
+              <button id="tool-scrcpy-detect" class="btn" data-icon="refresh">重新检测</button>
+              <span id="scrcpy-state" class="scrcpy-state">检测中…</span>
+            </div>
+            <div class="tool-row">
+              <label class="lbl" for="scrcpy-path">scrcpy 路径</label>
+              <input id="scrcpy-path" type="text" class="inp grow"
+                     placeholder="留空 = 自动探测（PATH / 常见安装目录）；或填 scrcpy.exe 全路径">
+            </div>
+            <div class="tool-desc dim">自动探测顺序：配置里填的路径 → 系统 PATH → 常见安装目录（Windows：%LOCALAPPDATA%\scrcpy、C:\scrcpy 等；macOS/Linux：/usr/local/bin、/opt/homebrew/bin 等）。未安装时：Windows 可 <code>winget install Genymobile.scrcpy</code>，macOS <code>brew install scrcpy</code>，或从 github.com/Genymobile/scrcpy 下载解压后把目录填到上面。scrcpy 自带 adb，会与本程序各自的 adb 客户端共存（同一台设备同时连多个 adb 客户端是支持的）。</div>
+
+            <div class="mirror-sep">没装 scrcpy？用备用方式投屏</div>
+            <div class="tool-row">
+              <button id="tool-mirror" class="btn" disabled data-icon="monitor">备用投屏（无需 scrcpy）</button>
+              <button id="tool-mirror-stop" class="btn" disabled data-icon="stop">停止投屏</button>
+              <span id="mirror-state" class="scrcpy-state">未开启</span>
+            </div>
+            <div id="mirror-preview" class="mirror-preview" hidden>
+              <div class="mirror-frame" id="mirror-frame">
+                <img id="mirror-view" alt="设备画面预览">
+                <!-- 右下角拖拽手柄：按住拖动改变预览大小（宽高各自独立，画面按
+                     contain 等比缩放，多出来的部分留黑边，不会被拉变形）。
+                     双击手柄恢复「自适应」大小。 -->
+                <span id="mirror-grip" class="mirror-grip" role="separator"
+                      aria-label="拖动调整预览大小"
+                      title="拖动改变预览大小 · 双击恢复自适应"></span>
+              </div>
+              <div class="mirror-preview-tip">低帧率预览（screencap 轮询）· 右下角可拖动改大小</div>
+            </div>
+            <div class="tool-row">
+              <label class="lbl" for="mirror-size">投屏分辨率</label>
+              <input id="mirror-size" type="text" class="inp" placeholder="留空 = 自动（长边缩到 1080），或填 720x1280">
+              <label class="lbl" for="mirror-bitrate">码率 Mbps</label>
+              <input id="mirror-bitrate" type="number" min="1" max="50" class="inp narrow">
+              <label class="lbl" for="mirror-fps">预览帧率</label>
+              <input id="mirror-fps" type="number" min="1" max="10" class="inp narrow">
+            </div>
+            <div class="tool-row">
+              <label class="lbl" for="mirror-player-path">播放器路径</label>
+              <input id="mirror-player-path" type="text" class="inp grow"
+                     placeholder="留空 = 自动探测 ffplay / mpv / mplayer / vlc">
+            </div>
+            <div class="tool-desc dim">备用方式会<b>自动降级</b>：① <b>screenrecord 管道</b> —— 把设备画面打成 H.264 流，喂给本机播放器窗口（ffplay / mpv / mplayer / vlc 任一即可，30~60fps、延迟约 0.2~1s，画面在独立窗口，<b>不能反向控制设备</b>；screenrecord 有 180 秒上限，到点会自动续流）；② <b>低帧率预览</b> —— 一个播放器都没装时退到此档，纯 adb 循环截图，画面直接显示在上面（1~3fps，只能看个状态、不适合演示）。少数 ROM（如部分华为机型）删掉了 screenrecord，那类设备会自动走 ②。</div>
+          </div>
+        </div>
+        <!-- 状态信息已抽离到顶栏跑马灯（点击弹窗查看全量历史） -->
+      </section>
+
+      <!-- ============ 性能监控（类 PerfDog：实时曲线 + 报告导出） ============ -->
+      <section class="tab" data-tab="perf">
+        <div class="perf-bar">
+          <span class="perf-dev" id="perf-dev">未选设备</span>
+          <label class="lbl" for="perf-pkg">应用包名</label>
+          <!-- 目标应用选择器：默认「跟随前台应用」，可下拉挑选设备上的已安装应用
+               （列表来自本机 adb 的 pm list packages，支持模糊搜索），也可切「全系统」
+               只采整机指标。手动输入包名同样支持：搜索框里回车即用。 -->
+          <div class="perf-pick" id="perf-pkg-pick">
+            <button id="perf-pkg" class="pkg-btn" type="button" aria-haspopup="listbox"
+                    aria-expanded="false" title="选择要监控的应用（默认跟随前台应用）">
+              <span class="pkg-btn-t" id="perf-pkg-label">跟随前台应用</span>
+              <svg class="pkg-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div class="pkg-pop hidden" id="perf-pkg-pop">
+              <input id="perf-pkg-search" type="text" class="inp pkg-search" autocomplete="off"
+                     spellcheck="false" placeholder="搜索包名（支持模糊），回车可直接使用输入的包名">
+              <div class="pkg-modes" id="perf-pkg-modes">
+                <button type="button" class="pkg-mode" data-pkg="auto">跟随前台应用</button>
+                <button type="button" class="pkg-mode" data-pkg="__system__">监控全系统</button>
+              </div>
+              <div class="pkg-ops">
+                <label class="pkg-sys" title="系统应用平时用不到；需要对比系统相机 / 桌面之类时再勾">
+                  <input type="checkbox" id="perf-pkg-all">含系统应用
+                </label>
+                <button type="button" class="pkg-refresh" id="perf-pkg-refresh"
+                        title="重新读取设备上已安装的应用">刷新</button>
+                <span class="pkg-count" id="perf-pkg-count"></span>
+              </div>
+              <div class="pkg-list" id="perf-pkg-list" role="listbox"></div>
+            </div>
+          </div>
+          <label class="lbl" for="perf-interval">采样间隔</label>
+          <input id="perf-interval" type="number" min="200" max="10000" step="100"
+                 class="inp narrow" value="1000" title="毫秒；一次采集本身耗时 200~400ms，再密也只是排队">
+          <span class="perf-unit">ms</span>
+          <button id="perf-start" class="btn accent" disabled data-icon="pulse">开始监控</button>
+          <button id="perf-stop" class="btn" disabled data-icon="stop">停止</button>
+          <button id="perf-export" class="btn" disabled data-icon="report">导出报告</button>
+          <button id="perf-th" class="btn" data-icon="sliders"
+                  title="自定义告警阈值（超标时指标卡切红、报告里标色带）">阈值</button>
+          <span id="perf-state" class="scrcpy-state">未开始</span>
+        </div>
+
+        <!-- 指标卡：既是读数，也是下方曲线的切换开关（点哪张画哪条） -->
+        <div class="perf-stats" id="perf-stats">
+          <div class="perf-stat on" id="perf-stat-cpu" data-metric="cpu"
+               role="button" tabindex="0" aria-pressed="true">
+            <span class="k">CPU</span>
+            <span class="val"><span class="v" id="perf-v-cpu">--</span><span class="u">%</span></span>
+            <span class="sub" id="perf-s-cpu">等待数据</span>
+          </div>
+          <div class="perf-stat" id="perf-stat-mem_used" data-metric="mem_used"
+               role="button" tabindex="0" aria-pressed="false">
+            <span class="k">内存占用</span>
+            <span class="val"><span class="v" id="perf-v-mem_used">--</span><span class="u">MB</span></span>
+            <span class="sub" id="perf-s-mem_used">等待数据</span>
+          </div>
+          <div class="perf-stat" id="perf-stat-pss" data-metric="pss"
+               role="button" tabindex="0" aria-pressed="false">
+            <span class="k">应用内存 PSS</span>
+            <span class="val"><span class="v" id="perf-v-pss">--</span><span class="u">MB</span></span>
+            <span class="sub" id="perf-s-pss">等待数据</span>
+          </div>
+          <div class="perf-stat" id="perf-stat-fps" data-metric="fps"
+               role="button" tabindex="0" aria-pressed="false">
+            <span class="k">帧率</span>
+            <span class="val"><span class="v" id="perf-v-fps">--</span><span class="u">FPS</span></span>
+            <span class="sub" id="perf-s-fps">等待数据</span>
+          </div>
+          <div class="perf-stat" id="perf-stat-jank" data-metric="jank"
+               role="button" tabindex="0" aria-pressed="false"
+               title="区间卡顿率：本采样窗口新增帧里卡顿帧的占比（不是自应用启动以来的累计值）">
+            <span class="k">卡顿率</span>
+            <span class="val"><span class="v" id="perf-v-jank">--</span><span class="u">%</span></span>
+            <span class="sub" id="perf-s-jank">等待数据</span>
+          </div>
+          <div class="perf-stat" id="perf-stat-batt" data-metric="batt"
+               role="button" tabindex="0" aria-pressed="false">
+            <span class="k">电量</span>
+            <span class="val"><span class="v" id="perf-v-batt">--</span><span class="u">%</span></span>
+            <span class="sub" id="perf-s-batt">等待数据</span>
+          </div>
+          <div class="perf-stat" id="perf-stat-temp" data-metric="temp"
+               role="button" tabindex="0" aria-pressed="false">
+            <span class="k">电池温度</span>
+            <span class="val"><span class="v" id="perf-v-temp">--</span><span class="u">℃</span></span>
+            <span class="sub" id="perf-s-temp">等待数据</span>
+          </div>
+        </div>
+
+        <div class="perf-chart-card">
+          <div class="perf-chart-h">
+            <span class="perf-chart-title" id="perf-chart-title">CPU 占用率</span>
+            <span class="panel-sub" id="perf-chart-sub">LIVE</span>
+            <span class="perf-chart-hint">单击指标卡切换曲线 · 悬停看逐点数值 · 按住横拖一段看区间统计 · 多设备勾选后自动分色对比 · 导出报告含全部指标与明细</span>
+          </div>
+          <div class="perf-legend" id="perf-legend" hidden></div>
+          <div class="perf-canvas-wrap">
+            <canvas id="perf-canvas"></canvas>
+            <!-- 悬停提示：竖线 + 数值卡片。用 DOM 而不是画在 canvas 上——
+                 画布每帧重绘会把提示一起重画（多设备时更闪），而文本排版、
+                 圆角与阴影在 canvas 里都要手算，交给 CSS 更省事。 -->
+            <div class="perf-cross" id="perf-cross" hidden></div>
+            <div class="perf-tip" id="perf-tip" hidden></div>
+            <!-- 区间框选：按住横拖选一段时间，松手给出该区间的均值 / 最低 /
+                 最高 / P95 / 超阈值次数。选框同样用 DOM 画——拖动时只改
+                 left/width，不触发画布重绘，拖起来才跟手。 -->
+            <div class="perf-band" id="perf-band" hidden></div>
+            <div class="perf-range" id="perf-range" hidden></div>
+            <div class="perf-empty" id="perf-empty">
+              选择一台受控设备，点「开始监控」即可实时采样 CPU / 内存 / FPS / 电量 / 温度。<br>
+              数据全部来自设备自带的 /proc 与 dumpsys，不注入、不改设备。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 文件 ============ -->
+      <section class="tab" data-tab="files">
+        <div class="savedir-row">
+          <label class="lbl">保存目录</label>
+          <input id="file-dir" type="text" class="inp grow" placeholder="文件下载保存目录">
+          <button id="file-open" class="btn" data-icon="folder">打开</button>
+        </div>
+        <div class="file-bar">
+          <span class="file-dev" id="file-dev-now">未选设备</span>
+          <input id="file-path" type="text" class="inp grow" placeholder="/">
+          <button id="file-up" class="btn" data-icon="arrow-up">上级</button>
+          <button id="file-refresh" class="btn" data-icon="refresh">刷新</button>
+          <button id="file-mkdir" class="btn" data-icon="folder-plus">新建文件夹</button>
+          <button id="file-touch" class="btn" data-icon="file-plus">新建文件</button>
+          <label class="btn file-upload" data-icon="upload">上传
+            <input id="file-upload" type="file" hidden>
+          </label>
+        </div>
+        <div class="file-bar file-batch">
+          <label class="chk"><input type="checkbox" id="file-sel-all">全选</label>
+          <button id="file-batch-dl" class="btn" disabled data-icon="download">下载选中</button>
+          <button id="file-batch-del" class="btn" disabled data-icon="trash">删除选中</button>
+          <span id="file-sel-count" class="dim">已选 0 项</span>
+        </div>
+        <div class="file-table-wrap" id="file-table-wrap">
+          <div class="file-drop-overlay" id="file-drop-overlay">
+            <div class="file-drop-inner">
+              <div class="file-drop-icon">⬆</div>
+              <div>松开鼠标，将文件上传到当前目录</div>
+            </div>
+          </div>
+          <table class="file-table">
+            <thead>
+              <tr><th class="col-sel"></th><th>名称</th><th>大小</th><th>日期</th><th>权限</th><th>操作</th></tr>
+            </thead>
+            <tbody id="file-body"></tbody>
+          </table>
+        </div>
+        <!-- 状态信息已抽离到顶栏跑马灯（点击弹窗查看全量历史） -->
+      </section>
+
+      <!-- ============ 关于 ============ -->
+      <section class="tab" data-tab="about">
+        <div class="about">
+          <h2>ADB 设备指令台</h2>
+          <div class="about-row"><span>版本</span><b id="about-ver">—</b></div>
+          <div class="about-row"><span>adb</span><b id="about-adb">—</b></div>
+          <div class="about-row adb-cfg"><span>adb 目录</span>
+            <input id="about-adb-dir" class="inp" type="text" spellcheck="false"
+                   placeholder="留空 = 用系统 PATH；或填 platform-tools 目录 / adb.exe 全路径"
+                   autocomplete="off">
+            <button id="about-adb-save" class="btn tiny" type="button" data-icon="save">保存</button>
+          </div>
+          <div class="about-row adb-cfg"><span>配置文件</span>
+            <b id="about-config-path" class="cfg-path" title="config.json 的绝对路径">—</b>
+            <button id="about-config-open" class="btn tiny" type="button" data-icon="folder">打开目录</button>
+          </div>
+          <div class="about-note" id="about-config-note">
+            全部开关、过滤条件、保存路径都记在这一个 <code>config.json</code> 里（程序目录旁）。
+            把它拷到另一台电脑的同位置即可同步设置；若其中的保存目录在本机不存在，
+            程序会自动改用默认目录并提示，文件里的原值保持不变。
+          </div>
+          <div class="about-row"><span>快捷命令数</span><b id="about-cmd">—</b></div>
+          <div class="about-row"><span>在线设备</span><b id="about-dev">—</b></div>
+          <div class="about-row"><span>架构</span><b>pywebview + backend/* + core/*（纯逻辑）</b></div>
+          <div class="about-warn" id="about-warn"></div>
+          <div class="about-features">
+            <h3>功能概览</h3>
+            <ul class="feat-list">
+              <li><b>设备指令</b>：多设备批量下发快捷命令（按标签分组）与自定义命令；
+                adb / scrcpy 自动按受控设备拼接 <code>-s</code>，彻底告别 more than one device。</li>
+              <li><b>工具</b>：竖向排列的三张卡（截图 / 录屏 / 投屏），每张标题栏单击可收起。批量截图（screencap，可同步至系统粘贴板）、录屏（screenrecord；「同步录制 logcat」按全量抓取、不截断不过滤，「结束自动压缩为 zip」默认开启）、
+                投屏（一键调用本机已安装的 scrcpy，自动探测路径，一台设备一个窗口）。<b>保存目录</b>由 工具 / Logcat / 文件 三页共享同一设置。</li>
+              <li><b>性能监控</b>：类 PerfDog 的实时面板——CPU / 整机内存 / 应用 PSS / 帧率 / 电量 / 电池温度
+                六项指标实时曲线（点指标卡切换），一键导出 HTML 报告 + CSV（含统计与采样明细）。
+                数据全部来自设备自带的 /proc 与 dumpsys，不注入、不装 APK、不需 root。单设备。</li>
+              <li><b>Logcat</b>：实时日志监控——关键字 / 级别 / 缓冲区 / 仅异常 过滤、异常高亮、行数异常计数；
+                另含抓取模式（落盘 txt，「结束后打包 zip」默认开启）。单设备，随左侧受控设备自动联动。</li>
+              <li><b>文件</b>：类 Device Explorer 的远程文件管理——浏览 / 上传 / 下载 / 删除 / 重命名 / 新建 / 查看内容。
+                单设备，随左侧受控设备自动联动。</li>
+              <li><b>全局共享</b>：左侧设备栏跨 tab 常驻可见；顶栏右上角「状态信息」跑马灯跨 tab 常驻，滚动显示最新的刷新 / 执行 / 停止等运行状态，鼠标悬停可暂停细看，点击即弹出完整历史（可复制 / 清空）。</li>
+              <li><b>受控设备</b>：左侧勾选即「受控设备」——多设备功能（指令 / 工具）对其广播；
+                单设备功能（Logcat / 文件）自动以第一个受控设备为当前目标。</li>
+            </ul>
+          </div>
+          <p class="dim">本程序为 Web 版（pywebview + backend/* + core/*），逻辑层可单测、可复用。</p>
+        </div>
+      </section>
+    </div>
+    </div>
+
+    <!-- 状态信息已迁到顶栏跑马灯（点击弹窗查看，见 #status-modal） -->
+  </main>
+
+  <!-- 状态信息弹窗：点击顶栏右上角跑马灯打开。
+       #status 就住在这里——全局只此一份 DOM，关闭时随弹窗一起隐藏，
+       复制 / 清空 / 跑马灯三处读写的都是它。 -->
+  <div id="status-modal" class="modal status-modal hidden">
+    <div class="modal-box status-modal-box">
+      <div class="modal-head status-head">
+        <span class="status-title">状态信息<span class="status-tag">STATUS</span></span>
+        <span class="status-hint dim">程序下发的命令与运行状态 · 全局共享 · 可框选复制</span>
+        <div class="status-actions">
+          <button id="btn-copy-status" class="btn tiny">复制</button>
+          <button id="btn-clear-status" class="btn tiny" data-icon="trash">清空</button>
+          <button id="status-modal-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div id="status" class="out status"></div>
+    </div>
+  </div>
+
+  <!-- 高优先级提示语 toast 容器（错误 / 关键警告弹窗，位于顶栏下方右上角） -->
+  <div id="toast-wrap" class="toast-wrap" aria-live="polite"></div>
+
+  <!-- Logcat 抓取 / 文件查看 等内容弹窗 -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span id="modal-title">内容</span>
+        <div class="modal-actions">
+          <!-- 大文件已拉取到本地时出现：一键用系统默认程序打开 -->
+          <button id="modal-open-local" class="btn tiny" type="button"
+                  title="用系统默认程序打开该文件" hidden data-icon="eye">查看</button>
+          <button id="modal-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <pre id="modal-body" class="modal-body"></pre>
+    </div>
+  </div>
+
+  <!-- 命令编辑弹窗：新增 / 编辑快捷命令（electerm 深色风格，复用 .modal/.modal-box） -->
+  <div id="cmd-edit-modal" class="modal hidden">
+    <div class="modal-box cmd-edit-box">
+      <div class="modal-head">
+        <span id="cmd-edit-title">新建命令</span>
+        <div class="modal-actions">
+          <button id="cmd-edit-delete" class="btn tiny danger" type="button" hidden data-icon="trash">删除</button>
+          <button id="cmd-edit-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body cmd-edit-body">
+        <label class="fld"><span>名称</span>
+          <input id="cmd-edit-name" class="inp" type="text" placeholder="如：[通用] 重启车机" spellcheck="false"></label>
+        <label class="fld"><span>标签</span>
+          <input id="cmd-edit-labels" class="inp" type="text" placeholder="逗号分隔，如：通用, J01" spellcheck="false"></label>
+        <label class="fld fld-col"><span>命令（每行一条）</span>
+          <textarea id="cmd-edit-cmds" class="inp" rows="7" spellcheck="false"
+            placeholder="adb reboot&#10;adb devices"></textarea>
+          <span class="fld-hint dim">每行一条命令；行尾加 <code>||delay=800</code> 可设置该条下发后等待的毫秒数（可选）。</span>
+        </label>
+        <label class="chk"><input type="checkbox" id="cmd-edit-inputonly">仅输入（点击只填入输入框，不直接执行）</label>
+      </div>
+      <div class="modal-foot">
+        <button id="cmd-edit-cancel" class="btn" type="button" data-icon="x">取消</button>
+        <button id="cmd-edit-save" class="btn accent" type="button" data-icon="save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 命令导出弹窗：展示 JSON，可复制或落盘为文件（备份 / 分享） -->
+  <div id="cmd-export-modal" class="modal hidden">
+    <div class="modal-box cmd-edit-box">
+      <div class="modal-head">
+        <span id="cmd-export-title">导出命令</span>
+        <div class="modal-actions">
+          <button id="cmd-export-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body cmd-edit-body">
+        <div class="export-hint dim">以下为用户自定义命令（已排除内置默认），可复制保存，或导出为文件后再用「导入」恢复 / 分享给他人。</div>
+        <textarea id="cmd-export-text" class="inp" rows="12" spellcheck="false" readonly></textarea>
+      </div>
+      <div class="modal-foot">
+        <button id="cmd-export-copy" class="btn" type="button" data-icon="copy">复制</button>
+        <button id="cmd-export-save" class="btn" type="button" data-icon="save">保存到文件</button>
+        <button id="cmd-export-close2" class="btn accent" type="button" data-icon="x">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 告警阈值弹窗：四条规则的开关与数值（落到 config.json 的 perf_thresholds） -->
+  <div id="perf-th-modal" class="modal hidden">
+    <div class="modal-box cmd-edit-box">
+      <div class="modal-head">
+        <span>告警阈值</span>
+        <div class="modal-actions">
+          <button id="perf-th-reset" class="btn tiny" type="button"
+                  data-icon="refresh" title="改回内置基线（尚未保存）">恢复默认</button>
+          <button id="perf-th-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body cmd-edit-body">
+        <div class="export-hint dim">超标时指标卡整卡切红并在状态栏提示；导出的报告里也用同一份标准判定，
+          超标时段在曲线上标红。取消勾选 = 不做该项判定。</div>
+        <div id="perf-th-rows" class="th-rows"></div>
+        <div id="perf-th-err" class="th-err" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button id="perf-th-cancel" class="btn" type="button" data-icon="x">取消</button>
+        <button id="perf-th-save" class="btn accent" type="button" data-icon="save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 无线调试弹窗：连接 / 断开 / 对勾选设备开启 5555。
+       USB 线不够用时（车机走线、长时间稳定性测试）靠它把设备从「插着线」
+       变成「同一 Wi-Fi 下可达」；开启 5555 时会顺手读出设备 IP 填进地址框。 -->
+  <div id="wifi-modal" class="modal hidden">
+    <div class="modal-box cmd-edit-box">
+      <div class="modal-head">
+        <span>无线调试 <span class="panel-sub">WI-FI ADB</span></span>
+        <div class="modal-actions">
+          <button id="wifi-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body cmd-edit-body">
+        <div class="wifi-row">
+          <label class="lbl" for="wifi-addr">设备地址</label>
+          <input id="wifi-addr" type="text" class="inp grow" autocomplete="off"
+                 spellcheck="false" placeholder="192.168.1.23:5555（可只填 IP）">
+          <button id="wifi-connect" class="btn accent" type="button" data-icon="wifi">连接</button>
+        </div>
+        <div class="wifi-hint dim">电脑与设备需在同一 Wi-Fi / 网段。首次开启无线调试必须先用 USB 线连一次。</div>
+        <div class="tool-row">
+          <button id="wifi-tcpip" class="btn" type="button" data-icon="refresh">对勾选设备开启无线调试（5555）</button>
+          <span id="wifi-tcpip-state" class="dim"></span>
+        </div>
+        <div class="wifi-sec">已连接的无线设备</div>
+        <div id="wifi-connected" class="wifi-list"></div>
+        <div class="wifi-sec">最近连接</div>
+        <div id="wifi-recent" class="wifi-recent"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="wifi-close2" class="btn accent" type="button" data-icon="x">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设备信息弹窗：型号 / 系统版本 / 分辨率 / 电量 / 存储 / 内存（一次 adb shell 取全） -->
+  <div id="devinfo-modal" class="modal hidden">
+    <div class="modal-box cmd-edit-box">
+      <div class="modal-head">
+        <span id="devinfo-title">设备信息</span>
+        <div class="modal-actions">
+          <button id="devinfo-refresh" class="btn tiny" type="button"
+                  data-icon="refresh" title="重新读取">刷新</button>
+          <button id="devinfo-copy" class="btn tiny" type="button"
+                  data-icon="copy" title="复制全部信息">复制</button>
+          <button id="devinfo-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body cmd-edit-body">
+        <div id="devinfo-rows" class="devinfo-rows"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="devinfo-close2" class="btn accent" type="button" data-icon="x">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <h2>未检测到 pywebview</h2>
+      <p>请通过 <code>python main.py</code> 启动本程序，<br>
+         直接用浏览器打开 index.html 无法调用后端能力。</p>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
