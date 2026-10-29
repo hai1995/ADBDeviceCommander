@@ -55,6 +55,7 @@ ADBDeviceCommander/
 ├── build.py              # PyInstaller 一键打包成 exe
 ├── assets/app.ico        # 程序图标
 ├── tools/                # 版本号递增（bump_version.py）+ 扁平 zip 打包（package.py）
+│                         #   + 源码推送 GitHub（push_github.py，token 不进版本库）
 ├── tests/                # 单元测试（backend/* + core/* 纯逻辑）+ 前端 jsdom 测试
 ├── 使用说明.txt           # 给最终使用者的简明说明（随 exe 分发）
 └── README.md
@@ -146,6 +147,63 @@ build / dist / .git / config.json / settings.json / `*.pyc` 等）。
 包内所有文件都挂在**与 zip 同名的顶层目录**下（`ADBDeviceCommander_v2026.1029.1649/`）：
 解压不会把 `main.py` / `core` / `frontend` 散落一地；顶层也没有 `index.html`，
 云端导入时不会被误判成「网页包」而解包成一个取不到文件的空壳页面。
+
+### 推送到 GitHub（版本留档 / 换机取回）
+
+远端：`https://github.com/hai1995/ADBDeviceCommander.git`（**私有**仓库，含个人命令库）。
+
+```bat
+python tools\push_github.py --status        :: 只看状态，不动仓库、不需要 token
+python tools\push_github.py                 :: 有改动就提交（说明自动生成）并推送
+python tools\push_github.py -m "修菜单层叠"  :: 指定提交说明
+python tools\push_github.py --init          :: 首次：git init + 首次提交 + 关联远端 + 推送
+python tools\push_github.py --dry-run       :: 只打印将要做什么
+```
+
+**第一次用要先放凭证**（只需一次，二选一）：
+
+```bat
+:: 方式 1：写文件（推荐，之后一直有效）
+echo {"token":"github_pat_xxx"} > .git-credential
+
+:: 方式 2：只在本条命令里给（换机器 / CI 用，不落盘）
+set GH_TOKEN=github_pat_xxx && python tools\push_github.py
+```
+
+读取顺序是 **`--token` > `GH_TOKEN` / `GITHUB_TOKEN` > `.git-credential`**。
+`.git-credential` 在 `.gitignore` 里，不会被 `git add -A` 带上。
+
+> **为什么不直接把 token 写进 remote URL**：那样 token 会明文躺在 `.git/config`，
+> 而且 `git push` 一旦失败会把**整条 URL 连同 token** 打回控制台——随手截图发群里就泄了。
+> `push_github.py` 改用 `http.extraHeader` 只在本次命令注入认证头：
+> remote 保持干净地址，git 的回显与报错里都不含 token；连推送失败时打印的
+> git 原文都会先把 token 换成 `***`。
+
+推送失败的提示是翻译过的，直接说下一步：
+
+| git 原始输出 | 脚本给出的下一步 |
+| --- | --- |
+| `Authentication failed` / `Invalid username or password` | token 失效，去 GitHub 重新生成后更新 `.git-credential` |
+| `403` / `Permission denied` | 私有仓库要求 token 勾 **Contents: Read and write**，细粒度 token 还要把该仓库加进 Repository access |
+| `Could not resolve host` | 网络/代理问题 |
+| `non-fast-forward` | 远端有本地没有的提交，先 `git pull --rebase origin main` |
+| `src refspec ... does not match any` | 本地还没提交过任何东西 |
+
+### 进仓库的是什么
+
+`.gitignore` 挡掉运行产物与凭证，避免「一次 `git add -A` 把不该传的带上」：
+
+| 忽略项 | 原因 |
+| --- | --- |
+| `config.json` / `settings.json` | 运行时个人配置，含本机绝对路径 |
+| `*.wav` | 设备音频回环的调试录音（`adb_devaudio_<序列号>_<时间>.wav`），运行产物 |
+| `.git-credential` | 推送凭证 |
+| `dist/` `build/` `dist_stage/` `*.spec` `*.exe` | 打包产物 |
+| `__pycache__/` `*.pyc` `.pytest_cache/` | 缓存 |
+| `tests/frontend/node_modules/` | 前端测试依赖（约 26 MB，`npm i` 可重建） |
+| `crash_*.log` | 崩溃日志，含 traceback 与本机路径 |
+
+`commands.json`（快捷指令库）**是**进仓库的——它是工具的一部分，不是运行产物。
 
 ---
 

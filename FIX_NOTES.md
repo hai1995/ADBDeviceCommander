@@ -16,6 +16,7 @@
 - **第十八轮**（本文末「第十八轮」一节）：无线调试（Wi-Fi ADB，含自动读设备 IP）/ APK 一键安装（批量 + 失败码中文解释）/ 设备信息快照（设备卡 ⓘ）。
 - **第十九轮**（本文末「第十九轮」一节）：修快捷命令 ⋯ 菜单被下方按钮压住（整卡抬层 + 空间不足向上弹）/ 修车机截图「开头不是 PNG」导致剪贴板报「参数无效」。
 - **第二十轮**（本文末「第二十轮」一节）：主动复查——APK 连点「假开始」、设备信息连点串台、BMP 弱签名误判、剩余空间显示 0.0 GB 等 9 处。
+- **第二十一轮**（本文末「第二十一轮」一节）：接入 GitHub 源码推送（`tools/push_github.py`，token 不进版本库/不回显）；修「token 明文被打进源码包」；修两条恒真的打包测试断言。
 
 ---
 
@@ -1749,3 +1750,92 @@ fmt + data」，但代码见到 `data` 就直接返回 —— 缺 fmt 块的坏�
 - 已知取舍：批次互斥只做「拒绝」不做「排队」，因为排队会让用户以为点了两次就装两次；
   拒绝 + 明确提示更不容易误判。设备信息弹窗仍不自动刷新，靠手动点「刷新」——自动
   刷新会在用户读数字时跳变，反而难用。
+
+---
+
+# 第二十一轮：接入 GitHub 源码推送（并修掉一个会泄 token 的打包缺陷）
+
+## 起因
+
+用户申请了一个 GitHub 仓库并要求「后续每次改动迭代之后都推送源码」。仓库建成了 **public**，
+而工程里的 `commands.json` 是个人命令库——含 4 个真实手机号、VIN 绑定规则、J01/CEI 内部项目指令、
+本机绝对路径（`D:\BUG`、`D:\android-sdk`）。用户确认后改为 **private**，命令库随仓库一起留档。
+
+## 一、推送怎么做（`tools/push_github.py`）
+
+一条命令完成「提交 + 推送」，但真正的设计点全在**别把 token 泄出去**：
+
+- **token 不进 remote URL**。常见写法是 `https://user:token@github.com/...`，但那样 token 会明文
+  躺在 `.git/config`；更糟的是 `git push` 失败时会把**整条 URL 连同 token** 打回控制台——
+  随手截图发群里就泄了。改用 `-c http.extraHeader=Authorization: Basic <base64>`，
+  认证头只在**本次命令**生效，remote 保持干净地址，git 的回显与报错里都不含 token。
+- **推送失败时打印的 git 原文也先打码**（`out.replace(tok, "***")`），再翻译成人话。
+- **凭证读取有固定优先级**：`--token` > `GH_TOKEN` > `GITHUB_TOKEN` > `.git-credential`
+  （JSON 或裸一行都认）。文件放在工程根、已在 `.gitignore` 里；同时支持环境变量，
+  是为了 CI / 临时机器上不必为推一次代码就在磁盘留凭证。
+- **失败提示是翻译过的**，直接说下一步：token 失效、私有仓库缺 `Contents: Read and write`、
+  网络不通、`non-fast-forward` 要先 rebase、本地还没提交过。
+- `--status` 不需要 token（只是读本地状态），`--dry-run` 只打印不执行。
+
+## 二、修掉一个真会泄密的缺陷：token 被打进源码包
+
+**发现方式**：接入 git 之后顺手把源码包和 `git ls-files` 的清单做了个 diff，结果第一条就是
+`zip 独有: .git-credential`——**GitHub token 的明文被 `build.py --zip-only` 打进了分发包**。
+
+**根因**：`.gitignore` 只作用于 git；`make_source_zip()` 走的是 `os.walk` + 自己的
+`SOURCE_ZIP_EXCLUDE_FILES`，是**另一条独立路径**。加了 `.gitignore` 不等于打包也会忽略。
+这个包是要发给同事的（甚至上传到团队空间），等于把 token 一并发了出去。
+
+**修法**：`SOURCE_ZIP_EXCLUDE_FILES` 补 `.git-credential` 与 `.git-push-log.txt`，
+并在 `test_real_source_zip_is_lean` 里加断言。反向验证：删掉这两条排除规则后，
+该断言立刻失败（「推送凭证（token 明文）绝不能随分发包发出去」），确认测试真的挡得住。
+
+## 三、两条恒真的测试断言（比缺陷更隐蔽）
+
+修上面那条时发现 `test_source_zip_excludes_junk` 里的四条断言**从来没生效过**：
+
+```python
+for bad in ("backend/__pycache__/a.pyc", "settings.json", ...):
+    assert bad not in names, "分发包不应包含 %s" % bad   # 恒真
+```
+
+原因：包内所有条目都挂在**与 zip 同名的顶层目录**下（`ADBDeviceCommander_v…/backend/a.py`），
+而断言比的是**裸相对路径**（`backend/a.py`）——永远匹配不上，于是永远通过。
+`test_real_source_zip_is_lean` 里的 `settings.json` / `config.json` 两条同理。
+
+危害不在于「这次漏了什么」，而在于**它给了假的安心**：以后真把 `node_modules` 打进包，
+这两处照样绿。已改成 `assert top + bad not in names`（`top = zp.stem + "/"`）。
+
+## 改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `tools/push_github.py` | **新增**：`load_token` / `save_token` / `_auth_header` / `repo_state` / `_auto_message` / `do_init` / `main` / `_explain_push_failure`；支持 `--init` / `--status` / `--dry-run` / `--save-token` / `--remote` / `--branch` |
+| `build.py` | `SOURCE_ZIP_EXCLUDE_FILES` 补 `.git-credential` / `.git-push-log.txt`（凭证不进分发包） |
+| `.gitignore` | 补 `config.json`（原来只忽略了 `settings.json`，等于没忽略现在真正在用的那份）、`*.wav`（设备音频调试录音）、`.git-credential` / `.git-push-log.txt` |
+| `tests/test_tools_push_github.py` | **新增** 29 条：凭证优先级（命令行 > 环境变量 > 文件）/ JSON 与裸 token / 坏 JSON 提示 / 打码 / 认证头不含明文 / **推送 URL 不含 token** / 提交说明按改动区域生成 / 凭证不进提交清单 / `--status` 无需 token / push 失败返回非零且打码 / 6 类失败提示 / 私有仓库权限提示 / `--dry-run` 不动远端 / `.gitignore` 覆盖凭证 |
+| `tests/test_build.py` | 四条恒真断言补顶层前缀；新增「凭证不进源码包」断言 |
+| `README.md` | 架构树补 `tools/push_github.py`；新增「推送到 GitHub」与「进仓库的是什么」两节（含为什么不把 token 写进 URL、失败提示对照表、忽略清单及原因） |
+| `FIX_NOTES.md` | 本轮 |
+
+## 验证
+
+- Python 全量：**856 passed / 1 skipped**（第二十轮 827 + 新增 29）。
+- 前端全量：**58 个测试文件 0 失败**（本轮未改前端）。
+- `pyflakes`：`core/ backend/ main.py build.py adb_inject.py tools/` 零输出。
+- **反向验证**（两条都确认有防护力，不是摆设）：
+  - 把 token 塞进 push URL → `test_push_url_stays_clean` 立刻失败；
+  - 去掉 `out.replace(tok,"***")` → `test_push_failure_returns_nonzero_and_masks_token` 立刻失败；
+  - 删掉 `build.py` 里两条凭证排除规则 → `test_real_source_zip_is_lean` 立刻失败。
+- **远端自证**（不是「接口返回成功」就算数）：GitHub API 拉 `git/trees/main?recursive=1`，
+  147 个 blob、单一顶层目录、不含 `.git-credential` / `*.wav` / `config.json` / `node_modules`；
+  `.git/config` 的 remote 是干净地址；`git log --all -p | grep <token>` 命中 0 次。
+
+## 已知取舍
+
+- **`commands.json` 进仓库**（含手机号与 VIN），所以仓库必须是 private。若将来要开源，
+  需要先把它换成脱敏样例——这条写进了团队空间的约定文档。
+- 脚本只做「提交 + 推送」，不做 `pull --rebase` 自动合并：远端有本地没有的提交时，
+  自动 rebase 可能产生用户没审过的合并结果，宁可停下来让人看一眼。
+- 凭证在磁盘上仍是明文（`.git-credential`，权限 600）。这是本机单用户的常见做法；
+  要更强就用系统密钥环，但那会把依赖从「标准库」变成「平台相关库」，暂不做。

@@ -126,6 +126,11 @@ SOURCE_ZIP_EXCLUDE_FILES = (
     # 开发期截图脚本（用 playwright 渲染界面出预览图，依赖本机 chromium，
     # 用户机器上跑不起来，也不属于运行时资产）
     "preview_*.cjs",
+    # 推送凭证（GitHub token 明文）。.gitignore 只作用于 git，源码包走的是 os.walk，
+    # 是**另一条独立路径**——只写 .gitignore 挡不住它。这条不写，每次 --zip-only
+    # 都会把 token 一起打进分发包发给别人。
+    ".git-credential",
+    ".git-push-log.txt",
 )
 
 # 版本号源码位置（与 tools/bump_version.py 保持一致）

@@ -40,7 +40,7 @@ DEVICE_SERVER_HEAL_AFTER = 2
 # 自动轮询刷新失败的提示最小间隔（秒）：失败时保留上次列表并按此间隔限频播报，
 # 避免每 5s 一条把状态栏刷爆（手动刷新不受限，立即播报）。
 FAIL_NOTICE_INTERVAL_S = 30.0
-VERSION = "2026.1029.1753"
+VERSION = "2026.1029.1823"
 
 # 全局强调色（iOS 系统蓝），Web 版通过 CSS 变量使用
 ACCENT = "#0A84FF"

@@ -367,9 +367,12 @@ def main(argv=None):
 def _explain_push_failure(out, tok):
     """把常见失败翻译成「下一步做什么」，而不是甩一坨 git 原文。"""
     low = out.lower()
-    safe = out.replace(tok, "***") if tok else out     # 兜底：任何情况下不留 token
+    # 打码：git 在个别版本 / 代理配置下会把认证头回显出来，原文里有 token。
+    # 这一步不是可选的礼仪——原文要打给用户看，就必须先擦掉。
+    safe = out.replace(tok, "***") if tok else out
     hints = []
-    if "authentication failed" in low or "401" in low or "bad credentials" in low:
+    if ("authentication failed" in low or "401" in low or "bad credentials" in low
+            or "invalid username or password" in low):
         hints.append("token 无效或已过期。到 GitHub → Settings → Developer settings → "
                      "Personal access tokens 重新生成，然后更新 .git-credential。")
     elif "403" in low or "permission" in low or "denied" in low:
@@ -384,7 +387,15 @@ def _explain_push_failure(out, tok):
     elif "src refspec" in low or "does not match any" in low:
         hints.append("本地还没有任何提交。先确认有改动被提交（`--status` 看一下）。")
     else:
-        hints.append("未归类的失败，原始输出见上（已把 token 打码）。")
+        hints.append("未归类的失败，原始输出见下（已把 token 打码）。")
+
+    # 原始输出也要给：翻译只能覆盖已知情况，未知情况全靠这几行。
+    # 去掉空行、只留最后 8 行——git 的报错重点总在末尾。
+    lines = [ln.rstrip() for ln in safe.splitlines() if ln.strip()]
+    if lines:
+        _out("  git 原始输出：")
+        for ln in lines[-8:]:
+            _out("    %s" % ln)
     for h in hints:
         _out("  → %s" % h)
 

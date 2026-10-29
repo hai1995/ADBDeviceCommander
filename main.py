@@ -31,7 +31,7 @@ from core.envcheck import (
 # 注意：webview 不在模块顶层导入。它在预检通过后才于 _launch() 内局部导入——
 # 这样 pywebview 未安装时，能先弹友好中文提示，而不是裸 ImportError。
 
-VERSION = "2026.1029.1753"
+VERSION = "2026.1029.1823"
 
 
 def _refresh_system_path():

@@ -170,7 +170,10 @@ def test_source_zip_excludes_junk(tmp_path):
                 "tests/frontend/node_modules/jsdom/big.js",
                 "settings.json",
                 "config.json"):
-        assert bad not in names, "分发包不应包含 %s" % bad
+        # 必须带上顶层目录前缀再比：包内条目都是 `顶层目录/相对路径`，
+        # 拿裸相对路径去断言 `not in names` 会**永远通过**（旧写法就是这样，
+        # 四条断言全部形同虚设——node_modules 真进来了也照样绿）。
+        assert top + bad not in names, "分发包不应包含 %s" % bad
     # 所有条目都挂在同一个顶层目录下：解压不会散落一地，
     # 顶层也没有 index.html（否则云端导入会把它当网页包解包成空壳页面）
     assert all(n.startswith(top) for n in names), names
@@ -220,8 +223,11 @@ def test_real_source_zip_is_lean(tmp_path):
     assert not any("__pycache__" in n for n in names)
     assert not any("node_modules" in n for n in names)
     assert not any(n.endswith(".pyc") for n in names)
-    assert "settings.json" not in names, "个人运行配置不进分发包"
-    assert "config.json" not in names, "个人运行配置不进分发包"
+    # 同上：这里必须带 top 前缀，否则断言恒真
+    assert top + "settings.json" not in names, "个人运行配置不进分发包"
+    assert top + "config.json" not in names, "个人运行配置不进分发包"
+    assert top + ".git-credential" not in names, \
+        "推送凭证（token 明文）绝不能随分发包发出去"
     assert all(n.startswith(top) for n in names), \
         "所有条目必须挂在同一个顶层目录下：%r" % names[:5]
     size_kb = zp.stat().st_size / 1024
