@@ -166,24 +166,35 @@ jobs:
           foreach ($a in $assets) {
             if (-not (Test-Path $a)) { throw "缺少附件：$a" }
           }
+
+          # 更新说明用「本次提交的完整说明」，不用 --generate-notes。
+          # 原因：那个自动生成的内容常常只有一行 Full Changelog 链接（没有 PR 时
+          # 就是这样），而程序弹窗要让人判断「值不值得现在更新」，一行链接等于没说。
+          # 本项目的提交说明是中文、按条目写的，正好可以直接当更新说明。
+          $notes = (git log -1 --pretty=%B $tag) -join "`n"
+          $notes = $notes.Trim()
+          if (-not $notes) { $notes = "版本 $ver" }
+          [System.IO.File]::WriteAllText("$PWD/dist/release-notes.md", $notes,
+            (New-Object System.Text.UTF8Encoding($false)))
+
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            # 同一 tag 重跑：补传 / 覆盖附件，不新建（否则会因 release 已存在而失败）
+            # 同一 tag 重跑：只补传 / 覆盖附件与说明，不新建（否则会因 release 已存在而失败）
+            gh release edit $tag --notes-file dist/release-notes.md
             gh release upload $tag @assets --clobber
           } else {
-            gh release create $tag @assets --title "ADB 设备指令台 $tag" --generate-notes
+            gh release create $tag @assets --title "ADB 设备指令台 $tag" `
+              --notes-file dist/release-notes.md
           }
 
           # latest.json：程序内更新检查的**静态源**。
           # 地址 .../releases/latest/download/latest.json 走 GitHub CDN，
           # 不需要认证、没有匿名 REST 那 60 次/小时/IP 的限流 —— 同事多人共用
           # 一个公司出口 IP 时，只有这一条路是稳的（REST 会集体 403）。
-          # 放在发版之后生成：这样 notes 能取到 --generate-notes 的真实内容。
-          $body = gh release view $tag --json body -q .body
           $pkg = "ADBDeviceCommander_v${ver}_win64.zip"
           $payload = [ordered]@{
             version = $ver
-            notes   = ($body -join "`n")
+            notes   = $notes
             url     = "https://github.com/${{ github.repository }}/releases/tag/$tag"
             assets  = @(
               [ordered]@{

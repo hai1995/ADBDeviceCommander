@@ -2210,6 +2210,10 @@ error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数�
     `ADBDeviceCommander_v2026.1030.0937.zip`（0.96 MB）、`sha256sums.txt`。
   - 客户端代码对真实接口查过一次：因为限流返回 403 —— 这条实测直接促成了
     「静态 latest.json 优先」的改动（见第六节）。
+- **静态源本身**：本沙箱访问不了 `github.com`（只有 `api.github.com` 通），所以
+  「静态优先」在这里必然回退到 API —— 回退链路因此被真实验证过一次。静态地址
+  本身用另一条路核对：从 Release 把 `latest.json` 附件拉下来（527 字节、无 BOM、
+  `json.loads` 通过、`normalize()` 能取出 `version` / `url` / `assets[0].size`）。
 
 ## 已知取舍 / 下一轮候选
 
