@@ -78,9 +78,13 @@ jobs:
         # 把「未用导入 / 未定义变量 / 语法陷阱」这类本可无感带进来的问题，在单测
         # 之前先拦一道。后端/核心层全是标准库、无平台依赖，Linux 上装 pyflakes
         # 零风险；任何新改动一旦引入脏代码，这里立刻红，不必等单测或打包才暴露。
+        #
+        # tests/ 一并纳入：测试里的死代码同样会掩盖真问题（本次就清出 8 处
+        # `import backend.controller as c` 残留 —— 它们说明用例曾依赖「patch
+        # controller 命名空间」的旧契约，而该契约在物理拆分后已失效）。
         run: |
           python -m pip install pyflakes
-          python -m pyflakes backend core tools
+          python -m pyflakes backend core tools tests
 
       - name: Python 单测
         run: python -m pytest -q
