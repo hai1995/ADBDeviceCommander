@@ -1,0 +1,258 @@
+# ADB 设备指令台 —— 懒人发版流水线
+#
+# 痛点
+# ----
+# 之前发版要：本地跑 `tools/bump_version.py --apply` 改 VERSION → 提交 →
+# 打 `v<版本>` tag → push --tags，GitHub 才触发 build.yml 去发 Release。
+# 这套「先改文件再打 tag」的手动链路，忘了哪一步都不出包。
+#
+# 本工作流把整条链路收进 CI：你只需要在 GitHub 的
+#   Actions → release → Run workflow
+# 点一下，剩下的全自动：
+#   1) 递增 VERSION（或你显式指定的版本号）并写回源码；
+#   2) 提交 + 打 tag + 推送到 main（tag 名 = v + VERSION，与源码一致）；
+#   3) 跑全量单测（Python + 前端），红了就停下、不发版；
+#   4) Windows 上 build.py --package --zip，把 zip / sha256sums.txt / latest.json
+#      自动发布为 Release（程序内更新检查就读取这个 latest.json）。
+#
+# 可选输入
+#   version  显式版本号（格式 YYYY.MMDD.HHMM）。留空 = 自动递增（同 bump_version.py）。
+#   notes    Release 更新说明（单行）。留空 = 自动汇总自上次发版以来的提交。
+#
+# 注意
+# ----
+# * 推送用仓库内置 GITHUB_TOKEN，按 GitHub 规则：由它触发/产生的 push 不会
+#   再次触发其它工作流，所以不会和 build.yml 形成递归或重复发版。
+# * 需要 default branch（main）允许 GITHUB_TOKEN 直接推送；若仓库开了
+#   「必须通过 PR 才能合入 main」的分支保护，本工作流会推送失败 —— 那种情况
+#   仍走「PR 合入 + 打 tag」的老路。
+# * 版本号一致性由 bump_version.py 保证（它写文件后直接用于构建），
+#   因此本工作流不再单独做「tag 与 VERSION 比对」这一步。
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "显式版本号（留空则自动递增，格式 YYYY.MMDD.HHMM）"
+        required: false
+        default: ""
+      notes:
+        description: "Release 更新说明（单行；留空则自动汇总自上次发版以来的提交）"
+        required: false
+        default: ""
+
+# 发版需要写权限（提交、打 tag、建 Release）
+permissions:
+  contents: write
+
+# 同一仓库一次只跑一个发版，避免连点产生交错的版本号
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 递增版本号 + 提交 + 打 tag + 推送；并顺手把 Release 说明生成好
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: 递增版本号 + 打 tag + 生成说明
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 递增版本号（写入源码）
+        id: bump
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            python tools/bump_version.py --set "${{ github.event.inputs.version }}"
+          else
+            python tools/bump_version.py --apply
+          fi
+          VER=$(python - <<'PY'
+          import re, pathlib
+          t = pathlib.Path("core/constants.py").read_text(encoding="utf-8")
+          print(re.search(r'^VERSION = "([^"]+)"', t, re.M).group(1))
+          PY
+          )
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "- 新版本号：$VER" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 提交并推送 tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for f in core/constants.py main.py README.md; do
+            [ -f "$f" ] && git add "$f"
+          done
+          if git diff --cached --quiet; then
+            echo "版本号无变化，跳过提交"
+          else
+            git commit -m "release: v${{ steps.bump.outputs.version }}"
+            git tag "v${{ steps.bump.outputs.version }}"
+            BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            git push origin "$BRANCH" --tags
+          fi
+
+      - name: 生成 Release 说明
+        env:
+          CUSTOM_NOTES: ${{ github.event.inputs.notes }}
+        run: |
+          mkdir -p notes
+          if [ -n "$CUSTOM_NOTES" ]; then
+            python3 - <<'PY' > notes/release-notes.md
+          import os
+          print(os.environ["CUSTOM_NOTES"])
+          PY
+          else
+            PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || true)
+            if [ -n "$PREV" ]; then
+              git log "${PREV}..HEAD" --pretty=format:'- %s' > notes/release-notes.md
+            else
+              git log --pretty=format:'- %s' -n 30 > notes/release-notes.md
+            fi
+          fi
+          echo "--- 说明预览 ---"
+          cat notes/release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: notes/release-notes.md
+
+  # ---------------------------------------------------------------------------
+  # 2) 全量单测：先拦住明显坏掉的构建（红 = 不发版）
+  # ---------------------------------------------------------------------------
+  test:
+    name: 测试（Python 3.11 + 前端 jsdom）
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装测试依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Python 单测
+        run: python -m pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 前端依赖（jsdom）
+        working-directory: tests/frontend
+        run: npm install --no-audit --no-fund
+
+      - name: 前端单测
+        working-directory: tests/frontend
+        run: node run-all.cjs
+
+  # ---------------------------------------------------------------------------
+  # 3) Windows 构建 + 发 Release（含 latest.json 静态更新源）
+  # ---------------------------------------------------------------------------
+  windows:
+    name: 打包 + 发版（Windows x64）
+    needs: [prepare, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装构建依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 构建（exe + 分发 zip + 源码 zip）
+        run: python build.py --package --zip
+
+      - name: 生成 SHA256 校验和
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -Filter *.zip | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $lines | Set-Content -Path dist/sha256sums.txt -Encoding utf8
+          $lines
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: dist-notes
+
+      - name: 发布 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = "${{ needs.prepare.outputs.version }}"
+          $tag = "${{ needs.prepare.outputs.tag }}"
+          $assets = @(
+            "dist/ADBDeviceCommander_v${ver}_win64.zip",
+            "dist/ADBDeviceCommander_v${ver}.zip",
+            "dist/sha256sums.txt"
+          )
+          foreach ($a in $assets) {
+            if (-not (Test-Path $a)) { throw "缺少附件：$a" }
+          }
+
+          gh release create $tag @assets --title "ADB 设备指令台 $tag" `
+            --notes-file dist-notes/release-notes.md
+
+          # latest.json：程序内更新检查的**静态源**（走 GitHub CDN，无需认证、无限流）。
+          $pkg = "ADBDeviceCommander_v${ver}_win64.zip"
+          $notes = (Get-Content -Raw -Encoding UTF8 dist-notes/release-notes.md).Trim()
+          $payload = [ordered]@{
+            version = $ver
+            notes   = $notes
+            url     = "https://github.com/${{ github.repository }}/releases/tag/$tag"
+            assets  = @(
+              [ordered]@{
+                name                 = $pkg
+                browser_download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/$pkg"
+                size                 = (Get-Item "dist/$pkg").Length
+              }
+            )
+          }
+          # 必须按 UTF-8 无 BOM 写：客户端用 utf-8 解码，带 BOM 会让 JSON 解析失败
+          $json = $payload | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText("$PWD/dist/latest.json", $json,
+            (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content dist/latest.json
+          gh release upload $tag dist/latest.json --clobber
+
+          Add-Content $env:GITHUB_STEP_SUMMARY "- Release：https://github.com/${{ github.repository }}/releases/tag/$tag"
+          Add-Content $env:GITHUB_STEP_SUMMARY "- 静态版本源：https://github.com/${{ github.repository }}/releases/latest/download/latest.json"
