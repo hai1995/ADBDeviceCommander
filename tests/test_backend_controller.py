@@ -2069,7 +2069,6 @@ def test_scrcpy_start_needs_device(monkeypatch):
 
 def test_scrcpy_start_reports_missing_scrcpy(monkeypatch, tmp_path):
     """找不到 scrcpy 时返回安装指引（reason=scrcpy_not_found + note），不抛异常。"""
-    import backend.controller as c
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
     monkeypatch.setattr(api, "_scrcpy_pref_path", lambda: "")
@@ -2083,7 +2082,6 @@ def test_scrcpy_start_reports_missing_scrcpy(monkeypatch, tmp_path):
 
 def test_scrcpy_start_calls_launcher_with_serials(monkeypatch):
     """拿到 scrcpy 路径后把「受控设备」原样交给 launcher（一台一个窗口）。"""
-    import backend.controller as c
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
     monkeypatch.setattr(api, "_scrcpy_pref_path", lambda: "/cfg/scrcpy")
@@ -2103,7 +2101,6 @@ def test_scrcpy_start_calls_launcher_with_serials(monkeypatch):
 
 def test_scrcpy_start_reports_partial_failure(monkeypatch):
     """某台设备秒退：其余照常，失败原因逐台回传（前端据此显示在按钮旁）。"""
-    import backend.controller as c
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
     monkeypatch.setattr(api, "_scrcpy_pref_path", lambda: "")
@@ -2147,7 +2144,6 @@ def _mirror_api(monkeypatch, prefs=None):
 
 def test_mirror_probe_reports_both_capabilities(monkeypatch):
     """一次探测同时给出 scrcpy 与播放器状态：前端据此预告会落到哪一档。"""
-    import backend.controller as c
     api = _make_api()
     patch_ctrl(monkeypatch, "scrcpy_probe_info",
                         lambda pref: {"ok": False, "note": "未找到 scrcpy"})
@@ -2166,7 +2162,6 @@ def test_mirror_start_needs_device(monkeypatch):
 
 def test_mirror_start_uses_player_when_available(monkeypatch):
     """装了播放器就走管道投屏（画质/帧率最好的一档），不退化到低帧率预览。"""
-    import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
     patch_ctrl(monkeypatch, "find_player", lambda pref: ("ffplay", "/bin/ffplay", "PATH"))
@@ -2198,7 +2193,6 @@ def test_mirror_start_uses_player_when_available(monkeypatch):
 
 def test_mirror_start_falls_back_to_snap_without_player(monkeypatch):
     """一个播放器都没装 → 自动退到低帧率预览，并把内嵌画面的帧地址回给前端。"""
-    import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
     patch_ctrl(monkeypatch, "find_player", lambda pref: ("", None, "未找到播放器"))
@@ -2230,7 +2224,6 @@ def test_mirror_start_falls_back_to_snap_without_player(monkeypatch):
 def test_mirror_start_falls_back_when_screenrecord_unavailable(monkeypatch):
     """有播放器、但设备端 screenrecord 用不了（部分 ROM 删了该命令）→ 同样
     退到低帧率预览，而不是卡在「播放器窗口没画面」。"""
-    import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
     patch_ctrl(monkeypatch, "find_player", lambda pref: ("mpv", "/bin/mpv", "PATH"))
@@ -2272,7 +2265,6 @@ def test_mirror_start_falls_back_when_screenrecord_unavailable(monkeypatch):
 
 def test_mirror_stop_clears_sessions(monkeypatch):
     """停止后登记表必须清空：否则用户再点一次会被判成「已在投屏」而永远开不起来。"""
-    import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
     patch_ctrl(monkeypatch, "find_player", lambda pref: ("", None, "无"))

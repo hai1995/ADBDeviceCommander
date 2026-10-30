@@ -35,7 +35,14 @@ def api():
     a = WebApi()
     a.state.adb_path = "adb"
     _seed(a)
-    return a
+    yield a
+    # 收尾：给后台线程（无线连接成功后 spawn 的 refresh_wifi、安装 worker 等）
+    # 一个优雅退出的机会。它们若跨用例存活，会继续调用下一个用例 patch 的
+    # 全局 subprocess.run，把 `adb devices -l` 混进后者的命令列表里。
+    try:
+        a.workers.shutdown(timeout=1.0)
+    except Exception:
+        pass
 
 
 class _R:
@@ -45,6 +52,26 @@ class _R:
 
 def _patch_run(monkeypatch, fn):
     monkeypatch.setattr(ctrl.subprocess, "run", fn)
+
+
+def _adb(calls, *prefix):
+    """从收集到的调用里挑出以 prefix 开头的命令。
+
+    `_patch_run` 换掉的是**全局** subprocess.run：后台刷新线程（无线连接成功
+    后 spawn 的 refresh_wifi、自动轮询等）发的 `adb devices -l` 也会进同一个
+    列表。按索引断言（calls[0]）会被这些偶发调用顶掉 —— CI 上曾随机失败
+    （拿到 ['adb','devices','-l']），而本地永远复现不了。故一律按命令内容
+    匹配，让用例只对「被测动作本身发了什么」负责，不受后台时序影响。
+    """
+    want = tuple(prefix)
+    return [c for c in calls
+            if len(c) >= len(want) and tuple(c[:len(want)]) == want]
+
+
+def _installs(calls):
+    """挑出 `adb -s <serial> install ...` 命令（忽略后台轮询的干扰）。"""
+    return [c for c in calls if len(c) > 3 and c[0] == "adb"
+            and "install" in c]
 
 
 def _wait(cond, timeout=3.0):
@@ -89,10 +116,38 @@ def test_wifi_connect_normalizes_and_remembers(api, monkeypatch):
     res = api.wifi_connect("192.168.1.23")
     assert res["ok"] is True
     assert res["address"] == "192.168.1.23:5555"
-    assert calls[0] == ["adb", "connect", "192.168.1.23:5555"]
+    # 按内容匹配：后台刷新线程也会走这个全局 patch，calls[0] 未必是本动作
+    assert _adb(calls, "adb", "connect")[0] == ["adb", "connect",
+                                                "192.168.1.23:5555"]
     # 记住最近连接（写进 config.json 的 wifi_recent）
     assert api.wifi_state()["recent"] == ["192.168.1.23:5555"]
     assert any("已连接" in t for t in _status_texts(api))
+
+
+def test_wifi_connect_ignores_background_polling_calls(api, monkeypatch):
+    """后台轮询并发发 `adb devices -l` 时，连接命令依然要能被正确断言。
+
+    回归锁定：`_patch_run` 换掉的是全局 subprocess.run，无线连接成功后 spawn
+    的 refresh_wifi（以及自动轮询）发的 `adb devices -l` 会进同一个 calls。
+    早先按 `calls[0]` 断言，CI 上曾随机拿到 ['adb','devices','-l'] 而失败，
+    本地却永远复现不了（后台线程时序差异）。改为按命令内容匹配后，无论后台
+    调用插在什么位置，被测动作本身的命令都应当被准确挑出来。
+    """
+    calls = [["adb", "devices", "-l"]]      # 先落一条后台轮询的干扰调用
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _R("", "connected to 192.168.1.23:5555")
+
+    _patch_run(monkeypatch, fake_run)
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    res = api.wifi_connect("192.168.1.23")
+    assert res["ok"] is True
+    # 干扰项在前，按索引断言会拿到 devices -l；按内容匹配应仍取到 connect
+    assert calls[0] == ["adb", "devices", "-l"]
+    assert _adb(calls, "adb", "connect")[0] == ["adb", "connect",
+                                                "192.168.1.23:5555"]
 
 
 def test_wifi_connect_rejects_bad_address_without_running_adb(api, monkeypatch):
@@ -100,7 +155,7 @@ def test_wifi_connect_rejects_bad_address_without_running_adb(api, monkeypatch):
     _patch_run(monkeypatch, lambda cmd, **kw: calls.append(cmd) or _R())
     res = api.wifi_connect("192.168.1.23; reboot")
     assert res["ok"] is False
-    assert calls == []
+    assert _adb(calls, "adb", "connect") == []
     assert "非法字符" in res["reason"]
 
 
@@ -120,7 +175,8 @@ def test_wifi_disconnect_passes_address(api, monkeypatch):
     monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
     res = api.wifi_disconnect("192.168.1.23:5555")
     assert res["ok"] is True
-    assert calls[0] == ["adb", "disconnect", "192.168.1.23:5555"]
+    assert _adb(calls, "adb", "disconnect")[0] == ["adb", "disconnect",
+                                                   "192.168.1.23:5555"]
 
 
 def test_wifi_enable_detects_ip_then_switches_to_tcpip(api, monkeypatch):
@@ -128,7 +184,8 @@ def test_wifi_enable_detects_ip_then_switches_to_tcpip(api, monkeypatch):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        if cmd[3] == "shell":
+        # 后台轮询的命令（如 adb devices -l）长度不足 4，先判长度再取索引
+        if len(cmd) > 3 and cmd[3] == "shell":
             return _R("default via 192.168.1.1 dev wlan0 proto dhcp "
                       "src 192.168.1.23 metric 600\n")
         return _R("", "restarting in TCP mode port: 5555")
@@ -137,8 +194,10 @@ def test_wifi_enable_detects_ip_then_switches_to_tcpip(api, monkeypatch):
     res = api.wifi_enable("A1")
     assert res["ok"] is True
     assert res["address"] == "192.168.1.23:5555"
-    assert calls[0][:4] == ["adb", "-s", "A1", "shell"]
-    assert calls[1] == ["adb", "-s", "A1", "tcpip", "5555"]
+    assert _adb(calls, "adb", "-s", "A1", "shell")[0][:4] == ["adb", "-s", "A1",
+                                                              "shell"]
+    assert _adb(calls, "adb", "-s", "A1", "tcpip")[0] == ["adb", "-s", "A1",
+                                                          "tcpip", "5555"]
 
 
 def test_wifi_enable_without_device_does_not_run_adb(api, monkeypatch):
@@ -192,8 +251,8 @@ def test_apk_install_runs_per_device_with_flags(api, monkeypatch, tmp_path):
     _patch_run(monkeypatch, fake_run)
     res = api.apk_install(replace=True, downgrade=False, grant=False)
     assert res["ok"] is True and res["count"] == 2
-    assert _wait(lambda: len(calls) == 2)
-    for cmd in calls:
+    assert _wait(lambda: len(_installs(calls)) == 2)
+    for cmd in _installs(calls):
         assert cmd[:4] == ["adb", "-s", cmd[2], "install"]
         assert "-r" in cmd and "-d" not in cmd and "-g" not in cmd
         assert cmd[-1] == api._apk_path
@@ -205,7 +264,7 @@ def test_apk_install_summary_reports_failures(api, monkeypatch, tmp_path):
     api._apk_path = _mk_apk(tmp_path)
 
     def fake_run(cmd, **kw):
-        if cmd[2] == "B2":
+        if len(cmd) > 2 and cmd[2] == "B2":
             return _R("", "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]")
         return _R("Success")
 
@@ -230,8 +289,9 @@ def test_apk_install_retries_test_only_with_t(api, monkeypatch, tmp_path):
     _patch_run(monkeypatch, fake_run)
     api.devices.device_checked = {"A1": True}
     api.apk_install(serial="A1")
-    assert _wait(lambda: len(calls) == 2)
-    assert "-t" not in calls[0] and "-t" in calls[1]
+    assert _wait(lambda: len(_installs(calls)) == 2)
+    inst = _installs(calls)
+    assert "-t" not in inst[0] and "-t" in inst[1]
     assert _wait(lambda: any("已安装到 1 台" in t for t in _status_texts(api)))
 
 
@@ -248,8 +308,9 @@ def test_apk_install_uses_prefs_defaults(api, monkeypatch, tmp_path):
     _patch_run(monkeypatch, fake_run)
     api.devices.device_checked = {"A1": True}
     api.apk_install()
-    assert _wait(lambda: seen)
-    assert "-g" in seen[0] and "-r" not in seen[0]
+    assert _wait(lambda: _installs(seen))
+    first = _installs(seen)[0]
+    assert "-g" in first and "-r" not in first
 
 
 # ---------------------------------------------------------------- 设备信息
@@ -276,7 +337,8 @@ def test_device_info_returns_rows_and_text(api, monkeypatch):
     _patch_run(monkeypatch, lambda cmd, **kw: calls.append(cmd) or _R(_INFO_RAW))
     res = api.device_info("A1")
     assert res["ok"] is True
-    assert calls[0][:4] == ["adb", "-s", "A1", "shell"]
+    assert _adb(calls, "adb", "-s", "A1", "shell")[0][:4] == ["adb", "-s", "A1",
+                                                              "shell"]
     assert ["型号", "MI 11"] in res["rows"]
     assert "型号: MI 11" in res["text"]
 
@@ -321,8 +383,8 @@ def test_apk_install_rejects_second_batch_while_running(api, monkeypatch,
     assert "还没结束" in second["reason"], second
 
     gate.set()
-    assert _wait(lambda: len(calls) == 2), \
-        "被拒的那一次不该再起安装（实际命令数 %d）" % len(calls)
+    assert _wait(lambda: len(_installs(calls)) == 2), \
+        "被拒的那一次不该再起安装（实际命令数 %d）" % len(_installs(calls))
     assert _wait(lambda: any("已安装到 2 台" in t for t in _status_texts(api)))
 
 
