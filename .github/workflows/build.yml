@@ -42,7 +42,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.11"
+  # 只要编码：Python 默认按 locale 解码输出，中文 Windows / 日志里的中文
+  # 会被 gbk 解成乱码或直接 UnicodeDecodeError（build.py 也单独设了同一组）
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: "1"
 
@@ -51,14 +52,19 @@ jobs:
   # 1) 全量单测：Linux 上跑得快，先拦住明显坏掉的提交
   # ---------------------------------------------------------------------------
   test:
-    name: 测试（Python ${{ env.PYTHON_VERSION }} + 前端 jsdom）
+    # 注意：这里的版本号必须写死，不能用 ${{ env.PYTHON_VERSION }} ——
+    # `jobs.<id>.name` 允许的上下文只有 github / needs / strategy / matrix /
+    # vars / inputs，**不含 env**。用了 env 会让整个工作流「校验不通过」：
+    # 运行记录显示为失败、且 jobs 列表为空（total_count=0），日志里什么都看不到，
+    # 极难自查。第一版就是这么挂的。
+    name: 测试（Python 3.11 + 前端 jsdom）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.11"
           cache: pip
 
       - name: 安装测试依赖
@@ -96,7 +102,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.11"
           cache: pip
 
       - name: 安装构建依赖
