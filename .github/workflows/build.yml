@@ -74,6 +74,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
+      - name: 静态检查（pyflakes）
+        # 把「未用导入 / 未定义变量 / 语法陷阱」这类本可无感带进来的问题，在单测
+        # 之前先拦一道。后端/核心层全是标准库、无平台依赖，Linux 上装 pyflakes
+        # 零风险；任何新改动一旦引入脏代码，这里立刻红，不必等单测或打包才暴露。
+        run: |
+          python -m pip install pyflakes
+          python -m pyflakes backend core tools
+
       - name: Python 单测
         run: python -m pytest -q
 
