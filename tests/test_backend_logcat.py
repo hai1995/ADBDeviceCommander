@@ -21,6 +21,10 @@ import pytest
 import backend.logcat_service as ls
 from backend.controller import WebApi
 
+# patch_ctrl 见 tests/conftest.py：物理拆分后方法实现在 backend.controllers
+# 子模块里，patch 必须打到子模块的命名空间才生效。
+from conftest import patch_ctrl
+
 
 class _FakeBus:
     def __init__(self):
@@ -359,7 +363,7 @@ def test_controller_capture_start_falls_back_to_default_dir(tmp_path, monkeypatc
     # 隔离外部环境：config.json 里的真实 save_dir 与真实家目录都会让本用例
     # 「看心情」通过（装了偏好的机器上永远走不到回退分支），故这里固定为空偏好
     # + 临时家目录，既保证断言确定，也不在用户机器上真的建目录。
-    monkeypatch.setattr("backend.controller.load_prefs", lambda: {})
+    patch_ctrl(monkeypatch, "load_prefs", lambda: {})
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -383,7 +387,7 @@ def test_controller_capture_start_prefers_prefs_save_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: _FakeLogcatProc([]))
     want = str(tmp_path / "my_save")
     os.makedirs(want, exist_ok=True)
-    monkeypatch.setattr("backend.controller.load_prefs", lambda: {"save_dir": want})
+    patch_ctrl(monkeypatch, "load_prefs", lambda: {"save_dir": want})
 
     api = WebApi()
     api.state.adb_path = "adb"

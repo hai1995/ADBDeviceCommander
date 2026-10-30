@@ -10,26 +10,10 @@ import pytest
 import backend.controller as ctrl
 import backend.device_service as ds
 from backend.controller import WebApi
-from backend.controllers import (
-    base, device, commands, autorefresh, logcat, settings, apk, deviceinfo,
-    update, screenshot, record, perf, file,
-)
 
-_MIXIN_MODS = [base, device, commands, autorefresh, logcat, settings, apk,
-               deviceinfo, update, screenshot, record, perf, file]
-
-
-def patch_ctrl(monkeypatch, name, val):
-    """把名字同时 patch 到所有 controllers 子模块与 backend.controller。
-
-    物理拆分后方法体在子模块、引用的是子模块导入的副本，patch backend.controller
-    一个命名空间不再生效；这里一并 patch 所有引用该名字的子模块，保证与单文件时
-    行为一致。
-    """
-    for mod in _MIXIN_MODS:
-        if hasattr(mod, name):
-            monkeypatch.setattr(mod, name, val)
-    monkeypatch.setattr(ctrl, name, val)
+# patch_ctrl 见 tests/conftest.py：把名字同时打到所有 controllers 子模块
+# （方法实现所在的命名空间），避免物理拆分后 patch 落空。
+from conftest import patch_ctrl
 
 
 CMDS = [
