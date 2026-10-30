@@ -14,6 +14,13 @@ crash_*.log
 settings.json
 config.json
 
+# 快捷指令库（用户个人命令集合）：含私人 adb 指令 / 项目内部命令，属于个人数据，
+# 不该进仓库（与 config.json 同类）。仓库里没有时，程序首次启动会在运行目录自动
+# 生成一份默认示例；build.py 也会在打包前自动补一份默认 commands.json 进 exe /
+# 同目录，保证干净检出既能正常打包、首次打开也有命令可用（详见 README「进仓库的
+# 是什么」与 build.ensure_default_commands_json）。
+commands.json
+
 # 调试录音：设备音频回环录出的 wav（adb_devaudio_<序列号>_<时间>.wav），
 # 是运行产物，不是源码；每次写音频测试都会多几个，进仓库只会越攒越乱。
 *.wav

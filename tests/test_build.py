@@ -93,7 +93,13 @@ def test_stage_dir_is_under_work_dir():
 
 
 def test_real_project_sources_are_complete():
-    """真实工程下入口与全部数据文件都必须存在。"""
+    """真实工程下入口与全部「需提交」数据文件都必须存在。
+
+    commands.json 是用户个人命令库，刻意不进 git（见 .gitignore），由
+    ensure_default_commands_json 在打包前自动生成——干净检出里本就允许缺失，
+    故先跑一遍该生成步骤（与 main() 的 1.5 步一致）再校验其余资源齐全。
+    """
+    build.ensure_default_commands_json(ROOT)   # 复刻打包前的自动生成步骤
     assert build.check_sources() == []
 
 

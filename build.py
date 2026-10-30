@@ -125,6 +125,10 @@ SOURCE_ZIP_EXCLUDE_FILES = (
     "settings.json",
     # 开发期设备音频调试产物（用户机器上真实录音留下的临时文件）
     "adb_devaudio_*.wav",
+    # commands.json 是用户个人命令库（含私人 / 内部指令），刻意不进 git
+    # （见 .gitignore 与 README）。os.walk 只认 .gitignore 挡不住它，这里单独
+    # 排除，避免把私人命令库随源码分发包发给别人（与 config.json 同类处理）。
+    "commands.json",
     # 开发期截图脚本（用 playwright 渲染界面出预览图，依赖本机 chromium，
     # 用户机器上跑不起来，也不属于运行时资产）
     "preview_*.cjs",
@@ -508,6 +512,32 @@ def ensure_default_config(target: Path):
     return cfg
 
 
+def ensure_default_commands_json(root: Path = ROOT):
+    """在打包根目录保证有一份 commands.json（用户命令库）。
+
+    commands.json 是「用户个人命令库」，含私人指令，刻意不进 git（见 .gitignore
+    与 README「进仓库的是什么」），但打包需要它作为 exe 内置副本与同目录可编辑
+    文件。仓库里没有时，这里生成一份默认示例（与程序首次启动自动生成的内容一致），
+    保证干净检出也能正常打包、首次打开就有命令可用。
+
+    绝不覆盖已存在的 commands.json：那是用户 / 同事的真实命令库，以用户版本为准。
+    """
+    from core.commands import (PRIMARY_COMMAND_FILE, DEMO_COMMANDS,
+                              _write_json_atomic)
+    p = os.path.join(str(root), PRIMARY_COMMAND_FILE)
+    if os.path.exists(p):
+        return None
+    try:
+        # _write_json_atomic 内部用 `path + ".tmp"` 拼接，要求传入字符串路径
+        # （与 core.commands 其余调用方一致），故此处用 os.path.join 而非 Path。
+        _write_json_atomic(p, DEMO_COMMANDS)
+    except Exception as e:
+        print("[警告] 生成默认 %s 失败：%s（打包将缺少命令库，首次启动程序会"
+              "自动重建）" % (PRIMARY_COMMAND_FILE, e), file=sys.stderr)
+        return None
+    return Path(p)
+
+
 def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
     """把暂存区的产物拷进 dist/，返回最终 exe 路径（失败返回 None）。
 
@@ -589,6 +619,12 @@ def main(argv=None) -> int:
     else:
         ensure_deps([("pyinstaller", "打包工具"), ("pywebview", "运行时宿主，打包期需可导入")],
                     auto_install=True)
+
+    # 1.5) 保证 commands.json 存在：它是用户个人命令库，刻意不进 git（见
+    # .gitignore 与 README），但打包需要它作为 exe 内置副本与同目录可编辑文件。
+    # 仓库里没有时自动生成一份默认示例（与程序首次启动生成的一致），干净检出也
+    # 能正常打包；该文件被 SOURCE_ZIP_EXCLUDE_FILES 排除，不会漏进源码分发包。
+    ensure_default_commands_json(ROOT)
 
     # 2) 资源自检（缺 frontend 会导致打包后窗口空白，必须拦住）
     missing = check_sources()

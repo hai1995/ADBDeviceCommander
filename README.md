@@ -253,6 +253,7 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 | 忽略项 | 原因 |
 | --- | --- |
 | `config.json` / `settings.json` | 运行时个人配置，含本机绝对路径 |
+| `commands.json` | 用户个人命令库（含私人 adb 指令 / 项目内部命令），**不进仓库**，首次启动自动生成默认示例；打包时 `build.py` 自动补一份默认进 exe / 同目录 |
 | `*.wav` | 设备音频回环的调试录音（`adb_devaudio_<序列号>_<时间>.wav`），运行产物 |
 | `.git-credential` | 推送凭证 |
 | `dist/` `build/` `dist_stage/` `*.spec` `*.exe` | 打包产物 |
@@ -260,7 +261,7 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 | `tests/frontend/node_modules/` | 前端测试依赖（约 26 MB，`npm i` 可重建） |
 | `crash_*.log` | 崩溃日志，含 traceback 与本机路径 |
 
-`commands.json`（快捷指令库）**是**进仓库的——它是工具的一部分，不是运行产物。
+`commands.json`（快捷指令库）**不**进仓库——它是用户个人命令集合（可能含私人 / 内部指令），按 `config.json` 同类处理。仓库里没有时，程序首次启动会在运行目录自动生成一份默认示例，`build.py` 也会在打包前自动补一份默认 `commands.json` 进 exe / 同目录；因此干净检出既能正常打包、首次打开也有命令可用。
 
 ---
 
