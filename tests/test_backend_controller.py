@@ -10,6 +10,26 @@ import pytest
 import backend.controller as ctrl
 import backend.device_service as ds
 from backend.controller import WebApi
+from backend.controllers import (
+    base, device, commands, autorefresh, logcat, settings, apk, deviceinfo,
+    update, screenshot, record, perf, file,
+)
+
+_MIXIN_MODS = [base, device, commands, autorefresh, logcat, settings, apk,
+               deviceinfo, update, screenshot, record, perf, file]
+
+
+def patch_ctrl(monkeypatch, name, val):
+    """把名字同时 patch 到所有 controllers 子模块与 backend.controller。
+
+    物理拆分后方法体在子模块、引用的是子模块导入的副本，patch backend.controller
+    一个命名空间不再生效；这里一并 patch 所有引用该名字的子模块，保证与单文件时
+    行为一致。
+    """
+    for mod in _MIXIN_MODS:
+        if hasattr(mod, name):
+            monkeypatch.setattr(mod, name, val)
+    monkeypatch.setattr(ctrl, name, val)
 
 
 CMDS = [
@@ -119,7 +139,7 @@ def _events_by_kind(api):
 # boot / shutdown
 # ---------------------------------------------------------------------------
 def test_boot_initializes_and_broadcasts(monkeypatch):
-    monkeypatch.setattr(ctrl, "load_commands", lambda: (list(CMDS), ["警告1"]))
+    patch_ctrl(monkeypatch, "load_commands", lambda: (list(CMDS), ["警告1"]))
     monkeypatch.setattr(
         ds.subprocess, "run",
         lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": ""})())
@@ -151,7 +171,7 @@ def test_boot_initializes_and_broadcasts(monkeypatch):
 
 
 def test_boot_refuses_after_shutdown(monkeypatch):
-    monkeypatch.setattr(ctrl, "load_commands", lambda: ([], []))
+    patch_ctrl(monkeypatch, "load_commands", lambda: ([], []))
     api = WebApi(session_factory=FakeSession, auto_update=False)
     api.shutdown()
     assert api.boot() == {"ok": False, "reason": "shutting_down"}
@@ -325,7 +345,7 @@ def test_get_manual_returns_bundled_text():
 # （关键回归：原先透传到单 adb 会话，多设备下会报 "more than one device"）
 # ---------------------------------------------------------------------------
 def test_run_custom_injects_serial_for_single_device(monkeypatch):
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     assert api.run_custom("adb root") == {"ok": True}
     assert wait_until(lambda: len(api.session.calls) >= 1)
@@ -355,7 +375,7 @@ def _run_and_settle(api):
 
 def test_root_skipped_when_already_root(monkeypatch):
     """设备已 root：重复 `adb root` 只是无谓重启 adbd，直接跳过。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: True)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: True)
     api = _make_api()
     assert api.run_custom("adb root") == {"ok": True}
     _run_and_settle(api)
@@ -367,7 +387,7 @@ def test_root_skipped_when_already_root(monkeypatch):
 
 def test_unroot_skipped_when_not_root(monkeypatch):
     """设备未 root：`adb unroot` 同样是无谓重启，跳过（方向对称）。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     assert api.run_custom("adb unroot") == {"ok": True}
     _run_and_settle(api)
@@ -379,7 +399,7 @@ def test_unroot_skipped_when_not_root(monkeypatch):
 
 def test_root_executes_when_needed_and_idle(monkeypatch):
     """未 root、无进行中任务：正常下发（保护不能把正常需求挡死）。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     assert api.run_custom("adb root") == {"ok": True}
     assert wait_until(lambda: len(api.session.calls) >= 1)
@@ -389,7 +409,7 @@ def test_root_executes_when_needed_and_idle(monkeypatch):
 def test_root_skipped_while_recording(monkeypatch):
     """未 root 但正在录屏：跳过并说明——执行会重启 adbd 杀掉 screenrecord，
     视频缺 moov 头、不完整（使用说明「录屏被中断」条就是这个坑）。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     api.video = _FakeVideoRec(recording={"A1"})
     assert api.run_custom("adb root") == {"ok": True}
@@ -405,7 +425,7 @@ def test_root_skipped_while_recording(monkeypatch):
 
 def test_root_skipped_while_logcat_capturing(monkeypatch):
     """logcat 抓取同样会随 adbd 重启断掉：也要拦。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     api.logcat_capture.is_running = lambda s: True
     assert api.run_custom("adb root") == {"ok": True}
@@ -418,7 +438,7 @@ def test_root_skipped_while_logcat_capturing(monkeypatch):
 
 def test_root_guard_is_per_device(monkeypatch):
     """多设备：只拦「有进行中任务」的那台，其余正常下发。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     api.devices.device_checked = {"A1": True, "B2": True, "C3": False}
     api.video = _FakeVideoRec(recording={"A1"})     # 只有 A1 在录屏
@@ -431,7 +451,7 @@ def test_root_guard_is_per_device(monkeypatch):
 
 def test_compound_root_command_skipped_while_recording(monkeypatch):
     """复合命令（adb root && adb shell xx）无法只跳过其中一段：整条跳过。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
     api = _make_api()
     api.video = _FakeVideoRec(recording={"A1"})
     assert api.run_custom("adb root && adb shell id") == {"ok": True}
@@ -441,7 +461,7 @@ def test_compound_root_command_skipped_while_recording(monkeypatch):
 
 def test_root_mention_in_quotes_is_not_guarded(monkeypatch):
     """引号内仅「提到」adb root（提交信息 / 回显）不下发，不应被拦。"""
-    monkeypatch.setattr(ctrl, "device_is_root", lambda adb, serial: True)
+    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: True)
     api = _make_api()
     assert api.run_custom('git commit -m "adb root 修复"') == {"ok": True}
     assert wait_until(lambda: len(api.session.calls) >= 1)
@@ -875,7 +895,7 @@ def test_screenshot_single_device_copies_to_clipboard_by_default(monkeypatch):
     """未指定开关时按偏好走，偏好缺省就是开启：截图后应同步进剪贴板。"""
     api = _make_api()
     capturer, clip = _install_screenshot_fakes(api, monkeypatch)
-    monkeypatch.setattr(ctrl, "get_pref", lambda key, default=None: True)
+    patch_ctrl(monkeypatch, "get_pref", lambda key, default=None: True)
 
     assert api.screenshot() == {"ok": True}
 
@@ -910,7 +930,7 @@ def test_screenshot_multi_device_skips_clipboard(monkeypatch):
     api = _make_api()
     api.toggle_device("B2", True)
     capturer, clip = _install_screenshot_fakes(api, monkeypatch)
-    monkeypatch.setattr(ctrl, "get_pref", lambda key, default=None: True)
+    patch_ctrl(monkeypatch, "get_pref", lambda key, default=None: True)
 
     api.screenshot()
 
@@ -954,7 +974,7 @@ def test_screenshot_pref_can_turn_it_off(monkeypatch):
     """偏好里显式关闭时（settings.json: shot_to_clipboard=false）即不复制。"""
     api = _make_api()
     _capturer, clip = _install_screenshot_fakes(api, monkeypatch)
-    monkeypatch.setattr(ctrl, "get_pref", lambda key, default=None: False)
+    patch_ctrl(monkeypatch, "get_pref", lambda key, default=None: False)
 
     api.screenshot()
 
@@ -1531,7 +1551,7 @@ def test_screen_record_start_survives_mic_exception(monkeypatch, tmp_path):
         def start(self, save_dir):
             raise RuntimeError("waveInOpen 失败，错误码 6")
 
-    monkeypatch.setattr(ctrl, "MicRecorder", _BoomMic)
+    patch_ctrl(monkeypatch, "MicRecorder", _BoomMic)
     monkeypatch.setattr(api.video, "start",
                         lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
 
@@ -1820,8 +1840,8 @@ def test_boot_sends_settings_and_warnings(monkeypatch, tmp_path):
     """boot 必须把 settings.json 内容随 booted 下发（前端回填控件），
     并把被防错机制纠正过的字段说明一并带给用户。"""
     p = str(tmp_path / "settings.json")
-    monkeypatch.setattr(ctrl, "load_commands", lambda: (list(CMDS), []))
-    monkeypatch.setattr(ctrl, "load_prefs_checked",
+    patch_ctrl(monkeypatch, "load_commands", lambda: (list(CMDS), []))
+    patch_ctrl(monkeypatch, "load_prefs_checked",
                         lambda: ({"save_dir": r"D:\shots", "keep_input": "yes"},
                                  ["keep_input 的值 'yes' 不是有效的开关，已恢复为 开"]))
     monkeypatch.setattr(
@@ -1990,8 +2010,8 @@ def test_boot_reports_missing_save_dir_as_fallback(monkeypatch, tmp_path):
     import core.prefs as prefs
     p = str(tmp_path / "config.json")
     monkeypatch.setattr(prefs, "prefs_path", lambda: p)
-    monkeypatch.setattr(ctrl, "load_commands", lambda: (list(CMDS), []))
-    monkeypatch.setattr(ctrl, "load_prefs_checked",
+    patch_ctrl(monkeypatch, "load_commands", lambda: (list(CMDS), []))
+    patch_ctrl(monkeypatch, "load_prefs_checked",
                         lambda: ({"save_dir": str(tmp_path / "nope")}, []))
     monkeypatch.setattr(
         ds.subprocess, "run",
@@ -2012,7 +2032,7 @@ def test_default_save_dir_falls_back_when_configured_path_missing(monkeypatch,
     import core.prefs as prefs
     monkeypatch.setattr(prefs, "prefs_path",
                         lambda: str(tmp_path / "config.json"))
-    monkeypatch.setattr(ctrl, "load_prefs",
+    patch_ctrl(monkeypatch, "load_prefs",
                         lambda: {"save_dir": str(tmp_path / "nope")})
     api = _make_api()
     assert api._default_save_dir() == prefs.default_save_dir()
@@ -2041,8 +2061,8 @@ def test_config_info_returns_path_and_effective_dir(monkeypatch, tmp_path):
     import core.prefs as prefs
     p = str(tmp_path / "config.json")
     # controller 直接 import 了 prefs_path，故 patch controller 命名空间
-    monkeypatch.setattr(ctrl, "prefs_path", lambda: p)
-    monkeypatch.setattr(ctrl, "load_prefs",
+    patch_ctrl(monkeypatch, "prefs_path", lambda: p)
+    patch_ctrl(monkeypatch, "load_prefs",
                         lambda: {"save_dir": str(tmp_path / "nope")})
     api = _make_api()
     info = api.config_info()
@@ -2069,7 +2089,7 @@ def test_scrcpy_start_reports_missing_scrcpy(monkeypatch, tmp_path):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
     monkeypatch.setattr(api, "_scrcpy_pref_path", lambda: "")
-    monkeypatch.setattr(c, "find_scrcpy",
+    patch_ctrl(monkeypatch, "find_scrcpy",
                         lambda pref: (None, "未找到 scrcpy：可 winget install Genymobile.scrcpy"))
     res = api.scrcpy_start(None)
     assert res["ok"] is False
@@ -2083,7 +2103,7 @@ def test_scrcpy_start_calls_launcher_with_serials(monkeypatch):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
     monkeypatch.setattr(api, "_scrcpy_pref_path", lambda: "/cfg/scrcpy")
-    monkeypatch.setattr(c, "find_scrcpy", lambda pref: ("/bin/scrcpy", "来自配置的路径"))
+    patch_ctrl(monkeypatch, "find_scrcpy", lambda pref: ("/bin/scrcpy", "来自配置的路径"))
     seen = {}
 
     def _launch(serials, exe):
@@ -2103,7 +2123,7 @@ def test_scrcpy_start_reports_partial_failure(monkeypatch):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
     monkeypatch.setattr(api, "_scrcpy_pref_path", lambda: "")
-    monkeypatch.setattr(c, "find_scrcpy", lambda pref: ("/bin/scrcpy", "来自系统 PATH"))
+    patch_ctrl(monkeypatch, "find_scrcpy", lambda pref: ("/bin/scrcpy", "来自系统 PATH"))
     monkeypatch.setattr(api._scrcpy, "launch", lambda serials, exe: {
         "started": ["A1"], "skipped": [],
         "failed": [("B2", "scrcpy 立即退出（退出码 1）：device unauthorized")]})
@@ -2145,9 +2165,9 @@ def test_mirror_probe_reports_both_capabilities(monkeypatch):
     """一次探测同时给出 scrcpy 与播放器状态：前端据此预告会落到哪一档。"""
     import backend.controller as c
     api = _make_api()
-    monkeypatch.setattr(c, "scrcpy_probe_info",
+    patch_ctrl(monkeypatch, "scrcpy_probe_info",
                         lambda pref: {"ok": False, "note": "未找到 scrcpy"})
-    monkeypatch.setattr(c, "probe_player",
+    patch_ctrl(monkeypatch, "probe_player",
                         lambda pref: {"ok": True, "kind": "mpv", "path": "/bin/mpv"})
     res = api.mirror_probe()
     assert res["scrcpy"]["ok"] is False
@@ -2165,8 +2185,8 @@ def test_mirror_start_uses_player_when_available(monkeypatch):
     import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(c, "find_player", lambda pref: ("ffplay", "/bin/ffplay", "PATH"))
-    monkeypatch.setattr(c, "plan_size", lambda adb, serial: "720x1280")
+    patch_ctrl(monkeypatch, "find_player", lambda pref: ("ffplay", "/bin/ffplay", "PATH"))
+    patch_ctrl(monkeypatch, "plan_size", lambda adb, serial: "720x1280")
     seen = {}
 
     class _Pipe:
@@ -2183,7 +2203,7 @@ def test_mirror_start_uses_player_when_available(monkeypatch):
         def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr(c, "PipeMirror", _Pipe)
+    patch_ctrl(monkeypatch, "PipeMirror", _Pipe)
     res = api.mirror_start(None, "pipe")
     assert res["ok"] is True
     assert res["started"][0]["mode"] == "pipe"
@@ -2197,7 +2217,7 @@ def test_mirror_start_falls_back_to_snap_without_player(monkeypatch):
     import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(c, "find_player", lambda pref: ("", None, "未找到播放器"))
+    patch_ctrl(monkeypatch, "find_player", lambda pref: ("", None, "未找到播放器"))
     seen = {}
 
     class _Snap:
@@ -2214,7 +2234,7 @@ def test_mirror_start_falls_back_to_snap_without_player(monkeypatch):
         def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr(c, "SnapMirror", _Snap)
+    patch_ctrl(monkeypatch, "SnapMirror", _Snap)
     res = api.mirror_start(None, "pipe")
     assert res["ok"] is True
     assert res["started"][0]["mode"] == "snap"
@@ -2229,8 +2249,8 @@ def test_mirror_start_falls_back_when_screenrecord_unavailable(monkeypatch):
     import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(c, "find_player", lambda pref: ("mpv", "/bin/mpv", "PATH"))
-    monkeypatch.setattr(c, "plan_size", lambda adb, serial: "")
+    patch_ctrl(monkeypatch, "find_player", lambda pref: ("mpv", "/bin/mpv", "PATH"))
+    patch_ctrl(monkeypatch, "plan_size", lambda adb, serial: "")
 
     class _DeadPipe:
         def __init__(self, *a, **kw):
@@ -2258,8 +2278,8 @@ def test_mirror_start_falls_back_when_screenrecord_unavailable(monkeypatch):
         def stop(self):
             pass
 
-    monkeypatch.setattr(c, "PipeMirror", _DeadPipe)
-    monkeypatch.setattr(c, "SnapMirror", _Snap)
+    patch_ctrl(monkeypatch, "PipeMirror", _DeadPipe)
+    patch_ctrl(monkeypatch, "SnapMirror", _Snap)
     res = api.mirror_start(None, "pipe")
     assert res["ok"] is True
     assert res["started"][0]["mode"] == "snap", "screenrecord 不可用时应自动降级"
@@ -2271,7 +2291,7 @@ def test_mirror_stop_clears_sessions(monkeypatch):
     import backend.controller as c
     api = _mirror_api(monkeypatch)
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(c, "find_player", lambda pref: ("", None, "无"))
+    patch_ctrl(monkeypatch, "find_player", lambda pref: ("", None, "无"))
 
     class _Snap:
         def __init__(self, *a, **kw):
@@ -2286,7 +2306,7 @@ def test_mirror_stop_clears_sessions(monkeypatch):
         def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr(c, "SnapMirror", _Snap)
+    patch_ctrl(monkeypatch, "SnapMirror", _Snap)
     assert api.mirror_start(None, "snap")["ok"] is True
     assert api.mirror_status()["snap"] == ["A1"]
     res = api.mirror_stop(None)
@@ -2347,7 +2367,7 @@ def test_perf_start_uses_first_device_and_passes_params(monkeypatch):
         made.update(m=m, adb=adb)
         return m
 
-    monkeypatch.setattr(ctrl, "PerfMonitor", _factory)
+    patch_ctrl(monkeypatch, "PerfMonitor", _factory)
     res = api.perf_start(None, 500, "com.tencent.kuwo")
     assert res["ok"] is True and res["serial"] == "A1"
     assert made["m"].interval == pytest.approx(0.5)
@@ -2359,7 +2379,7 @@ def test_perf_start_monitors_all_selected_devices(monkeypatch):
     """不指定 serial 时全部受控设备一起监控：多台即对比模式，各自一条会话。"""
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     res = api.perf_start(None, 1000)
     assert res["ok"] is True
     assert sorted(res["sessions"]) == ["A1", "B2"]
@@ -2379,7 +2399,7 @@ def test_perf_poll_accepts_per_device_cursor(monkeypatch):
     """since 传 {serial: seq} 时各设备独立游标，互不影响。"""
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     api.perf_start(None, 1000)
     polled = api.perf_poll({"A1": 1, "B2": 0})
     assert polled["sessions"]["A1"]["samples"] == []
@@ -2397,7 +2417,7 @@ def test_perf_start_partial_failure_keeps_good_devices(monkeypatch):
                 return False, "设备无响应"
             return True, ""
 
-    monkeypatch.setattr(ctrl, "PerfMonitor", _Bad)
+    patch_ctrl(monkeypatch, "PerfMonitor", _Bad)
     res = api.perf_start(None, 1000)
     assert res["ok"] is True and list(api._perfs) == ["A1"]
     assert "B2" in res["failed"]
@@ -2408,7 +2428,7 @@ def test_perf_device_count_is_capped(monkeypatch):
     api = _make_api()
     lots = ["D%d" % i for i in range(ctrl.PERF_MAX_DEVICES + 2)]
     monkeypatch.setattr(api.devices, "selected_serials", lambda: list(lots))
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     res = api.perf_start(None, 1000)
     assert res["ok"] is True
     assert len(api._perfs) == ctrl.PERF_MAX_DEVICES
@@ -2418,7 +2438,7 @@ def test_perf_device_count_is_capped(monkeypatch):
 def test_perf_interval_is_clamped(monkeypatch):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     assert api.perf_start(None, 5)[  # 5ms → 下限 0.2s
         "interval"] == pytest.approx(0.2)
     assert api.perf_start(None, 999999)["interval"] == pytest.approx(
@@ -2435,7 +2455,7 @@ def test_perf_start_failure_reports_reason(monkeypatch):
         def start(self):
             return False, "读取设备状态失败（设备是否已授权？）"
 
-    monkeypatch.setattr(ctrl, "PerfMonitor", _Bad)
+    patch_ctrl(monkeypatch, "PerfMonitor", _Bad)
     res = api.perf_start(None, 1000)
     assert res["ok"] is False and res["reason"] == "start_failed"
     assert "授权" in res["error"]
@@ -2445,7 +2465,7 @@ def test_perf_poll_and_stop_keep_session_for_export(monkeypatch):
     """停止后会话对象要保留：否则「先停再导出」会丢光数据。"""
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     api.perf_start(None, 1000)
     polled = api.perf_poll(0)
     assert polled["running"] is True and len(polled["samples"]) == 1
@@ -2463,7 +2483,7 @@ def test_perf_export_without_data(monkeypatch):
 def test_perf_export_writes_report(monkeypatch, tmp_path):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     api.perf_start(None, 1000)
     seen = {}
 
@@ -2473,7 +2493,7 @@ def test_perf_export_writes_report(monkeypatch, tmp_path):
         return {"html": str(tmp_path / "r.html"), "csv": str(tmp_path / "r.csv"),
                 "rows": len(samples)}
 
-    monkeypatch.setattr(ctrl, "perf_write_report", _fake_report)
+    patch_ctrl(monkeypatch, "perf_write_report", _fake_report)
     monkeypatch.setattr(api, "_default_save_dir", lambda: str(tmp_path))
     res = api.perf_export()
     assert res["ok"] is True and res["rows"] == 1
@@ -2500,7 +2520,7 @@ def test_perf_thresholds_are_exposed_with_rules():
 def test_perf_thresholds_payload_marks_off_state(monkeypatch):
     """config.json 里写 "off" 时界面要能区分「全部关闭」与「未配置」。"""
     api = _make_api()
-    monkeypatch.setattr(ctrl, "load_prefs", lambda: {"perf_thresholds": "off"})
+    patch_ctrl(monkeypatch, "load_prefs", lambda: {"perf_thresholds": "off"})
     res = api.perf_thresholds()
     assert res["off"] is True and res["thresholds"] == {}
     assert res["rules"] == {} and res["custom"] is True
@@ -2509,7 +2529,7 @@ def test_perf_thresholds_payload_marks_off_state(monkeypatch):
 def test_perf_thresholds_broken_config_falls_back_to_baseline(monkeypatch):
     """手改 config.json 写错格式：能救的段落生效，错误回报给界面，不崩。"""
     api = _make_api()
-    monkeypatch.setattr(ctrl, "load_prefs",
+    patch_ctrl(monkeypatch, "load_prefs",
                         lambda: {"perf_thresholds": "fps<50,乱写<1"})
     res = api.perf_thresholds()
     assert res["thresholds"] == {"fps": {"min": 50.0}}
@@ -2561,7 +2581,7 @@ def test_perf_export_writes_compare_report_for_multi_device(monkeypatch,
     """多设备导出：每台一份报告 + 一份横向对比报告，且对比报告是打开的那份。"""
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     api.perf_start(None, 1000)
     seen = {}
 
@@ -2576,8 +2596,8 @@ def test_perf_export_writes_compare_report_for_multi_device(monkeypatch,
         seen["serials"] = [e["serial"] for e in entries]
         return {"html": str(tmp_path / "cmp.html"), "devices": len(entries)}
 
-    monkeypatch.setattr(ctrl, "perf_write_report", _fake_report)
-    monkeypatch.setattr(ctrl, "perf_write_compare", _fake_compare)
+    patch_ctrl(monkeypatch, "perf_write_report", _fake_report)
+    patch_ctrl(monkeypatch, "perf_write_compare", _fake_compare)
     monkeypatch.setattr(api, "_default_save_dir", lambda: str(tmp_path))
     res = api.perf_export()
     assert res["ok"] is True and res["sessions"] == 2
@@ -2590,13 +2610,13 @@ def test_perf_export_writes_compare_report_for_multi_device(monkeypatch,
 def test_perf_export_single_device_skips_compare(monkeypatch, tmp_path):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     api.perf_start(None, 1000)
-    monkeypatch.setattr(ctrl, "perf_write_report",
+    patch_ctrl(monkeypatch, "perf_write_report",
                         lambda *a, **k: {"html": str(tmp_path / "r.html"),
                                          "csv": str(tmp_path / "r.csv"), "rows": 1})
     called = {"n": 0}
-    monkeypatch.setattr(ctrl, "perf_write_compare",
+    patch_ctrl(monkeypatch, "perf_write_compare",
                         lambda *a, **k: called.update(n=called["n"] + 1) or {})
     monkeypatch.setattr(api, "_default_save_dir", lambda: str(tmp_path))
     res = api.perf_export()
@@ -2615,7 +2635,7 @@ def test_perf_label_disambiguates_same_model():
 def test_shutdown_stops_perf_monitor(monkeypatch):
     api = _make_api()
     monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
-    monkeypatch.setattr(ctrl, "PerfMonitor", _FakePerfMon)
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
     api.perf_start(None, 1000)
     mon = api._perfs["A1"]
     api.shutdown()
@@ -2641,7 +2661,7 @@ def test_perf_list_packages_caches_and_refresh_bypasses(monkeypatch):
         calls.append(serial)
         return {"ok": True, "third": ["com.a"], "system": [], "total": 1}
 
-    monkeypatch.setattr(ctrl, "perf_list_installed", fake)
+    patch_ctrl(monkeypatch, "perf_list_installed", fake)
     first = api.perf_list_packages(None, False)
     assert first["ok"] is True and first["cached"] is False
     assert first["serial"] == "A1"
@@ -2663,7 +2683,7 @@ def test_perf_list_packages_does_not_cache_failures(monkeypatch):
         return ({"ok": True, "third": ["com.a"], "system": [], "total": 1}
                 if state["ok"] else {"ok": False, "reason": "device offline"})
 
-    monkeypatch.setattr(ctrl, "perf_list_installed", fake)
+    patch_ctrl(monkeypatch, "perf_list_installed", fake)
     assert api.perf_list_packages(None, False)["ok"] is False
     state["ok"] = True
     res = api.perf_list_packages(None, False)
@@ -2681,7 +2701,7 @@ def test_perf_start_passes_system_mode_through(monkeypatch):
         made["pkg"] = pkg
         return m
 
-    monkeypatch.setattr(ctrl, "PerfMonitor", _factory)
+    patch_ctrl(monkeypatch, "PerfMonitor", _factory)
     assert api.perf_start(None, 1000, "__system__")["ok"] is True
     assert made["pkg"] == "__system__"
 
