@@ -2215,6 +2215,39 @@ error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数�
   本身用另一条路核对：从 Release 把 `latest.json` 附件拉下来（527 字节、无 BOM、
   `json.loads` 通过、`normalize()` 能取出 `version` / `url` / `assets[0].size`）。
 
+### 发版实测（2026.1030.1008，两次 CI 都绿）
+
+- `push main`（run 40989978769）与 `push tag v2026.1030.1008`（run 40989980583）
+  两次都 success。tag 那次 12 个步骤全过，含「版本号一致性（tag 与源码 VERSION
+  必须相同）」「构建（exe + 分发 zip + 源码 zip）」「生成 SHA256」
+  「upload-artifact」「发布 Release」。
+- 分发件实测内容（取自 CI 日志，不是本地推断）：
+  `ADBDeviceCommander_v2026.1030.1008_win64.zip`，**5 个文件 / 23.6 MB /
+  单一顶层目录** `ADBDeviceCommander_v2026.1030.1008_win64/`；exe 本体 23.9 MB
+  （onefile）。源码包 159 个文件。
+  附带一条环境事实：本沙箱拉这个 24 MB 附件会被网络掐在 20 MiB
+  （`curl` 只拿到 20,971,520 字节，`zipfile` 判 `BadZipFile`），所以「分发件里
+  到底有什么」只认 CI 日志，不认本地下载。
+- Release 四个附件（`/releases/tags/v2026.1030.1008` 实查）：
+  `..._win64.zip` 24,711,175 B、`....zip` 1,006,363 B、`latest.json` 835 B、
+  `sha256sums.txt` 218 B。
+- `latest.json` 逐字核对：835 字节、**无 BOM**、`json.loads` 通过；
+  `version` = `2026.1030.1008`；`assets[0].size` = 24,711,175；
+  `notes` 与 `git log -1 --pretty=%B` **完全一致** —— 「取提交正文当更新说明」
+  这件事真的生效了，不再是一行 Full Changelog。
+
+### 一次事故：Release 被清空
+
+- 02:16 查 `v2026.1030.1008` 的 Release，四个附件齐全；02:23 再查 `/releases`
+  返回 `[]`、`/releases/tags/v2026.1030.0958` 也 404 —— **三个 Release 全部消失**。
+  同一时刻 tag ref、commit、分支都在，`githubstatus.com` 显示 All Systems
+  Operational，所以不是 GitHub 故障，是「Release 被人删了」。
+- 值得记住的是**恢复不用重新上传文件**：发版步骤写的是「存在则改、不存在则建」，
+  重跑那次 tag 工作流（`POST /actions/runs/<id>/rerun`，或重推同一个 tag）就会
+  重新出包并挂附件，天然可重入。
+- 顺带加固了一条设计判断：**Release 可以被人在网页上随手删掉**，所以客户端
+  不能把「查不到更新源」当致命错误。现在的处理是静默失败、过一小时再试、不弹窗。
+
 ## 已知取舍 / 下一轮候选
 
 - **不自动替换自身**：理由见上（占用 / 杀毒 / UAC 三条路都更差）。真要自动化，
