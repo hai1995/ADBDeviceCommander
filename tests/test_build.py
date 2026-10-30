@@ -484,8 +484,9 @@ def test_publish_from_stage_lock_error_is_actionable(tmp_path, monkeypatch, caps
 
 
 # ---------------------------------------------------------------------------
-# 分发产物内容：只含 exe + 使用说明.txt（config.json / commands.json / assets
-# 都是用户个人数据 / 非必需资源，刻意不随版本分发，避免覆盖用户已有设置）
+# 分发产物内容：dist 目录只含 exe 本体（config.json / commands.json / assets
+# 都是用户个人数据 / 非必需资源，刻意不随版本分发，避免覆盖用户已有设置；
+# 使用说明已移入程序内关于页，不再以独立文件形式随包分发）
 # ---------------------------------------------------------------------------
 def test_config_json_is_not_bundled_inside_exe():
     """config.json 只放 exe 同目录，绝不进 BUNDLED_DATA / SIDE_FILES。
@@ -501,7 +502,7 @@ def test_config_json_is_not_bundled_inside_exe():
 def test_personal_data_and_assets_are_not_bundled():
     """commands.json / config.json / assets 都不应进 BUNDLED_DATA 或 SIDE_FILES /
     SIDE_DIRS：它们是用户个人数据 / 非必需资源，随版本分发会覆盖用户已有设置
-    或白胖包体（回归锁定 `dist/` 只含 exe + 使用说明.txt）。"""
+    或白胖包体（回归锁定 `dist/` 只含 exe 本体）。"""
     bundled = [src for src, _ in build.BUNDLED_DATA]
     for name in ("commands.json", "config.json", "assets"):
         assert name not in bundled, "%s 不应进 BUNDLED_DATA" % name
@@ -509,10 +510,11 @@ def test_personal_data_and_assets_are_not_bundled():
         assert name not in build.SIDE_DIRS, "%s 不应进 SIDE_DIRS" % name
 
 
-def test_main_publishes_only_exe_and_readme(monkeypatch, tmp_path):
-    """主流程：产物目录只含 exe 与 使用说明.txt；不自带 config.json /
-    commands.json / assets（它们是用户使用后才产生的个人数据 / 非必需资源，
-    随版本分发会覆盖用户已有的命令库与设置，或白胖包体）。"""
+def test_main_publishes_only_exe(monkeypatch, tmp_path):
+    """主流程：产物目录只含 exe 本体；不自带 config.json /
+    commands.json / assets / 使用说明.txt（使用说明已移入程序内关于页；前者是
+    用户使用后才产生的个人数据 / 非必需资源，随版本分发会覆盖用户已有的命令库
+    与设置，或白胖包体）。"""
     exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
     staged = tmp_path / "build" / "dist_stage"
     staged.mkdir(parents=True)
@@ -526,7 +528,7 @@ def test_main_publishes_only_exe_and_readme(monkeypatch, tmp_path):
     assert rc == 0
     dist = tmp_path / "dist"
     assert (dist / exe_name).exists(), "exe 必须存在"
-    assert (dist / "使用说明.txt").exists(), "使用说明.txt 必须存在"
+    assert not (dist / "使用说明.txt").exists(), "使用说明已移入程序内，不再随包分发"
     # 刻意不随版本分发：避免覆盖用户已有的个人数据
     assert not (dist / "config.json").exists(), "config.json 不应随版本分发"
     assert not (dist / "commands.json").exists(), "commands.json 不应随版本分发"
@@ -561,7 +563,7 @@ def test_main_preserves_existing_user_data(monkeypatch, tmp_path):
 # 分发件（--package）：给「只想用」的同事的那个 zip
 # ---------------------------------------------------------------------------
 def _fake_dist(tmp_path, version="2026.1103.1200", with_exe=True):
-    """造一个「dist/ 已经打完」的目录：exe + 可编辑的同目录文件（使用说明.txt）。"""
+    """造一个「dist/ 已经打完」的目录：只有 exe 本体（无随包外发文件）。"""
     root = tmp_path / "proj"
     (root / "core").mkdir(parents=True)
     (root / "core" / "constants.py").write_text(
@@ -575,7 +577,7 @@ def _fake_dist(tmp_path, version="2026.1103.1200", with_exe=True):
     return root, dist
 
 
-def test_win_package_contains_exe_and_readme(tmp_path):
+def test_win_package_contains_only_exe(tmp_path):
     root, dist = _fake_dist(tmp_path)
     zp = build.make_win_package(dist, tmp_path / "out", root=root)
     assert zp.exists()
@@ -583,10 +585,12 @@ def test_win_package_contains_exe_and_readme(tmp_path):
     names = zipfile.ZipFile(zp).namelist()
     top = zp.stem + "/"
     assert top + (build.APP_NAME + (".exe" if os.name == "nt" else "")) in names
-    # 分发件只含 exe + 使用说明.txt；commands.json / config.json / assets 都是
-    # 用户个人数据 / 非必需资源，刻意不进包（避免覆盖同事已有的设置），逐个盯着
+    # 分发件只含 exe 本体；commands.json / config.json / assets / 使用说明.txt
+    # 都不应进包（使用说明已移入程序内；其余是用户个人数据 / 非必需资源，
+    # 随版本分发会覆盖同事已有的设置），逐个盯着
     for rel in build.SIDE_FILES:
         assert top + rel in names, "%s 应在分发件里" % rel
+    assert top + "使用说明.txt" not in names, "使用说明已移入程序内，不再随包分发"
     assert top + "config.json" not in names, "个人配置不进分发件"
     assert top + "assets/app.ico" not in names, "assets 不再随版本分发"
 
@@ -605,7 +609,7 @@ def test_win_package_is_wrapped_in_single_top_dir(tmp_path):
 def test_win_package_warns_when_exe_missing(tmp_path, capsys):
     root, dist = _fake_dist(tmp_path, with_exe=False)
     zp = build.make_win_package(dist, tmp_path / "out", root=root)
-    assert zp.exists()                     # 仍然出包（至少 使用说明.txt 还在）
+    assert zp.exists()                     # 仍然出包（只是主程序缺失会告警）
     assert "缺少" in capsys.readouterr().err
 
 
@@ -625,8 +629,6 @@ def test_verify_dist_ok(tmp_path):
     target.mkdir()
     exe = target / (build.APP_NAME + ".exe")
     exe.write_bytes(b"MZ" * (2 * 1024 * 1024))
-    for rel in build.SIDE_FILES:
-        (target / rel).write_text("x", encoding="utf-8")
     problems = build.verify_dist(target, "onefile", exe)
     assert problems == [], problems
 
@@ -635,13 +637,12 @@ def test_verify_dist_reports_missing(tmp_path):
     target = tmp_path / "dist"
     target.mkdir()
     exe = target / (build.APP_NAME + ".exe")
-    # 故意不写 exe、不写同目录文件（使用说明.txt）
+    # 故意不写 exe（dist 目录现在只可能有 exe，没有随包外发文件）
     problems = build.verify_dist(target, "onefile", exe)
     joined = "\n".join(problems)
     assert "主程序缺失" in joined
-    assert "使用说明.txt" in joined
-    # 主程序缺失 + SIDE_FILES 每项缺失(1) = 至少 2 条（SIDE_DIRS 已为空）
-    assert len(problems) >= 2
+    # 只有主程序缺失这一条（SIDE_FILES / SIDE_DIRS 已为空）
+    assert len(problems) == 1
 
 
 def test_verify_dist_flags_tiny_exe(tmp_path):
@@ -649,7 +650,5 @@ def test_verify_dist_flags_tiny_exe(tmp_path):
     target.mkdir()
     exe = target / (build.APP_NAME + ".exe")
     exe.write_bytes(b"MZ")  # 远小于 _MIN_EXE_MB
-    for rel in build.SIDE_FILES:
-        (target / rel).write_text("x", encoding="utf-8")
     problems = build.verify_dist(target, "onefile", exe)
     assert any("体积异常" in p for p in problems)

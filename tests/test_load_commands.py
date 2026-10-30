@@ -648,7 +648,8 @@ def test_builtin_entries_are_well_formed():
     for c in BUILTIN_COMMANDS:
         assert c["labels"] == ["内置"], c["id"]
         assert c.get("builtin") is True
-        assert c["name"].startswith("[内置] "), c["id"]
+        # 名称不再带 [内置] 前缀（更精短）；区分内置只靠 labels，渲染层另加角标
+        assert not c["name"].startswith("["), c["id"]
         assert c["commands"], c["id"]
         for item in c["commands"]:
             cmd = item["command"]
@@ -743,9 +744,10 @@ def test_same_name_user_command_suppresses_builtin():
     merged = merge_builtins(user)
     names = [c["name"] for c in merged]
     assert "[通用] 开启指针位置" in names
-    assert "[内置] 开启指针位置" not in names
+    # 内置命令名称已去掉 [内置] 前缀；这里断言「同名核心名」被用户条目压制
+    assert "开启指针位置" not in names
     # 其余内置照常补齐
-    assert "[内置] 息屏" in names
+    assert "息屏" in names
 
 
 # ---------------------------------------------------------------------------

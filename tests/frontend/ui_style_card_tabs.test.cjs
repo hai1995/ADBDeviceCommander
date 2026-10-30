@@ -108,12 +108,13 @@ console.log("\n[C] 结构完整性：按钮/tab 类名未被改动");
     "仍是 6 个 tab（设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于）");
 
   // 每个 <button> 的 class 都必须命中一套「面板样式」（.btn / .tab-btn / .clear-x /
-  // .modal-x / .ticker），否则会渲染成浏览器默认灰按钮 —— 这条断言曾真的抓出漏样式
-  // 的清除按钮。ticker 是顶栏状态跑马灯：胶囊造型 + 状态灯 + 滚动轨道由 .ticker 自己
-  // 一套样式实现（刻意不做成 .btn 的按键块），同样属于「已样式化」。
+  // .modal-x / .ticker / about-subtab），否则会渲染成浏览器默认灰按钮 —— 这条断言
+  // 曾真的抓出漏样式的清除按钮。ticker 是顶栏状态跑马灯：胶囊造型 + 状态灯 + 滚动
+  // 轨道由 .ticker 自己一套样式实现（刻意不做成 .btn 的按键块），同样属于「已样式化」。
   // pkg-mode / pkg-refresh 属于性能页「应用包名」选择器自带的一套样式
   // （下拉弹层里的模式切换与刷新，尺寸与 .btn 差一档，套 .btn 反而挤爆弹层）。
-  const STYLE_CLASS = /\b(btn|tab-btn|clear-x|toast-close|modal-x|ticker|pkg-mode|pkg-refresh)\b/;
+  // about-subtab 是关于页二级子 tab（概览 / 使用说明），有 .about-subtab 专属样式。
+  const STYLE_CLASS = /\b(btn|tab-btn|clear-x|toast-close|modal-x|ticker|pkg-mode|pkg-refresh|about-subtab)\b/;
   const bare = (html.match(/<button\b[^>]*>/g) || [])
     .filter((tag) => {
       const m = tag.match(/class="([^"]*)"/);

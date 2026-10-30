@@ -118,6 +118,9 @@
     updateSkip: $("update-skip"), updateLater: $("update-later"),
     updateDownload: $("update-download"),
     aboutConfigOpen: $("about-config-open"),
+    aboutManual: $("about-manual"),
+    aboutSubtabs: Array.from(document.querySelectorAll(".about-subtab")),
+    aboutPanes: Array.from(document.querySelectorAll(".about-pane")),
     // modal
     modal: $("modal"), modalTitle: $("modal-title"),
     modalBody: $("modal-body"), modalClose: $("modal-close"),
@@ -205,6 +208,10 @@
     "report": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 17v-3"/><path d="M12 17v-6"/><path d="M16 17v-4"/>',
     "sliders": '<path d="M4 6h9"/><path d="M19 6h1"/><circle cx="16" cy="6" r="2.2"/><path d="M4 12h3"/><path d="M13 12h7"/><circle cx="10" cy="12" r="2.2"/><path d="M4 18h9"/><path d="M19 18h1"/><circle cx="16" cy="18" r="2.2"/>',
     "arrow-up": '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>',
+    // 返回上级（corner-up-left）：上一步/回退到父目录
+    "corner-up-left": '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
+    // 使用说明（book / 手册）
+    "book": '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
     "upload": '<path d="M12 15V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/>',
     "download": '<path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/>',
     "eye": '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>',
@@ -4435,6 +4442,35 @@
     if (persist) persistPref("sidebar_collapsed", !!collapsed);
   }
 
+  /* ---------------- 关于页子 tab（概览 / 使用说明）---------------- */
+  let _manualLoaded = false;
+  function bindAboutSubtabs() {
+    els.aboutSubtabs.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const which = btn.dataset.aboutTab;
+        els.aboutSubtabs.forEach((b) =>
+          b.classList.toggle("active", b === btn));
+        els.aboutPanes.forEach((p) =>
+          p.hidden = (p.dataset.aboutPane !== which));
+        if (which === "manual" && !_manualLoaded) loadManual();
+      });
+    });
+  }
+  // 使用说明内容由后端 get_manual() 提供（exe 内置副本经 resource_path 读取），
+  // 不再以独立文件随包分发，避免维护两份脱节的文案。
+  async function loadManual() {
+    _manualLoaded = true;
+    const res = await callApi(api.get_manual());
+    if (!res || !res.ok) {
+      if (els.aboutManual)
+        els.aboutManual.textContent =
+          "（使用说明暂不可用：" + ((res && res.reason) || "未知错误") + "）";
+      _manualLoaded = false;   // 允许下次重试
+      return;
+    }
+    if (els.aboutManual) els.aboutManual.textContent = res.text || "（内容为空）";
+  }
+
   /* ---------------- UI 绑定 ---------------- */
   function bindUI() {
     // 采用原生标题栏（含 min/max/close），不再自绘窗口按钮与 Win32 拖拽。
@@ -4961,6 +4997,8 @@
     }
     if (els.updateClose) els.updateClose.addEventListener("click", hideUpdateModal);
     if (els.updateLater) els.updateLater.addEventListener("click", hideUpdateModal);
+    // ---- 关于页子 tab（概览 / 使用说明）----
+    bindAboutSubtabs();
     if (els.updateDownload) {
       els.updateDownload.addEventListener("click", () => {
         const url = updateShown && updateShown.url;

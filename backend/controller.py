@@ -19,6 +19,7 @@ import os
 import sys
 import re
 import time
+from pathlib import Path
 import json
 import uuid
 import threading
@@ -30,6 +31,7 @@ import tempfile
 
 from core.constants import (
     VERSION, AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
+    resource_path,
 )
 from core.commands import load_commands, save_click_deltas, save_user_commands, merge_builtins
 from core.prefs import (load_prefs, load_prefs_checked, save_prefs,
@@ -3337,3 +3339,17 @@ class WebApi:
         snapshot["devices"] = self.devices.get_items()
         snapshot["workers"] = self.workers.running_keys()
         return snapshot
+
+    def get_manual(self):
+        """读使用说明文本（README 风格、随 exe 内置副本，不再以独立文件随包分发）。
+
+        关于页的「使用说明」子 tab 直接渲染这里返回的内容，避免再维护一份
+        与仓库 使用说明.txt 脱节的硬编码文案。路径优先 exe 同目录那份、
+        否则回退到 PyInstaller 解包副本（resource_path 统一处理）。
+        """
+        try:
+            path = resource_path("使用说明.txt")
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception as ex:  # noqa: BLE001 — 兜底给前端一个可读错误，不抛异常卡住桥接
+            return {"ok": False, "reason": "使用说明读取失败：%s" % ex}
+        return {"ok": True, "text": text}

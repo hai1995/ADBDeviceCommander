@@ -28,9 +28,9 @@
 | 文件              | 说明                                       |
 | ----------------- | ------------------------------------------ |
 | ADB设备指令台.exe | 主程序（双击运行，无需 Python）            |
-| 使用说明.txt      | 给使用同事的简明说明                       |
 
-`frontend/`（界面代码）只打进 exe 内部，使用者无需也不会去改。
+`frontend/`（界面代码）与使用说明都只打进 exe 内部，使用者无需也不会去改；
+使用说明在程序「关于」页的「使用说明」子 tab 内直接阅读。
 
 `commands.json`（快捷指令库）与 `config.json`（各项配置）**刻意不随版本分发**：
 它们都是「用户使用后才在 exe 同目录产生的个人数据」——前者首次打开自动生成默认
@@ -78,10 +78,11 @@ BUNDLED_DATA = [
 # 配置必须只有一个可写位置：exe 同目录（tests/test_build.py 有回归断言守着这条）。
 
 # 构建后再拷一份到 dist 的「可编辑 / 可见」文件：同目录优先于 exe 内置副本。
-# 仅 使用说明.txt：commands.json / config.json 都是「用户使用后才产生」的个人数据，
-# 刻意不随版本分发（否则同事重装会覆盖自己先前调好的命令库 / 设置）；运行时
-# core.commands / core.prefs 在缺失时自动生成默认值，无需打包自带。
-SIDE_FILES = ["使用说明.txt"]
+# 现在为空：使用说明已移入程序内（关于页「使用说明」子 tab 直接渲染，由 exe 内置
+# 副本经 resource_path 读取），不再以独立文件形式随包分发；commands.json / config.json
+# 仍是「用户使用后才产生」的个人数据，刻意不随版本分发（否则同事重装会覆盖自己先前
+# 调好的命令库 / 设置）。dist 目录因此只剩 exe 本体，最干净、最不会误伤用户数据。
+SIDE_FILES = []
 SIDE_DIRS = []
 
 # 构建期不需要进包的模块（缩小体积）：pytest 只在 tests/ 用，PIL 仅用于重生成图标。
@@ -329,7 +330,7 @@ def make_win_package(target: Path, dist_dir: Path = None,
 
     与 make_source_zip 的分工：
       * 源码包给「要看代码 / 想自己跑起来」的人，里面是 .py 与测试；
-      * 这个包给「只想用」的同事，里面只有 exe + 使用说明.txt。
+      * 这个包给「只想用」的同事，里面只有 exe 本体（使用说明已移入程序内关于页）。
     commands.json / config.json 是用户使用后产生的个人数据，刻意不进分发包，
     避免同事重装覆盖自己先前的命令库与设置；运行时缺失会自动重建默认值。
 
@@ -455,7 +456,11 @@ def exe_dir(dist_dir: Path, mode: str) -> Path:
 
 
 def copy_side_files(target: Path) -> list:
-    """把可编辑 / 可见文件拷到 exe 同目录，返回拷贝项名称。"""
+    """把可编辑 / 可见文件拷到 exe 同目录，返回拷贝项名称。
+
+    现已无随包外发的可见文件（使用说明移入程序内；config.json / commands.json
+    是用户使用后才产生的个人数据），故正常返回空列表——保留函数以兼容 main 调用。
+    """
     target.mkdir(parents=True, exist_ok=True)
     done = []
     for rel in SIDE_FILES:
@@ -472,10 +477,12 @@ def copy_side_files(target: Path) -> list:
 
 
 def verify_dist(target, mode, exe):
-    """产物完整性自检：确认 exe 与可编辑同目录文件（使用说明.txt）都确实落盘。
+    """产物完整性自检：确认 exe 本体确实落盘。
 
-    手工分发包最易漏 使用说明.txt 或 exe 本体，这里在打包收尾自动核对一遍，
-    缺项返回给 main 打印告警，避免发出缺文件的残包。返回空列表即视为通过。
+    手工分发包最易漏 exe 本体，这里在打包收尾自动核对一遍，缺项返回给 main
+    打印告警，避免发出缺文件的残包。dist 目录现在只含 exe（使用说明已移入
+    程序内、config.json / commands.json 由用户首次使用后生成），所以只校验 exe。
+    返回空列表即视为通过。
     """
     problems = []
     if not exe.exists():
@@ -487,13 +494,6 @@ def verify_dist(target, mode, exe):
             mb = 0.0
         if mb < _MIN_EXE_MB:
             problems.append("主程序体积异常（%.2f MB，疑似未完整生成）：%s" % (mb, exe))
-    for rel in SIDE_FILES:
-        if not (target / rel).is_file():
-            problems.append("同目录文件缺失：%s" % rel)
-    for rel in SIDE_DIRS:
-        d = target / rel
-        if not d.is_dir() or not any(d.iterdir()):
-            problems.append("资源目录缺失或为空：%s/" % rel)
     return problems
 
 def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
@@ -656,7 +656,7 @@ def main(argv=None) -> int:
     print("[4/4] 已拷贝同目录文件：%s" % "、".join(copied))
 
     # 6) 产物完整性自检（仅告警）：确认 exe 与「可编辑同目录文件」都确实落盘。
-    # 核对 exe 本体与 使用说明.txt 是否落盘，避免发出缺文件的残包。
+    # 核对 exe 本体是否落盘，避免发出缺文件的残包。
     # 这里自动核对一遍，缺项直接提示，避免发出残包。
     problems = verify_dist(target, args.mode, exe)
     if problems:
@@ -670,7 +670,7 @@ def main(argv=None) -> int:
         make_win_package(target, args.dist_dir)
 
     print("\n打包完成：%s（%.1f MB）" % (exe, exe.stat().st_size / 1024 / 1024))
-    print("把整个 %s 目录一起拷给同事（ADB设备指令台.exe 与 使用说明.txt 必须同目录）。" % target)
+    print("把整个 %s 目录一起拷给同事（dist 仅含 exe 本体；使用说明见程序内「关于 → 使用说明」）。" % target)
     print("提示：同事机器若报「WebView2 Runtime 未安装 / 过旧」，到 "
           "https://developer.microsoft.com/microsoft-edge/webview2/ 装运行库即可。")
     return 0

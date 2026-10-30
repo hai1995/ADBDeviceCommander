@@ -59,7 +59,7 @@ ADBDeviceCommander/
 │                         #   + 源码推送 GitHub（push_github.py，token 不进版本库）
 ├── .github/workflows/    # CI：每次 push 跑全量测试；打 tag 自动构建并发 Release
 ├── tests/                # 单元测试（backend/* + core/* 纯逻辑）+ 前端 jsdom 测试
-├── 使用说明.txt           # 给最终使用者的简明说明（随 exe 分发）
+├── 使用说明.txt           # 给最终使用者的简明说明（打进 exe 内部，在程序「关于 → 使用说明」里阅读）
 └── README.md
 ```
 
@@ -105,13 +105,15 @@ python build.py --dry-run      # 只打印将要执行的 PyInstaller 命令
 python build.py --no-deps      # 跳过依赖检查与自动安装
 ```
 
-产物为 `dist\ADB设备指令台.exe` 与 `使用说明.txt` 两项，放在同一目录即可双击运行。
-`frontend/` 只打进 exe 内部（界面代码，使用者无需也不会去改）；分发的 `dist\` 内容：
+产物为 `dist\ADB设备指令台.exe` 一个文件，放在任意目录即可双击运行。
+`frontend/` 与使用说明都只打进 exe 内部（界面代码与说明使用者无需也不会去改）；
+分发目录因此只有 exe 本体，最干净、最不会误伤同事已有的个人数据。分发的 `dist\` 内容：
 
 | 文件 | 说明 |
 | --- | --- |
 | `ADB设备指令台.exe` | 主程序（单文件，双击运行，无需 Python） |
-| `使用说明.txt` | 给使用同事的简明说明 |
+
+> 使用说明不再以独立文件随包分发，而是内置于 exe，在程序「关于 → 使用说明」子 tab 里直接阅读。
 
 > **刻意不随版本分发的内容**：`commands.json`（快捷指令库）与 `config.json`（各项配置）
 > 都是「用户使用后才在 exe 同目录产生的个人数据」——前者首次打开自动生成默认指令库，
@@ -138,8 +140,8 @@ python build.py --package      # exe 打完后，再压一个 ADBDeviceCommander
 python build.py --package --zip   # 同时产出发给同事的分发件 + 源码分发包
 ```
 
-产物 `dist\ADBDeviceCommander_v<版本>_win64.zip` 里是 `exe + 使用说明.txt`，
-套在与 zip 同名的顶层目录下。分发包刻意只含这两项：`commands.json` / `config.json`
+产物 `dist\ADBDeviceCommander_v<版本>_win64.zip` 里只有 `exe` 本体（使用说明已内置于
+exe，不再以独立文件随包），套在与 zip 同名的顶层目录下。分发包刻意只含 exe：`commands.json` / `config.json`
 是用户使用后才产生的个人数据，打了反而会让同事重装覆盖自己先前的命令库与设置；`assets/`
 仅构建期用于 exe 图标、不随分发目录提供。
 
@@ -379,8 +381,9 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 
 ## 分发给同事 / 使用说明
 
-给最终使用者的完整说明见仓库根 **`使用说明.txt`**（`build.py` 构建后自动拷进
-`dist\`，随 exe 分发；改说明请只编辑它，避免两份漂移）。给同事的要点：
+给最终使用者的完整说明已内置于程序，在 **「关于 → 使用说明」** 子 tab 里直接阅读
+（源码在仓库根 `使用说明.txt`，`build.py` 把它打进 exe 内部、不再以独立文件随包
+分发；改说明请只编辑它，避免源码与内置副本漂移）。给同事的要点：
 
 1. **整体拷贝**：把 `dist\` 整个文件夹拷走，不要只发 exe——`commands.json`
    必须和 exe 同目录，编辑它才能生效。更省事的做法是直接发

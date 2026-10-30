@@ -542,42 +542,49 @@
           <input id="file-dir" type="text" class="inp grow" placeholder="文件下载保存目录">
           <button id="file-open" class="btn" data-icon="folder">打开</button>
         </div>
-        <div class="file-bar">
-          <span class="file-dev" id="file-dev-now">未选设备</span>
-          <input id="file-path" type="text" class="inp grow" placeholder="/">
-          <button id="file-up" class="btn" data-icon="arrow-up">上级</button>
-          <button id="file-refresh" class="btn" data-icon="refresh">刷新</button>
-          <button id="file-mkdir" class="btn" data-icon="folder-plus">新建文件夹</button>
-          <button id="file-touch" class="btn" data-icon="file-plus">新建文件</button>
-          <label class="btn file-upload" data-icon="upload">上传
-            <input id="file-upload" type="file" hidden>
-          </label>
-        </div>
-        <div class="file-bar file-batch">
-          <label class="chk"><input type="checkbox" id="file-sel-all">全选</label>
-          <button id="file-batch-dl" class="btn" disabled data-icon="download">下载选中</button>
-          <button id="file-batch-del" class="btn" disabled data-icon="trash">删除选中</button>
-          <span id="file-sel-count" class="dim">已选 0 项</span>
-        </div>
-        <div class="file-table-wrap" id="file-table-wrap">
-          <div class="file-drop-overlay" id="file-drop-overlay">
-            <div class="file-drop-inner">
-              <div class="file-drop-icon">⬆</div>
-              <div>松开鼠标，将文件上传到当前目录</div>
-            </div>
+        <div class="file-panel">
+          <div class="file-bar">
+            <span class="file-dev" id="file-dev-now">未选设备</span>
+            <input id="file-path" type="text" class="inp grow" placeholder="/">
+            <button id="file-up" class="btn" data-icon="corner-up-left">返回上级</button>
+            <button id="file-refresh" class="btn" data-icon="refresh">刷新</button>
+            <button id="file-mkdir" class="btn" data-icon="folder-plus">新建文件夹</button>
+            <button id="file-touch" class="btn" data-icon="file-plus">新建文件</button>
+            <label class="btn file-upload" data-icon="upload">上传
+              <input id="file-upload" type="file" hidden>
+            </label>
           </div>
-          <table class="file-table">
-            <thead>
-              <tr><th class="col-sel"></th><th>名称</th><th>大小</th><th>日期</th><th>权限</th><th>操作</th></tr>
-            </thead>
-            <tbody id="file-body"></tbody>
-          </table>
+          <div class="file-bar file-batch">
+            <label class="chk"><input type="checkbox" id="file-sel-all">全选</label>
+            <button id="file-batch-dl" class="btn" disabled data-icon="download">下载选中</button>
+            <button id="file-batch-del" class="btn" disabled data-icon="trash">删除选中</button>
+            <span id="file-sel-count" class="dim">已选 0 项</span>
+          </div>
+          <div class="file-table-wrap" id="file-table-wrap">
+            <div class="file-drop-overlay" id="file-drop-overlay">
+              <div class="file-drop-inner">
+                <div class="file-drop-icon">⬆</div>
+                <div>松开鼠标，将文件上传到当前目录</div>
+              </div>
+            </div>
+            <table class="file-table">
+              <thead>
+                <tr><th class="col-sel"></th><th>名称</th><th>大小</th><th>日期</th><th>权限</th><th>操作</th></tr>
+              </thead>
+              <tbody id="file-body"></tbody>
+            </table>
+          </div>
         </div>
         <!-- 状态信息已抽离到顶栏跑马灯（点击弹窗查看全量历史） -->
       </section>
 
       <!-- ============ 关于 ============ -->
       <section class="tab" data-tab="about">
+        <div class="about-subtabs">
+          <button class="about-subtab active" data-about-tab="overview">概览</button>
+          <button class="about-subtab" data-about-tab="manual" data-icon="book">使用说明</button>
+        </div>
+        <div class="about-pane" data-about-pane="overview">
         <div class="about">
           <h2>ADB 设备指令台</h2>
           <div class="about-row"><span>版本</span><b id="about-ver">—</b></div>
@@ -632,6 +639,13 @@
             </ul>
           </div>
           <p class="dim">本程序为 Web 版（pywebview + backend/* + core/*），逻辑层可单测、可复用。</p>
+        </div>
+        </div>
+        <div class="about-pane" data-about-pane="manual" hidden>
+          <div class="about">
+            <h2>使用说明</h2>
+            <pre class="manual-body" id="about-manual">加载中…</pre>
+          </div>
         </div>
       </section>
     </div>

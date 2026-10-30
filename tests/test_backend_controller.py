@@ -310,6 +310,16 @@ def test_get_state_snapshot():
     assert len(snap["devices"]) == 3
 
 
+def test_get_manual_returns_bundled_text():
+    """使用说明由后端读取内置副本返回，前端关于页「使用说明」子 tab 渲染它。"""
+    api = _make_api()
+    res = api.get_manual()
+    assert res["ok"] is True
+    # 仓库根的 使用说明.txt 被打进 exe 内部，内容应非空且含标题字样
+    assert res["text"].strip()
+    assert "使用说明" in res["text"]
+
+
 # ---------------------------------------------------------------------------
 # run_custom —— 必须与快捷指令同源：按受控设备逐台循环 + transform 注入 -s
 # （关键回归：原先透传到单 adb 会话，多设备下会报 "more than one device"）

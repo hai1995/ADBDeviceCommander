@@ -363,9 +363,10 @@
 - `frontend/js/app.js`：`applyBootSettings` 回填 + `persistPref` 即时落盘。
 
 **真正的断点只有一个**：`build.py` 从不把 `config.json` 放进 `dist/`——
-`SIDE_FILES` 只有 `quick_commands.json` / `使用说明.txt`，`BUNDLED_DATA`
-也不含它。于是打好的程序目录里没有任何配置文件：用户看不到有哪些项
-可配，「设置记忆」也要等第一次改动某个开关才由 `save_prefs` 悄悄创建文件——
+`SIDE_FILES` 现为空（`使用说明` 已移入程序内「关于 → 使用说明」，不再随包分发），
+`BUNDLED_DATA` 也不含 `config.json`。于是打好的程序目录里没有任何配置文件：
+用户看不到有哪些项可配，「设置记忆」也要等第一次改动某个开关才由 `save_prefs`
+悄悄创建文件——
 观感上正是「这程序没有配置文件、不保存设置」。
 
 ## 改法（三层，缺一不可）
