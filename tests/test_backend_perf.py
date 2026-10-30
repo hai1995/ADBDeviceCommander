@@ -247,7 +247,6 @@ def test_ring_buffer_drops_oldest(monkeypatch):
 def test_start_fails_when_device_unreadable(monkeypatch):
     mon = _monitor()
     monkeypatch.setattr(mon, "_read_device_info", lambda: None)
-    monkeypatch.setattr(mon, "_detect_focus", lambda: None)
     monkeypatch.setattr(mon, "_run", lambda *a, **k: _Proc("", code=1))
     ok, err = mon.start()
     assert ok is False and "设备" in err
@@ -704,14 +703,79 @@ def test_auto_and_manual_modes():
     assert manual.mode == "manual" and manual.auto_pkg is False
 
 
-def test_system_mode_skips_focus_probe(monkeypatch):
-    """全系统模式不探前台应用：探了也没人用，白多一次 adb 调用。"""
-    mon = svc.PerfMonitor("adb", "S1", 1.0, svc.SYSTEM_PKG)
-    probed = []
-    monkeypatch.setattr(mon, "_detect_focus", lambda: probed.append(1))
-    monkeypatch.setattr(mon, "_run", lambda *a, **k: _Proc(_SYS_RAW))
+def test_diff_state_exposes_jank_cum_and_focus():
+    """_diff_state 现在一次性把 GFX 的累计卡顿率(jank_cum) 与（跟随前台时的）
+    前台包名(focus) 一并返回，_collect 直接复用，不再重复解析 @@GFX 段。"""
+    mon = _monitor()
+    cur = mon._diff_state(svc._split_sections(_RAW))
+    assert cur["jank_cum"] == pytest.approx(1.00)
+    # manual 模式不解析 focus（脚本里压根没有 @@FOCUS 段）
+    assert cur["focus"] == ""
+
+    auto = svc.PerfMonitor("adb", "S1", 1.0, "")
+    raw = _RAW + "@@FOCUS\n  mCurrentFocus=Window{8f u0 com.spotify.music/Player}\n"
+    cur2 = auto._diff_state(svc._split_sections(raw))
+    assert cur2["focus"] == "com.spotify.music"
+
+
+def test_auto_mode_script_includes_focus_section():
+    """跟随前台模式把前台包名探测并到同一段脚本（@@FOCUS），不再单独起 adb。"""
+    auto = svc.PerfMonitor("adb", "S1", 1.0, "")
+    script = auto._script()
+    assert "FOCUS" in script and "dumpsys window" in script
+    # 但脚本里没有按包名取数的命令（此时还没拿到前台包名）
+    for bad in ("dumpsys gfxinfo", "dumpsys meminfo", "pidof"):
+        assert bad not in script
+
+
+def test_auto_mode_collect_applies_focus_pkg(monkeypatch):
+    """_collect 解析 @@FOCUS 后把前台包名写回 self.pkg / info.pkg，
+    后续采样才会带上 GFX / PSS / PID 段。"""
+    auto = svc.PerfMonitor("adb", "S1", 1.0, "")
+    raw = (_RAW
+           + "@@FOCUS\n  mCurrentFocus=Window{8f u0 com.spotify.music/Player}\n")
+    monkeypatch.setattr(auto, "_run", lambda *a, **k: _Proc(raw))
+    assert auto.pkg == ""
+    auto._collect()
+    assert auto.pkg == "com.spotify.music"
+    assert auto.info["pkg"] == "com.spotify.music"
+    # 下一帧脚本已经带上该包名 -> 会采应用级指标
+    assert "dumpsys gfxinfo com.spotify.music" in auto._script()
+
+
+def test_collect_reuses_gfx_parse_no_double_work(monkeypatch):
+    """_collect 直接复用 _diff_state 解析出的 frames/janky/jank_cum，
+    不得再调用 parse_gfxinfo_detail（用计数器确认只解析一次）。"""
+    import backend.perf_service as svc2
+    calls = {"n": 0}
+    orig = svc2.parse_gfxinfo_detail
+
+    def spy(text):
+        calls["n"] += 1
+        return orig(text)
+
+    monkeypatch.setattr(svc2, "parse_gfxinfo_detail", spy)
+    mon = _monitor()
+    raws = [_RAW, _RAW.replace("cpu  1000 100 300 6000",
+                               "cpu  1100 100 400 6400") \
+                     .replace("1000\nJanky", "1060\nJanky") \
+                     .replace("120 30", "160 30")]
+    it = iter(raws[1:])
+    monkeypatch.setattr(mon, "_run", lambda *a, **k: _Proc(next(it)))
+    mon._prev = mon._diff_state(svc._split_sections(raws[0]))
     mon._collect()
-    assert probed == []
+    # 基线 1 次 + 采样 1 次 = 2 次；若 _collect 再解析一次就会变成 3 次
+    assert calls["n"] == 2
+
+
+def test_system_mode_skips_focus_probe(monkeypatch):
+    """全系统模式不探前台应用：脚本里不带 @@FOCUS，_collect 也不会改写 pkg。"""
+    mon = svc.PerfMonitor("adb", "S1", 1.0, svc.SYSTEM_PKG)
+    monkeypatch.setattr(mon, "_run", lambda *a, **k: _Proc(_SYS_RAW))
+    script = mon._script()
+    assert "FOCUS" not in script and "dumpsys window" not in script
+    mon._collect()
+    assert mon.pkg == "" and mon.info["pkg"] == ""
 
 
 def test_system_mode_collect_leaves_app_metrics_empty(monkeypatch):

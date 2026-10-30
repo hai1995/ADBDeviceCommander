@@ -27,8 +27,9 @@ backend.perf_service —— 设备性能实时采样（CPU / 内存 / FPS / 电�
 
 二、为什么一次采样只调一次 adb
   1Hz 采样下如果每个指标各起一个 adb 进程，光进程创建就要几百毫秒，采样间隔
-  会被拖成 2~3 秒，曲线全是台阶。这里把 6 条命令拼成一个 shell 脚本，用
-  `echo @@XXX` 做分段标记，一次 `adb shell` 全部取回（约 150~400ms）。
+  会被拖成 2~3 秒，曲线全是台阶。这里把各项命令拼成一个 shell 脚本，用
+  `echo @@XXX` 做分段标记，一次 `adb shell` 全部取回（约 150~400ms）。跟随前台
+  时前台包名探测也并到同一条脚本里（@@FOCUS），不再为它额外起一个 adb 进程。
   代价是**指标之间最多差 300ms**——对趋势图完全够用，对逐帧归因不够（那本来
   也不是本功能的定位）。
 
@@ -54,8 +55,6 @@ MAX_SAMPLES = 20000
 DEFAULT_INTERVAL = 1.0
 MIN_INTERVAL = 0.2
 MAX_INTERVAL = 10.0
-# 自动识别前台应用的重探测周期（采样次数）。用户手填包名时不探测。
-FOCUS_REDETECT_TICKS = 10
 # 「监控全系统」的哨兵包名：故意不绑任何进程，只采整机指标（CPU / 系统内存 /
 # 电量 / 温度）。应用级指标（PSS / 帧率 / 卡顿）在这一模式下没有意义（一个
 # 「整机帧率」既不是某一帧率、也没法差分），故一律留空而不是拿别的数据顶上。
@@ -111,6 +110,13 @@ ALERT_CRIT_RATIO = 25.0
 # 「一条都不要」——两者语义相反，混用会让用户清空输入框后告警奇迹般复活。
 THRESHOLDS_OFF = "off"
 _TH_EXPR_RE = re.compile(r"^([a-z_]+)\s*([<>])\s*(-?\d+(?:\.\d+)?)$")
+
+# 纯解析函数跑在采样热路径上，下面这些正则只编译一次，避免每次调用都 re.compile。
+_NUM_RE = re.compile(r"\d+")
+_GFX_NUM_RE = re.compile(r"(\d+)")
+_GFX_PCT_RE = re.compile(r"\(([\d.]+)%\)")
+_FOCUS_RE = re.compile(r"u\d+\s+([A-Za-z0-9_.]+)/")
+_WM_SIZE_RE = re.compile(r"(\d+x\d+)")
 
 
 # --------------------------------------------------------------------------- #
@@ -201,7 +207,7 @@ def parse_dumpsys_meminfo(text):
         s = line.strip()
         if not s.upper().startswith("TOTAL"):
             continue
-        nums = re.findall(r"\d+", s)
+        nums = _NUM_RE.findall(s)
         if not nums:
             continue
         try:
@@ -225,14 +231,14 @@ def parse_gfxinfo_detail(text):
         s = line.strip()
         low = s.lower()
         if low.startswith("total frames rendered"):
-            m = re.search(r"(\d+)", s)
+            m = _GFX_NUM_RE.search(s)
             if m:
                 frames = int(m.group(1))
         elif low.startswith("janky frames"):
-            m = re.search(r"(\d+)", s)
+            m = _GFX_NUM_RE.search(s)
             if m:
                 janky = int(m.group(1))
-            m2 = re.search(r"\(([\d.]+)%\)", s)
+            m2 = _GFX_PCT_RE.search(s)
             if m2:
                 try:
                     pct = float(m2.group(1))
@@ -310,7 +316,7 @@ def parse_focus_pkg(text):
             if idx < 0:
                 continue
             seg = line[idx:]
-            m = re.search(r"u\d+\s+([A-Za-z0-9_.]+)/", seg)
+            m = _FOCUS_RE.search(seg)
             if m:
                 if key == "mCurrentFocus":
                     return m.group(1)
@@ -323,7 +329,7 @@ def parse_wm_size(text):
     override = ""
     physical = ""
     for line in (text or "").splitlines():
-        m = re.search(r"(\d+x\d+)", line)
+        m = _WM_SIZE_RE.search(line)
         if not m:
             continue
         if "override" in line.lower():
@@ -511,7 +517,6 @@ class PerfMonitor:
         self._thread = None
         self._prev = {}            # 上一次采样的差分基线
         self._fails = 0
-        self._tick = 0
 
     # ---------------- 采集 ----------------
     def _run(self, args, timeout=8):
@@ -519,34 +524,35 @@ class PerfMonitor:
                               **adb_kwargs(timeout))
 
     def _script(self):
-        """拼设备端的采样脚本。pkg 已过白名单，可安全内插。"""
+        """拼设备端的采样脚本。pkg 已过白名单，可安全内插。
+
+        跟随前台（auto_pkg）时每次都顺带探一次前台包名（@@FOCUS 段），与各项
+        指标走同一条 adb 取回，不必为它单独再起一个 adb 进程（老实现每 10 次采样
+        就多一次进程创建，纯属浪费）。前台包名只用于刷新后续采样的 pkg，本身不
+        参与差分，因此拿不到（设备忙）时留空即可，不影响整机指标。
+
+        GFX / PSS / PID 这些「按包名取数」的段，只在 pkg 已知时才拼进脚本——
+        跟随前台但还没探到前台包名时，自然先只采整机指标。
+        """
+        # 仅跟随前台模式下带 @@FOCUS；其余模式（全系统 / 锁定包名）不需要。
+        focus = ("echo @@FOCUS; dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -4; "
+                 if self.auto_pkg else "")
         pkg = self.pkg
         if not pkg:
             return ("echo @@STAT; head -1 /proc/stat; "
                     "echo @@MEM; head -8 /proc/meminfo; "
+                    + focus +
                     "echo @@BATT; dumpsys battery 2>/dev/null")
         return (
             "echo @@STAT; head -1 /proc/stat; "
             "echo @@MEM; head -8 /proc/meminfo; "
-            "echo @@PID; P=$(pidof %s 2>/dev/null | tr ' ' '\\n' | head -1); echo \"$P\"; "
+            "echo @@PID; P=$(pidof " + pkg + " 2>/dev/null | tr ' ' '\\n' | head -1); echo \"$P\"; "
             "echo @@PSTAT; [ -n \"$P\" ] && cat /proc/$P/stat 2>/dev/null; "
-            "echo @@GFX; dumpsys gfxinfo %s 2>/dev/null | head -80; "
-            "echo @@PSS; dumpsys meminfo %s 2>/dev/null | grep -E '^[[:space:]]*TOTAL' "
+            "echo @@GFX; dumpsys gfxinfo " + pkg + " 2>/dev/null | head -80; "
+            "echo @@PSS; dumpsys meminfo " + pkg + " 2>/dev/null | grep -E '^[[:space:]]*TOTAL' "
             "| head -3; "
-            "echo @@BATT; dumpsys battery 2>/dev/null"
-            % (pkg, pkg, pkg))
-
-    def _detect_focus(self):
-        """探测前台包名（仅在用户没填包名时用）。失败保持原值。"""
-        try:
-            r = self._run(["shell", "dumpsys window 2>/dev/null "
-                                   "| grep -E 'mCurrentFocus|mFocusedApp' | head -4"])
-            pkg = parse_focus_pkg(r.stdout if r.returncode == 0 else "")
-        except Exception:
-            return
-        if pkg and _PKG_RE.match(pkg):
-            self.pkg = pkg
-            self.info["pkg"] = pkg
+            + focus +
+            "echo @@BATT; dumpsys battery 2>/dev/null")
 
     def _read_device_info(self):
         try:
@@ -567,25 +573,40 @@ class PerfMonitor:
                 break
 
     def _baseline(self):
-        """先取一次差分基线，让第一帧就有真实 CPU% 而不是空白。"""
+        """先取一次差分基线，让第一帧就有真实 CPU% 而不是空白。
+
+        跟随前台时顺手把前台包名也记下来（@@FOCUS 段就在同一条脚本里），免得
+        _collect 第一帧还拿不到 pkg、采不到应用级指标。
+        """
         try:
             raw = self._run(["shell", self._script()]).stdout
         except Exception:
             return
         sec = _split_sections(raw)
         self._prev = self._diff_state(sec)
+        if self.auto_pkg:
+            self._apply_focus(self._prev)
 
     def _diff_state(self, sec):
         stat = parse_proc_stat(sec.get("STAT", ""))
         proc = parse_pid_stat(sec.get("PSTAT", ""))
-        frames, janky, _jank_cum = parse_gfxinfo_detail(sec.get("GFX", ""))
+        frames, janky, jank_cum = parse_gfxinfo_detail(sec.get("GFX", ""))
+        # 前台包名只在跟随前台模式下解析（system / manual 模式根本不含 @@FOCUS 段，
+        # 解析了也没人用）；它不参与差分，纯属给下一帧刷新 pkg 用。
+        focus = parse_focus_pkg(sec.get("FOCUS", "")) if self.auto_pkg else ""
         return {"t": time.time(), "stat": stat, "proc": proc,
-                "frames": frames, "janky": janky}
+                "frames": frames, "janky": janky, "jank_cum": jank_cum,
+                "focus": focus}
+
+    def _apply_focus(self, cur):
+        """用本次采样探到的前台包名刷新 pkg（仅跟随前台模式、且确实探到时）。"""
+        focus = cur.get("focus") or ""
+        if focus and _PKG_RE.match(focus):
+            self.pkg = focus
+            self.info["pkg"] = focus
 
     def _collect(self):
         """采一次样，返回 sample dict（失败返回 None）。"""
-        if self.auto_pkg and (self._tick % FOCUS_REDETECT_TICKS == 0 or not self.pkg):
-            self._detect_focus()
         try:
             r = self._run(["shell", self._script()])
         except Exception as ex:
@@ -599,11 +620,17 @@ class PerfMonitor:
         now = time.time()
         prev = self._prev or {}
         cur = self._diff_state(sec)
+        if self.auto_pkg:
+            self._apply_focus(cur)
         dt = (cur["t"] - prev.get("t", now)) if prev else self.interval
         mem = parse_meminfo(sec.get("MEM", ""))
         batt = parse_battery(sec.get("BATT", "")) or {}
         pss = parse_dumpsys_meminfo(sec.get("PSS", ""))
-        frames, janky, jank_cum = parse_gfxinfo_detail(sec.get("GFX", ""))
+        # 直接复用 _diff_state 里已经解析好的 GFX 结果，不必再解析一次 @@GFX 段
+        # （老实现这里重复调用了 parse_gfxinfo_detail，等于白干一遍字符串解析）。
+        frames = cur["frames"]
+        janky = cur["janky"]
+        jank_cum = cur["jank_cum"]
         prev_frames = prev.get("frames")
         dframes = (frames - prev_frames
                    if frames is not None and prev_frames is not None else None)
@@ -629,10 +656,8 @@ class PerfMonitor:
 
     # ---------------- 线程 ----------------
     def start(self):
-        """探测设备信息 + 取基线 + 起线程。返回 (ok, 错误说明)。"""
+        """探测设备信息 + 取基线 + 起线程。返回 (ok, 错误说明）。"""
         self._read_device_info()
-        if self.auto_pkg:
-            self._detect_focus()
         self.info["started_at"] = datetime.datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S")
         self._baseline()
@@ -660,7 +685,6 @@ class PerfMonitor:
                     self._seq += 1
                     sample["seq"] = self._seq
                     self._samples.append(sample)
-            self._tick += 1
             wait = self.interval - (time.time() - t0)
             if wait > 0:
                 self._stop.wait(wait)

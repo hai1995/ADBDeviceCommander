@@ -52,8 +52,6 @@ ADBDeviceCommander/
 │   ├── win_theme.py      # 原生标题栏套用界面深色（DWM 属性，Win10/11，纯逻辑可单测）
 │   └── envcheck.py       # 启动前环境预检（WebView2/依赖/adb，纯判定可单测）
 ├── adb_inject.py         # 纯逻辑：adb/scrcpy 的 -s 自动拼接（可单测）
-├── commands.json   # 快捷指令（可随时编辑）
-├── config.json           # 运行时生成的用户配置（默认值版随 dist 分发；属个人数据，不进源码包）
 ├── requirements.txt      # 依赖（pywebview / webview 运行时）
 ├── build.py              # PyInstaller 一键打包成 exe
 ├── assets/app.ico        # 程序图标
@@ -107,27 +105,19 @@ python build.py --dry-run      # 只打印将要执行的 PyInstaller 命令
 python build.py --no-deps      # 跳过依赖检查与自动安装
 ```
 
-产物为 `dist\ADB设备指令台.exe`，并把 `commands.json`、`config.json`、`assets\`、
-`使用说明.txt` 放到 exe 同目录（可编辑的那份）。`frontend/` 只打进 exe 内部；分发的
-`dist\` 内容：
+产物为 `dist\ADB设备指令台.exe` 与 `使用说明.txt` 两项，放在同一目录即可双击运行。
+`frontend/` 只打进 exe 内部（界面代码，使用者无需也不会去改）；分发的 `dist\` 内容：
 
 | 文件 | 说明 |
 | --- | --- |
 | `ADB设备指令台.exe` | 主程序（单文件，双击运行，无需 Python） |
-| `commands.json` | 快捷指令（**可编辑**，改完重启生效） |
-| `config.json` | 各项配置（保存目录 / adb 目录 / 全部开关与过滤条件），**可编辑**；每次启动自动加载，界面改动即时写回 |
-| `assets\` | 图标等资源 |
 | `使用说明.txt` | 给使用同事的简明说明 |
 
-> **关键约定**：`commands.json` / `config.json` / `assets` / `使用说明.txt` 必须与
-> exe 同目录，运行时通过 `resource_path()` 优先读同目录那份，编辑即生效；分发时务必连
-> json 一起拷。
->
-> `config.json` 由 build.py 按 `core.prefs.PREFS_DEFAULTS`（默认值单一来源）**现生成**，
-> 而不是拷贝工程目录里的同名文件——那份是开发者本人的个人配置（含本机绝对路径），
-> 不能随分发改出去。且 **dist/ 里已有 config.json 时绝不覆盖**：同事调好的设置不会
-> 因你重打包而复位。它也刻意**不打进 exe 内部**——写进 `_MEIPASS` 解包临时目录会
-> 「重启即丢」（`tests/test_build.py` / `tests/test_core_prefs.py` 均有回归断言）。
+> **刻意不随版本分发的内容**：`commands.json`（快捷指令库）与 `config.json`（各项配置）
+> 都是「用户使用后才在 exe 同目录产生的个人数据」——前者首次打开自动生成默认指令库，
+> 后者在用户第一次改动设置时落盘（启动时若缺失则全部走界面默认值）。把它们打进每个版本，
+> 同事重装 / 升级就会覆盖掉自己先前调好的命令库与设置，因此 dist/ 里只给 exe 与说明，
+> 运行时缺失时程序均会自动重建默认值。`assets/` 仅构建期用于 exe 图标，也不随分发目录提供。
 
 > **首次运行弹「WebView2 Runtime 未安装 / 版本过旧」**：Web 版界面依赖 Windows 的
 > WebView2 Runtime（需 **121 及以上**），较新 Win10/11 已自带；缺失请到
@@ -148,10 +138,10 @@ python build.py --package      # exe 打完后，再压一个 ADBDeviceCommander
 python build.py --package --zip   # 同时产出发给同事的分发件 + 源码分发包
 ```
 
-产物 `dist\ADBDeviceCommander_v<版本>_win64.zip` 里是 `exe + commands.json +
-使用说明.txt + assets\ + config.json`，套在与 zip 同名的顶层目录下。以前是手工
-「右键压缩 dist 目录」，三个坑都踩过：漏了 `assets`（同事那边没图标）、漏了
-`commands.json`（指令页空的）、把自己的 `config.json`（含本机绝对路径）发出去。
+产物 `dist\ADBDeviceCommander_v<版本>_win64.zip` 里是 `exe + 使用说明.txt`，
+套在与 zip 同名的顶层目录下。分发包刻意只含这两项：`commands.json` / `config.json`
+是用户使用后才产生的个人数据，打了反而会让同事重装覆盖自己先前的命令库与设置；`assets/`
+仅构建期用于 exe 图标、不随分发目录提供。
 
 > 名字里的 `_win64` 不是装饰：更新检查按这个后缀从 Release 资产里挑 Windows 包
 > （`core.update.ASSET_SUFFIX`），改名会让自动更新退化成「随便挑一个 zip」。
@@ -253,7 +243,7 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 | 忽略项 | 原因 |
 | --- | --- |
 | `config.json` / `settings.json` | 运行时个人配置，含本机绝对路径 |
-| `commands.json` | 用户个人命令库（含私人 adb 指令 / 项目内部命令），**不进仓库**，首次启动自动生成默认示例；打包时 `build.py` 自动补一份默认进 exe / 同目录 |
+| `commands.json` | 用户个人命令库（含私人 adb 指令 / 项目内部命令），**不进仓库**、也不随 dist 分发；首次启动在运行目录自动生成默认示例（避免覆盖用户已有命令库） |
 | `*.wav` | 设备音频回环的调试录音（`adb_devaudio_<序列号>_<时间>.wav`），运行产物 |
 | `.git-credential` | 推送凭证 |
 | `dist/` `build/` `dist_stage/` `*.spec` `*.exe` | 打包产物 |
@@ -261,7 +251,7 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 | `tests/frontend/node_modules/` | 前端测试依赖（约 26 MB，`npm i` 可重建） |
 | `crash_*.log` | 崩溃日志，含 traceback 与本机路径 |
 
-`commands.json`（快捷指令库）**不**进仓库——它是用户个人命令集合（可能含私人 / 内部指令），按 `config.json` 同类处理。仓库里没有时，程序首次启动会在运行目录自动生成一份默认示例，`build.py` 也会在打包前自动补一份默认 `commands.json` 进 exe / 同目录；因此干净检出既能正常打包、首次打开也有命令可用。
+`commands.json`（快捷指令库）**不**进仓库、也**不**随 dist 分发——它是用户个人命令集合（可能含私人 / 内部指令），按 `config.json` 同类处理：仓库里没有时，程序首次启动会在运行目录自动生成一份默认示例；因此干净检出运行时首次打开也有命令可用，而重新分发不会覆盖用户已有的命令库。
 
 ---
 
@@ -337,9 +327,9 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
   全部即时落盘到 exe 旁的 **`config.json`**，每次启动自动恢复以往配置；任一修改
   实时同步到相关控件，留空 / 缺省回退默认（保存目录留空回退
   `%USERPROFILE%/Pictures/ADB` 或 `$HOME/Pictures/ADB`）。
-  打包后的 `dist\` 自带一份**默认值版** `config.json`（打开目录即可看到全部可配置项，
-  可直接用记事本编辑）；运行时若文件缺失（手动删过 / 从源码直接跑），启动时会按
-  默认值自动补建一份——「每次启动都加载以往的设置」始终有着落。
+  首次运行若在 exe 同目录未发现 `config.json`，程序会全部走界面默认值；用户在界面
+  改动任意设置后才会落盘一份 `config.json`。`dist\` 不再自带 `config.json`——避免重装 /
+  升级覆盖同事先前调好的设置（打开目录看不到配置项属正常，改动一次即生成）。
 - **配置可拷贝、可跨设备同步**：所有设置集中在这**一个** `config.json` 里
   （位置在「关于」页可直接看到，点「打开目录」即可定位）。把它拷到另一台电脑的
   程序目录下，全部设置（开关 / 过滤条件 / 保存路径）一并同步过去。

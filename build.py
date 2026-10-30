@@ -28,19 +28,15 @@
 | 文件              | 说明                                       |
 | ----------------- | ------------------------------------------ |
 | ADB设备指令台.exe | 主程序（双击运行，无需 Python）            |
-| commands.json | 快捷指令（**可编辑**，改完重启生效）     |
-| config.json       | 各项配置的默认值模板（**可编辑**；程序每次启动从中加载，改动即时记忆） |
 | 使用说明.txt      | 给使用同事的简明说明                       |
-| assets/           | 图标等资源                                 |
 
-`frontend/` 只打进 exe 内部（界面代码，不需要也不应被使用者改），
-`commands.json` / `config.json` / `使用说明.txt` / `assets/` 则 exe 内一份、
-同目录一份——运行时 `core.constants.resource_path()` 优先读同目录那份，所以改同目录的 json 立即生效。
+`frontend/`（界面代码）只打进 exe 内部，使用者无需也不会去改。
 
-其中 `config.json` 是**运行时生成、而非拷贝工程目录里的同名文件**：工程根下的
-config.json 是开发者自己的个人配置（含本机绝对路径），绝不能随分发改出去；
-打包时改由 `core.prefs.PREFS_DEFAULTS`（默认值单一来源）现生成一份默认模板，
-且 **dist/ 里已有 config.json 时绝不覆盖**——同事调好的设置不会因你重打包而丢。
+`commands.json`（快捷指令库）与 `config.json`（各项配置）**刻意不随版本分发**：
+它们都是「用户使用后才在 exe 同目录产生的个人数据」——前者首次打开自动生成默认
+指令库，后者在用户第一次改动设置时落盘（启动时若缺失则全部走界面默认值）。把它们
+打进每个版本，同事重装 / 升级就会覆盖掉自己先前调好的命令库与设置，这正是要避免的。
+运行时缺失时程序均会自动重建默认值，无需打包自带。
 
 Windows 打包被占用（杀毒扫描 / exe 还在运行）时的行为
 --------------------------------------------------
@@ -61,7 +57,6 @@ import shutil
 import subprocess
 import sys
 import zipfile
-import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -71,22 +66,23 @@ APP_NAME = "ADB设备指令台"
 # 打进 exe 内部的数据文件：(源路径, 包内目标目录)，PyInstaller --add-data 语法。
 # frontend 必须进包：否则打包后 resource_path() 找不到 index.html，窗口会空白。
 BUNDLED_DATA = [
-    ("commands.json", "."),
     ("使用说明.txt", "."),
-    ("assets", "assets"),
     ("frontend", "frontend"),
 ]
 
-# ⚠️ config.json（用户配置）刻意**不进** BUNDLED_DATA，只由 ensure_default_config()
-# 生成到 exe 同目录。原因：一旦打进 exe 内部，当同目录那份缺失时
-# resource_path() 会回退返回 _MEIPASS 里的内置副本——而 _MEIPASS 是每次运行
-# 解压出来的临时目录，save_prefs() 写进去「重启即丢」，用户设置看起来保存
-# 成功、下次启动却全部复位，且没有任何报错。配置必须只有一个可写位置：
-# exe 同目录（tests/test_build.py 有回归断言守着这条）。
+# ⚠️ config.json（用户配置）刻意**不进** BUNDLED_DATA、也不在打包时生成：它完全是
+# 「用户使用后才产生」的个人数据（首次改动设置时由 core.prefs 落盘；启动时缺失
+# 则全部走界面默认值）。一旦打进 exe 内部，当同目录那份缺失时 resource_path() 会
+# 回退返回 _MEIPASS 里的内置副本——而 _MEIPASS 是每次运行解压出来的临时目录，
+# save_prefs() 写进去「重启即丢」，用户设置看起来保存成功、下次启动却全部复位。
+# 配置必须只有一个可写位置：exe 同目录（tests/test_build.py 有回归断言守着这条）。
 
 # 构建后再拷一份到 dist 的「可编辑 / 可见」文件：同目录优先于 exe 内置副本。
-SIDE_FILES = ["commands.json", "使用说明.txt"]
-SIDE_DIRS = ["assets"]
+# 仅 使用说明.txt：commands.json / config.json 都是「用户使用后才产生」的个人数据，
+# 刻意不随版本分发（否则同事重装会覆盖自己先前调好的命令库 / 设置）；运行时
+# core.commands / core.prefs 在缺失时自动生成默认值，无需打包自带。
+SIDE_FILES = ["使用说明.txt"]
+SIDE_DIRS = []
 
 # 构建期不需要进包的模块（缩小体积）：pytest 只在 tests/ 用，PIL 仅用于重生成图标。
 # cryptography：本项目不启用 pywebview 的 SSL 模式（webview.start 从不传 ssl=True），
@@ -333,10 +329,9 @@ def make_win_package(target: Path, dist_dir: Path = None,
 
     与 make_source_zip 的分工：
       * 源码包给「要看代码 / 想自己跑起来」的人，里面是 .py 与测试；
-      * 这个包给「只想用」的同事，里面是 exe + 可编辑的 json + 说明 + 图标。
-    以前每次发版都是手工把 dist 目录压一遍再发，压出来常常漏掉
-    commands.json / assets（同事那边图标没了、指令是空的），或者把
-    config.json 里自己的设置一起发出去。打成一条命令就没有这些手滑。
+      * 这个包给「只想用」的同事，里面只有 exe + 使用说明.txt。
+    commands.json / config.json 是用户使用后产生的个人数据，刻意不进分发包，
+    避免同事重装覆盖自己先前的命令库与设置；运行时缺失会自动重建默认值。
 
     包内同样套一层与 zip 同名的顶层目录：解压后不会把 exe 和一堆 json
     散落在下载文件夹里，也就不会出现「exe 与 json 不同目录、json 不生效」。
@@ -370,12 +365,6 @@ def make_win_package(target: Path, dist_dir: Path = None,
                     p = Path(dirpath) / fn
                     zf.write(p, top + "/" + p.relative_to(target).as_posix())
                     count += 1
-        # 默认配置模板：有它就等于「同事第一次打开就有一份完整可改的 config.json」，
-        # 不必等程序自己生成（程序也会生成，但用户会先看见目录里是空的）。
-        cfg = target / "config.json"
-        if cfg.is_file():
-            zf.write(cfg, top + "/config.json")
-            count += 1
     if missing:
         print("[警告] 分发件里缺少 %s（产物目录里没有）" % "、".join(missing),
               file=sys.stderr)
@@ -482,112 +471,11 @@ def copy_side_files(target: Path) -> list:
     return done
 
 
-def ensure_default_config(target: Path):
-    """在 exe 同目录生成默认 config.json，返回生成的路径（已存在 / 失败返回 None）。
-
-    为什么打包时就要带上配置文件：程序的所有设置（保存目录 / adb 目录 /
-    各开关与过滤条件）都记录在 exe 同目录的 config.json 里，每次启动从中
-    加载以往的配置。若 dist/ 里没有这个文件，用户打开目录看不到任何可配置
-    项，「设置记忆」也要等第一次改动某个开关才悄悄出现——观感上就是
-    「这程序不保存设置」。
-
-    两个关键约定：
-      * **默认值来自 core.prefs.PREFS_DEFAULTS**（schema 的单一来源），
-        不另存一份模板文件——两份必然漂移（模板少一个键，用户就少一项可配）；
-      * **绝不覆盖已存在的 config.json**：dist/ 里那份可能是同事调好的设置，
-        重打包不该把它打回默认值（commands.json 可覆盖是因为它随源码
-        分发、以工程版本为准；config.json 是用户数据，以用户版本为准）。
-    """
-    # core.prefs 只依赖标准库 + core.constants（同为纯标准库），构建期导入安全；
-    # 放函数内而非模块顶层：--zip-only 等不碰配置的路径无需付这个 import。
-    from core.prefs import PREFS_FILE, default_prefs_json
-    cfg = target / PREFS_FILE
-    if cfg.exists():
-        return None
-    try:
-        cfg.write_text(default_prefs_json(), encoding="utf-8")
-    except OSError as e:
-        print("[警告] 生成默认配置 %s 失败：%s（不影响运行，首次改动设置时"
-              "程序会自行创建）" % (cfg, e), file=sys.stderr)
-        return None
-    return cfg
-
-
-def ensure_default_commands_json(root: Path = ROOT):
-    """在打包根目录保证有一份 commands.json（用户命令库）。
-
-    commands.json 是「用户个人命令库」，含私人指令，刻意不进 git（见 .gitignore
-    与 README「进仓库的是什么」），但打包需要它作为 exe 内置副本与同目录可编辑
-    文件。仓库里没有时，这里生成一份默认示例（与程序首次启动自动生成的内容一致），
-    保证干净检出也能正常打包、首次打开就有命令可用。
-
-    绝不覆盖已存在的 commands.json：那是用户 / 同事的真实命令库，以用户版本为准。
-    """
-    from core.commands import (PRIMARY_COMMAND_FILE, DEMO_COMMANDS,
-                              _write_json_atomic)
-    p = os.path.join(str(root), PRIMARY_COMMAND_FILE)
-    if os.path.exists(p):
-        return None
-    try:
-        # _write_json_atomic 内部用 `path + ".tmp"` 拼接，要求传入字符串路径
-        # （与 core.commands 其余调用方一致），故此处用 os.path.join 而非 Path。
-        _write_json_atomic(p, DEMO_COMMANDS)
-    except Exception as e:
-        print("[警告] 生成默认 %s 失败：%s（打包将缺少命令库，首次启动程序会"
-              "自动重建）" % (PRIMARY_COMMAND_FILE, e), file=sys.stderr)
-        return None
-    return Path(p)
-
-
-def validate_commands_json(path):
-    """校验 commands.json 是否可被程序正常加载，返回 (is_valid, errors, warnings)。
-
-    只做「结构性」检查（不依赖运行时 core.commands，保持构建脚本零业务依赖）：
-      * 能被 JSON 解析；
-      * 顶层是「数组」或「对象」（core.commands.normalize_commands 只认这两种）；
-      * 若是数组，元素应为对象——非对象元素会被运行时跳过，这里记一条 warnings，
-        不计入 errors（那是 normalize_commands 的容错范畴，不致命）。
-    不深入检查每条命令的内部字段。errors 为空即视为 is_valid。
-    """
-    errors = []
-    warnings = []
-    if not path.exists():
-        return False, ["文件不存在：%s" % path], []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        return False, ["JSON 解析失败：%s" % e], []
-    except OSError as e:
-        return False, ["读取失败：%s" % e], []
-    if isinstance(data, list):
-        bad = [i + 1 for i, c in enumerate(data) if not isinstance(c, dict)]
-        if bad:
-            shown = "、".join(str(x) for x in bad[:10])
-            warnings.append("有 %d 条命令不是对象（第 %s 条等），会被运行时跳过"
-                           % (len(bad), shown))
-    elif not isinstance(data, dict):
-        return False, ["顶层结构既不是数组也不是对象（实际：%s），程序将无法加载"
-                       % type(data).__name__], []
-    return (len(errors) == 0), errors, warnings
-
-
-def _warn_bad_commands_json(path):
-    """打包前对 commands.json 做结构校验，仅告警不中止（用户数据优先）。"""
-    ok, errors, warnings = validate_commands_json(path)
-    for e in errors:
-        print("[错误] commands.json：%s" % e, file=sys.stderr)
-    for w in warnings:
-        print("[警告] commands.json：%s" % w, file=sys.stderr)
-    if not ok:
-        print("        该文件会被原样打进分发包，同事打开后命令库可能为空 / "
-              "程序提示「未就绪」。请修复或删除该文件（删除后打包会重新生成默认库）。",
-              file=sys.stderr)
 def verify_dist(target, mode, exe):
-    """产物完整性自检：确认 exe 与「可编辑同目录文件」都确实落盘，返回问题列表。
+    """产物完整性自检：确认 exe 与可编辑同目录文件（使用说明.txt）都确实落盘。
 
-    手工分发包最易漏 commands.json / assets（同事那边图标没了、指令是空的），
-    或漏了 exe。这里在打包收尾自动核对一遍，缺项返回给 main 打印告警，
-    避免发出残包。返回空列表即视为通过。
+    手工分发包最易漏 使用说明.txt 或 exe 本体，这里在打包收尾自动核对一遍，
+    缺项返回给 main 打印告警，避免发出缺文件的残包。返回空列表即视为通过。
     """
     problems = []
     if not exe.exists():
@@ -690,17 +578,6 @@ def main(argv=None) -> int:
         ensure_deps([("pyinstaller", "打包工具"), ("pywebview", "运行时宿主，打包期需可导入")],
                     auto_install=True)
 
-    # 1.5) 保证 commands.json 存在：它是用户个人命令库，刻意不进 git（见
-    # .gitignore 与 README），但打包需要它作为 exe 内置副本与同目录可编辑文件。
-    # 仓库里没有时自动生成一份默认示例（与程序首次启动生成的一致），干净检出也
-    # 能正常打包；该文件被 SOURCE_ZIP_EXCLUDE_FILES 排除，不会漏进源码分发包。
-    ensure_default_commands_json(ROOT)
-
-    # 1.6) commands.json 结构校验（仅告警，不阻断）：万一用户手改的命令库是
-    # 损坏的 JSON 或顶层不是数组 / 对象，程序启动会直接「未就绪」。这里打个提前量，
-    # 让打包者知道，而不是等同事打开才发现问题。运行时 load_commands 自身对坏条目
-    # 有容错（跳过并告警），所以这里不中止构建——用户数据优先。
-    _warn_bad_commands_json(ROOT / "commands.json")
 
     # 2) 资源自检（缺 frontend 会导致打包后窗口空白，必须拦住）
     missing = check_sources()
@@ -777,15 +654,9 @@ def main(argv=None) -> int:
 
     copied = copy_side_files(target)
     print("[4/4] 已拷贝同目录文件：%s" % "、".join(copied))
-    # 默认 config.json：没有它，用户目录里看不到任何可配置项，设置记忆也要等
-    # 第一次改动开关才悄悄出现（观感＝「程序不保存设置」）。
-    cfg = ensure_default_config(target)
-    if cfg is not None:
-        print("       已生成默认配置 %s（全部配置项 + 默认值，可手动编辑；"
-              "若已存在则原样保留，不覆盖用户的设置）" % cfg.name)
 
     # 6) 产物完整性自检（仅告警）：确认 exe 与「可编辑同目录文件」都确实落盘。
-    # 手工分发包常漏 commands.json / assets（同事那边图标没了、指令是空的），
+    # 核对 exe 本体与 使用说明.txt 是否落盘，避免发出缺文件的残包。
     # 这里自动核对一遍，缺项直接提示，避免发出残包。
     problems = verify_dist(target, args.mode, exe)
     if problems:
@@ -799,7 +670,7 @@ def main(argv=None) -> int:
         make_win_package(target, args.dist_dir)
 
     print("\n打包完成：%s（%.1f MB）" % (exe, exe.stat().st_size / 1024 / 1024))
-    print("把整个 %s 目录一起拷给同事（exe 与 json 必须同目录，json 才 editable）。" % target)
+    print("把整个 %s 目录一起拷给同事（ADB设备指令台.exe 与 使用说明.txt 必须同目录）。" % target)
     print("提示：同事机器若报「WebView2 Runtime 未安装 / 过旧」，到 "
           "https://developer.microsoft.com/microsoft-edge/webview2/ 装运行库即可。")
     return 0

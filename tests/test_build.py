@@ -95,11 +95,9 @@ def test_stage_dir_is_under_work_dir():
 def test_real_project_sources_are_complete():
     """真实工程下入口与全部「需提交」数据文件都必须存在。
 
-    commands.json 是用户个人命令库，刻意不进 git（见 .gitignore），由
-    ensure_default_commands_json 在打包前自动生成——干净检出里本就允许缺失，
-    故先跑一遍该生成步骤（与 main() 的 1.5 步一致）再校验其余资源齐全。
+    commands.json / config.json 是用户使用后才产生的个人数据（刻意不进 git，
+    也刻意不进 BUNDLED_DATA），干净检出里本就允许缺失；这里只校验其余资源齐全。
     """
-    build.ensure_default_commands_json(ROOT)   # 复刻打包前的自动生成步骤
     assert build.check_sources() == []
 
 
@@ -486,29 +484,9 @@ def test_publish_from_stage_lock_error_is_actionable(tmp_path, monkeypatch, caps
 
 
 # ---------------------------------------------------------------------------
-# 默认 config.json：打包产物自带配置文件（用户设置跨启动记忆的载体）
+# 分发产物内容：只含 exe + 使用说明.txt（config.json / commands.json / assets
+# 都是用户个人数据 / 非必需资源，刻意不随版本分发，避免覆盖用户已有设置）
 # ---------------------------------------------------------------------------
-def test_ensure_default_config_creates_defaults(tmp_path):
-    """dist/ 里没有 config.json → 生成一份全量默认值模板（不缺项）。"""
-    from core.prefs import PREFS_DEFAULTS
-
-    cfg = build.ensure_default_config(tmp_path)
-    assert cfg is not None and cfg.exists()
-    assert cfg.name == "config.json"
-    data = json.loads(cfg.read_text(encoding="utf-8"))
-    assert data == PREFS_DEFAULTS
-
-
-def test_ensure_default_config_never_overwrites_user_settings(tmp_path):
-    """已有 config.json → 原样保留（重打包不能把用户的设置打回默认值）。"""
-    cfg = tmp_path / "config.json"
-    cfg.write_text('{"save_dir": "D:\\\\mine", "keep_input": false}',
-                   encoding="utf-8")
-    assert build.ensure_default_config(tmp_path) is None
-    data = json.loads(cfg.read_text(encoding="utf-8"))
-    assert data == {"save_dir": "D:\\mine", "keep_input": False}
-
-
 def test_config_json_is_not_bundled_inside_exe():
     """config.json 只放 exe 同目录，绝不进 BUNDLED_DATA / SIDE_FILES。
 
@@ -520,8 +498,21 @@ def test_config_json_is_not_bundled_inside_exe():
     assert "config.json" not in build.SIDE_FILES
 
 
-def test_main_publishes_default_config_into_dist(monkeypatch, tmp_path):
-    """主流程：打包完成后 dist/ 里必须有一份默认 config.json。"""
+def test_personal_data_and_assets_are_not_bundled():
+    """commands.json / config.json / assets 都不应进 BUNDLED_DATA 或 SIDE_FILES /
+    SIDE_DIRS：它们是用户个人数据 / 非必需资源，随版本分发会覆盖用户已有设置
+    或白胖包体（回归锁定 `dist/` 只含 exe + 使用说明.txt）。"""
+    bundled = [src for src, _ in build.BUNDLED_DATA]
+    for name in ("commands.json", "config.json", "assets"):
+        assert name not in bundled, "%s 不应进 BUNDLED_DATA" % name
+        assert name not in build.SIDE_FILES, "%s 不应进 SIDE_FILES" % name
+        assert name not in build.SIDE_DIRS, "%s 不应进 SIDE_DIRS" % name
+
+
+def test_main_publishes_only_exe_and_readme(monkeypatch, tmp_path):
+    """主流程：产物目录只含 exe 与 使用说明.txt；不自带 config.json /
+    commands.json / assets（它们是用户使用后才产生的个人数据 / 非必需资源，
+    随版本分发会覆盖用户已有的命令库与设置，或白胖包体）。"""
     exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
     staged = tmp_path / "build" / "dist_stage"
     staged.mkdir(parents=True)
@@ -533,24 +524,25 @@ def test_main_publishes_default_config_into_dist(monkeypatch, tmp_path):
     rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
                      "--dist-dir", str(tmp_path / "dist")])
     assert rc == 0
-    cfg = tmp_path / "dist" / "config.json"
-    assert cfg.exists(), "dist/ 必须自带默认 config.json"
-    data = json.loads(cfg.read_text(encoding="utf-8"))
-    assert data["save_dir"] == "" and data["keep_input"] is True
-    # 与 commands.json 等同目录文件一起发布
-    assert (tmp_path / "dist" / "commands.json").exists()
+    dist = tmp_path / "dist"
+    assert (dist / exe_name).exists(), "exe 必须存在"
+    assert (dist / "使用说明.txt").exists(), "使用说明.txt 必须存在"
+    # 刻意不随版本分发：避免覆盖用户已有的个人数据
+    assert not (dist / "config.json").exists(), "config.json 不应随版本分发"
+    assert not (dist / "commands.json").exists(), "commands.json 不应随版本分发"
+    assert not (dist / "assets").exists(), "assets/ 不再随版本分发"
 
 
-def test_main_keeps_existing_dist_config(monkeypatch, tmp_path):
-    """主流程：dist/ 已有 config.json 时不被默认模板覆盖（用户的设置优先）。"""
+def test_main_preserves_existing_user_data(monkeypatch, tmp_path):
+    """主流程：dist/ 里用户已有的 config.json / commands.json 不被删除或覆盖。"""
     exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
     staged = tmp_path / "build" / "dist_stage"
     staged.mkdir(parents=True)
     (staged / exe_name).write_bytes(b"MZ" * (2 * 1024 * 1024))
     dist = tmp_path / "dist"
     dist.mkdir(parents=True)
-    (dist / "config.json").write_text('{"save_dir": "D:\\\\kept"}',
-                                      encoding="utf-8")
+    (dist / "config.json").write_text('{"save_dir": "D:\\\\kept"}', encoding="utf-8")
+    (dist / "commands.json").write_text('[{"id": "mine"}]', encoding="utf-8")
     monkeypatch.setattr(build, "check_sources", lambda: [])
     monkeypatch.setattr(build, "clean_junk", lambda root: [])
     monkeypatch.setattr(build, "_file_locked", lambda p: False)
@@ -558,15 +550,18 @@ def test_main_keeps_existing_dist_config(monkeypatch, tmp_path):
     rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
                      "--dist-dir", str(dist)])
     assert rc == 0
+    # 用户的个人数据原样保留（构建脚本既不删也不改）
     data = json.loads((dist / "config.json").read_text(encoding="utf-8"))
     assert data == {"save_dir": "D:\\kept"}
+    assert json.loads((dist / "commands.json").read_text(encoding="utf-8")) == \
+        [{"id": "mine"}]
 
 
 # ---------------------------------------------------------------------------
 # 分发件（--package）：给「只想用」的同事的那个 zip
 # ---------------------------------------------------------------------------
 def _fake_dist(tmp_path, version="2026.1103.1200", with_exe=True):
-    """造一个「dist/ 已经打完」的目录：exe + 可编辑文件 + 默认配置。"""
+    """造一个「dist/ 已经打完」的目录：exe + 可编辑的同目录文件（使用说明.txt）。"""
     root = tmp_path / "proj"
     (root / "core").mkdir(parents=True)
     (root / "core" / "constants.py").write_text(
@@ -577,13 +572,10 @@ def _fake_dist(tmp_path, version="2026.1103.1200", with_exe=True):
         (dist / (build.APP_NAME + (".exe" if os.name == "nt" else ""))).write_bytes(b"MZ")
     for rel in build.SIDE_FILES:
         (dist / rel).write_text("x", encoding="utf-8")
-    (dist / "assets").mkdir()
-    (dist / "assets" / "app.ico").write_bytes(b"ico")
-    (dist / "config.json").write_text('{"save_dir": ""}', encoding="utf-8")
     return root, dist
 
 
-def test_win_package_contains_exe_and_editable_files(tmp_path):
+def test_win_package_contains_exe_and_readme(tmp_path):
     root, dist = _fake_dist(tmp_path)
     zp = build.make_win_package(dist, tmp_path / "out", root=root)
     assert zp.exists()
@@ -591,11 +583,12 @@ def test_win_package_contains_exe_and_editable_files(tmp_path):
     names = zipfile.ZipFile(zp).namelist()
     top = zp.stem + "/"
     assert top + (build.APP_NAME + (".exe" if os.name == "nt" else "")) in names
-    # 少一个文件同事那边就是「指令是空的 / 图标没了」，逐个都盯着
+    # 分发件只含 exe + 使用说明.txt；commands.json / config.json / assets 都是
+    # 用户个人数据 / 非必需资源，刻意不进包（避免覆盖同事已有的设置），逐个盯着
     for rel in build.SIDE_FILES:
         assert top + rel in names, "%s 应在分发件里" % rel
-    assert top + "assets/app.ico" in names
-    assert top + "config.json" in names
+    assert top + "config.json" not in names, "个人配置不进分发件"
+    assert top + "assets/app.ico" not in names, "assets 不再随版本分发"
 
 
 def test_win_package_is_wrapped_in_single_top_dir(tmp_path):
@@ -612,7 +605,7 @@ def test_win_package_is_wrapped_in_single_top_dir(tmp_path):
 def test_win_package_warns_when_exe_missing(tmp_path, capsys):
     root, dist = _fake_dist(tmp_path, with_exe=False)
     zp = build.make_win_package(dist, tmp_path / "out", root=root)
-    assert zp.exists()                     # 仍然出包（至少 json / 说明还在）
+    assert zp.exists()                     # 仍然出包（至少 使用说明.txt 还在）
     assert "缺少" in capsys.readouterr().err
 
 
@@ -627,48 +620,6 @@ def test_win_package_name_matches_update_asset_suffix():
     assert build.win_package_name().startswith("ADBDeviceCommander_v")
 
 
-def test_validate_commands_json_valid_list(tmp_path):
-    p = tmp_path / "commands.json"
-    p.write_text(json.dumps([{"id": "1", "name": "x",
-                             "commands": ["adb devices"]}]), encoding="utf-8")
-    ok, errs, warns = build.validate_commands_json(p)
-    assert ok and errs == [] and warns == []
-
-
-def test_validate_commands_json_valid_dict_of_values(tmp_path):
-    p = tmp_path / "commands.json"
-    p.write_text(json.dumps({"g1": {"id": "1", "name": "x"}}), encoding="utf-8")
-    ok, errs, warns = build.validate_commands_json(p)
-    assert ok and errs == [] and warns == []
-
-
-def test_validate_commands_json_malformed_json(tmp_path):
-    p = tmp_path / "commands.json"
-    p.write_text("{ 这不是合法 json", encoding="utf-8")  # 解析必然失败
-    ok, errs, warns = build.validate_commands_json(p)
-    assert not ok and errs and warns == []
-
-
-def test_validate_commands_json_bad_top_level(tmp_path):
-    p = tmp_path / "commands.json"
-    p.write_text(json.dumps(42), encoding="utf-8")  # 顶层是数字，不被支持
-    ok, errs, warns = build.validate_commands_json(p)
-    assert not ok and errs and warns == []
-
-
-def test_validate_commands_json_non_dict_items_warn(tmp_path):
-    p = tmp_path / "commands.json"
-    p.write_text(json.dumps(["字符串不是命令", {"id": "1"}]), encoding="utf-8")
-    ok, errs, warns = build.validate_commands_json(p)
-    # 顶层是合法数组 → is_valid；但含非对象元素 → 记 warnings（不致命）
-    assert ok and errs == [] and warns
-
-
-def test_validate_commands_json_missing_file(tmp_path):
-    ok, errs, warns = build.validate_commands_json(tmp_path / "nope.json")
-    assert not ok and errs and warns == []
-
-
 def test_verify_dist_ok(tmp_path):
     target = tmp_path / "dist"
     target.mkdir()
@@ -676,8 +627,6 @@ def test_verify_dist_ok(tmp_path):
     exe.write_bytes(b"MZ" * (2 * 1024 * 1024))
     for rel in build.SIDE_FILES:
         (target / rel).write_text("x", encoding="utf-8")
-    (target / "assets").mkdir()
-    (target / "assets" / "app.ico").write_bytes(b"x")
     problems = build.verify_dist(target, "onefile", exe)
     assert problems == [], problems
 
@@ -686,13 +635,13 @@ def test_verify_dist_reports_missing(tmp_path):
     target = tmp_path / "dist"
     target.mkdir()
     exe = target / (build.APP_NAME + ".exe")
-    # 故意不写 exe、不写同目录文件、不建 assets
+    # 故意不写 exe、不写同目录文件（使用说明.txt）
     problems = build.verify_dist(target, "onefile", exe)
     joined = "\n".join(problems)
     assert "主程序缺失" in joined
-    assert "commands.json" in joined
-    # 主程序缺失 + SIDE_FILES 每项缺失(2) + SIDE_DIRS 缺失(1) = 至少 4 条
-    assert len(problems) >= 4
+    assert "使用说明.txt" in joined
+    # 主程序缺失 + SIDE_FILES 每项缺失(1) = 至少 2 条（SIDE_DIRS 已为空）
+    assert len(problems) >= 2
 
 
 def test_verify_dist_flags_tiny_exe(tmp_path):
@@ -702,7 +651,5 @@ def test_verify_dist_flags_tiny_exe(tmp_path):
     exe.write_bytes(b"MZ")  # 远小于 _MIN_EXE_MB
     for rel in build.SIDE_FILES:
         (target / rel).write_text("x", encoding="utf-8")
-    (target / "assets").mkdir()
-    (target / "assets" / "app.ico").write_bytes(b"x")
     problems = build.verify_dist(target, "onefile", exe)
     assert any("体积异常" in p for p in problems)
