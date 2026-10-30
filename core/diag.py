@@ -14,8 +14,10 @@ core.diag —— 「一键诊断包」：把一次问题的现场证据收齐，
 设计要点
 --------
 * **尽量少的 adb 调用**：设备信息（getprop / wm / battery / df / meminfo /
-  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 5 次调用，
-  USB 上约 3~6 秒。
+  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 6 次调用
+  （含一次 `dumpsys meminfo`），USB 上约 4~8 秒。meminfo 只抽取头部的
+  汇总段（Total PSS by process / by category / Total RAM），**丢弃几 MB 的
+  进程详情**，既精准回答「谁在吃内存」（PSS 比 ps 的 RSS 更准）又不撑爆包体。
 * **每段独立失败**：logcat 拉不到、/data/anr 无权限，都只在该文件里写一行
   中文说明并记进清单，绝不让整包失败 —— 收集现场时「有 4 份、缺 1 份」远好过
   「什么都没有」。
@@ -27,6 +29,7 @@ core.diag —— 「一键诊断包」：把一次问题的现场证据收齐，
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -52,6 +55,7 @@ F_LOGCAT = "logcat.txt"      # 日志尾部
 F_PROCESS = "process.txt"    # 进程 + 内存 TOP
 F_APPS = "apps.txt"          # 已安装应用（第三方 + 系统包名清单）
 F_ANR = "anr.txt"            # 前台 Activity / ANR / tombstone 线索
+F_MEMINFO = "meminfo.txt"    # 内存分页明细（PSS by process TOP N + 汇总）
 F_META = "meta.json"         # 清单
 
 
@@ -151,6 +155,84 @@ def process_report(text, limit=PROC_TOP_N):
     head.append("")
     head.append("== ps 原始输出 ==")
     return "\n".join(head) + "\n" + (text or "")
+
+
+# ---------------------------------------------------------------------------
+# 解析：dumpsys meminfo 内存分页明细
+# ---------------------------------------------------------------------------
+def _meminfo_summary_block(text):
+    """从 `dumpsys meminfo` 输出里抽取头部汇总段（丢弃几 MB 的进程详情）。
+
+    返回从「Total PSS by process:」到「Total RAM:」之间的文本——这一段同时
+    覆盖 by process / by OOM adjustment / by category 三个汇总表与全局 Total RAM
+    画像，是诊断「谁在吃内存」最有价值、体积又最小的部分。老 ROM 没有这些标记
+    时返回空串（调用方据此写失败原因，绝不抛异常）。
+    """
+    if not text:
+        return ""
+    start = text.find("Total PSS by process:")
+    if start < 0:
+        return ""
+    end = text.find("Total RAM:", start)
+    if end < 0:
+        return text[start:]
+    # 含 Total RAM 那一行（其后的 Free/Used/Lost RAM 也一并保留，画像更完整）
+    nl = text.find("\n", end)
+    return text[start:(nl if nl > 0 else len(text))]
+
+
+def parse_meminfo(text):
+    """解析 `dumpsys meminfo` 的「Total PSS by process」段。
+
+    返回 [(pss_kb, name, pid_or_none)]，按 PSS 降序。每行形如
+    `  123456 kB: com.abc (pid 1234) (foreground)`，不同 ROM 还可能带
+    `(uid NNN)` 或没有 pid；name 会剔除这些括号后缀。认不出 PSS 数字的行
+    （如总计行）会被忽略。
+    """
+    block = _meminfo_summary_block(text)
+    # 只解析 by process 段：by OOM / by category 段也有「NNN kB: 名字」格式，
+    # 会把 Native/Dalvik/Foreground 之类错当成进程，必须限定在 process 段内。
+    m = re.search(r"Total PSS by process:\s*(.*?)(?=Total PSS by |\Z)",
+                  block, re.S)
+    if m:
+        block = m.group(1)
+    rows = []
+    for ln in block.splitlines():
+        m = re.match(r"^\s*(\d+)\s*kB:\s*(.+?)\s*$", ln)
+        if not m:
+            continue
+        try:
+            pss = int(m.group(1))
+        except ValueError:
+            continue
+        name = m.group(2)
+        pid = None
+        pm = re.search(r"\(pid\s+(\d+)\)", name)
+        if pm:
+            pid = int(pm.group(1))
+            name = name[:pm.start()].strip()
+        rows.append((pss, name, pid))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return rows
+
+
+def meminfo_report(text, limit=PROC_TOP_N):
+    """把 `dumpsys meminfo` 整理成「分页明细 TOP N + 内存汇总段」的文本。"""
+    rows = parse_meminfo(text)[:max(1, int(limit or 1))]
+    head = ["== 内存分页明细 TOP %d（PSS，来自 dumpsys meminfo）==" % len(rows)]
+    if rows:
+        for pss, name, _pid in rows:
+            head.append("  %-40s %12s" % (name, _mb(pss)))
+    else:
+        head.append("  （未能从 meminfo 输出里解析出 PSS 分段，见下方原始汇总）")
+    head.append("")
+    block = _meminfo_summary_block(text)
+    head.append("== dumpsys meminfo 内存汇总 ==")
+    if block.strip():
+        head.append(block.strip())
+    else:
+        head.append("（无汇总段：部分精简 ROM 不输出 Total PSS by process）")
+    return "\n".join(head) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +420,18 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("进程列表读取失败")
 
+        # ---- 2.5) 内存分页明细（dumpsys meminfo 的 PSS 汇总段）----
+        rc, out, err = ctx.run(["shell", "dumpsys", "meminfo"], timeout=TIMEOUT)
+        mem_text = (meminfo_report(out) if (rc == 0 and out.strip())
+                    else "（读取内存分页明细失败：%s）\n"
+                         % (err or "dumpsys meminfo 无输出").strip()[:200])
+        size = _write(os.path.join(work, F_MEMINFO), mem_text)
+        ctx.record(F_MEMINFO, bool(rc == 0 and out.strip()),
+                   size, "adb shell dumpsys meminfo",
+                   "" if rc == 0 else (err or "")[:200])
+        if rc != 0:
+            manifest["notes"].append("内存分页明细读取失败")
+
         # ---- 3) 应用清单 ----
         rc3, out3, _e3 = ctx.run(["shell", "pm", "list", "packages", "-3"],
                                  timeout=TIMEOUT)
@@ -388,7 +482,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
                 for fn in (F_DEVICE, F_PROPS, F_LOGCAT, F_PROCESS, F_APPS,
-                           F_ANR, F_META):
+                           F_ANR, F_MEMINFO, F_META):
                     p = os.path.join(work, fn)
                     if os.path.exists(p):
                         z.write(p, fn)

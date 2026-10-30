@@ -26,6 +26,71 @@ PS_OLD = (
     "  100 root     0:01:02  8000 system_server\n"
 )
 
+MEMINFO_SAMPLE = (
+    "Applications Memory Usage (in Kilobytes):\n"
+    "Uptime: 123456789 Realtime: 123456789\n"
+    "\n"
+    "Total PSS by process:\n"
+    "   234567 kB: com.big.app (pid 1234) (foreground)\n"
+    "    65432 kB: com.small.app (pid 4321)\n"
+    "    12345 kB: system (pid 567)\n"
+    "Total PSS by OOM adjustment:\n"
+    "   234567 kB: Foreground\n"
+    "    65432 kB: Visible\n"
+    "Total PSS by category:\n"
+    "   120000 kB: Native\n"
+    "    80000 kB: Dalvik\n"
+    "Total RAM: 8000000 kB\n"
+    " Free RAM: 2000000 kB\n"
+    " Used RAM: 5000000 kB\n"
+    " Lost RAM: 100000 kB\n"
+)
+
+
+def test_parse_meminfo_extracts_by_process_only():
+    """只解析 by process 段：by OOM / by category 的 Native/Dalvik/Foreground
+    不能被错当成进程。"""
+    rows = diag.parse_meminfo(MEMINFO_SAMPLE)
+    names = [r[1] for r in rows]
+    assert "com.big.app" in names
+    assert "com.small.app" in names
+    assert "system" in names
+    assert "Native" not in names
+    assert "Dalvik" not in names
+    assert "Foreground" not in names
+    # 按 PSS 降序
+    assert [r[0] for r in rows] == [234567, 65432, 12345]
+
+
+def test_parse_meminfo_pulls_pid_and_strips_suffix():
+    rows = diag.parse_meminfo(MEMINFO_SAMPLE)
+    big = [r for r in rows if r[1] == "com.big.app"][0]
+    assert big[2] == 1234
+    small = [r for r in rows if r[1] == "com.small.app"][0]
+    assert small[2] == 4321
+
+
+def test_parse_meminfo_empty_and_no_marker():
+    assert diag.parse_meminfo("") == []
+    assert diag.parse_meminfo("no meminfo markers here") == []
+
+
+def test_meminfo_report_has_top_n_and_summary():
+    txt = diag.meminfo_report(MEMINFO_SAMPLE, limit=2)
+    assert "内存分页明细 TOP 2" in txt
+    assert "com.big.app" in txt and "com.small.app" in txt
+    head, _, tail = txt.partition("== dumpsys meminfo 内存汇总 ==")
+    assert "system" not in head          # TOP 2 明细不含第三名
+    assert "system" in tail              # 但汇总段保留完整 by process
+    assert "== dumpsys meminfo 内存汇总 ==" in txt
+    assert "Total RAM: 8000000 kB" in txt   # 汇总段保留全局画像
+    assert "Native" in txt                  # by category 也进了汇总段
+
+
+def test_meminfo_report_falls_back_when_no_block():
+    txt = diag.meminfo_report("nothing useful")
+    assert "未能从 meminfo" in txt or "无汇总段" in txt
+
 
 def _props_block():
     return (
@@ -60,6 +125,8 @@ def make_runner(ps=PS_NEW, logcat_supports_t=True, anr_ok=True,
             return 0, apps3, ""
         if a.startswith("shell pm list packages"):
             return 0, apps_all, ""
+        if a.startswith("shell dumpsys meminfo"):
+            return 0, MEMINFO_SAMPLE, ""
         if a.startswith("shell dumpsys"):
             if not anr_ok:
                 return 0, "", "Permission denied"
@@ -172,7 +239,8 @@ def test_collect_produces_zip_with_all_parts(tmp_path):
     with zipfile.ZipFile(z) as zf:
         names = zf.namelist()
         assert names == [diag.F_DEVICE, diag.F_PROPS, diag.F_LOGCAT,
-                         diag.F_PROCESS, diag.F_APPS, diag.F_ANR, diag.F_META]
+                         diag.F_PROCESS, diag.F_APPS, diag.F_ANR,
+                         diag.F_MEMINFO, diag.F_META]
         meta = json.loads(zf.read(diag.F_META).decode("utf-8"))
         assert meta["serial"] == "SERIAL1"
         assert meta["device"]["model"] == "Pixel 7"
@@ -182,6 +250,8 @@ def test_collect_produces_zip_with_all_parts(tmp_path):
         assert "ro.product.model" in zf.read(diag.F_PROPS).decode("utf-8")
         assert "com.big.app" in zf.read(diag.F_PROCESS).decode("utf-8")
         assert "a.b" in zf.read(diag.F_APPS).decode("utf-8")
+        assert "com.big.app" in zf.read(diag.F_MEMINFO).decode("utf-8")
+        assert "Total RAM" in zf.read(diag.F_MEMINFO).decode("utf-8")
 
 
 def test_collect_without_logcat_omits_file(tmp_path):
@@ -238,6 +308,24 @@ def test_collect_section_failure_still_produces_zip(tmp_path):
     assert flags[diag.F_APPS] is False
     assert flags[diag.F_DEVICE] is True
     assert "诊断包" in diag.summary_line(z, man) or "已保存" in diag.summary_line(z, man)
+
+
+def test_collect_meminfo_failure_still_produces_zip(tmp_path):
+    """meminfo 段读不到（dumpsys 无权限 / 精简 ROM）时只记失败，整包照常产出。"""
+    def runner(args, timeout):
+        if " ".join(args).startswith("shell dumpsys meminfo"):
+            return 1, "", "Permission denied"
+        return make_runner()(args, timeout)
+
+    z, man, err = diag.collect("adb", "S1", str(tmp_path), with_logcat=False,
+                               runner=runner)
+    assert err is None and z
+    flags = {p["name"]: p["ok"] for p in man["parts"]}
+    assert flags[diag.F_MEMINFO] is False
+    assert flags[diag.F_DEVICE] is True          # 其它段不受牵连
+    with zipfile.ZipFile(z) as zf:
+        assert diag.F_MEMINFO in zf.namelist()
+        assert "失败" in zf.read(diag.F_MEMINFO).decode("utf-8")
 
 
 def test_collect_runner_raises_is_contained(tmp_path):
