@@ -28,7 +28,6 @@ import zipfile
 import itertools
 import datetime
 import tempfile
-
 from core.constants import (
     VERSION, AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
     resource_path,
@@ -81,33 +80,15 @@ from backend.perf_service import (
     pkg_display as perf_pkg_display, list_packages as perf_list_installed,
 )
 
-# 默认性能阈值随控制器一起暴露（`ctrl.PERF_THRESHOLDS`）：前端「阈值」页与
-# 测试都按这个名字读，属于有意对外的常量，不是顺手留下的无用导入。
 PERF_THRESHOLDS = DEFAULT_THRESHOLDS
-
-# 同时监控的设备数上限。每台一条采样线程、每 tick 一次 adb shell；超过这个数
-# 后新增设备只是在 adb 的调用队列里排队，采样间隔会被拉长、曲线出现假台阶。
 PERF_MAX_DEVICES = 4
-# 已安装应用列表的缓存时长（秒）：够点几次下拉框都命中，又不会在装/卸应用后
-# 一直拿着旧列表（真要立刻刷新，下拉框里有「刷新」按钮）。
 PERF_PKG_CACHE_S = 120
-
-# 退出交互式子 shell 的命令（`exit` / `exit 1`，PowerShell 与 sh 都认）。
-# 命中后要把会话的直通态复位，否则后续命令再也拿不到输出边界。
 _EXIT_RE = re.compile(r"^exit(?:\s+-?\d+)?$", re.IGNORECASE)
-
-# 「打开下载页」允许的主机：只放开 GitHub 自家的下载域名。
-# 这个白名单存在的意义不是防用户（用户点的是自己程序给的链接），而是防
-# **更新源被换掉之后** 有人拿一条 http://随便什么域名/b.exe 的响应，让程序
-# 直接给用户打开一个可执行文件下载——那等于把「装什么」的决定权交出去了。
-# 内网自建更新源另有出口：`update_feed` 的主机会自动加入白名单（见 update_open）。
 _UPDATE_HOSTS = (
     "github.com", "api.github.com", "codeload.github.com",
     "objects.githubusercontent.com", "raw.githubusercontent.com",
     "github-releases.githubusercontent.com",
 )
-
-
 def _host_allowed(url: str, extra=()) -> bool:
     """URL 是否为 http(s) 且主机在白名单（或 extra）内。"""
     from urllib.parse import urlparse
@@ -126,13 +107,8 @@ def _host_allowed(url: str, extra=()) -> bool:
             return True
     return False
 
-
-class WebApi:
-    """pywebview js_api：前端 window.pywebview.api.<method> 的调用面。
-
-    所有可能阻塞的方法（设备刷新 / 命令执行）都在后台线程运行，
-    主调用线程只做登记与立即返回，结果经 bus 事件异步送达前端。
-    """
+class WebApiBase:
+    """WebApi 基：共享状态/生命周期/事件桥/点击计数/状态查询/手册。"""
 
     def __init__(self, bus=None, state=None, workers=None, devices=None,
                  session_factory=ShellSession, auto_update=True):
@@ -223,9 +199,6 @@ class WebApi:
         # 上次检查完成的时间戳（节流依据）。0 = 本会话还没查过。
         self._update_last_ts = 0.0
 
-    # ------------------------------------------------------------------
-    # 生命周期
-    # ------------------------------------------------------------------
     def boot(self):
         """前端加载完成后调用：加载命令、建立会话、启动自动轮询、首刷设备。"""
         if self.state.shutting_down:
@@ -368,18 +341,9 @@ class WebApi:
                 pass
         return {"ok": True}
 
-    # ------------------------------------------------------------------
-    # 事件桥（前端轮询拉取）
-    # ------------------------------------------------------------------
-    # 单次最多取 2000 条事件、且其中日志行合计不超过 2000 行。
-    # 行限流是必须的：logcat 启动瞬间一个 append 就带几百行，只按条数限流
-    # 会让单次返回达到几十万行，JSON 传输 + 前端解析足以让界面失去响应。
     def take_events(self):
         return self.bus.take(max_n=2000, max_lines=2000)
 
-    # ------------------------------------------------------------------
-    # 内部：事件推送
-    # ------------------------------------------------------------------
     def _on_session_output(self, text):
         """ShellSession 标准输出回调 -> 指令台 out 事件。"""
         self.bus.push("console", {"kind": "out", "text": text})
@@ -415,9 +379,6 @@ class WebApi:
             self.bus.push("stop_state", {"running": busy})
         return busy
 
-    # ------------------------------------------------------------------
-    # 快捷指令点击计数（防抖写回 commands.json）
-    # ------------------------------------------------------------------
     def _bump_click(self, cmd_id):
         """一次快捷指令点击 -> 内存 +1，并确保存在防抖落盘 Timer。"""
         with self._click_lock:
@@ -441,9 +402,30 @@ class WebApi:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # 设备
-    # ------------------------------------------------------------------
+    def get_state(self):
+        """调试 / 对账用：一次性取后端状态快照。"""
+        snapshot = self.state.snapshot()
+        snapshot["devices"] = self.devices.get_items()
+        snapshot["workers"] = self.workers.running_keys()
+        return snapshot
+
+    def get_manual(self):
+        """读使用说明文本（README 风格、随 exe 内置副本，不再以独立文件随包分发）。
+
+        关于页的「使用说明」子 tab 直接渲染这里返回的内容，避免再维护一份
+        与仓库 使用说明.txt 脱节的硬编码文案。路径优先 exe 同目录那份、
+        否则回退到 PyInstaller 解包副本（resource_path 统一处理）。
+        """
+        try:
+            path = resource_path("使用说明.txt")
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception as ex:  # noqa: BLE001 — 兜底给前端一个可读错误，不抛异常卡住桥接
+            return {"ok": False, "reason": "使用说明读取失败：%s" % ex}
+        return {"ok": True, "text": text}
+
+class DeviceMixin:
+    """设备：刷新、开关、选中。"""
+
     def refresh_devices(self):
         """手动刷新（后台执行，完成/失败以 status 事件回报）。"""
         if self.state.shutting_down:
@@ -488,9 +470,11 @@ class WebApi:
     def selected_serials(self):
         return self.devices.selected_serials()
 
-    # ------------------------------------------------------------------
-    # 指令执行
-    # ------------------------------------------------------------------
+class CommandMixin:
+    """快捷指令：执行、保存、导入导出、自定义、停止。"""
+
+    DEFAULT_CMD_TIMEOUT = 120
+
     def run_command(self, cmd_id):
         """下发一条快捷指令（可多设备循环，线程内执行）。"""
         if self.state.shutting_down:
@@ -801,9 +785,6 @@ class WebApi:
         self._sync_stop_state(interactive=False)
         return {"ok": True}
 
-    # ------------------------------------------------------------------
-    # 内部：命令执行骨架（线程内运行）
-    # ------------------------------------------------------------------
     def _execute(self, cmd_obj):
         """执行一条快捷指令：按需逐设备循环 + 每条命令带 delay。
 
@@ -925,10 +906,6 @@ class WebApi:
         self._push_status("info", "✓ 完成")
         return True
 
-    # 单条非交互命令的兜底超时（秒）。config.json 的 cmd_timeout 可覆盖，
-    # 0 表示不限制（自己知道某条命令要跑很久时才这么设）。
-    DEFAULT_CMD_TIMEOUT = 120
-
     def _cmd_timeout(self):
         """本条序列里非交互命令的超时秒数；None 表示不限制。"""
         try:
@@ -937,9 +914,6 @@ class WebApi:
             v = self.DEFAULT_CMD_TIMEOUT
         return v if v > 0 else None
 
-    # ------------------------------------------------------------------
-    # root / unroot 切换保护
-    # ------------------------------------------------------------------
     def _skip_root_switch(self, cmd, serial):
         """本条命令是否应跳过（不下发）：root 状态切换的两种「跳过」情形。
 
@@ -1018,9 +992,9 @@ class WebApi:
                 return
             time.sleep(0.05)
 
-    # ------------------------------------------------------------------
-    # 自动轮询（防拔线 / 状态漂移的静默守护）
-    # ------------------------------------------------------------------
+class AutoRefreshMixin:
+    """自动轮询与孤儿回收（录屏/工具/录制）。"""
+
     def _start_auto_refresh(self):
         if self._auto_started or self.state.shutting_down:
             return
@@ -1061,9 +1035,6 @@ class WebApi:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # 录屏进程意外死亡（adb root / 设备重启 adbd）的自动收尾
-    # ------------------------------------------------------------------
     def _reap_dead_recordings(self):
         """发现「无人停止却退出」的录屏进程即派后台 worker 自动收尾。
 
@@ -1160,9 +1131,6 @@ class WebApi:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # 输出区操作
-    # ------------------------------------------------------------------
     def clear_output(self):
         self.bus.push("console", {"kind": "clear"})
         return {"ok": True}
@@ -1171,9 +1139,9 @@ class WebApi:
         self.bus.push("status", {"type": "clear"})
         return {"ok": True}
 
-    # ==================================================================
-    # Logcat 监控（实时渲染）
-    # ==================================================================
+class LogcatMixin:
+    """logcat 实时监控与抓取。"""
+
     def logcat_start(self, serial, buffers, level_filter=None,
                      keyword="", only_exc=False):
         """对单台设备启动实时 logcat 监控。buffers 为缓冲区名列表。"""
@@ -1197,9 +1165,6 @@ class WebApi:
         self.bus.push("logcat", {"serial": serial, "status": "clear"})
         return {"ok": True}
 
-    # ==================================================================
-    # Logcat 抓取（落盘 txt / zip）
-    # ==================================================================
     def logcat_capture_start(self, serial, save_dir, buffers, level_filter=None):
         if not serial:
             return {"ok": False, "reason": "no_device"}
@@ -1241,9 +1206,6 @@ class WebApi:
         self.logcat_capture.stop(serial, zip_on_stop=zip_on_stop)
         return {"ok": True}
 
-    # ==================================================================
-    # 工具：截图 / 录屏 / 录音
-    # ==================================================================
     def _default_save_dir(self):
         """本机实际生效的保存目录。
 
@@ -1266,7 +1228,9 @@ class WebApi:
         """
         return {"ok": True, "dir": self._default_save_dir()}
 
-    # ---- 用户配置（config.json：保存目录 / adb 路径 / 全部开关）----
+class SettingsMixin:
+    """设置、adb 状态、Wi-Fi 无线调试。"""
+
     def save_settings(self, patch):
         """合并保存用户偏好；adb_dir 变更即时生效（前插到进程 PATH）。
 
@@ -1353,9 +1317,6 @@ class WebApi:
             return [serial]
         return self.devices.selected_serials()
 
-    # ------------------------------------------------------------------
-    # 无线调试（Wi-Fi ADB）
-    # ------------------------------------------------------------------
     def _adb_argv(self):
         """当前 adb 可执行文件（-s 之外的所有 adb 调用都走这里）。"""
         return getattr(self.state, "adb_path", "") or "adb"
@@ -1531,9 +1492,9 @@ class WebApi:
         return {"ok": ok_any, "port": p, "results": results,
                 "address": first_addr}
 
-    # ------------------------------------------------------------------
-    # APK 安装
-    # ------------------------------------------------------------------
+class ApkMixin:
+    """APK 选择/安装。"""
+
     def apk_pick(self):
         """弹原生文件对话框选一个 APK，只记路径（不读字节）。"""
         if self.state.shutting_down:
@@ -1671,9 +1632,9 @@ class WebApi:
             self._push_status("ok", "✓ %s 已安装到 %d 台设备" % (name, ok_count),
                               toast=True)
 
-    # ------------------------------------------------------------------
-    # 设备信息快照
-    # ------------------------------------------------------------------
+class DeviceInfoMixin:
+    """设备信息、诊断包收集。"""
+
     def device_info(self, serial):
         """一次 adb shell 取回型号 / 版本 / 分辨率 / 电量 / 存储 / 内存。"""
         if self.state.shutting_down:
@@ -1698,9 +1659,6 @@ class WebApi:
                 "rows": [[k, v] for k, v in rows],
                 "text": devinfo.as_text(info)}
 
-    # ------------------------------------------------------------------
-    # 诊断包（一键收集现场证据 -> zip）
-    # ------------------------------------------------------------------
     def diag_options(self):
         """诊断包卡的默认值（来自 config.json，单一数据源）。"""
         try:
@@ -1788,9 +1746,9 @@ class WebApi:
         elif failed:
             self._push_toast("err", "⚠ 诊断包收集失败：%s" % "；".join(failed)[:160])
 
-    # ------------------------------------------------------------------
-    # 版本更新（发现新版本 -> 弹窗提示去下载，见 core/update.py）
-    # ------------------------------------------------------------------
+class UpdateMixin:
+    """版本更新检查/下载/跳过。"""
+
     def _update_feed(self):
         """用户配置的更新源；返回空串表示「用内置的多源列表」。
 
@@ -1964,38 +1922,8 @@ class WebApi:
                 pass        # 检查更新出任何问题都不能拖垮这条后台线
             self._update_sleep(updater.CHECK_INTERVAL_S)
 
-
-    def _mic_start(self, save_dir):
-        """启动电脑麦克风录音；任何一步失败都返回 (False, 人话原因)，**绝不外抛**。
-
-        早前这里只 try 了构造函数，`MicRecorder.start()` 裸调 —— 而 start() 内部的
-        `_open()` 在 `waveInOpen` 失败（无麦克风设备 / 被隐私策略禁用 / 设备被占用）
-        时会抛 RuntimeError。异常一路逃出 js_api 调用，且此时 `_screen_record_start_locked`
-        已把 `_rec_session` 置为非空：异常跳过 `_cancel_half_started_rec()`，会话残留
-        导致之后每次「开始录屏」都被守卫判为 recording 返回 —— 录屏功能永久锁死，
-        用户只能重启程序。故这里对 start() 同样兜住，并顺手清掉半初始化的实例
-        （否则 `_mic` 非 None 会让下次 `_mic_start` 误报「已在录音」）。
-        """
-        if self._mic is not None:
-            return False, "已在录音"
-        try:
-            self._mic = MicRecorder()
-        except Exception as e:
-            self._mic = None
-            return False, str(e)
-        try:
-            ok, p = self._mic.start(save_dir)
-        except Exception as e:
-            try:
-                self._mic.stop()
-            except Exception:
-                pass
-            self._mic = None
-            return False, str(e)
-        if not ok:
-            self._mic = None
-            return False, p
-        return True, p
+class ScreenshotMixin:
+    """截图（单设备/批量/剪贴板）。"""
 
     def screenshot(self, serial=None, to_clipboard=None):
         """对勾选（或指定）设备各截一张 PNG。
@@ -2154,7 +2082,41 @@ class WebApi:
             # 单设备：tool 事件即时推（前端可据此刷新缩略图等）
             self.bus.push("tool", payload)
 
-    # ---- 录屏（视频 + 可选设备音频 + 可选电脑麦克风 + ffmpeg 合成）----
+class RecordMixin:
+    """录屏、投屏（scrcpy/备用）、麦克风。"""
+
+    def _mic_start(self, save_dir):
+        """启动电脑麦克风录音；任何一步失败都返回 (False, 人话原因)，**绝不外抛**。
+
+        早前这里只 try 了构造函数，`MicRecorder.start()` 裸调 —— 而 start() 内部的
+        `_open()` 在 `waveInOpen` 失败（无麦克风设备 / 被隐私策略禁用 / 设备被占用）
+        时会抛 RuntimeError。异常一路逃出 js_api 调用，且此时 `_screen_record_start_locked`
+        已把 `_rec_session` 置为非空：异常跳过 `_cancel_half_started_rec()`，会话残留
+        导致之后每次「开始录屏」都被守卫判为 recording 返回 —— 录屏功能永久锁死，
+        用户只能重启程序。故这里对 start() 同样兜住，并顺手清掉半初始化的实例
+        （否则 `_mic` 非 None 会让下次 `_mic_start` 误报「已在录音」）。
+        """
+        if self._mic is not None:
+            return False, "已在录音"
+        try:
+            self._mic = MicRecorder()
+        except Exception as e:
+            self._mic = None
+            return False, str(e)
+        try:
+            ok, p = self._mic.start(save_dir)
+        except Exception as e:
+            try:
+                self._mic.stop()
+            except Exception:
+                pass
+            self._mic = None
+            return False, str(e)
+        if not ok:
+            self._mic = None
+            return False, p
+        return True, p
+
     def screen_record_start(self, serial=None,
                             with_devaudio=False, with_mic=False, save_dir=None,
                             with_logcat=False, zip_on_stop=False,
@@ -2337,7 +2299,6 @@ class WebApi:
         self._restore_overlays(sess)
         self._rec_session = {}
 
-    # ---- 可视化 overlay（pointer_location 指针位置 / show_touches 触摸圆点）----
     def _enable_overlay(self, serial, key, prev_field):
         """打开设备端 overlay（指针位置 / 触摸圆点），原值备份进会话（须持 _rec_lock）。
 
@@ -2551,7 +2512,6 @@ class WebApi:
                 pass
         return zip_path
 
-    # ---- 投屏（调用用户机器上已安装的 scrcpy，见 backend/scrcpy_service.py）----
     def _scrcpy_pref_path(self):
         """用户配置的 scrcpy 路径（读失败一律当空 = 走自动探测）。"""
         try:
@@ -2605,7 +2565,6 @@ class WebApi:
             "failed": [{"serial": s, "reason": r} for s, r in failed],
         }
 
-    # ---- 备用投屏：没装 scrcpy 时的两条退路（见 backend/mirror_service.py）----
     def _mirror_prefs(self):
         """备用投屏相关配置（读失败一律回退默认值，不让界面卡在异常上）。"""
         try:
@@ -2762,7 +2721,9 @@ class WebApi:
             "snap": [s for s, m in self._mirror_snaps.items() if m.alive()],
         }
 
-    # ---------------- 性能监控（CPU / 内存 / FPS / 电量 / 温度） ----------------
+class PerfMixin:
+    """性能监控（采样/阈值/报告/对比）。"""
+
     @staticmethod
     def _perf_label(info, serial):
         """报告里用的设备短名：型号 + 序列号尾部。
@@ -3081,6 +3042,16 @@ class WebApi:
                 "samples": total_samples, "sessions": len(saved),
                 "compare": compare, "errors": errors}
 
+class FileMixin:
+    """设备文件浏览/增删改/上传下载/预览。"""
+
+    _FILE_OP_LABELS = {
+            "_do_file_list": "列出目录", "_do_file_mkdir": "创建目录",
+            "_do_file_touch": "创建文件", "_do_file_remove": "删除",
+            "_do_file_rename": "重命名", "_do_file_upload_data": "上传",
+            "_do_file_download": "下载", "_do_file_view": "查看",
+        }
+
     def open_save_dir(self, dir_path=None):
         """在系统文件管理器打开保存目录（Windows 用 explorer / startfile）。"""
         d = (dir_path or "").strip() or self._default_save_dir()
@@ -3104,9 +3075,6 @@ class WebApi:
             self._push_status("err", "⚠ 无法打开目录 %s: %s" % (d, e))
             return {"ok": False, "text": str(e)}
 
-    # ==================================================================
-    # 文件管理
-    # ==================================================================
     @staticmethod
     def _parent_dir(path):
         p = (path or "/").rstrip("/")
@@ -3164,14 +3132,6 @@ class WebApi:
             return {"ok": False, "reason": "busy"}
         self.workers.spawn(k, self._run_file_op, do_fn, serial, *args)
         return {"ok": True}
-
-    # 文件操作的中文标签（仅用于把未预期异常翻译成人话）
-    _FILE_OP_LABELS = {
-        "_do_file_list": "列出目录", "_do_file_mkdir": "创建目录",
-        "_do_file_touch": "创建文件", "_do_file_remove": "删除",
-        "_do_file_rename": "重命名", "_do_file_upload_data": "上传",
-        "_do_file_download": "下载", "_do_file_view": "查看",
-    }
 
     def _run_file_op(self, do_fn, serial, *args):
         """后台执行文件操作，并把未预期异常转成用户可见的状态。
@@ -3330,26 +3290,10 @@ class WebApi:
             "note": res.get("note"),
         })
 
-    # ------------------------------------------------------------------
-    # 查询
-    # ------------------------------------------------------------------
-    def get_state(self):
-        """调试 / 对账用：一次性取后端状态快照。"""
-        snapshot = self.state.snapshot()
-        snapshot["devices"] = self.devices.get_items()
-        snapshot["workers"] = self.workers.running_keys()
-        return snapshot
+class WebApi(WebApiBase, DeviceMixin, CommandMixin, AutoRefreshMixin, LogcatMixin, SettingsMixin, ApkMixin, DeviceInfoMixin, UpdateMixin, ScreenshotMixin, RecordMixin, PerfMixin, FileMixin):
+    """pywebview js_api：前端 window.pywebview.api.<method> 的调用面。
 
-    def get_manual(self):
-        """读使用说明文本（README 风格、随 exe 内置副本，不再以独立文件随包分发）。
-
-        关于页的「使用说明」子 tab 直接渲染这里返回的内容，避免再维护一份
-        与仓库 使用说明.txt 脱节的硬编码文案。路径优先 exe 同目录那份、
-        否则回退到 PyInstaller 解包副本（resource_path 统一处理）。
-        """
-        try:
-            path = resource_path("使用说明.txt")
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
-        except Exception as ex:  # noqa: BLE001 — 兜底给前端一个可读错误，不抛异常卡住桥接
-            return {"ok": False, "reason": "使用说明读取失败：%s" % ex}
-        return {"ok": True, "text": text}
+    方法按领域拆分到上方各 mixin 类，由本类统一继承；
+    方法名与旧版完全一致，RPC 契约不变。
+    """
+    pass
