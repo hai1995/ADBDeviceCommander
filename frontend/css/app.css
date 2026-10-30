@@ -930,6 +930,10 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   padding: 9px 11px;
   font-family: var(--font-mono); font-size: var(--fs-md); line-height: 1.55;
   min-height: 0; overflow-anchor: none;
+  /* 选中复制：pywebview 默认全局禁文本选择（text_select=False），状态栏 /
+     指令输出已用同款手段局部放开（.out.console，见 510 行附近）。cursor 用
+     text 提示「这里可以框选」，与普通文本区一致。 */
+  user-select: text; -webkit-user-select: text; cursor: text;
 }
 /* contain 隔离每行布局/绘制：密集日志滚动流畅度的关键 */
 .lc-line { white-space: pre-wrap; word-break: break-all; padding: 1px 0; contain: layout style paint; }
@@ -946,6 +950,22 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   border-radius: 0 4px 4px 0;
 }
 .lc-line.raw { color: var(--muted); }
+
+/* 日志右键菜单（选中复制）：与指令区 ⋯ 菜单同一套视觉语言——深色渐变实底 +
+   发丝边 + 圆角 + 大阴影；由 JS 定位（跟随右键点，按视口收敛防裁边）。 */
+.ctx-menu {
+  position: fixed; z-index: 60; min-width: 128px;
+  display: flex; flex-direction: column; gap: 1px; padding: 4px;
+  background: linear-gradient(180deg, #1e2a39 0%, #151d27 100%);
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .55);
+}
+.ctx-menu-item {
+  display: block; width: 100%; text-align: left; padding: 6px 9px;
+  border: 0; background: none; border-radius: 6px; cursor: pointer;
+  color: var(--text-2); font-size: var(--fs-sm); white-space: nowrap;
+}
+.ctx-menu-item:hover { background: var(--accent-soft); color: #fff; }
 
 /* ---------------- Logcat 双卡：实时监控 / 落盘抓取 ----------------
    旧布局是「目录行 + 监控控制条 + 过滤条 + 抓取控制条 + 视图」五段平铺，

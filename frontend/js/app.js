@@ -1860,8 +1860,10 @@
     // 裁剪头部超出 DOM 上限的节点，维持稳定内存/节点数（Range 一次删一片）
     const over = view.childElementCount - LC_VIEW_MAX;
     if (over <= 0) return;
-    // 自动滚动时会直接滚到底，无需维护位置；回看时才需要补偿
-    const keepPos = !els.lcAuto.checked;
+    // 自动滚动时会直接滚到底，无需维护位置；回看时才需要补偿。
+    // 框选期间同样要补偿：选区存在时强滚已让路，trim 掉头部行若不补位置，
+    // 视图会整体上跳、选区跟着错位。
+    const keepPos = !els.lcAuto.checked || lcHasSelection();
     const before = keepPos ? view.scrollHeight : 0;
     trimHead(view, LC_VIEW_MAX);
     // 用 scrollHeight 差值一次性补偿，避免逐行读 offsetHeight 造成的强制同步布局
@@ -1870,6 +1872,14 @@
       if (delta > 0) view.scrollTop = Math.max(0, view.scrollTop - delta);
     }
   }
+  // 视图内是否存在未折叠选区（用户正在/已经框选日志）。自动滚动必须给它让路：
+  // 否则每个 append 都把视图拽到底，拖选时内容一直往下跑，根本选不中。选区
+  // 一出现就停止强滚；用户点空白处取消选区后，自动滚动自然恢复。
+  function lcHasSelection() {
+    const sel = window.getSelection && window.getSelection();
+    return !!(sel && !sel.isCollapsed && sel.anchorNode
+      && els.lcView.contains(sel.anchorNode));
+  }
   // 用 rAF 合并滚动请求，避免每个 append 事件都触发布局
   let lcScrollScheduled = false;
   function scheduleLcScroll() {
@@ -1877,7 +1887,9 @@
     lcScrollScheduled = true;
     const doScroll = () => {
       lcScrollScheduled = false;
-      if (els.lcAuto.checked) els.lcView.scrollTop = els.lcView.scrollHeight;
+      if (els.lcAuto.checked && !lcHasSelection()) {
+        els.lcView.scrollTop = els.lcView.scrollHeight;
+      }
     };
     if (window.requestAnimationFrame) window.requestAnimationFrame(doScroll);
     else setTimeout(doScroll, 16);
@@ -1922,6 +1934,73 @@
     view.innerHTML = "";
     view.appendChild(frag);
     if (els.lcAuto.checked) view.scrollTop = view.scrollHeight;
+  }
+  /* ---------------- 日志右键菜单（选中复制） ----------------
+     .lc-view 已用 CSS user-select:text 放开框选，Ctrl+C / 右键系统菜单里的
+     「复制」理论上可用；但 WebView2 系统菜单是英文、不可控，且用户最常用的
+     是「右键这一行 → 复制」。这里自绘一个与指令区 ⋯ 菜单同视觉的右键菜单：
+       有选区           → 「复制选中内容」
+       无选区、落在行上 → 「复制该行」
+     复制走全局 copyToClipboard（clipboard API 优先，老内核回退 execCommand）。 */
+  let lcMenuEl = null;
+  function lcMenuHide() {
+    if (lcMenuEl) { lcMenuEl.remove(); lcMenuEl = null; }
+  }
+  function copyLcText(text, label) {
+    if (!text) { pushStatus("warn", "没有可复制的内容"); return; }
+    copyToClipboard(text);
+    // flashCopy 只会让状态栏的「复制」按钮闪一下「已复制」；这里补一条带
+    // 行数的状态消息，用户不用挪视线就知道复制了多少。
+    pushStatus("ok", "✓ 已复制" + label + "（"
+      + (text.split("\n").length) + " 行）到剪贴板");
+  }
+  function lcMenuShow(x, y, items) {
+    lcMenuHide();
+    const m = document.createElement("div");
+    m.className = "ctx-menu";
+    for (const it of items) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "ctx-menu-item";
+      b.textContent = it.label;
+      b.addEventListener("click", () => { lcMenuHide(); it.fn(); });
+      m.appendChild(b);
+    }
+    document.body.appendChild(m);
+    // 先挂载再量尺寸：按视口收敛位置，贴边右键时菜单不被裁掉
+    const r = m.getBoundingClientRect();
+    m.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 8)) + "px";
+    m.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 8)) + "px";
+    lcMenuEl = m;
+  }
+  function initLcContextMenu() {
+    els.lcView.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();   // 始终拦掉 WebView2 系统菜单（英文且不可控）
+      const sel = window.getSelection && window.getSelection();
+      const selText = sel ? sel.toString() : "";
+      const items = [];
+      if (selText && sel.anchorNode && els.lcView.contains(sel.anchorNode)) {
+        items.push({ label: "复制选中内容", fn: () => copyLcText(selText, "选中内容") });
+      } else {
+        const line = ev.target && ev.target.closest
+          ? ev.target.closest(".lc-line") : null;
+        if (line) {
+          const t = line.textContent || "";
+          items.push({ label: "复制该行", fn: () => copyLcText(t, "日志行") });
+        }
+      }
+      if (!items.length) return;   // 空白处右键：无内容可复制，不弹菜单
+      lcMenuShow(ev.clientX, ev.clientY, items);
+    });
+    // 点菜单以外 / 视图滚动 / 窗口失焦 / Esc 都收起。pointerdown 用捕获：
+    // 菜单项自己的 click 在 pointerdown 之后，收起逻辑不能抢在它前面误删菜单。
+    window.addEventListener("pointerdown", (ev) => {
+      if (lcMenuEl && !lcMenuEl.contains(ev.target)) lcMenuHide();
+    }, true);
+    els.lcView.addEventListener("scroll", lcMenuHide, { passive: true });
+    window.addEventListener("blur", lcMenuHide);
+    window.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") lcMenuHide();
+    });
   }
   function onLogcatCapture(p) {
     if (p.status === "running") { lcCapRunning = true; els.lcCapStatus.textContent = "采集中…"; els.lcCapStop.disabled = false; els.lcCapStart.disabled = true; }
@@ -4477,6 +4556,8 @@
       callApi(api.logcat_clear(lcSerial));
     });
     els.lcSave.addEventListener("click", saveLogcat);
+    // 日志右键菜单（选中复制 / 复制该行）：依赖 els.lcView，绑一次即可
+    initLcContextMenu();
     // 关键字输入防抖：每敲一个字都全量重建 DOM 会明显卡顿（与
     // core/constants.LOGCAT_RERENDER_DEBOUNCE_MS 同值）。级别/仅异常是离散操作，
     // 立即生效，不防抖。关键字同时落盘（防抖末尾存一次，别每敲一个字写盘）。
