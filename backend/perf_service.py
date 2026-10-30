@@ -1018,8 +1018,35 @@ def _ts(sec, fmt="%H:%M:%S"):
     return datetime.datetime.fromtimestamp(sec, datetime.timezone.utc).astimezone().strftime(fmt)
 
 
+def _hover_strips(cells, y, ih, title_fn):
+    """把「像素列 → (时间, 数据)」画成一排透明热区，浏览器原生 <title> 出提示。
+
+    不逐点放热区 —— 两万个采样点就是两万个 rect，报告体积与渲染都吃不消；
+    按**像素列**合并后热区数量恒定不超过图表宽度，且相邻列首尾相接铺满整张
+    绘图区，鼠标停在曲线上任意位置都有提示。不写一行脚本：报告是双击打开的
+    离线文件，靠 SVG 内置的 <title> 就能出 tooltip，「双击即可看」仍然成立。
+    cells: {像素列x: (时间戳秒, 数据)}；title_fn(t, data) → 提示文本；
+    y/ih 热区纵向范围。
+    """
+    if not cells:
+        return []
+    xs = sorted(cells)
+    out = []
+    for k, cx in enumerate(xs):
+        left = cx if k == 0 else (xs[k - 1] + 1 + cx) // 2
+        right = cx if k == len(xs) - 1 else max(cx, (cx + xs[k + 1]) // 2)
+        t, data = cells[cx]
+        out.append(
+            '<rect x="%d" y="%d" width="%d" height="%d" fill="transparent">'
+            '<title>%s</title></rect>'
+            % (left, y, max(1, right - left + 1), ih, esc_html(title_fn(t, data))))
+    return out
+
+
 def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
-    """把一条指标画成内联 SVG（面积 + 折线 + 网格 + 首尾时间 + 超标色带）。
+    """把一条指标画成内联 SVG（面积 + 折线 + 网格 + 首尾时间 + 超标色带 +
+    悬停提示）。鼠标停在图上任意位置会浮出该时刻的时间与读数（SVG 原生
+    <title>，不需要脚本）。
 
     None 值（设备断连 / 应用重启）会**断开**折线而不是连成一条假的直线——
     报告里最忌讳把「没数据」画成「数据很好」。
@@ -1149,15 +1176,23 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
 
     t0 = samples[0].get("t") or 0
     t1 = samples[-1].get("t") or 0
+    # 悬停热区：同列多笔采样取最后一笔（与曲线最右端的最新读数一致）。
+    cols = {}
+    for i, v in pts:
+        if v is not None:
+            cols[int(x_of(i))] = (samples[i].get("t") or 0, v)
+    hots = _hover_strips(
+        cols, pad_t, ih,
+        lambda t, v: "%s  %s%s" % (_ts(t), _fmt(v), unit))
     return (
         '<svg viewBox="0 0 %d %d" preserveAspectRatio="none" class="chart" '
-        'width="100%%" height="%d">%s%s%s%s%s%s'
+        'width="100%%" height="%d">%s%s%s%s%s%s%s'
         '<text x="%d" y="%d" fill="#6e8299" font-size="9" font-family="monospace">%s</text>'
         '<text x="%d" y="%d" fill="#6e8299" font-size="9" text-anchor="end" '
         'font-family="monospace">%s</text>'
         '</svg>'
         % (w, h, h, "".join(grid), "".join(bands), "".join(areas),
-           "".join(thline), "".join(lines), "".join(thlabel),
+           "".join(thline), "".join(lines), "".join(hots), "".join(thlabel),
            pad_l, h - 6, _ts(t0), w - pad_r, h - 6, _ts(t1)))
 
 
@@ -1256,6 +1291,8 @@ def _alert_card_html(alerts, thresholds=None):
 def build_report_html(samples, info, thresholds=None, generated_at=None):
     """生成自包含的 HTML 报告（无外链、无脚本，双击即可看）。
 
+    图表带悬停提示：鼠标停在曲线上浮出该时刻的时间与读数（SVG 原生
+    <title>，无需脚本，离线双击可用）。
     thresholds 由调用方（controller）从用户配置解析后传入：None = 内置基线，
     {} = 用户关掉了全部告警。报告、界面、CSV 必须按同一份阈值判，缺一不可。
     """
@@ -1405,6 +1442,7 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
 
     不画超标色带：三条线叠在一起时，色带属于哪台设备无从分辨。改用「超标点
     打红点」—— 红点落在哪条线上，就是哪台设备在那一刻不达标，指认明确。
+    图上带悬停提示（SVG 原生 <title>）：停在任意时刻会列出每台设备的读数。
     """
     prepared, ts, vals = [], [], []
     for label, color, samples in series:
@@ -1511,15 +1549,34 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
                           "≥" if th_dir == "min" else "≤",
                           _fmt_tick(th_val, hi - lo), unit))
 
+    # 悬停热区（与单设备报告同一套路）：按像素列合并，一列一条提示，
+    # 列出该时刻**每台设备**的读数 —— 对比图的提示必须一次看全各家，不然
+    # 用户得在几条线之间来回找。
+    cols = {}
+    for label, _color, pts in prepared:
+        for t, v in pts:
+            if v is None:
+                continue
+            ent = cols.setdefault(int(x_of(t)), (t, {}))
+            ent[1][label] = v
+
+    def _cmp_title(t, per):
+        lines = [_ts(t)]
+        for label, v in per.items():
+            lines.append("%s  %s%s" % (label, _fmt(v), unit))
+        return "\n".join(lines)
+
+    hots = _hover_strips(cols, pad_t, ih, _cmp_title)
+
     return (
         '<svg viewBox="0 0 %d %d" preserveAspectRatio="none" class="chart" '
-        'width="100%%" height="%d">%s%s%s%s%s'
+        'width="100%%" height="%d">%s%s%s%s%s%s'
         '<text x="%d" y="%d" fill="#6e8299" font-size="9" font-family="monospace">%s</text>'
         '<text x="%d" y="%d" fill="#6e8299" font-size="9" text-anchor="end" '
         'font-family="monospace">%s</text>'
         '</svg>'
         % (w, h, h, "".join(grid), "".join(thline), "".join(lines),
-           "".join(dots), "".join(thlabel),
+           "".join(dots), "".join(hots), "".join(thlabel),
            pad_l, h - 6, _ts(t0), w - pad_r, h - 6, _ts(t1)))
 
 

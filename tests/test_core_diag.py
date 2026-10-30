@@ -136,7 +136,29 @@ def test_process_report_keeps_raw():
 def test_summarize_packages_counts():
     txt = diag.summarize_packages("package:a.b\n", "package:a.b\npackage:sys\n")
     assert "第三方应用：1 个" in txt
+    assert "系统应用：1 个" in txt
     assert "全部应用：2 个" in txt
+    assert "a.b" in txt
+
+
+def test_summarize_packages_lists_system_apps():
+    """系统应用包名也要列出来：车机问题常出在预置应用，只给第三方查不到。"""
+    txt = diag.summarize_packages(
+        "package:a.b\n",
+        "package:a.b\npackage:sys.one\npackage:sys.two\n")
+    assert "== 系统应用包名 ==" in txt
+    assert "sys.one" in txt and "sys.two" in txt
+    # 系统清单是「全量 − 第三方」，第三方不重复出现
+    sys_sec = txt.split("== 系统应用包名 ==", 1)[1]
+    assert "a.b" not in sys_sec
+
+
+def test_summarize_packages_without_all_output():
+    """只拿到 -3 输出（全量那条失败）时不算失败，也不凭空编系统清单。"""
+    txt = diag.summarize_packages("package:a.b\n", "")
+    assert "第三方应用：1 个" in txt
+    assert "系统应用" not in txt
+    assert "全部应用" not in txt
     assert "a.b" in txt
 
 

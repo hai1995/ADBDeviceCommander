@@ -50,7 +50,7 @@ F_DEVICE = "device.txt"      # 设备信息（人读摘要）
 F_PROPS = "props.txt"        # getprop 全量（机器可读的原始值）
 F_LOGCAT = "logcat.txt"      # 日志尾部
 F_PROCESS = "process.txt"    # 进程 + 内存 TOP
-F_APPS = "apps.txt"          # 已安装应用（第三方优先）
+F_APPS = "apps.txt"          # 已安装应用（第三方 + 系统包名清单）
 F_ANR = "anr.txt"            # 前台 Activity / ANR / tombstone 线索
 F_META = "meta.json"         # 清单
 
@@ -167,12 +167,22 @@ def summarize_packages(text3, text_all=""):
         return out
     third = names(text3)
     total = names(text_all)
+    # 系统应用 = 全量 − 第三方。排查「这个弹窗是哪来的 / 这个服务谁在拉起」
+    # 时只给第三方清单经常查不到 —— 车机上的问题十有八九出在预置应用里。
+    third_set = set(third)
+    system = [n for n in total if n not in third_set]
     lines = ["第三方应用：%d 个" % len(third)]
+    if system:
+        lines.append("系统应用：%d 个" % len(system))
     if total:
         lines.append("全部应用：%d 个" % len(total))
     lines.append("")
     lines.append("== 第三方应用包名 ==")
     lines.extend(["  " + n for n in sorted(third)] or ["  （无）"])
+    if system:
+        lines.append("")
+        lines.append("== 系统应用包名 ==")
+        lines.extend(["  " + n for n in sorted(system)])
     return "\n".join(lines) + "\n"
 
 

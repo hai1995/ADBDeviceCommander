@@ -369,7 +369,7 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 - **诊断包（出事之后一步留证）**：工具页「诊断包」卡一点，把这台机器此刻的现场
   收齐打成一个 zip —— `device.txt`（型号 / 系统 / 分辨率 / 电量 / 存储 / 内存 / 开机时长）、
   `props.txt`（`getprop` 全量）、`logcat.txt`（尾部 N 行，可不含）、`process.txt`
-  （内存 TOP 15 + `ps` 原始表）、`apps.txt`（第三方 / 全部应用清单）、`anr.txt`
+  （内存 TOP 15 + `ps` 原始表）、`apps.txt`（第三方 / 系统应用包名清单与总数）、`anr.txt`
   （前台 Activity + `lastanr` + `/data/anr`、`/data/tombstones` 列表）、`meta.json`
   （收集时间 / 程序版本 / 每份文件的来源命令与字节数 / 缺失原因）。整包只读设备状态，
   不影响正在跑的 logcat / 录屏；某一段读不到（如 `/data/anr` 无权限）只让那个文件写一行

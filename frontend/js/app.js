@@ -1995,6 +1995,9 @@
     if (els.wifiTcpip) els.wifiTcpip.disabled = !any || wifiBusy;
     // 录制中不打断：setRecRunning 已经按 running 锁定了录屏区按钮与选项，
     // 设备列表刷新时也不要在这里把它们再回拨回去。
+    // 请求在途同样不打断：开始/停止都是重操作，点击后已整体禁用，
+    // 这里若按「有无受控设备」回拨会把禁用态冲掉。
+    if (recInFlight) return;
     if (els.toolRecStop && !els.toolRecStop.disabled) return;
     els.toolRec.disabled = !any;
   }
@@ -2007,14 +2010,28 @@
     syncToolButtons();
   }
 
+  /* 录屏请求在途：开始 / 停止都是秒级耗时的重操作（起停录屏进程、拉 logcat、
+     收尾转码打包），点击后立刻把两个按钮一起禁用，等真正完成/失败后才恢复，
+     避免用户以为没点上而连点出并发请求。收尾由点击处理函数统一对账。 */
+  let recInFlight = false;
+
+  function setRecInFlight(busy) {
+    recInFlight = busy;
+    if (els.toolRec) els.toolRec.disabled = busy;
+    if (els.toolRecStop) els.toolRecStop.disabled = busy;
+  }
+
   /* 录屏态：录制中把「停止」按钮切成红色实心并带轻微呼吸光晕，空闲时恢复灰。
      立即切换不等后端事件回传，避免点了没反应；复用 .btn.danger / .btn.danger.live。
      选项在录制中锁定防误改。
      除按钮点击外，后端 rec_state 事件也会驱动本函数——录屏进程意外死亡
      （adb root / adbd 重启）时后端自动收尾会话并广播 running=false，
      前端据此把界面切回「开始录制」，否则会一直停在"录制中"（后端早已结束，
-     用户再点停止只会得到 no_session）。 */
+     用户再点停止只会得到 no_session）。
+     请求在途（recInFlight）时忽略：按钮此刻已被点击处理函数禁用，
+     在途收尾时会按最终结果统一设置，中途插入的事件不与之打架。 */
   function setRecRunning(running) {
+    if (recInFlight) return;
     els.toolRec.disabled = running;
     els.toolRecStop.disabled = !running;
     els.toolRecStop.classList.toggle("danger", running);
@@ -2481,15 +2498,18 @@
     let drag = null;
     grip.addEventListener("pointerdown", (e) => {
       const fr = frame.getBoundingClientRect ? frame.getBoundingClientRect() : null;
-      const pr = els.mirrorPreview && els.mirrorPreview.getBoundingClientRect
-        ? els.mirrorPreview.getBoundingClientRect() : null;
+      // 横向上限取「所在工具卡的内容宽」而不是预览框当前宽：预览框是
+      // inline-flex，宽度跟着画面内容收缩，拿它当上限等于「永远只能这么宽」，
+      // 用户一像素都拖不大 —— 这正是旧实现横向拖不动的根因。
+      const body = frame.closest && frame.closest(".tool-body");
       drag = {
         x: e.clientX, y: e.clientY,
         // 起点用「当前实际渲染尺寸」而不是 storage 里的值：首次拖动前是自适应，
         // 两者并不相等，用存储值会让第一下拖动跳一段。
         w: mirrorViewSize.w || Math.round((fr && fr.width) || 0) || 260,
         h: mirrorViewSize.h || Math.round((fr && fr.height) || 0) || 420,
-        maxW: Math.max(MIRROR_MIN_W, Math.round(((pr && pr.width) || 720)) - 18),
+        maxW: Math.max(MIRROR_MIN_W,
+          Math.round((body && body.clientWidth) || 720) - 20),
       };
       frame.classList.add("is-resizing");
       if (grip.setPointerCapture && e.pointerId != null) {
@@ -4755,12 +4775,21 @@
     loadPerfThresholds();
 
     els.toolRec.addEventListener("click", async () => {
+      if (recInFlight) return;      // 启动在途：按钮已禁用，这里再兜一道
       // 第 2/3 参（设备音频 / 电脑麦克风）与第 7 参（logcat 级别）固定给
       // false / null：音频采集链路没做完已从界面上撤掉，logcat 一律全量抓取。
-      const res = await callApi(api.screen_record_start(
-        null, false, false, saveDir(),
-        els.recLogcat.checked, els.recZip.checked, null,
-        !!els.recPointerLocation.checked, !!els.recShowTouches.checked));
+      setRecInFlight(true);
+      if (els.toolRec) els.toolRec.title = "正在启动录屏，请稍候…";
+      let res = null;
+      try {
+        res = await callApi(api.screen_record_start(
+          null, false, false, saveDir(),
+          els.recLogcat.checked, els.recZip.checked, null,
+          !!els.recPointerLocation.checked, !!els.recShowTouches.checked));
+      } finally {
+        setRecInFlight(false);
+        if (els.toolRec) els.toolRec.title = "";
+      }
       if (!res || res.ok === false) {
         // 后端在全部设备启动失败时会自动撤销会话残留并返回 ok:false；
         // 这里回滚按钮态，避免 UI 卡在“录制中”却没有任何会话可停。
@@ -4770,8 +4799,20 @@
       }
       setRecRunning(true);
     });
-    els.toolRecStop.addEventListener("click", () => {
-      callApi(api.screen_record_stop());
+    els.toolRecStop.addEventListener("click", async () => {
+      if (recInFlight) return;      // 停止在途：收尾（转码 / 打包）要十几秒，防连点
+      setRecInFlight(true);
+      if (els.toolRecStop) els.toolRecStop.title = "正在停止录屏并收尾，请稍候…";
+      let res = null;
+      try {
+        res = await callApi(api.screen_record_stop());
+      } finally {
+        setRecInFlight(false);
+        if (els.toolRecStop) els.toolRecStop.title = "";
+      }
+      if (res && res.ok === false && res.reason) {
+        pushStatus("err", "⚠ 停止录屏失败：" + res.reason);
+      }
       setRecRunning(false);
     });
     // 保存目录（工具 / Logcat / 文件 三处输入共享）：任一输入实时镜像到另两处，

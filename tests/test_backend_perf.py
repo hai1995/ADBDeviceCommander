@@ -294,6 +294,39 @@ def test_build_report_html_has_charts_and_summary():
     assert "nan" not in html.lower()
 
 
+def test_report_charts_have_hover_tooltips():
+    """图表要能悬停看读数：SVG 原生 <title>，离线双击打开就有提示。"""
+    samples = _demo_samples(8)
+    html = svc.build_report_html(samples, {"serial": "A1"})
+    # 热区铺满绘图区（每张图都有一排透明 rect），提示里带时间与读数
+    assert html.count("<title>") >= len(svc.METRICS)
+    assert " 20%" in html            # cpu 首个采样值 + 单位
+    assert "4000MB" in html          # mem_used 首个采样值 + 单位
+
+
+def test_hover_strips_cover_full_plot_area():
+    """相邻热区首尾相接，鼠标停在曲线任意位置都能出提示。"""
+    samples = [{"t": 1793200000.0 + i, "cpu": 10.0 + i} for i in range(5)]
+    svg = svc._svg_chart(samples, "cpu", "#34e0ea", "%")
+    assert svg.count('fill="transparent"') == 5
+    # 热区必须盖住整个绘图区：第一条左缘 = pad_l，最后一条右缘 ≈ w - pad_r
+    first = int(svg.split('fill="transparent"')[0].rsplit('x="', 1)[1].split('"')[0])
+    assert first == 44
+
+
+def test_compare_chart_tooltips_list_every_device():
+    """对比图的提示一次列出各台设备的读数，不用来回找线。"""
+    t0 = 1793200000.0
+    series = [
+        ("Pixel7", "#34e0ea", [{"t": t0, "cpu": 11.0}, {"t": t0 + 1, "cpu": 12.0}]),
+        ("CarHW", "#a78bfa", [{"t": t0, "cpu": 21.0}, {"t": t0 + 1, "cpu": 22.0}]),
+    ]
+    svg = svc._svg_compare(series, "cpu", "%")
+    assert "<title>" in svg
+    assert "Pixel7" in svg and "CarHW" in svg
+    assert "11%" in svg and "22%" in svg
+
+
 def test_build_report_html_handles_empty_and_single():
     """空数据 / 单点都要能出报告（用户可能刚点开始就导出）。"""
     info = {"serial": "A1"}
