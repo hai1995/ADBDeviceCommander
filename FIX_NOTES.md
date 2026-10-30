@@ -2139,11 +2139,46 @@ config.json`，套一层与 zip 同名的顶层目录（解压不会把 exe 和�
   会把刚显示的「有新版本 …」盖回「尚未检查」。加 `updateEventSeen`：回填天生是
   旧数据，不该赢。（这个 bug 是前端测试先抓到的，不是读代码读出来的。）
 
+## 六、实测踩到的两件事（都不是读代码能发现的）
+
+**1）工作流「校验不通过」时，日志里什么都没有。**
+第一版 `jobs.test.name` 里写了 `${{ env.PYTHON_VERSION }}`，GitHub 直接判
+「工作流无效」：运行记录显示 failed，但 `/actions/runs/<id>/jobs` 返回
+`total_count: 0` —— 没有 job 就没有日志，界面上只是一次「秒失败」。
+根因是 `jobs.<id>.name` 允许的上下文只有 `github / needs / strategy / matrix /
+vars / inputs`，**不含 `env`**。改成字面量 `3.11` 后正常。
+
+**2）匿名 REST 接口会 403，而且是在最不该失败的时候。**
+发完第一个 Release 后，用客户端代码真查了一次（匿名、真实网络）：
+
+```
+status  : error
+error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数用尽）。
+```
+
+`curl -i` 看清楚了：`x-ratelimit-limit: 60`、`x-ratelimit-remaining: 0`、
+`API rate limit exceeded for <出口 IP>`。也就是说**同一个出口 IP 一小时只有
+60 次**。这个工具是发给同事的，一个公司通常只有一个出口 IP：十几个人每天各查
+几次就贴近上限，一旦超了，所有人都会看到「查不到新版本」——而更新检查恰恰是
+「大家都得知道」的功能。
+
+于是把更新源改成**静态优先、API 兜底**：
+
+| 顺序 | 地址 | 认证 | 限流 |
+| --- | --- | --- | --- |
+| 1 | `https://github.com/<o>/<r>/releases/latest/download/latest.json` | 不需要 | 无（走 CDN，几百字节） |
+| 2 | `https://api.github.com/repos/<o>/<r>/releases/latest` | 匿名 | 60 次/小时/IP |
+
+`latest.json` 由 CI 在发版后生成并作为 Release 附件上传（内容与 API 返回同构：
+`version` / `notes` / `url` / `assets[]`），所以两条路共用同一份解析代码。
+`check()` 按顺序试，**任一成功即返回**；全失败才报错，并在原因里注明试了几个源。
+用户自己配了 `update_feed` 时只查那一个——悄悄又去连 GitHub 会让人以为配置没生效。
+
 ## 改动清单
 
 | 文件 | 改动 |
 | --- | --- |
-| `.github/workflows/build.yml` | **新增**：test + windows 两个 job，tag 触发发 Release |
+| `.github/workflows/build.yml` | **新增**：test + windows 两个 job；tag 触发发 Release 并生成 / 上传 `latest.json`（程序内的静态版本源） |
 | `core/update.py` | **新增**：版本解析 / 比较 / Release 归一化 / 失败翻译（约 330 行） |
 | `build.py` | 新增 `--package`、`win_package_name()`、`make_win_package()` |
 | `core/prefs.py` | 新增 `update_check` / `update_feed` / `update_skipped_version` |
@@ -2151,7 +2186,7 @@ config.json`，套一层与 zip 同名的顶层目录（解压不会把 exe 和�
 | `frontend/index.html` | 新增 `#update-modal`；关于页新增「更新」一行 |
 | `frontend/js/app.js` | `update_state` / `update` 事件、弹窗与关于页渲染、6 个按钮绑定、启动回填 |
 | `frontend/css/app.css` | `.update-box` / `.update-ver` / `.update-notes` / `.about-row.up-row` |
-| `tests/test_core_update.py` | **新增** 30 条 |
+| `tests/test_core_update.py` | **新增** 35 条（含 5 条「多源回退」：静态 404 → API、全失败报尝试数、显式配置不回流） |
 | `tests/test_backend_update.py` | **新增** 27 条 |
 | `tests/frontend/update_modal.test.cjs` | **新增** 46 条 |
 | `tests/test_build.py` | +4 条（分发件内容 / 顶层目录 / 缺 exe 警告 / 与 `ASSET_SUFFIX` 一致） |
@@ -2162,10 +2197,19 @@ config.json`，套一层与 zip 同名的顶层目录（解压不会把 exe 和�
 
 ## 验证
 
-- Python 全量：**957 passed / 1 skipped**（第二十二轮 896 + 61）。
+- Python 全量：**962 passed / 1 skipped**（第二十二轮 896 + 66）。
 - 前端全量：**61 个测试文件 0 失败**（第二十二轮 60 + 1）。
 - `pyflakes`：零输出。
-- **CI 首次运行结果**：待 push 后回填（本地无法跑 windows-latest）。
+- **CI 真跑过，两次都绿**（这是本轮最该验的东西，本地造不出 windows-latest）：
+  - `push main`（run 40987084156）：`test` 8 步全过；`windows` 装好
+    pywebview + pyinstaller、`build.py --package --zip` 出包成功、sha256 生成、
+    artifact 上传成功；
+  - `push tag v2026.1030.0937`（run 40988157986）：额外跑了「版本号一致性」校验，
+    并创建 Release，附件为
+    `ADBDeviceCommander_v2026.1030.0937_win64.zip`（23.57 MB）、
+    `ADBDeviceCommander_v2026.1030.0937.zip`（0.96 MB）、`sha256sums.txt`。
+  - 客户端代码对真实接口查过一次：因为限流返回 403 —— 这条实测直接促成了
+    「静态 latest.json 优先」的改动（见第六节）。
 
 ## 已知取舍 / 下一轮候选
 

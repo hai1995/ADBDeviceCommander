@@ -228,6 +228,59 @@ def test_check_unknown_payload_is_translated():
     assert "版本号" in res["error"]
 
 
+def test_default_feed_prefers_static_latest_json():
+    """首选必须是静态 latest.json：REST 接口匿名限流 60 次/小时/IP，
+    同事多人共用一个公司出口 IP 时会集体查到「限流」（实测踩过）。"""
+    assert update.FEED_URL.endswith("/releases/latest/download/latest.json")
+    assert update.FEEDS[0] == update.FEED_URL
+    assert update.FEED_API in update.FEEDS
+
+
+def test_check_falls_back_to_next_feed_on_404():
+    calls = []
+
+    def opener(url, timeout):
+        calls.append(url)
+        return (404, "") if "latest/download" in url else (200, _gh())
+
+    res = update.check("2026.1029.1931", opener=opener)
+    assert res["status"] == "update"
+    assert len(calls) == 2, calls
+    assert res["feed"].startswith("https://api.github.com")
+
+
+def test_check_stops_at_first_working_feed():
+    calls = []
+
+    def opener(url, timeout):
+        calls.append(url)
+        return 200, _gh()
+
+    res = update.check("2026.1029.1931", opener=opener)
+    assert len(calls) == 1, "静态源成功就不该再打 API（省额度）"
+    assert res["feed"] == update.FEED_URL
+
+
+def test_check_reports_attempt_count_when_all_feeds_fail():
+    res = update.check("2026.1029.1931", opener=lambda u, t: (403, ""))
+    assert res["status"] == "error"
+    assert "2 个更新源" in res["error"]
+
+
+def test_explicit_feed_does_not_fall_back():
+    """用户配了内网源就只查它 —— 悄悄又去连 GitHub，用户会以为配置没生效。"""
+    calls = []
+
+    def opener(url, timeout):
+        calls.append(url)
+        return 404, ""
+
+    res = update.check("2026.1029.1931", feed="https://intra.example.com/v.json",
+                       opener=opener)
+    assert calls == ["https://intra.example.com/v.json"]
+    assert "个更新源" not in res["error"]
+
+
 def test_check_passes_timeout_through():
     seen = {}
 

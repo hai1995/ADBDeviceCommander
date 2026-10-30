@@ -25,10 +25,27 @@ import re
 import urllib.error
 import urllib.request
 
-# 默认更新源：GitHub Releases 的「最新正式版」接口。
-# 用 latest 而不是列表接口：列表接口要把全部 release 拉下来再自己挑，随版本
-# 累积会越来越慢，且分页容易漏掉最新那条。
-FEED_URL = "https://api.github.com/repos/hai1995/ADBDeviceCommander/releases/latest"
+# 更新源：**静态文件优先，API 兜底**。
+#
+# 为什么不一上来就打 API：GitHub 的匿名 REST 接口限流是 **60 次/小时/IP**。
+# 这不是理论值 —— 实测过：一台机器（同一个出口 IP）当天用完额度后，任何匿名
+# 请求都返回 403 `API rate limit exceeded`。同事多人共用公司同一个出口 IP、
+# 或者有人反复重启程序时，更新检查会在最需要它的时候集体失效，而用户看到的
+# 只是「查不到」。
+#
+# 静态地址则走 GitHub 的 CDN：
+#   https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+# 永远指向「最新 Release 里那个叫 latest.json 的附件」，不需要认证、没有
+# 60 次/小时的限制、响应体只有几百字节。CI 每次发版都会把它作为附件上传
+# （见 .github/workflows/build.yml），内容与 API 返回同构（version / notes /
+# url / assets[]），所以客户端两条路的解析代码是同一份。
+FEED_URL = ("https://github.com/hai1995/ADBDeviceCommander"
+            "/releases/latest/download/latest.json")
+# 兜底：第一个 Release 里还没有 latest.json 时（或静态地址被公司网络挡掉），
+# 退回 REST 接口。限流时它会给 403，check() 会如实说明。
+FEED_API = "https://api.github.com/repos/hai1995/ADBDeviceCommander/releases/latest"
+# 尝试顺序：静态 → API
+FEEDS = (FEED_URL, FEED_API)
 
 # 单次检查超时（秒）。这个值同时是「自动检查」的最坏阻塞时长——检查在后台线程里
 # 跑，用户不会看到转圈，但线程池名额有限，不宜等到 30s 让后续任务排队。
@@ -211,7 +228,7 @@ def _http_get(url: str, timeout: int):
 # --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
-def check(current: str, feed: str = None, opener=None, timeout: int = TIMEOUT) -> dict:
+def check(current: str, feed=None, opener=None, timeout: int = TIMEOUT) -> dict:
     """检查更新，返回统一结果字典（**不抛异常**）。
 
     status 取值：
@@ -220,17 +237,46 @@ def check(current: str, feed: str = None, opener=None, timeout: int = TIMEOUT) -
       ahead   —— 本机版本比发布版还新（开发态，自己比线上超前）
       error   —— 没查成（error 里是中文原因）
 
-    无论哪种结果都带上 current / feed，便于状态栏与「关于」页直接展示。
+    `feed` 可以是一个地址（用户在内网自建版本源时），也可以不传 —— 不传就按
+    `FEEDS` 顺序试：静态 latest.json → REST API。**任一成功即返回**，全失败才
+    报错（错误信息取最后一个源的原因，并注明试了几个）。
     """
-    feed = feed or FEED_URL
+    if isinstance(feed, str) and feed.strip():
+        feeds = [feed.strip()]
+    elif isinstance(feed, (list, tuple)) and feed:
+        feeds = [f for f in feed if isinstance(f, str) and f.strip()]
+    else:
+        feeds = list(FEEDS)
+    opener = opener or _http_get
+
+    last = None
+    for one in feeds:
+        last = _check_one(current, one, opener, timeout)
+        if last["status"] != "error":
+            return last
+    # 全部失败：把「试过几个源」写进原因，否则用户会以为程序只连了一个地址
+    if last is None:                       # 理论上不会发生（feeds 必非空）
+        return {"status": "error", "current": current or "", "feed": "",
+                "version": "", "notes": "", "url": "", "asset": {},
+                "error": "没有配置任何更新源。", "checked_at": _now()}
+    if len(feeds) > 1:
+        last["error"] = "%s（已按顺序尝试 %d 个更新源）" % (last["error"], len(feeds))
+    return last
+
+
+def _now() -> int:
+    import time
+    return int(time.time())
+
+
+def _check_one(current: str, feed: str, opener, timeout: int) -> dict:
+    """查单个更新源。失败时返回 status=error 的字典，由 check() 决定是否换源。"""
     out = {"status": "error", "current": current or "", "feed": feed,
            "version": "", "notes": "", "url": "", "asset": {},
-           "error": "", "checked_at": 0}
-    import time
-    out["checked_at"] = int(time.time())
+           "error": "", "checked_at": _now()}
 
     try:
-        code, body = (opener or _http_get)(feed, timeout)
+        code, body = opener(feed, timeout)
     except Exception as e:                      # noqa: BLE001 —— 任何网络异常都要翻译成人话
         out["error"] = ("检查更新失败：连不上 %s（%s）。若这台机器在内网，"
                         "可在 config.json 里把 update_feed 改成内网可访问的版本地址。"
@@ -242,8 +288,10 @@ def check(current: str, feed: str = None, opener=None, timeout: int = TIMEOUT) -
                         "首次发版后这里就能查到版本了。")
         return out
     if code in (403, 429):
-        out["error"] = ("更新源暂时拒绝访问（HTTP %s，通常是接口调用次数用尽）。"
-                        "稍后再试，或把 update_feed 换成内网自建地址。" % code)
+        out["error"] = ("更新源暂时拒绝访问（HTTP %s，通常是接口调用次数用尽 —— "
+                        "GitHub 匿名接口是 60 次/小时/IP，同一个公司出口 IP 下"
+                        "多人共用会更快用完）。稍后再试，或把 update_feed 换成"
+                        "内网自建地址。" % code)
         return out
     if code != 200:
         out["error"] = "更新源返回异常状态 HTTP %s。" % code

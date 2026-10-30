@@ -412,10 +412,18 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 | 环节 | 行为 |
 | --- | --- |
 | 时机 | 启动后 8 秒查一次（避开展台初始化），之后每 **12 小时**一次；「关于」页的「检查」按钮随时可手动查 |
-| 判定 | 读 GitHub Releases 的 `releases/latest`，把 `tag_name` 与源码 `VERSION` 按 `年.月日.时分` 逐段比较 |
+| 判定 | 读**静态** `releases/latest/download/latest.json`（GitHub CDN，无认证无限流），把版本号与源码 `VERSION` 按 `年.月日.时分` 逐段比较；静态源取不到（首次发版 / 被网络拦截）才退回 REST API |
 | 提示 | 只有「确实更新」才弹窗：版本号对比 + 更新说明（过长截断）+ 资产体积，按钮为 **去下载 / 稍后 / 跳过此版本** |
 | 下载 | 点「去下载」用系统浏览器打开发布页，**程序不自己替换自身** |
 | 静默 | 自动检查失败（断网 / 限流）不弹窗，只在「关于」页留一行可读原因；「已是最新」「本机是开发版」也不弹 |
+
+> **为什么优先静态 `latest.json` 而不是 REST API**：GitHub 匿名 REST 接口是
+> **60 次/小时/IP**。这不是理论值——实测时一台机器（同一出口 IP）用完额度后
+> 任何匿名请求都返回 `403 API rate limit exceeded`。同事多人共用公司同一个出口
+> IP 时，更新检查会在最需要的时候集体失效，而用户只看到「查不到」。静态地址走
+> CDN、响应体几百字节、不需要 token，是唯一稳的那条路。CI 每次发版都会把
+> `latest.json` 作为 Release 附件上传，内容与 API 返回同构（`version` / `notes` /
+> `url` / `assets[]`），两条路共用同一份解析代码。
 
 为什么不自动替换：exe 正在运行时 Windows 不允许覆盖自身，自动更新只有两条路——
 写一个 `.bat` 等进程退出后替换（杀毒软件对「脚本延迟改可执行文件」高度敏感，十有八九
@@ -427,7 +435,7 @@ git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --
 | 键 | 默认 | 含义 |
 | --- | --- | --- |
 | `update_check` | `true` | 是否自动检查；关掉后「检查」按钮仍可手动查 |
-| `update_feed` | 空 | 留空 = GitHub Releases。内网部署时填自建的 `version.json` 地址（字段只要 `version` / `notes` / `url`），代码不用改 |
+| `update_feed` | 空 | 留空 = 内置多源（静态 `latest.json` → REST API）。内网部署时填自建的 `version.json` 地址（字段只要 `version` / `notes` / `url`），**填了就只查它**，不会再偷偷去连 GitHub |
 | `update_skipped_version` | 空 | 点过「跳过此版本」的版本号；同版本不再自动弹窗，更高版本发布后照常提示 |
 
 > **隐私/安全边界**：打开下载页只放行 http(s) 且主机在 GitHub 域名（或 `update_feed`

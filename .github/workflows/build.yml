@@ -173,4 +173,32 @@ jobs:
           } else {
             gh release create $tag @assets --title "ADB 设备指令台 $tag" --generate-notes
           }
+
+          # latest.json：程序内更新检查的**静态源**。
+          # 地址 .../releases/latest/download/latest.json 走 GitHub CDN，
+          # 不需要认证、没有匿名 REST 那 60 次/小时/IP 的限流 —— 同事多人共用
+          # 一个公司出口 IP 时，只有这一条路是稳的（REST 会集体 403）。
+          # 放在发版之后生成：这样 notes 能取到 --generate-notes 的真实内容。
+          $body = gh release view $tag --json body -q .body
+          $pkg = "ADBDeviceCommander_v${ver}_win64.zip"
+          $payload = [ordered]@{
+            version = $ver
+            notes   = ($body -join "`n")
+            url     = "https://github.com/${{ github.repository }}/releases/tag/$tag"
+            assets  = @(
+              [ordered]@{
+                name                 = $pkg
+                browser_download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/$pkg"
+                size                 = (Get-Item "dist/$pkg").Length
+              }
+            )
+          }
+          # 必须按 UTF-8 无 BOM 写：客户端用 utf-8 解码，带 BOM 会让 JSON 解析失败
+          $json = $payload | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText("$PWD/dist/latest.json", $json,
+            (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content dist/latest.json
+          gh release upload $tag dist/latest.json --clobber
+
           Add-Content $env:GITHUB_STEP_SUMMARY "- Release：https://github.com/${{ github.repository }}/releases/tag/$tag"
+          Add-Content $env:GITHUB_STEP_SUMMARY "- 静态版本源：https://github.com/${{ github.repository }}/releases/latest/download/latest.json"

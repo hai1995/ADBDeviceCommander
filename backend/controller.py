@@ -1790,12 +1790,16 @@ class WebApi:
     # 版本更新（发现新版本 -> 弹窗提示去下载，见 core/update.py）
     # ------------------------------------------------------------------
     def _update_feed(self):
-        """当前生效的更新源（config.json 里留空 = 内置的 GitHub Releases 地址）。"""
+        """用户配置的更新源；返回空串表示「用内置的多源列表」。
+
+        内置列表是「静态 latest.json → REST API」两个（见 core.update.FEEDS）：
+        静态那份走 GitHub CDN、没有匿名接口那 60 次/小时/IP 的限流，同事多人
+        共用一个公司出口 IP 时不会集体查到「限流」。
+        """
         try:
-            feed = (get_pref("update_feed", "") or "").strip()
+            return (get_pref("update_feed", "") or "").strip()
         except Exception:
-            feed = ""
-        return feed or updater.FEED_URL
+            return ""
 
     def update_info(self):
         """「关于」页要的版本信息：当前版本 / 是否自动检查 / 上次结果（不发请求）。"""
@@ -1807,7 +1811,8 @@ class WebApi:
         return {"ok": True,
                 "version": VERSION,
                 "enabled": enabled,
-                "feed": self._update_feed(),
+                # 展示用：没配就显示内置首选地址（静态 latest.json）
+                "feed": self._update_feed() or updater.FEED_URL,
                 "interval_s": updater.CHECK_INTERVAL_S,
                 "checking": self._update_busy,
                 "last": dict(last) if isinstance(last, dict) else None}
@@ -1843,7 +1848,8 @@ class WebApi:
     def _do_update_check(self, feed, manual):
         """真正的检查（后台线程）：广播结果；自动检查失败时保持沉默。"""
         try:
-            res = updater.check(VERSION, feed)
+            # feed 为空串 = 用 core.update.FEEDS（静态 → API 依次尝试）
+            res = updater.check(VERSION, feed or None)
         except Exception as e:      # 兜底：这条线程不能带着 _update_busy=True 死掉，
             res = {"status": "error", "current": VERSION, "feed": feed,   # 否则按钮永久转圈
                    "version": "", "notes": "", "url": "", "asset": {},
