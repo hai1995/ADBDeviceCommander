@@ -625,3 +625,84 @@ def test_win_package_name_matches_update_asset_suffix():
     from core import update
     assert build.win_package_name().endswith(update.ASSET_SUFFIX)
     assert build.win_package_name().startswith("ADBDeviceCommander_v")
+
+
+def test_validate_commands_json_valid_list(tmp_path):
+    p = tmp_path / "commands.json"
+    p.write_text(json.dumps([{"id": "1", "name": "x",
+                             "commands": ["adb devices"]}]), encoding="utf-8")
+    ok, errs, warns = build.validate_commands_json(p)
+    assert ok and errs == [] and warns == []
+
+
+def test_validate_commands_json_valid_dict_of_values(tmp_path):
+    p = tmp_path / "commands.json"
+    p.write_text(json.dumps({"g1": {"id": "1", "name": "x"}}), encoding="utf-8")
+    ok, errs, warns = build.validate_commands_json(p)
+    assert ok and errs == [] and warns == []
+
+
+def test_validate_commands_json_malformed_json(tmp_path):
+    p = tmp_path / "commands.json"
+    p.write_text("{ 这不是合法 json", encoding="utf-8")  # 解析必然失败
+    ok, errs, warns = build.validate_commands_json(p)
+    assert not ok and errs and warns == []
+
+
+def test_validate_commands_json_bad_top_level(tmp_path):
+    p = tmp_path / "commands.json"
+    p.write_text(json.dumps(42), encoding="utf-8")  # 顶层是数字，不被支持
+    ok, errs, warns = build.validate_commands_json(p)
+    assert not ok and errs and warns == []
+
+
+def test_validate_commands_json_non_dict_items_warn(tmp_path):
+    p = tmp_path / "commands.json"
+    p.write_text(json.dumps(["字符串不是命令", {"id": "1"}]), encoding="utf-8")
+    ok, errs, warns = build.validate_commands_json(p)
+    # 顶层是合法数组 → is_valid；但含非对象元素 → 记 warnings（不致命）
+    assert ok and errs == [] and warns
+
+
+def test_validate_commands_json_missing_file(tmp_path):
+    ok, errs, warns = build.validate_commands_json(tmp_path / "nope.json")
+    assert not ok and errs and warns == []
+
+
+def test_verify_dist_ok(tmp_path):
+    target = tmp_path / "dist"
+    target.mkdir()
+    exe = target / (build.APP_NAME + ".exe")
+    exe.write_bytes(b"MZ" * (2 * 1024 * 1024))
+    for rel in build.SIDE_FILES:
+        (target / rel).write_text("x", encoding="utf-8")
+    (target / "assets").mkdir()
+    (target / "assets" / "app.ico").write_bytes(b"x")
+    problems = build.verify_dist(target, "onefile", exe)
+    assert problems == [], problems
+
+
+def test_verify_dist_reports_missing(tmp_path):
+    target = tmp_path / "dist"
+    target.mkdir()
+    exe = target / (build.APP_NAME + ".exe")
+    # 故意不写 exe、不写同目录文件、不建 assets
+    problems = build.verify_dist(target, "onefile", exe)
+    joined = "\n".join(problems)
+    assert "主程序缺失" in joined
+    assert "commands.json" in joined
+    # 主程序缺失 + SIDE_FILES 每项缺失(2) + SIDE_DIRS 缺失(1) = 至少 4 条
+    assert len(problems) >= 4
+
+
+def test_verify_dist_flags_tiny_exe(tmp_path):
+    target = tmp_path / "dist"
+    target.mkdir()
+    exe = target / (build.APP_NAME + ".exe")
+    exe.write_bytes(b"MZ")  # 远小于 _MIN_EXE_MB
+    for rel in build.SIDE_FILES:
+        (target / rel).write_text("x", encoding="utf-8")
+    (target / "assets").mkdir()
+    (target / "assets" / "app.ico").write_bytes(b"x")
+    problems = build.verify_dist(target, "onefile", exe)
+    assert any("体积异常" in p for p in problems)

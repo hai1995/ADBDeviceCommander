@@ -61,6 +61,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -538,6 +539,75 @@ def ensure_default_commands_json(root: Path = ROOT):
     return Path(p)
 
 
+def validate_commands_json(path):
+    """校验 commands.json 是否可被程序正常加载，返回 (is_valid, errors, warnings)。
+
+    只做「结构性」检查（不依赖运行时 core.commands，保持构建脚本零业务依赖）：
+      * 能被 JSON 解析；
+      * 顶层是「数组」或「对象」（core.commands.normalize_commands 只认这两种）；
+      * 若是数组，元素应为对象——非对象元素会被运行时跳过，这里记一条 warnings，
+        不计入 errors（那是 normalize_commands 的容错范畴，不致命）。
+    不深入检查每条命令的内部字段。errors 为空即视为 is_valid。
+    """
+    errors = []
+    warnings = []
+    if not path.exists():
+        return False, ["文件不存在：%s" % path], []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return False, ["JSON 解析失败：%s" % e], []
+    except OSError as e:
+        return False, ["读取失败：%s" % e], []
+    if isinstance(data, list):
+        bad = [i + 1 for i, c in enumerate(data) if not isinstance(c, dict)]
+        if bad:
+            shown = "、".join(str(x) for x in bad[:10])
+            warnings.append("有 %d 条命令不是对象（第 %s 条等），会被运行时跳过"
+                           % (len(bad), shown))
+    elif not isinstance(data, dict):
+        return False, ["顶层结构既不是数组也不是对象（实际：%s），程序将无法加载"
+                       % type(data).__name__], []
+    return (len(errors) == 0), errors, warnings
+
+
+def _warn_bad_commands_json(path):
+    """打包前对 commands.json 做结构校验，仅告警不中止（用户数据优先）。"""
+    ok, errors, warnings = validate_commands_json(path)
+    for e in errors:
+        print("[错误] commands.json：%s" % e, file=sys.stderr)
+    for w in warnings:
+        print("[警告] commands.json：%s" % w, file=sys.stderr)
+    if not ok:
+        print("        该文件会被原样打进分发包，同事打开后命令库可能为空 / "
+              "程序提示「未就绪」。请修复或删除该文件（删除后打包会重新生成默认库）。",
+              file=sys.stderr)
+def verify_dist(target, mode, exe):
+    """产物完整性自检：确认 exe 与「可编辑同目录文件」都确实落盘，返回问题列表。
+
+    手工分发包最易漏 commands.json / assets（同事那边图标没了、指令是空的），
+    或漏了 exe。这里在打包收尾自动核对一遍，缺项返回给 main 打印告警，
+    避免发出残包。返回空列表即视为通过。
+    """
+    problems = []
+    if not exe.exists():
+        problems.append("主程序缺失：%s" % exe)
+    else:
+        try:
+            mb = exe.stat().st_size / 1024 / 1024
+        except OSError:
+            mb = 0.0
+        if mb < _MIN_EXE_MB:
+            problems.append("主程序体积异常（%.2f MB，疑似未完整生成）：%s" % (mb, exe))
+    for rel in SIDE_FILES:
+        if not (target / rel).is_file():
+            problems.append("同目录文件缺失：%s" % rel)
+    for rel in SIDE_DIRS:
+        d = target / rel
+        if not d.is_dir() or not any(d.iterdir()):
+            problems.append("资源目录缺失或为空：%s/" % rel)
+    return problems
+
 def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
     """把暂存区的产物拷进 dist/，返回最终 exe 路径（失败返回 None）。
 
@@ -626,6 +696,12 @@ def main(argv=None) -> int:
     # 能正常打包；该文件被 SOURCE_ZIP_EXCLUDE_FILES 排除，不会漏进源码分发包。
     ensure_default_commands_json(ROOT)
 
+    # 1.6) commands.json 结构校验（仅告警，不阻断）：万一用户手改的命令库是
+    # 损坏的 JSON 或顶层不是数组 / 对象，程序启动会直接「未就绪」。这里打个提前量，
+    # 让打包者知道，而不是等同事打开才发现问题。运行时 load_commands 自身对坏条目
+    # 有容错（跳过并告警），所以这里不中止构建——用户数据优先。
+    _warn_bad_commands_json(ROOT / "commands.json")
+
     # 2) 资源自检（缺 frontend 会导致打包后窗口空白，必须拦住）
     missing = check_sources()
     if missing:
@@ -707,6 +783,15 @@ def main(argv=None) -> int:
     if cfg is not None:
         print("       已生成默认配置 %s（全部配置项 + 默认值，可手动编辑；"
               "若已存在则原样保留，不覆盖用户的设置）" % cfg.name)
+
+    # 6) 产物完整性自检（仅告警）：确认 exe 与「可编辑同目录文件」都确实落盘。
+    # 手工分发包常漏 commands.json / assets（同事那边图标没了、指令是空的），
+    # 这里自动核对一遍，缺项直接提示，避免发出残包。
+    problems = verify_dist(target, args.mode, exe)
+    if problems:
+        print("[警告] 产物完整性自检发现 %d 项问题：" % len(problems))
+        for _p in problems:
+            print("        - %s" % _p)
 
     if args.zip:
         make_source_zip(ROOT, args.dist_dir)
