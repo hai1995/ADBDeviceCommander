@@ -4,7 +4,6 @@
 回归保护：list_dir 必须使用最广泛兼容的 `ls -la`（不带 GNU 扩展），
 否则在 Android Toybox / BusyBox 设备上会因 --time-style 不支持而整列失败。
 """
-import subprocess
 import sys
 import os
 

@@ -8,7 +8,6 @@
      成功后的内存归属、任何路径都要 CloseClipboard）。
 """
 import base64
-import os
 import shutil
 import struct
 import sys
@@ -462,7 +461,7 @@ def test_windows_dib_header_describes_bottom_up_32bpp(tmp_path, monkeypatch):
     """CF_DIB 的头必须是 40 字节 BITMAPINFOHEADER + 32bpp + 自下而上正高。"""
     import struct as _struct
 
-    fake = _install_fake_win(monkeypatch)
+    _install_fake_win(monkeypatch)
     # 记录真正被搬进全局内存的内容
     moved = []
 

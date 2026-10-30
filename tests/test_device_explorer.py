@@ -3,7 +3,6 @@
 这些逻辑原属 legacy Tk 版的 posix_join / fmt_size / parse_ls_output，
 现已统一收敛到 core.constants，供 Web 版与任意前端复用。"""
 
-import pytest
 
 from core.constants import parse_ls_output, fmt_size, posix_join
 

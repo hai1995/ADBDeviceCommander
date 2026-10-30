@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """core.rootguard —— root/unroot 命令识别 + 设备 root 状态查询单测。"""
-import subprocess
 
 import pytest
 

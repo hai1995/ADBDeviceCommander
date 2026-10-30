@@ -9,10 +9,8 @@
   3. 停止时补报未提示的丢弃量（计数可解释的闭环）；
   4. 抓取（落盘）模式不受此限 —— 文件里仍是全量。
 """
-import threading
 import time
 
-import pytest
 
 import backend.logcat_service as ls
 from core.constants import LOGCAT_DISPLAY_MAX_LPS

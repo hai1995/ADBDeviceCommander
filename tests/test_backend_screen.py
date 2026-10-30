@@ -425,7 +425,6 @@ def test_screenshot_filename_safe_for_wireless_serial(monkeypatch, tmp_path):
 
     回归：直接拼序列号会在 Windows 上抛 FileNotFoundError，截图静默丢失。
     """
-    import io
 
     class _Proc:
         returncode = 0

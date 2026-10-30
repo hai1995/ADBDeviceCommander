@@ -254,7 +254,7 @@ def test_load_prefs_checked_top_level_not_object(monkeypatch, tmp_path):
 
 def test_roundtrip_all_defaults_survive(monkeypatch, tmp_path):
     """全量默认值写盘再读回应保持一致（持久化不漂移）。"""
-    p = _patch_path(monkeypatch, tmp_path)
+    _patch_path(monkeypatch, tmp_path)
     prefs.save_prefs(dict(prefs.PREFS_DEFAULTS))
     loaded = prefs.load_prefs()
     for k, v in prefs.PREFS_DEFAULTS.items():

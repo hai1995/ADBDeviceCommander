@@ -7,7 +7,6 @@ adb logcat 不带 -t 时，启动瞬间会把设备缓冲区里的历史日志�
 import threading
 import time
 
-import pytest
 
 import backend.logcat_service as ls
 

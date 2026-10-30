@@ -5,10 +5,9 @@
 """
 import json
 import os
-import sys
 
 import core.commands as cmds_mod
-from core.commands import load_commands, normalize_commands, merge_builtins, DEMO_COMMANDS
+from core.commands import load_commands, normalize_commands, merge_builtins
 from core.builtin_commands import BUILTIN_COMMANDS
 
 

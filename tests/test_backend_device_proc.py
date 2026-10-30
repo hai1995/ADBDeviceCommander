@@ -78,7 +78,6 @@ def test_graceful_kill_waits_before_term_and_skips_term_if_dead(monkeypatch):
     回归：早期实现把 -INT 与 -TERM 背靠背发出去，进程很可能死在写 moov / 补
     RIFF 头的中途 —— 白优雅一次，产出的 MP4 / WAV 依旧是坏的。
     """
-    import time as _time
     calls, slept = [], []
 
     def fake_run(cmd, **kw):
