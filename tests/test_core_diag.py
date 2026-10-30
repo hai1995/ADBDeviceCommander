@@ -60,6 +60,16 @@ NETCFG_SAMPLE = (
     "wlan0    DOWN    0.0.0.0/0         0x00001002 aa:bb:cc:dd:ee:ff\n"
 )
 
+CPU_SAMPLE = (
+    "0.50 0.30 0.20 1/234 5678\n"
+    "__CPUINFO__\n"
+    "Load: 0.5 / 0.3 / 0.2\n"
+    "CPU usage from 1000ms to 0ms ago:\n"
+    "  12% 1234/com.big.app: 8% user + 4% kernel\n"
+    "  5% 5678/com.small.app: 5%\n"
+    "TOTAL: 45% user + 23% kernel\n"
+)
+
 
 def test_parse_net_from_ip_addr():
     rows = diag.parse_net(NET_IP_SAMPLE)
@@ -143,6 +153,46 @@ def test_meminfo_report_falls_back_when_no_block():
     assert "未能从 meminfo" in txt or "无汇总段" in txt
 
 
+def test_parse_cpu_loadavg_and_proc():
+    """loadavg 取整体负载、cpuinfo 取进程占比，且 TOTAL 行不计入进程。"""
+    load, procs = diag.parse_cpu(CPU_SAMPLE)
+    assert load["one"] == 0.5 and load["five"] == 0.3 and load["fifteen"] == 0.2
+    assert load["runnable"] == 1 and load["total_threads"] == 234
+    assert load["last_pid"] == 5678
+    names = [n for _p, n in procs]
+    assert "com.big.app" in names and "com.small.app" in names
+    assert all("TOTAL" not in n for n in names)
+    # 按 CPU 占用降序：com.big.app(8%) > com.small.app(5%)
+    assert procs[0][1] == "com.big.app"
+
+
+def test_parse_cpu_strips_leading_pid():
+    """cpuinfo 进程行带前导 PID（如 `1234/com.x: 9%`）时只取包名。"""
+    load, procs = diag.parse_cpu(
+        "0 0 0 0/0 1\n__CPUINFO__\n12% 1234/com.x: 9% user + 3% kernel\n")
+    assert [n for _p, n in procs] == ["com.x"]
+
+
+def test_parse_cpu_no_cpuinfo_falls_back_to_load_only():
+    """cpuinfo 受限（Android 8+ 可能只有 Load 行）时仍给出整体负载。"""
+    load, procs = diag.parse_cpu("1.20 0.90 0.50 3/300 9999\n")
+    assert load["one"] == 1.2
+    assert procs == []
+
+
+def test_parse_cpu_empty():
+    assert diag.parse_cpu("") == ({}, [])
+
+
+def test_cpu_report_shows_load_and_top():
+    txt = diag.cpu_report(CPU_SAMPLE)
+    assert "== 整体负载（来自 /proc/loadavg）==" in txt
+    assert "1 分钟" in txt
+    assert "== 进程 CPU 占比 TOP" in txt
+    assert "com.big.app" in txt
+    assert "== 原始输出 ==" in txt
+
+
 def _props_block():
     return (
         "@@PROP\n"
@@ -178,6 +228,8 @@ def make_runner(ps=PS_NEW, logcat_supports_t=True, anr_ok=True,
             return 0, apps_all, ""
         if a.startswith("shell dumpsys meminfo"):
             return 0, MEMINFO_SAMPLE, ""
+        if "loadavg" in a or "__CPUINFO__" in a:
+            return 0, CPU_SAMPLE, ""
         if "ip addr" in a or "__NETCFG__" in a:
             return 0, NET_IP_SAMPLE, ""
         if a.startswith("shell dumpsys"):
@@ -293,7 +345,7 @@ def test_collect_produces_zip_with_all_parts(tmp_path):
         names = zf.namelist()
         assert names == [diag.F_DEVICE, diag.F_PROPS, diag.F_LOGCAT,
                          diag.F_PROCESS, diag.F_APPS, diag.F_ANR, diag.F_NET,
-                         diag.F_MEMINFO, diag.F_META]
+                         diag.F_MEMINFO, diag.F_CPU, diag.F_META]
         meta = json.loads(zf.read(diag.F_META).decode("utf-8"))
         assert meta["serial"] == "SERIAL1"
         assert meta["device"]["model"] == "Pixel 7"
@@ -307,6 +359,10 @@ def test_collect_produces_zip_with_all_parts(tmp_path):
         assert "Total RAM" in zf.read(diag.F_MEMINFO).decode("utf-8")
         assert "eth0" in zf.read(diag.F_NET).decode("utf-8")
         assert "192.168.1.5" in zf.read(diag.F_NET).decode("utf-8")
+        # CPU：整体负载 + 进程占比都进来了
+        cpu_text = zf.read(diag.F_CPU).decode("utf-8")
+        assert "0.50" in cpu_text and "0.30" in cpu_text   # 整体负载
+        assert "com.big.app" in cpu_text and "com.small.app" in cpu_text
 
 
 def test_collect_without_logcat_omits_file(tmp_path):
@@ -415,6 +471,24 @@ def test_collect_net_failure_still_produces_zip(tmp_path):
     with zipfile.ZipFile(z) as zf:
         assert diag.F_NET in zf.namelist()
         assert "失败" in zf.read(diag.F_NET).decode("utf-8")
+
+
+def test_collect_cpu_failure_still_produces_zip(tmp_path):
+    """CPU 段读不到（无 loadavg / cpuinfo 受限）时只记失败，整包照常产出。"""
+    def runner(args, timeout):
+        if "loadavg" in " ".join(args):
+            return 1, "", "not found"
+        return make_runner()(args, timeout)
+
+    z, man, err = diag.collect("adb", "S1", str(tmp_path), with_logcat=False,
+                               runner=runner)
+    assert err is None and z
+    flags = {p["name"]: p["ok"] for p in man["parts"]}
+    assert flags[diag.F_CPU] is False
+    assert flags[diag.F_DEVICE] is True          # 其它段不受牵连
+    with zipfile.ZipFile(z) as zf:
+        assert diag.F_CPU in zf.namelist()
+        assert "失败" in zf.read(diag.F_CPU).decode("utf-8")
 
 
 def test_collect_runner_raises_is_contained(tmp_path):

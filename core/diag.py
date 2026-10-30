@@ -14,12 +14,14 @@ core.diag —— 「一键诊断包」：把一次问题的现场证据收齐，
 设计要点
 --------
 * **尽量少的 adb 调用**：设备信息（getprop / wm / battery / df / meminfo /
-  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 7 次调用
-  （另含一次 `dumpsys meminfo` 与一次网络接口快照），USB 上约 4~10 秒。
-  meminfo 只抽取头部的汇总段（Total PSS by process / by category / Total RAM），
-  **丢弃几 MB 的进程详情**，既精准回答「谁在吃内存」（PSS 比 ps 的 RSS 更准）
-  又不撑爆包体；网络快照用 `ip addr` / `netcfg` 双格式兜底，回答「接口通不通、
-  有没有拿到 IP」（车机联网问题最常见）。
+  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 8 次调用
+  （另含一次 `dumpsys meminfo`、一次网络接口快照、一次 CPU 负载快照），
+  USB 上约 4~12 秒。meminfo 只抽取头部的汇总段（Total PSS by process /
+  by category / Total RAM），**丢弃几 MB 的进程详情**，既精准回答「谁在吃内存」
+  （PSS 比 ps 的 RSS 更准）又不撑爆包体；网络快照用 `ip addr` / `netcfg`
+  双格式兜底，回答「接口通不通、有没有拿到 IP」（车机联网问题最常见）；
+  CPU 快照用 `/proc/loadavg` 取整体负载、再用 `dumpsys cpuinfo` 补进程占比，
+  回答「整机卡不卡、谁在吃 CPU」（车机卡顿 / 发热排查的必看项）。
 * **每段独立失败**：logcat 拉不到、/data/anr 无权限，都只在该文件里写一行
   中文说明并记进清单，绝不让整包失败 —— 收集现场时「有 4 份、缺 1 份」远好过
   「什么都没有」。
@@ -59,6 +61,7 @@ F_APPS = "apps.txt"          # 已安装应用（第三方 + 系统包名清单�
 F_ANR = "anr.txt"            # 前台 Activity / ANR / tombstone 线索
 F_MEMINFO = "meminfo.txt"    # 内存分页明细（PSS by process TOP N + 汇总）
 F_NET = "net.txt"            # 网络接口状态 / IP（ip addr 与 netcfg 兜底）
+F_CPU = "cpu.txt"            # CPU 负载 / 进程 CPU 占比（loadavg + cpuinfo 兜底）
 F_META = "meta.json"         # 清单
 
 
@@ -329,6 +332,109 @@ def net_report(text):
 
 
 # ---------------------------------------------------------------------------
+# 解析：CPU 负载 / 进程 CPU 占比（/proc/loadavg 与 dumpsys cpuinfo 兜底）
+# ---------------------------------------------------------------------------
+_CPUINFO_SEP = "__CPUINFO__"
+
+
+def parse_cpu(text):
+    """从 `cat /proc/loadavg ; dumpsys cpuinfo` 的组合输出里提取 CPU 现场。
+
+    返回 `(load, procs)`：
+      * load  为 dict：{one, five, fifteen, runnable, total_threads, last_pid}
+        （字段缺失时省去对应键）；`/proc/loadavg` 是 Linux 通用接口，Android
+        全版本都有，是「整机忙不忙」最可靠的单一指标。
+      * procs 为 [(pct, name)]，按 CPU 占用降序；来源是 `dumpsys cpuinfo` 的
+        进程段（`包名: N%`）。Android 8+ 对 cpuinfo 做了限制，可能输出为空或
+        只有 TOTAL，此时 procs 为空 list（绝不抛异常，调用方据此只报负载）。
+
+    解析严格限定在进程段内（cpuinfo 末尾的 TOTAL 行只用于说明、不计入进程），
+    避免把 `TOTAL:` 这种汇总行误当成某个进程。
+    """
+    load = {}
+    procs = []
+    if not text:
+        return load, procs
+    if _CPUINFO_SEP in text:
+        la_part, _, ci_part = text.partition(_CPUINFO_SEP)
+    else:
+        la_part, ci_part = text, ""
+    toks = (la_part or "").split()
+    # /proc/loadavg: 1min 5min 15min runnable/total_threads last_pid
+    if len(toks) >= 5:
+        try:
+            load["one"] = float(toks[0])
+            load["five"] = float(toks[1])
+            load["fifteen"] = float(toks[2])
+        except ValueError:
+            pass
+        rt = toks[3].split("/")
+        if len(rt) == 2:
+            try:
+                load["runnable"] = int(rt[0])
+                load["total_threads"] = int(rt[1])
+            except ValueError:
+                pass
+        try:
+            load["last_pid"] = int(toks[4])
+        except ValueError:
+            pass
+    # dumpsys cpuinfo 进程段：每行形如 `com.abc (pid 123): 12%` / `com.abc: 12%`
+    # / `12% 1234/com.abc: 8% user + 4% kernel`。进程段从「Load: / CPU usage
+    # from」表头之后开始，遇到 `TOTAL:` 汇总行即结束。`TOTAL` 不计入进程。
+    rows = []
+    if ci_part:
+        for ln in ci_part.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith("TOTAL"):
+                break
+            if s.startswith("Load:") or s.startswith("CPU usage"):
+                continue
+            pm = re.search(r"([\w.\-/]+):\s*(\d+(?:\.\d+)?)\s*%", s)
+            if not pm or pm.group(1).upper() == "TOTAL":
+                continue
+            name = pm.group(1)
+            if "/" in name:                  # 去掉前导 PID（如 `1234/com.abc`）
+                name = name.rsplit("/", 1)[-1]
+            try:
+                pct = float(pm.group(2))
+            except ValueError:
+                continue
+            rows.append((pct, name))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    procs = rows
+    return load, procs
+
+
+def cpu_report(text):
+    """把 CPU 现场整理成「整体负载 + 进程 CPU 占比 TOP N + 原始输出」的文本。"""
+    load, procs = parse_cpu(text)
+    head = ["== 整体负载（来自 /proc/loadavg）=="]
+    if load:
+        head.append("  1 分钟: %s   5 分钟: %s   15 分钟: %s"
+                    % (load.get("one", "-"), load.get("five", "-"),
+                       load.get("fifteen", "-")))
+        if "runnable" in load:
+            head.append("  运行队列: %d / 线程总数 %d"
+                        % (load["runnable"], load.get("total_threads", 0)))
+    else:
+        head.append("  （未能读取 /proc/loadavg）")
+    head.append("")
+    head.append("== 进程 CPU 占比 TOP %d（来自 dumpsys cpuinfo）==" % len(procs))
+    if procs:
+        for pct, name in procs:
+            head.append("  %6.1f%%  %s" % (pct, name))
+    else:
+        head.append("  （cpuinfo 受限或无进程占比，仅看整体负载即可）")
+    head.append("")
+    head.append("== 原始输出 ==")
+    head.append((text or "").strip())
+    return "\n".join(head) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # 解析：应用清单摘要
 # ---------------------------------------------------------------------------
 def summarize_packages(text3, text_all=""):
@@ -570,6 +676,21 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("网络接口读取失败")
 
+        # ---- 4.75) CPU 负载 / 进程占比（loadavg + dumpsys cpuinfo 兜底）----
+        rc, out, err = ctx.run(
+            ["shell", "cat /proc/loadavg 2>/dev/null; echo %s; "
+             "dumpsys cpuinfo 2>/dev/null" % _CPUINFO_SEP],
+            timeout=TIMEOUT)
+        cpu_text = (cpu_report(out) if (rc == 0 and out.strip())
+                    else "（读取 CPU 负载失败：%s）\n"
+                         % (err or "无输出").strip()[:200])
+        size = _write(os.path.join(work, F_CPU), cpu_text)
+        ctx.record(F_CPU, bool(rc == 0 and out.strip()),
+                   size, "adb shell cat /proc/loadavg ; dumpsys cpuinfo",
+                   "" if rc == 0 else (err or "")[:200])
+        if rc != 0:
+            manifest["notes"].append("CPU 负载读取失败")
+
         # ---- 5) logcat 尾部（可选：抓大日志要十几秒）----
         if with_logcat:
             text, lerr = _logcat_text(ctx, logcat_lines)
@@ -590,7 +711,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
                 for fn in (F_DEVICE, F_PROPS, F_LOGCAT, F_PROCESS, F_APPS,
-                           F_ANR, F_NET, F_MEMINFO, F_META):
+                           F_ANR, F_NET, F_MEMINFO, F_CPU, F_META):
                     p = os.path.join(work, fn)
                     if os.path.exists(p):
                         z.write(p, fn)
