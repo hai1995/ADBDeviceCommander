@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "test": "node run-all.cjs"
+  },
+  "dependencies": {
+    "jsdom": "^29.1.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
+  }
+}
