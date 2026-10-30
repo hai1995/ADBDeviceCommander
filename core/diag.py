@@ -14,10 +14,12 @@ core.diag —— 「一键诊断包」：把一次问题的现场证据收齐，
 设计要点
 --------
 * **尽量少的 adb 调用**：设备信息（getprop / wm / battery / df / meminfo /
-  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 6 次调用
-  （含一次 `dumpsys meminfo`），USB 上约 4~8 秒。meminfo 只抽取头部的
-  汇总段（Total PSS by process / by category / Total RAM），**丢弃几 MB 的
-  进程详情**，既精准回答「谁在吃内存」（PSS 比 ps 的 RSS 更准）又不撑爆包体。
+  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 7 次调用
+  （另含一次 `dumpsys meminfo` 与一次网络接口快照），USB 上约 4~10 秒。
+  meminfo 只抽取头部的汇总段（Total PSS by process / by category / Total RAM），
+  **丢弃几 MB 的进程详情**，既精准回答「谁在吃内存」（PSS 比 ps 的 RSS 更准）
+  又不撑爆包体；网络快照用 `ip addr` / `netcfg` 双格式兜底，回答「接口通不通、
+  有没有拿到 IP」（车机联网问题最常见）。
 * **每段独立失败**：logcat 拉不到、/data/anr 无权限，都只在该文件里写一行
   中文说明并记进清单，绝不让整包失败 —— 收集现场时「有 4 份、缺 1 份」远好过
   「什么都没有」。
@@ -56,6 +58,7 @@ F_PROCESS = "process.txt"    # 进程 + 内存 TOP
 F_APPS = "apps.txt"          # 已安装应用（第三方 + 系统包名清单）
 F_ANR = "anr.txt"            # 前台 Activity / ANR / tombstone 线索
 F_MEMINFO = "meminfo.txt"    # 内存分页明细（PSS by process TOP N + 汇总）
+F_NET = "net.txt"            # 网络接口状态 / IP（ip addr 与 netcfg 兜底）
 F_META = "meta.json"         # 清单
 
 
@@ -232,6 +235,96 @@ def meminfo_report(text, limit=PROC_TOP_N):
         head.append(block.strip())
     else:
         head.append("（无汇总段：部分精简 ROM 不输出 Total PSS by process）")
+    return "\n".join(head) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# 解析：网络接口（ip addr 与 netcfg 双格式兜底）
+# ---------------------------------------------------------------------------
+_NETCFG_SEP = "__NETCFG__"
+
+
+def _parse_ip_addr(block):
+    """解析 `ip addr` 输出，返回 [(name, up, ipv4)]。
+
+    `ip addr` 是 Android 5.0+ 的标准命令；接口行形如
+    `2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> ... state UP ...`，IP 在后续
+    `inet 192.168.1.5/24 ...` 行。只取第一个 IPv4（inet6 行不匹配），一个接口
+    没有 inet（无 IP）也照样登记——「接口 UP 但没 IP」正是车机最常踩的坑。
+    """
+    out = []
+    cur = None                      # [name, up, ip]
+    for ln in (block or "").splitlines():
+        m = re.match(r"^\d+:\s*([\w.@-]+):\s*<([^>]*)>", ln)
+        if m:
+            if cur is not None:
+                out.append(tuple(cur))
+            flags = m.group(2).split(",")
+            cur = [m.group(1), ("UP" in flags), ""]
+            continue
+        if cur is not None:
+            im = re.match(r"\s*inet\s+(\d+\.\d+\.\d+\.\d+)/\d+", ln)
+            if im:
+                cur[2] = im.group(1)
+                out.append(tuple(cur))
+                cur = None
+    if cur is not None:
+        out.append(tuple(cur))
+    return out
+
+
+def _parse_netcfg(block):
+    """解析 `netcfg` 输出，返回 [(name, up, ipv4)]。
+
+    老 ROM（Android 4.x）没有 `ip addr`，用 `netcfg` 兜底，格式是
+    `lo  UP  127.0.0.1/8  0x...  MAC`。IP 为 `0.0.0.0` 表示未分配到地址，记为空。
+    """
+    out = []
+    for ln in (block or "").splitlines():
+        toks = ln.split()
+        if len(toks) < 3:
+            continue
+        if toks[1] not in ("UP", "DOWN"):
+            continue
+        ip = toks[2].split("/")[0]
+        # 0.0.0.0 表示接口未分配到地址，等同于「无 IP」（车机常见：网线插了却没拿到地址）
+        if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip) or ip == "0.0.0.0":
+            ip = ""
+        out.append((toks[0], toks[1] == "UP", ip))
+    return out
+
+
+def parse_net(text):
+    """从 `ip addr ; netcfg` 的组合输出里提取网络接口列表。
+
+    优先 `ip addr`（现代 ROM），完全解析不到时退回 `netcfg`（老 ROM）。
+    返回 [(name, up, ipv4)]，解析不出任何接口时返回空 list（绝不抛异常）。
+    """
+    if not text:
+        return []
+    if _NETCFG_SEP in text:
+        ip_part, _, nc_part = text.partition(_NETCFG_SEP)
+    else:
+        ip_part, nc_part = text, ""
+    rows = _parse_ip_addr(ip_part)
+    if not rows:
+        rows = _parse_netcfg(nc_part or text)
+    return rows
+
+
+def net_report(text):
+    """把网络接口整理成「接口列表 + 原始输出」的文本。"""
+    rows = parse_net(text)
+    head = ["== 网络接口（状态 / IPv4）=="]
+    if rows:
+        for name, up, ip in rows:
+            head.append("  %-12s %s  %s" % (name, "UP  " if up else "DOWN",
+                                            ip or "（无 IP）"))
+    else:
+        head.append("  （未能解析出网络接口，见下方原始输出）")
+    head.append("")
+    head.append("== 原始输出 ==")
+    head.append((text or "").strip())
     return "\n".join(head) + "\n"
 
 
@@ -462,6 +555,21 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("ANR 线索读取失败（部分机型需 root）")
 
+        # ---- 4.5) 网络接口快照（ip addr / netcfg 双格式兜底）----
+        rc, out, err = ctx.run(
+            ["shell", "ip addr 2>/dev/null; echo %s; netcfg 2>/dev/null"
+             % _NETCFG_SEP],
+            timeout=TIMEOUT)
+        net_text = (net_report(out) if (rc == 0 and out.strip())
+                    else "（读取网络接口失败：%s）\n"
+                         % (err or "无输出").strip()[:200])
+        size = _write(os.path.join(work, F_NET), net_text)
+        ctx.record(F_NET, bool(rc == 0 and out.strip()),
+                   size, "adb shell ip addr / netcfg",
+                   "" if rc == 0 else (err or "")[:200])
+        if rc != 0:
+            manifest["notes"].append("网络接口读取失败")
+
         # ---- 5) logcat 尾部（可选：抓大日志要十几秒）----
         if with_logcat:
             text, lerr = _logcat_text(ctx, logcat_lines)
@@ -482,7 +590,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
                 for fn in (F_DEVICE, F_PROPS, F_LOGCAT, F_PROCESS, F_APPS,
-                           F_ANR, F_MEMINFO, F_META):
+                           F_ANR, F_NET, F_MEMINFO, F_META):
                     p = os.path.join(work, fn)
                     if os.path.exists(p):
                         z.write(p, fn)

@@ -46,6 +46,57 @@ MEMINFO_SAMPLE = (
     " Lost RAM: 100000 kB\n"
 )
 
+NET_IP_SAMPLE = (
+    "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\n"
+    "    inet 127.0.0.1/8 scope host lo\n"
+    "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+    "    inet 192.168.1.5/24 brd 192.168.1.255 scope global eth0\n"
+    "3: wlan0: <BROADCAST,MULTICAST> mtu 1500 state DOWN\n"
+)
+
+NETCFG_SAMPLE = (
+    "lo       UP      127.0.0.1/8       0x00000049 00:00:00:00:00:00\n"
+    "eth0     UP      192.168.1.5/24    0x00001043 00:11:22:33:44:55\n"
+    "wlan0    DOWN    0.0.0.0/0         0x00001002 aa:bb:cc:dd:ee:ff\n"
+)
+
+
+def test_parse_net_from_ip_addr():
+    rows = diag.parse_net(NET_IP_SAMPLE)
+    d = {n: (up, ip) for n, up, ip in rows}
+    assert d["lo"] == (True, "127.0.0.1")
+    assert d["eth0"] == (True, "192.168.1.5")
+    # wlan0 接口存在但 DOWN 且没有 inet 行，仍要登记（无 IP 记为空）
+    assert d["wlan0"] == (False, "")
+
+
+def test_parse_net_falls_back_to_netcfg():
+    """只有 netcfg 输出（老 ROM 无 ip addr）时也能解析。"""
+    rows = diag.parse_net("__NETCFG__\n" + NETCFG_SAMPLE)
+    d = {n: (up, ip) for n, up, ip in rows}
+    assert d["eth0"] == (True, "192.168.1.5")
+    assert d["wlan0"] == (False, "")          # 0.0.0.0 当作无 IP
+
+
+def test_parse_net_empty():
+    assert diag.parse_net("") == []
+    assert diag.parse_net("no interfaces here") == []
+
+
+def test_net_report_lists_up_down_and_ip():
+    txt = diag.net_report(NET_IP_SAMPLE)
+    assert "== 网络接口（状态 / IPv4）==" in txt
+    assert "eth0" in txt and "192.168.1.5" in txt
+    assert "wlan0" in txt
+    assert "DOWN" in txt                       # wlan0 状态要体现
+    assert "（无 IP）" in txt                  # wlan0 无 IP
+    assert "== 原始输出 ==" in txt
+
+
+def test_net_report_fallback_when_nothing_parsed():
+    txt = diag.net_report("garbage")
+    assert "未能解析出网络接口" in txt
+
 
 def test_parse_meminfo_extracts_by_process_only():
     """只解析 by process 段：by OOM / by category 的 Native/Dalvik/Foreground
@@ -127,6 +178,8 @@ def make_runner(ps=PS_NEW, logcat_supports_t=True, anr_ok=True,
             return 0, apps_all, ""
         if a.startswith("shell dumpsys meminfo"):
             return 0, MEMINFO_SAMPLE, ""
+        if "ip addr" in a or "__NETCFG__" in a:
+            return 0, NET_IP_SAMPLE, ""
         if a.startswith("shell dumpsys"):
             if not anr_ok:
                 return 0, "", "Permission denied"
@@ -239,7 +292,7 @@ def test_collect_produces_zip_with_all_parts(tmp_path):
     with zipfile.ZipFile(z) as zf:
         names = zf.namelist()
         assert names == [diag.F_DEVICE, diag.F_PROPS, diag.F_LOGCAT,
-                         diag.F_PROCESS, diag.F_APPS, diag.F_ANR,
+                         diag.F_PROCESS, diag.F_APPS, diag.F_ANR, diag.F_NET,
                          diag.F_MEMINFO, diag.F_META]
         meta = json.loads(zf.read(diag.F_META).decode("utf-8"))
         assert meta["serial"] == "SERIAL1"
@@ -252,6 +305,8 @@ def test_collect_produces_zip_with_all_parts(tmp_path):
         assert "a.b" in zf.read(diag.F_APPS).decode("utf-8")
         assert "com.big.app" in zf.read(diag.F_MEMINFO).decode("utf-8")
         assert "Total RAM" in zf.read(diag.F_MEMINFO).decode("utf-8")
+        assert "eth0" in zf.read(diag.F_NET).decode("utf-8")
+        assert "192.168.1.5" in zf.read(diag.F_NET).decode("utf-8")
 
 
 def test_collect_without_logcat_omits_file(tmp_path):
@@ -326,6 +381,40 @@ def test_collect_meminfo_failure_still_produces_zip(tmp_path):
     with zipfile.ZipFile(z) as zf:
         assert diag.F_MEMINFO in zf.namelist()
         assert "失败" in zf.read(diag.F_MEMINFO).decode("utf-8")
+
+
+def test_collect_netcfg_fallback(tmp_path):
+    """老 ROM 没有 ip addr（ip addr 段为空）时退回 netcfg 仍产出 net.txt。"""
+    def runner(args, timeout):
+        if "ip addr" in " ".join(args):
+            return 0, "__NETCFG__\n" + NETCFG_SAMPLE, ""
+        return make_runner()(args, timeout)
+
+    z, man, err = diag.collect("adb", "S1", str(tmp_path), with_logcat=False,
+                               runner=runner)
+    assert err is None and z
+    with zipfile.ZipFile(z) as zf:
+        assert diag.F_NET in zf.namelist()
+        txt = zf.read(diag.F_NET).decode("utf-8")
+        assert "eth0" in txt and "192.168.1.5" in txt
+
+
+def test_collect_net_failure_still_produces_zip(tmp_path):
+    """网络段读不到（无 ip addr 也无 netcfg）时只记失败，整包照常产出。"""
+    def runner(args, timeout):
+        if "ip addr" in " ".join(args):
+            return 1, "", "not found"
+        return make_runner()(args, timeout)
+
+    z, man, err = diag.collect("adb", "S1", str(tmp_path), with_logcat=False,
+                               runner=runner)
+    assert err is None and z
+    flags = {p["name"]: p["ok"] for p in man["parts"]}
+    assert flags[diag.F_NET] is False
+    assert flags[diag.F_DEVICE] is True          # 其它段不受牵连
+    with zipfile.ZipFile(z) as zf:
+        assert diag.F_NET in zf.namelist()
+        assert "失败" in zf.read(diag.F_NET).decode("utf-8")
 
 
 def test_collect_runner_raises_is_contained(tmp_path):
