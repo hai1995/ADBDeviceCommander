@@ -1938,3 +1938,39 @@ body.cmd-sorting .cmd-chip .chip-popup { display: none !important; }
   font: 400 var(--fs-sm) var(--font-mono); color: var(--text);
   max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* ---------------- 关于页「更新」行 ---------------- */
+/* 与 adb 行同款布局：复选框 + 结果文字 + 行尾按钮。
+   结果文字 flex:1 吃掉中间空档，把「检查」按钮推到行尾，否则三者会挤在左边。 */
+.about-row.up-row { align-items: center; gap: 12px; }
+.about-row.up-row .chk { flex: none; }
+.about-row.up-row b {
+  flex: 1 1 auto; min-width: 0; font-weight: 400; font-size: var(--fs-sm);
+  overflow-wrap: anywhere; line-height: 1.45;
+}
+.about-row.up-row .btn { flex: none; }
+
+/* ---------------- 新版本弹窗 ---------------- */
+.update-box { width: min(680px, 92vw); }
+/* .modal-body 默认 pre-wrap + break-all（给「查看文件内容」用的），
+   本弹窗里既有横排的版本信息又有长段说明，按正常流排才不乱。 */
+.update-body { white-space: normal; word-break: normal; }
+.update-ver {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 10px; font-family: var(--font-mono);
+}
+.update-ver .update-k { color: var(--muted); font-size: var(--fs-sm); letter-spacing: .08em; }
+.update-ver b { font-weight: 600; }
+/* 新版本号用强调色：一眼看出「要变的是这个数」 */
+.update-ver .update-new { color: var(--accent); }
+.update-ver .update-arrow { color: var(--muted); margin: 0 2px; }
+.update-notes {
+  margin: 0; padding: 10px 12px; max-height: 44vh; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.6;
+  color: var(--text); background: rgba(0, 0, 0, .22);
+  border: 1px solid var(--line); border-radius: var(--r-sm, 4px);
+  box-sizing: border-box;
+}
+.update-hint { margin-top: 10px; font-size: var(--fs-sm); line-height: 1.6; }
+.update-hint code { font-family: var(--font-mono); color: var(--text); }

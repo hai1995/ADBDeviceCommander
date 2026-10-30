@@ -1,0 +1,170 @@
+# ADB 设备指令台 —— 构建 / 测试 / 发布流水线
+#
+# 为什么要有这个工作流
+# --------------------
+# 以前每次发版是「开发机上 python build.py → 手工压 zip → 微信/邮件发给同事」，
+# 三个坑都在人身上：忘了先跑测试、压包时漏了 commands.json / assets、
+# 发出去之后没人记得这版对应哪个提交。CI 把这三件事一次性固定下来：
+#   * 每次 push / PR 先跑全量单测（Python + 前端），红了就不产出；
+#   * 产物由 build.py --package 现场生成，包内文件齐不齐由测试盯着；
+#   * 打 tag 时自动发 Release，附件就是同事该下发的那个 zip。
+#
+# 触发方式
+#   push 到 main      → 跑测试 + 构建，产物上传为 artifact（不发 Release）
+#   push tag v<version> → 同上，并把产物发布为 Release
+#   pull_request      → 只跑测试（省一台 Windows 机器）
+#   手动 workflow_dispatch → 同 main
+#
+# 发版只需两步（版本号单一来源在 core/constants.py）：
+#   python tools/bump_version.py --apply     # 递增版本号并写回源码
+#   git commit -am "第二十四轮：..." && git tag v<新版本> && git push --tags
+#
+# 注意：tag 必须与源码里的 VERSION 一致，否则下面的「版本号一致性」步骤会失败。
+# 这不是洁癖 —— Release 标题、zip 文件名、程序自报版本号三处一旦不一致，
+# 用户看到的「我有新版」和实际下到的包就对不上，排查起来极其难受。
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# 发布 Release 需要写权限；其余步骤只读
+permissions:
+  contents: write
+
+# 同一分支/tag 的新推送会取消上一次未跑完的构建（Windows 机器启动慢，
+# 连推两次不必等两份队列）
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 全量单测：Linux 上跑得快，先拦住明显坏掉的提交
+  # ---------------------------------------------------------------------------
+  test:
+    name: 测试（Python ${{ env.PYTHON_VERSION }} + 前端 jsdom）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装测试依赖
+        # 只装 pytest：core/backend 全是标准库，不需要 pywebview / pyinstaller。
+        # 少装一个带平台依赖的包，就少一种「CI 在 Linux 上装不起来」的失败。
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Python 单测
+        run: python -m pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 前端依赖（jsdom）
+        working-directory: tests/frontend
+        run: npm install --no-audit --no-fund
+
+      - name: 前端单测
+        working-directory: tests/frontend
+        run: node run-all.cjs
+
+  # ---------------------------------------------------------------------------
+  # 2) Windows 构建：产出可直接发给同事的分发件
+  # ---------------------------------------------------------------------------
+  windows:
+    name: 打包（Windows x64）
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装构建依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 版本号一致性（tag 与源码 VERSION 必须相同）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $m = Select-String -Path core/constants.py -Pattern '^VERSION = "([^"]+)"'
+          if (-not $m) { throw "core/constants.py 里找不到 VERSION" }
+          $ver = $m.Matches[0].Groups[1].Value
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          if ($ver -ne $tag) {
+            throw "tag=$tag 与源码 VERSION=$ver 不一致：请先跑 python tools/bump_version.py --apply 再打 tag"
+          }
+          Add-Content $env:GITHUB_STEP_SUMMARY "- 版本号：``$ver``"
+
+      - name: 构建（exe + 分发 zip + 源码 zip）
+        # --package 产出发给同事的 ADBDeviceCommander_v<版本>_win64.zip
+        # --zip     同时产出源码分发包（给要看代码的人）
+        run: python build.py --package --zip
+
+      - name: 生成 SHA256 校验和
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -Filter *.zip | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $lines | Set-Content -Path dist/sha256sums.txt -Encoding utf8
+          $lines
+          Add-Content $env:GITHUB_STEP_SUMMARY "### 产物"
+          $lines | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "- ``$_``" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ADBDeviceCommander-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            dist/sha256sums.txt
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $m = Select-String -Path core/constants.py -Pattern '^VERSION = "([^"]+)"'
+          $ver = $m.Matches[0].Groups[1].Value
+          $tag = "${{ github.ref_name }}"
+          # 显式列出附件名：用通配符会把「源码包」和「分发件」混在一起传两遍，
+          # gh 会因同名重复而报错。
+          $assets = @(
+            "dist/ADBDeviceCommander_v${ver}_win64.zip",
+            "dist/ADBDeviceCommander_v${ver}.zip",
+            "dist/sha256sums.txt"
+          )
+          foreach ($a in $assets) {
+            if (-not (Test-Path $a)) { throw "缺少附件：$a" }
+          }
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            # 同一 tag 重跑：补传 / 覆盖附件，不新建（否则会因 release 已存在而失败）
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --title "ADB 设备指令台 $tag" --generate-notes
+          }
+          Add-Content $env:GITHUB_STEP_SUMMARY "- Release：https://github.com/${{ github.repository }}/releases/tag/$tag"

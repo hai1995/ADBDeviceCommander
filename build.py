@@ -20,6 +20,8 @@
     python build.py --dist-dir DIR  # 改产物目录（默认 dist/）
     python build.py --zip           # exe 打完后，额外产出干净源码分发 zip
     python build.py --zip-only      # 跳过 PyInstaller，只产出源码分发 zip
+    python build.py --package       # exe 打完后，额外产出「双击即用」的 Windows 分发 zip
+                                    # （ADBDeviceCommander_v<版本>_win64.zip，CI 发的就是它）
 
 产物（`dist/` 整个目录拷给同事即可）：
 
@@ -310,6 +312,73 @@ def make_source_zip(root: Path = ROOT, dest_dir: Path = None) -> Path:
     return zip_path
 
 
+def win_package_name(root: Path = ROOT) -> str:
+    """分发给同事的 Windows 包名。
+
+    `_win64` 后缀不是装饰：core.update.ASSET_SUFFIX 靠它从 Release 资产里挑
+    出「该给 Windows 用户下哪一个」，改名会让更新检查退化成「随便挑一个 zip」。
+    tests/test_build.py 有断言盯着这两个常量一致。
+    """
+    return "ADBDeviceCommander_v%s_win64.zip" % app_version(root)
+
+
+def make_win_package(target: Path, dist_dir: Path = None,
+                     root: Path = ROOT) -> Path:
+    """把 dist/ 里「双击即用」的那一套打成 zip，返回产物路径。
+
+    与 make_source_zip 的分工：
+      * 源码包给「要看代码 / 想自己跑起来」的人，里面是 .py 与测试；
+      * 这个包给「只想用」的同事，里面是 exe + 可编辑的 json + 说明 + 图标。
+    以前每次发版都是手工把 dist 目录压一遍再发，压出来常常漏掉
+    commands.json / assets（同事那边图标没了、指令是空的），或者把
+    config.json 里自己的设置一起发出去。打成一条命令就没有这些手滑。
+
+    包内同样套一层与 zip 同名的顶层目录：解压后不会把 exe 和一堆 json
+    散落在下载文件夹里，也就不会出现「exe 与 json 不同目录、json 不生效」。
+    """
+    dist_dir = Path(dist_dir or root / "dist")
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = dist_dir / win_package_name(root)
+    top = zip_path.stem
+    exe_name = APP_NAME + (".exe" if os.name == "nt" else "")
+    count = 0
+    missing = []
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        exe = target / exe_name
+        if exe.is_file():
+            zf.write(exe, top + "/" + exe_name)
+            count += 1
+        else:
+            missing.append(exe_name)
+        for rel in SIDE_FILES:
+            p = target / rel
+            if p.is_file():
+                zf.write(p, top + "/" + rel)
+                count += 1
+        for rel in SIDE_DIRS:
+            d = target / rel
+            if not d.is_dir():
+                continue
+            for dirpath, dirnames, filenames in os.walk(d):
+                dirnames.sort()
+                for fn in sorted(filenames):
+                    p = Path(dirpath) / fn
+                    zf.write(p, top + "/" + p.relative_to(target).as_posix())
+                    count += 1
+        # 默认配置模板：有它就等于「同事第一次打开就有一份完整可改的 config.json」，
+        # 不必等程序自己生成（程序也会生成，但用户会先看见目录里是空的）。
+        cfg = target / "config.json"
+        if cfg.is_file():
+            zf.write(cfg, top + "/config.json")
+            count += 1
+    if missing:
+        print("[警告] 分发件里缺少 %s（产物目录里没有）" % "、".join(missing),
+              file=sys.stderr)
+    print("分发件：%s（%d 个文件，%.1f MB，顶层目录 %s/）"
+          % (zip_path, count, zip_path.stat().st_size / 1024 / 1024, top))
+    return zip_path
+
+
 def _file_locked(path: Path) -> bool:
     """探测文件是否被其他进程占用（Windows：以读写方式打不开即被锁）。
 
@@ -497,6 +566,9 @@ def main(argv=None) -> int:
                     help="exe 打完后，额外产出干净源码分发 zip（排除测试/构建垃圾）")
     ap.add_argument("--zip-only", action="store_true",
                     help="跳过 PyInstaller，只产出源码分发 zip（不发 exe 时用）")
+    ap.add_argument("--package", action="store_true",
+                    help="exe 打完后，额外产出「双击即用」的 Windows 分发 zip"
+                         "（ADBDeviceCommander_v<版本>_win64.zip）")
     ap.set_defaults(clean=True)
     args = ap.parse_args(argv)
 
@@ -602,6 +674,8 @@ def main(argv=None) -> int:
 
     if args.zip:
         make_source_zip(ROOT, args.dist_dir)
+    if args.package:
+        make_win_package(target, args.dist_dir)
 
     print("\n打包完成：%s（%.1f MB）" % (exe, exe.stat().st_size / 1024 / 1024))
     print("把整个 %s 目录一起拷给同事（exe 与 json 必须同目录，json 才 editable）。" % target)

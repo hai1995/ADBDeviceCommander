@@ -107,6 +107,16 @@
     aboutCmd: $("about-cmd"), aboutDev: $("about-dev"), aboutWarn: $("about-warn"),
     aboutAdbDir: $("about-adb-dir"), aboutAdbSave: $("about-adb-save"),
     aboutConfigPath: $("about-config-path"),
+    // 版本更新：关于页一行（自动检查 + 上次结果 + 手动检查）+ 新版本弹窗
+    aboutUpdateAuto: $("about-update-auto"),
+    aboutUpdateState: $("about-update-state"),
+    aboutUpdateCheck: $("about-update-check"),
+    updateModal: $("update-modal"), updateTitle: $("update-title"),
+    updateCurrent: $("update-current"), updateLatest: $("update-latest"),
+    updateSize: $("update-size"), updateNotes: $("update-notes"),
+    updateHint: $("update-hint"), updateClose: $("update-close"),
+    updateSkip: $("update-skip"), updateLater: $("update-later"),
+    updateDownload: $("update-download"),
     aboutConfigOpen: $("about-config-open"),
     // modal
     modal: $("modal"), modalTitle: $("modal-title"),
@@ -569,6 +579,8 @@
       case "shot_state": setShotRunning(!!p.running); break;
       case "apk_state": setApkRunning(!!p.running); break;
       case "diag_state": setDiagRunning(!!p.running); break;
+      case "update_state": setUpdateChecking(!!p.running); break;
+      case "update": onUpdateResult(p); break;
       case "logcat": onLogcat(p); break;
       case "logcat_capture": onLogcatCapture(p); break;
       case "file": onFile(p); break;
@@ -692,6 +704,9 @@
     }
     renderCommands(p.commands || []);
     onAbout(p);
+    // 版本更新状态（开关 + 上次检查结果）。单独一次调用而不是塞进 booted 载荷：
+    // 它是「可选的附加信息」，取不到也不该影响启动主流程。
+    loadUpdateInfo();
   }
 
   // 后端下发的缓冲区选项（label -> 实际缓冲区名列表）重建下拉；
@@ -4091,6 +4106,124 @@
     els.aboutDev.textContent = online + " / " + devices.length;
   }
 
+  /* ---------------- 版本更新 ----------------
+     后端每 12 小时自动查一次（见 backend/controller.py 的 _update_loop），查到新版
+     推一条 update 事件，这里负责弹窗。三条「不打扰」规则：
+       · 自动检查失败（断网 / 限流）不弹 —— 用户没问，别把网络问题当报错砸给他；
+       · 点过「跳过此版本」的，后端已把事件标成 silenced，这里不再弹；
+       · 「稍后」只关窗不记忆 —— 下次启动仍会提醒一次，那是真该提醒的。 */
+  let updateChecking = false;
+  let updateShown = null;          // 弹窗当前展示的结果（下载 / 跳过要用它的 version）
+  // 收到过「实时结果」后，启动回填就不再覆盖关于页文字。
+  // 真实竞态：booted 与 update 事件可能在同一批轮询里到达——onBooted 里的
+  // loadUpdateInfo() 是异步的，它的响应会比同批事件更晚落地，于是把刚显示的
+  // 「有新版本 2026.1103.1200」盖回「尚未检查」。回填天生是旧数据，不该赢。
+  let updateEventSeen = false;
+
+  function setUpdateChecking(on) {
+    updateChecking = !!on;
+    if (els.aboutUpdateCheck) {
+      els.aboutUpdateCheck.disabled = updateChecking;
+      els.aboutUpdateCheck.textContent = updateChecking ? "检查中…" : "检查";
+    }
+  }
+
+  /* 关于页那一行只放「结论」，细节进 title（悬停可看全文）。 */
+  function setUpdateStateText(res) {
+    const b = els.aboutUpdateState;
+    if (!b) return;
+    b.classList.remove("err", "ok", "dim");
+    if (!res) {
+      b.textContent = "尚未检查";
+      b.title = "程序启动 8 秒后会自动查一次；也可点右侧「检查」立即查";
+      b.classList.add("dim");
+      return;
+    }
+    if (res.status === "update") {
+      b.textContent = "有新版本 " + (res.version || "");
+      b.title = "当前 " + (res.current || "") + " → " + (res.version || "")
+        + "；点「检查」可再看说明与下载入口";
+    } else if (res.status === "latest") {
+      b.textContent = "已是最新（" + (res.current || "") + "）";
+      b.title = "";
+    } else if (res.status === "ahead") {
+      b.textContent = "开发版（" + (res.current || "") + "）";
+      b.title = "本机版本比发布版新：" + (res.version || "");
+    } else {
+      const msg = res.error || "检查失败";
+      b.textContent = msg.length > 46 ? msg.slice(0, 46) + "…" : msg;
+      b.title = msg;
+      b.classList.add("err");
+    }
+  }
+
+  /* 拉一次版本信息（只读，不发网络请求）：回填开关与「上次检查结果」。 */
+  async function loadUpdateInfo() {
+    const info = await callApi(api.update_info());
+    if (!info || info.ok === false) return;
+    if (els.aboutUpdateAuto && typeof info.enabled === "boolean") {
+      els.aboutUpdateAuto.checked = info.enabled;
+    }
+    setUpdateChecking(!!info.checking);
+    // 已有实时结果就不回填（回填是上次会话的旧数据，会盖掉刚到的结果）
+    if (!updateEventSeen) setUpdateStateText(info.last || null);
+  }
+
+  async function checkUpdateManual() {
+    if (updateChecking) return;
+    setUpdateChecking(true);         // 乐观禁用：后端广播回来之前先给出反馈
+    if (els.aboutUpdateState) {
+      els.aboutUpdateState.classList.remove("dim", "err", "ok");
+      els.aboutUpdateState.textContent = "正在检查…";
+      els.aboutUpdateState.title = "";
+    }
+    const res = await callApi(api.update_check(true));
+    // 被拒（正在查 / 正在退出）时不擅自复位：真正的收尾由 update_state 广播负责，
+    // 这里复位会和后台线程抢同一个按钮状态。
+    if (!res || res.ok === false) {
+      if (!res || res.reason !== "busy") setUpdateChecking(false);
+    }
+  }
+
+  function fmtMB(n) {
+    n = Number(n) || 0;
+    return n > 0 ? (n / 1048576).toFixed(1) + " MB" : "";
+  }
+
+  function showUpdateModal(res) {
+    if (!els.updateModal) return;
+    updateShown = res || null;
+    const cur = (res && res.current) || (els.aboutVer && els.aboutVer.textContent) || "";
+    if (els.updateTitle) {
+      els.updateTitle.textContent = res && res.version
+        ? "发现新版本 " + res.version : "发现新版本";
+    }
+    if (els.updateCurrent) els.updateCurrent.textContent = cur || "—";
+    if (els.updateLatest) els.updateLatest.textContent = (res && res.version) || "—";
+    if (els.updateSize) {
+      els.updateSize.textContent = fmtMB(res && res.asset && res.asset.size);
+    }
+    if (els.updateNotes) {
+      const notes = (res && res.notes) || "";
+      els.updateNotes.textContent = notes
+        || "（这个版本没有填写更新说明，可在下载页查看提交记录。）";
+    }
+    // 没有下载地址时不能给一个「点了没反应」的按钮
+    if (els.updateDownload) els.updateDownload.disabled = !(res && res.url);
+    els.updateModal.classList.remove("hidden");
+  }
+
+  function hideUpdateModal() {
+    if (els.updateModal) els.updateModal.classList.add("hidden");
+  }
+
+  function onUpdateResult(p) {
+    p = p || {};
+    updateEventSeen = true;
+    setUpdateStateText(p);
+    if (p.status === "update" && !p.silenced) showUpdateModal(p);
+  }
+
   /* ---------------- 可拖动分隔条 ----------------
      左右拖动改变左侧面板宽度（设备栏 / 指令台）。钳制在
      [min, 可用宽 - 右侧保留] 之间，防止把面板拖没或压垮右侧；
@@ -4696,6 +4829,34 @@
       // 目录配好后立即用新 PATH 刷新一次设备列表
       if (ok && adbRes && adbRes.ok) callApi(api.refresh_devices());
     });
+    // ---- 版本更新（关于页一行 + 新版本弹窗）----
+    if (els.aboutUpdateCheck) els.aboutUpdateCheck.addEventListener("click", checkUpdateManual);
+    if (els.aboutUpdateAuto) {
+      els.aboutUpdateAuto.addEventListener("change", () => {
+        // 关掉只是「别自动打扰我」：手动「检查」按钮仍然可用（后端也是这么分的）
+        persistPref("update_check", !!els.aboutUpdateAuto.checked);
+      });
+    }
+    if (els.updateClose) els.updateClose.addEventListener("click", hideUpdateModal);
+    if (els.updateLater) els.updateLater.addEventListener("click", hideUpdateModal);
+    if (els.updateDownload) {
+      els.updateDownload.addEventListener("click", () => {
+        const url = updateShown && updateShown.url;
+        if (!url) {
+          pushStatus("warn", "⚠ 这个版本没有提供下载地址，请到仓库的 Releases 页面手动取包");
+          return;
+        }
+        callApi(api.update_open(url));
+        hideUpdateModal();
+      });
+    }
+    if (els.updateSkip) {
+      els.updateSkip.addEventListener("click", () => {
+        const v = updateShown && updateShown.version;
+        if (v) callApi(api.update_skip(v));
+        hideUpdateModal();
+      });
+    }
     // files
     els.fileUp.addEventListener("click", () => {
       if (!fileSerial) return pushStatus("warn", "请先勾选设备");

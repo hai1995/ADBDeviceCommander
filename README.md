@@ -48,6 +48,7 @@ ADBDeviceCommander/
 │   ├── devinfo.py        # 设备信息快照：一次 adb shell 取全（getprop/wm/battery/df/mem）
 │   ├── diag.py           # 诊断包：设备信息/日志尾部/进程 TOP/应用清单/ANR 一次收齐并打 zip
 │   ├── tmpfiles.py       # 系统临时目录里「本程序遗留副本」的保守清理（只碰自己的前缀）
+│   ├── update.py         # 版本检查：版本比较 / Release 解析 / 挑 Windows 资产 / 失败翻译（不发请求，opener 注入）
 │   ├── win_theme.py      # 原生标题栏套用界面深色（DWM 属性，Win10/11，纯逻辑可单测）
 │   └── envcheck.py       # 启动前环境预检（WebView2/依赖/adb，纯判定可单测）
 ├── adb_inject.py         # 纯逻辑：adb/scrcpy 的 -s 自动拼接（可单测）
@@ -58,6 +59,7 @@ ADBDeviceCommander/
 ├── assets/app.ico        # 程序图标
 ├── tools/                # 版本号递增（bump_version.py）+ 扁平 zip 打包（package.py）
 │                         #   + 源码推送 GitHub（push_github.py，token 不进版本库）
+├── .github/workflows/    # CI：每次 push 跑全量测试；打 tag 自动构建并发 Release
 ├── tests/                # 单元测试（backend/* + core/* 纯逻辑）+ 前端 jsdom 测试
 ├── 使用说明.txt           # 给最终使用者的简明说明（随 exe 分发）
 └── README.md
@@ -68,8 +70,8 @@ ADBDeviceCommander/
 pywebview `evaluate_js` 的跨线程限制）。空闲时轮询退避到 500ms（省 CPU/电池，
 又不让「截图/录屏/抓取完成」的 toast 迟到）；一旦有事件立即回到 400ms。
 事件种类：`booted` / `devices` / `console` / `status` / `tool` / `stop_state` /
-`rec_state` / `shot_state` / `apk_state` / `diag_state` / `logcat` / `logcat_capture` /
-`file` / `file_view`。
+`rec_state` / `shot_state` / `apk_state` / `diag_state` / `update_state` / `update` /
+`logcat` / `logcat_capture` / `file` / `file_view`。
 
 **分发是逐条隔离的**：任何一条事件的处理函数抛异常都只丢弃它自己 —— 同一批里
 后面的事件照常处理，轮询续约也一定发生（`try/finally`）。否则一条坏事件就能让
@@ -139,6 +141,22 @@ python build.py --no-deps      # 跳过依赖检查与自动安装
 > 残留进程，将 `D:\Code\ADBDeviceCommander`（或你的工程目录）加入 Windows 安全中心 →
 > 病毒和威胁防护 → 管理设置 → 排除项，重跑 `python build.py`。
 
+### 一条命令出「发给同事」的包
+
+```bat
+python build.py --package      # exe 打完后，再压一个 ADBDeviceCommander_v<版本>_win64.zip
+python build.py --package --zip   # 同时产出发给同事的分发件 + 源码分发包
+```
+
+产物 `dist\ADBDeviceCommander_v<版本>_win64.zip` 里是 `exe + commands.json +
+使用说明.txt + assets\ + config.json`，套在与 zip 同名的顶层目录下。以前是手工
+「右键压缩 dist 目录」，三个坑都踩过：漏了 `assets`（同事那边没图标）、漏了
+`commands.json`（指令页空的）、把自己的 `config.json`（含本机绝对路径）发出去。
+
+> 名字里的 `_win64` 不是装饰：更新检查按这个后缀从 Release 资产里挑 Windows 包
+> （`core.update.ASSET_SUFFIX`），改名会让自动更新退化成「随便挑一个 zip」。
+> `tests/test_build.py` 有断言盯着这两处一致。
+
 ### 打源码分发包（二次开发 / review 用）
 
 ```bat
@@ -195,6 +213,38 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 | `Could not resolve host` | 网络/代理问题 |
 | `non-fast-forward` | 远端有本地没有的提交，先 `git pull --rebase origin main` |
 | `src refspec ... does not match any` | 本地还没提交过任何东西 |
+
+### CI/CD：打一个 tag 就自动构建发版
+
+`.github/workflows/build.yml` 分两个 job：
+
+| job | 运行环境 | 触发 | 做什么 |
+| --- | --- | --- | --- |
+| `test` | ubuntu-latest | 每次 push / PR | `pytest` 全量（约 940 项）+ 前端 61 个 jsdom 用例 |
+| `windows` | windows-latest | push 到 main / 打 tag / 手动 | 装依赖 → 校验 tag 与源码 `VERSION` 一致 → `build.py --package --zip` → 生成 `sha256sums.txt` → 上传 artifact → tag 时发 Release |
+
+打 tag 之后的两三分钟，Releases 页面就有 `ADBDeviceCommander_v<版本>_win64.zip`
+（给同事的）、源码包（给要看代码的）和 `sha256sums.txt`。同事的下载地址因此固定成
+「最新 Release」，不用再问「现在该用哪版」。
+
+发版只剩两步：
+
+```bat
+python tools\bump_version.py --apply
+git commit -am "第二十四轮：…" && git tag v2026.1103.1200 && git push --tags
+```
+
+两个刻意的设计：
+
+* **tag 与 `core/constants.py` 的 `VERSION` 不一致直接失败**。Release 标题、
+  zip 文件名、程序自报版本号三处一旦不一致，用户看到的「我有新版」和实际下到的
+  包就对不上，事后极难排查。
+* **同一 tag 重跑不报错**：`gh release view` 能查到就 `gh release upload --clobber`
+  补传附件，查不到才 `gh release create`。否则「重新跑一次流水线」会因
+  「Release 已存在」红掉。
+
+> 资产名是显式列出来的，不用 `dist/*.zip` 通配：那样源码包与分发件会混在一起
+> 传两遍，`gh` 因同名重复直接报错。
 
 ### 进仓库的是什么
 
@@ -342,7 +392,9 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 `dist\`，随 exe 分发；改说明请只编辑它，避免两份漂移）。给同事的要点：
 
 1. **整体拷贝**：把 `dist\` 整个文件夹拷走，不要只发 exe——`commands.json`
-   必须和 exe 同目录，编辑它才能生效。
+   必须和 exe 同目录，编辑它才能生效。更省事的做法是直接发
+   `dist\ADBDeviceCommander_v<版本>_win64.zip`（`python build.py --package` 或 CI 产出），
+   解压出来就是「exe + json + assets + 说明」一整套。
 2. **使用前**：设备开 USB 调试、电脑 adb 可用（或程序里填 adb.exe 绝对路径）、
    连数据线并在设备上点允许调试。
 3. **加 / 改指令**：直接编辑同目录的 `commands.json`（兼容 electerm 导出），
@@ -350,6 +402,37 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 4. **常见问题**：`more than one device` → 去掉命令里写死的 `-s`；`未授权` → 在设备
    上点允许；改了 json 没效果 → 确认同目录且已重启。
 5. **启动报「WebView2 过旧 / 缺失」**：按上文链接安装 WebView2 Runtime（≥121）即可。
+
+---
+
+## 版本更新提示（程序内）
+
+程序会自己看有没有新版，不需要用户来问「现在该用哪版」。
+
+| 环节 | 行为 |
+| --- | --- |
+| 时机 | 启动后 8 秒查一次（避开展台初始化），之后每 **12 小时**一次；「关于」页的「检查」按钮随时可手动查 |
+| 判定 | 读 GitHub Releases 的 `releases/latest`，把 `tag_name` 与源码 `VERSION` 按 `年.月日.时分` 逐段比较 |
+| 提示 | 只有「确实更新」才弹窗：版本号对比 + 更新说明（过长截断）+ 资产体积，按钮为 **去下载 / 稍后 / 跳过此版本** |
+| 下载 | 点「去下载」用系统浏览器打开发布页，**程序不自己替换自身** |
+| 静默 | 自动检查失败（断网 / 限流）不弹窗，只在「关于」页留一行可读原因；「已是最新」「本机是开发版」也不弹 |
+
+为什么不自动替换：exe 正在运行时 Windows 不允许覆盖自身，自动更新只有两条路——
+写一个 `.bat` 等进程退出后替换（杀毒软件对「脚本延迟改可执行文件」高度敏感，十有八九
+被拦），或要求管理员权限（同事机器上等于让程序弹 UAC）。两条都比「让用户点一下下载」
+更糟，所以这里只做「发现 + 说清楚」。
+
+三个可配置项（`config.json`，也能在「关于」页勾）：
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `update_check` | `true` | 是否自动检查；关掉后「检查」按钮仍可手动查 |
+| `update_feed` | 空 | 留空 = GitHub Releases。内网部署时填自建的 `version.json` 地址（字段只要 `version` / `notes` / `url`），代码不用改 |
+| `update_skipped_version` | 空 | 点过「跳过此版本」的版本号；同版本不再自动弹窗，更高版本发布后照常提示 |
+
+> **隐私/安全边界**：打开下载页只放行 http(s) 且主机在 GitHub 域名（或 `update_feed`
+> 配置的域名）内的地址。否则一旦更新源被换掉，一条 `http://随便什么域名/b.exe` 就能
+> 让程序替用户打开可执行文件下载——那等于把「装什么」的决定权交出去了。
 
 ---
 

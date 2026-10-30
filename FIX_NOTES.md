@@ -2019,3 +2019,159 @@ TEMP 里留一份，看几次就能吃掉几个 GB。（本轮开工时沙箱 `/
   避免一次性改太多面（改的面越广，回归越难验干净）。
 - 诊断卡与 APK 卡一样是「多设备广播」：勾几台就出几个包，命名带序列号与时间戳，
   不会互相覆盖。
+
+# 第二十三轮：CI/CD 自动构建发版 + 程序内「发现新版本」提示
+
+## 起因
+
+用户提的是流程问题，不是功能问题：
+
+> 每次有新改动发版之后，都是手动 build 出来再发给同事，效率太低。能不能更新后
+> GitHub 上跑 CI/CD 直接出产物，程序里也定期扫描，发现新版就弹窗让用户下载更新。
+
+一句「效率太低」背后其实是四件反复出错的事，而且错在人不在代码：
+忘跑测试就打包、压包时漏 `commands.json` / `assets`（同事那边指令页是空的、图标没了）、
+把自己的 `config.json`（含本机绝对路径）一起发出去、发完没人记得这版对应哪个提交。
+
+## 先定两件事，再写代码
+
+两个决定会影响整个实现，先问清再动手，避免做完了发现方向不对：
+
+**一、产物放哪、更新怎么拿到版本信息。** 仓库当时是 **private**，而私有仓库的
+Release 资产必须带 token 才能下载——token 一旦打进 exe 就等于公开发布（谁拿到
+exe 都能提取，而且那是写权限 token）。所以这不是「技术上能不能」的问题，是
+「必须选一条路」：仓库转 public / 另建 public 发布仓库 / 内网共享盘。
+用户选了**转 public**（工具本身无商业机密）。
+
+> 转 public 之前先扫了 git 全历史：`git rev-list --all --objects` 逐个 cat-file
+> 找 `github_pat_` / `ghp_`。5 个 blob 命中，逐个看清全是占位符
+> （`github_pat_xxx`）与测试夹具（`github_pat_TESTONLY_…`），`.git-credential`
+> 从未进过历史；154 个跟踪文件里没有 `config.json` / `*.wav` / `dist/`。
+> 确认干净才动 `PATCH /repos {... "private": false}`。
+
+**二、发现新版后做到哪一步。** 自动下载替换 / 只提示 + 浏览器下载 / 下载到本地由
+用户覆盖。用户选了**弹窗提示 + 浏览器下载**——这也是我推荐的：exe 正在运行时
+Windows 不允许覆盖自身，自动替换要么写 `.bat` 延迟替换（杀毒软件对「脚本延迟改
+可执行文件」高度敏感，十有八九被拦），要么要管理员权限（同事机器上等于让程序弹
+UAC）。两条都比「用户点一下下载」更糟。
+
+## 一、CI：打一个 tag 就出包（`.github/workflows/build.yml`）
+
+| job | 环境 | 触发 | 做什么 |
+| --- | --- | --- | --- |
+| `test` | ubuntu-latest | 每次 push / PR | `pytest` 全量 + 前端 61 个 jsdom 用例 |
+| `windows` | windows-latest | push main / tag / 手动 | 装依赖 → 校验 tag↔VERSION → `build.py --package --zip` → sha256 → artifact → tag 时发 Release |
+
+几个刻意的选择：
+
+* **测试在 Linux、构建在 Windows**：`core/` 与 `backend/` 全是标准库，测试不需要
+  pywebview / pyinstaller，Linux 上装 `pytest` 就能跑完（快、失败信息清楚）；
+  Windows 机器启动慢，只在真要出包时才用。
+* **tag 必须与 `core/constants.py` 的 `VERSION` 相同**，不同就直接 `throw`。
+  Release 标题、zip 文件名、程序自报版本号三处一旦不一致，用户看到的「我有新版」
+  和实际下到的包就对不上，这种问题事后极难查。
+* **同一 tag 重跑不红**：`gh release view` 查到就 `gh release upload --clobber`，
+  查不到才 `gh release create`。否则「重跑一次流水线」会因「Release 已存在」失败。
+* **附件名显式列出**，不用 `dist/*.zip` 通配：源码包与分发件都会匹配那个通配，
+  `gh` 会因同名重复报错。
+* **权限只给 `contents: write`**，且只在发布那一步用 `GITHUB_TOKEN`。
+
+## 二、`build.py --package`：把「发给同事的东西」做成一条命令
+
+以前是手工右键压缩 `dist/`。压漏 `assets/`、压漏 `commands.json`、顺手把自己的
+`config.json` 打进去，三种都发生过（后两种由用户实报）。
+
+`make_win_package()` 固定包内容：`exe + commands.json + 使用说明.txt + assets/ +
+config.json`，套一层与 zip 同名的顶层目录（解压不会把 exe 和一坨 json 散在下载
+文件夹里——那会导致「exe 与 json 不同目录，json 不生效，用户改了没反应」）。
+
+文件名 `ADBDeviceCommander_v<版本>_win64.zip` 里的 `_win64` 是**协议的一部分**：
+`core.update.ASSET_SUFFIX` 靠它从 Release 资产里挑 Windows 包，改名会让自动更新
+悄悄退化成「随便挑一个 zip」（可能下到源码包，解压没有 exe）。
+`tests/test_build.py::test_win_package_name_matches_update_asset_suffix` 盯着这两处。
+
+## 三、`core/update.py`：版本检查（纯逻辑，可单测）
+
+只做判断，不发请求（`opener` 注入）、不读配置、不碰 UI：
+
+| 函数 | 职责 |
+| --- | --- |
+| `parse_version` | `v2026.1029.1931` / `release-2026.1029.1931` → `(2026,1029,1931)`；**只接受字符串** |
+| `is_newer` | 任一方认不出（如 `dev`）→ 一律 `False`（宁可漏报一次，不可天天误报） |
+| `due` | 距上次检查是否已过 12 小时；`last` 在未来（系统时间被调回）也算到点 |
+| `pick_asset` | `_win64.zip` > 任意 `.zip` > 任意 `.exe` |
+| `normalize` | GitHub `releases/latest` 与自建 `version.json` 归一成同一结构 |
+| `check` | 404/403/5xx/坏 JSON/连不上 全部翻译成中文，**绝不抛异常** |
+
+`parse_version` 只收字符串这条值得单独说：早先写成「非字符串先 `str()` 再解析」，
+于是 `2026` 会变成 `(2026,0,0)`——任何真版本都比它大，用户会天天看到「有新版本」
+且查不出原因。宁可判无效。
+
+## 四、后端：检查时机与「不打扰」
+
+`update_check(force)` 立即返回、结果走 `update` 事件；`_update_loop` 在后台线程里
+「等 8 秒查首次」（启动瞬间 adb 探测、命令加载、首刷设备都在抢时间），之后每
+12 小时复查。
+
+| 场景 | 行为 |
+| --- | --- |
+| 开关关掉（`update_check=false`）、非手动 | 直接返回 `disabled`，不发请求 |
+| 12 小时内已查过、非手动 | 返回 `skipped` |
+| 正在查（手动再点） | 返回 `busy` + 一句提示，**不排队**（排队会让用户把旧结果当新结果） |
+| 查失败 | 节流只等 **1 小时**再试（开会切网 / VPN 掉线不该让提示消失半天） |
+| 自动查 + 无新版 / 出错 | 一句话都不说（用户没问，别把断网当报错砸给他） |
+| 自动查 + 有新版本 | 弹窗 + 状态栏一行 |
+| 用户点过「跳过此版本」 | 自动查的事件标 `silenced=true`，不弹窗；手动查仍如实回报 |
+
+「打开下载页」有个白名单：只放行 http(s) 且主机在 GitHub 域名（或 `update_feed`
+所配置的域名）内。防的不是用户，而是**更新源被换掉之后**有人用一条
+`http://随便什么域名/b.exe` 的响应让程序替用户打开可执行文件下载——那等于把
+「装什么」的决定权交出去。
+
+## 五、前端：弹窗 + 关于页一行
+
+* 弹窗只承载「差异」：`当前 → 最新`、说明（过长截断）、资产体积、
+  **去下载 / 稍后 / 跳过此版本**。
+* 「稍后」只关窗不记忆（下次启动还会提醒，那是真该提醒的）；「跳过此版本」落盘。
+* 关于页新增一行：自动检查开关 + 上次检查结论 + 「检查」按钮。
+* 修了一个自己引入的竞态：`booted` 与 `update` 事件可能在同一批轮询里到达，
+  `onBooted` 里的 `loadUpdateInfo()` 是异步的，它的响应比同批事件**更晚**落地，
+  会把刚显示的「有新版本 …」盖回「尚未检查」。加 `updateEventSeen`：回填天生是
+  旧数据，不该赢。（这个 bug 是前端测试先抓到的，不是读代码读出来的。）
+
+## 改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `.github/workflows/build.yml` | **新增**：test + windows 两个 job，tag 触发发 Release |
+| `core/update.py` | **新增**：版本解析 / 比较 / Release 归一化 / 失败翻译（约 330 行） |
+| `build.py` | 新增 `--package`、`win_package_name()`、`make_win_package()` |
+| `core/prefs.py` | 新增 `update_check` / `update_feed` / `update_skipped_version` |
+| `backend/controller.py` | 新增 `update_info` / `update_check` / `update_open` / `update_skip` / `update_unskip`、`_update_loop`、URL 白名单；`boot()` 起后台检查；新增构造参数 `auto_update`（单测关掉，避免真发网络请求） |
+| `frontend/index.html` | 新增 `#update-modal`；关于页新增「更新」一行 |
+| `frontend/js/app.js` | `update_state` / `update` 事件、弹窗与关于页渲染、6 个按钮绑定、启动回填 |
+| `frontend/css/app.css` | `.update-box` / `.update-ver` / `.update-notes` / `.about-row.up-row` |
+| `tests/test_core_update.py` | **新增** 30 条 |
+| `tests/test_backend_update.py` | **新增** 27 条 |
+| `tests/frontend/update_modal.test.cjs` | **新增** 46 条 |
+| `tests/test_build.py` | +4 条（分发件内容 / 顶层目录 / 缺 exe 警告 / 与 `ASSET_SUFFIX` 一致） |
+| `tests/test_backend_controller.py` | 5 处构造点加 `auto_update=False` |
+| `tests/test_core_prefs.py` | 布尔键映射表补 `update_check → about-update-auto` |
+| `tests/frontend/checkbox_switch_style.test.cjs` | 静态复选框 28 → 29 |
+| `README.md` / `使用说明.txt` | 新增「CI/CD」「版本更新提示」两节 + 使用说明一条 Q&A |
+
+## 验证
+
+- Python 全量：**957 passed / 1 skipped**（第二十二轮 896 + 61）。
+- 前端全量：**61 个测试文件 0 失败**（第二十二轮 60 + 1）。
+- `pyflakes`：零输出。
+- **CI 首次运行结果**：待 push 后回填（本地无法跑 windows-latest）。
+
+## 已知取舍 / 下一轮候选
+
+- **不自动替换自身**：理由见上（占用 / 杀毒 / UAC 三条路都更差）。真要自动化，
+  更合适的方向是「下载 + 校验 + 提示用户关闭程序后替换」，而不是程序自己动手。
+- **更新检查不看预发布版**：只读 `releases/latest`（GitHub 定义上就是「最新正式版」），
+  预发布（prerelease）不会推给同事。这是有意的——同事要的是能用的版本。
+- **12 小时这个间隔是拍的**：程序是常驻工具（开着就是半天），比「每次启动查」更贴合，
+  又不会打接口打太勤（匿名 60 次/小时）。真要更频繁，改 `core.update.CHECK_INTERVAL_S`。

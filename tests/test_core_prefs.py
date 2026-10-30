@@ -321,6 +321,8 @@ _BOOL_KEY_TO_HTML_ID = {
     "apk_grant": "apk-grant",
     # 诊断包（工具页「诊断包」卡的复选框）
     "diag_with_logcat": "diag-logcat",
+    # 版本更新（关于页「更新」行的自动检查复选框）
+    "update_check": "about-update-auto",
 }
 
 # 没有对应 HTML 复选框的布尔键：设备栏收起是「标题前的 « / » 按钮切换」、

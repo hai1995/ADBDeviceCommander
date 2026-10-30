@@ -90,7 +90,8 @@ def _isolate_prefs(tmp_path, monkeypatch):
 
 
 def _make_api(session=None):
-    api = WebApi(session_factory=lambda **kw: FakeSession(**kw))
+    api = WebApi(session_factory=lambda **kw: FakeSession(**kw),
+                   auto_update=False)
     api.state.commands = list(CMDS)          # 直接注入（不走 boot 的文件加载）
     # 与真实 ShellSession 一致：会话持有 output_callback，回显转成 console 事件
     api.session = session or FakeSession(output_callback=api._on_session_output)
@@ -123,7 +124,7 @@ def test_boot_initializes_and_broadcasts(monkeypatch):
         ds.subprocess, "run",
         lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": ""})())
 
-    api = WebApi(session_factory=FakeSession)
+    api = WebApi(session_factory=FakeSession, auto_update=False)
     assert api.boot() == {"ok": True}
     assert api.state.booted is True
     assert api.session is not None
@@ -151,7 +152,7 @@ def test_boot_initializes_and_broadcasts(monkeypatch):
 
 def test_boot_refuses_after_shutdown(monkeypatch):
     monkeypatch.setattr(ctrl, "load_commands", lambda: ([], []))
-    api = WebApi(session_factory=FakeSession)
+    api = WebApi(session_factory=FakeSession, auto_update=False)
     api.shutdown()
     assert api.boot() == {"ok": False, "reason": "shutting_down"}
 
@@ -1818,7 +1819,7 @@ def test_boot_sends_settings_and_warnings(monkeypatch, tmp_path):
         lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": ""})())
     assert not os.path.exists(p)
 
-    api = WebApi(session_factory=FakeSession)
+    api = WebApi(session_factory=FakeSession, auto_update=False)
     assert api.boot() == {"ok": True}
     booted = _events_by_kind(api)["booted"][0]
     assert booted["settings"]["save_dir"] == r"D:\shots"
@@ -1986,7 +1987,7 @@ def test_boot_reports_missing_save_dir_as_fallback(monkeypatch, tmp_path):
         ds.subprocess, "run",
         lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": ""})())
 
-    api = WebApi(session_factory=FakeSession)
+    api = WebApi(session_factory=FakeSession, auto_update=False)
     assert api.boot() == {"ok": True}
     booted = _events_by_kind(api)["booted"][0]
 

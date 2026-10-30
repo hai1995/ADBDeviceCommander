@@ -581,6 +581,17 @@
         <div class="about">
           <h2>ADB 设备指令台</h2>
           <div class="about-row"><span>版本</span><b id="about-ver">—</b></div>
+          <!-- 更新：只做「发现新版 + 打开下载页」，不自动替换（见 core/update.py 顶部说明）。
+               自动检查默认开（与 core/prefs.py 的 update_check 默认值对齐）；
+               关掉之后右侧「检查」仍可手动查一次——用户关的是「别自动打扰我」，
+               不是「永远别告诉我」。 -->
+          <div class="about-row up-row"><span>更新</span>
+            <label class="chk" title="启动后自动检查新版本，之后每 12 小时一次；关掉后仍可点右侧「检查」手动查">
+              <input type="checkbox" id="about-update-auto" checked>自动检查
+            </label>
+            <b id="about-update-state" class="dim">尚未检查</b>
+            <button id="about-update-check" class="btn tiny" type="button" data-icon="refresh">检查</button>
+          </div>
           <div class="about-row"><span>adb</span><b id="about-adb">—</b></div>
           <div class="about-row adb-cfg"><span>adb 目录</span>
             <input id="about-adb-dir" class="inp" type="text" spellcheck="false"
@@ -644,6 +655,39 @@
         </div>
       </div>
       <div id="status" class="out status"></div>
+    </div>
+  </div>
+
+  <!-- 新版本提示弹窗：只做「告知差异 + 引导去下载」，不在程序里替换自身。
+       原因见 core/update.py 顶部：exe 运行时无法覆盖自己，自动替换要么写延迟
+       替换脚本（杀毒软件高度敏感）、要么要管理员权限，都不适合发给同事用。 -->
+  <div id="update-modal" class="modal hidden">
+    <div class="modal-box update-box">
+      <div class="modal-head">
+        <span id="update-title">发现新版本</span>
+        <div class="modal-actions">
+          <button id="update-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body update-body">
+        <div class="update-ver">
+          <span class="update-k">当前</span><b id="update-current">—</b>
+          <span class="update-arrow">→</span>
+          <span class="update-k">最新</span><b id="update-latest" class="update-new">—</b>
+          <span id="update-size" class="dim"></span>
+        </div>
+        <pre id="update-notes" class="update-notes"></pre>
+        <div class="update-hint dim" id="update-hint">
+          在浏览器里下载后，退出本程序并用新包里的文件覆盖当前目录即可；
+          <code>config.json</code> 是你的设置，覆盖时请保留它。
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button id="update-skip" class="btn" type="button"
+                title="这个版本不再自动提示（手动「检查」仍会看到，更新版本发布后照常提示）">跳过此版本</button>
+        <button id="update-later" class="btn" type="button">稍后</button>
+        <button id="update-download" class="btn accent" type="button" data-icon="folder">去下载</button>
+      </div>
     </div>
   </div>
 

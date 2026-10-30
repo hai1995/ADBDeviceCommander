@@ -29,7 +29,7 @@ import datetime
 import tempfile
 
 from core.constants import (
-    AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
+    VERSION, AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
 )
 from core.commands import load_commands, save_click_deltas, save_user_commands, merge_builtins
 from core.prefs import (load_prefs, load_prefs_checked, save_prefs,
@@ -43,6 +43,7 @@ from core import wireless as wifi
 from core import apk as apkinfo
 from core import devinfo
 from core import diag
+from core import update as updater
 from adb_inject import (
     transform, needs_device,
     merge_adb_shell_commands_detailed,
@@ -93,6 +94,36 @@ PERF_PKG_CACHE_S = 120
 # 命中后要把会话的直通态复位，否则后续命令再也拿不到输出边界。
 _EXIT_RE = re.compile(r"^exit(?:\s+-?\d+)?$", re.IGNORECASE)
 
+# 「打开下载页」允许的主机：只放开 GitHub 自家的下载域名。
+# 这个白名单存在的意义不是防用户（用户点的是自己程序给的链接），而是防
+# **更新源被换掉之后** 有人拿一条 http://随便什么域名/b.exe 的响应，让程序
+# 直接给用户打开一个可执行文件下载——那等于把「装什么」的决定权交出去了。
+# 内网自建更新源另有出口：`update_feed` 的主机会自动加入白名单（见 update_open）。
+_UPDATE_HOSTS = (
+    "github.com", "api.github.com", "codeload.github.com",
+    "objects.githubusercontent.com", "raw.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+)
+
+
+def _host_allowed(url: str, extra=()) -> bool:
+    """URL 是否为 http(s) 且主机在白名单（或 extra）内。"""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").lower()
+    if not host:
+        return False
+    for h in tuple(_UPDATE_HOSTS) + tuple(extra):
+        h = (h or "").lower().strip()
+        if h and (host == h or host.endswith("." + h)):
+            return True
+    return False
+
 
 class WebApi:
     """pywebview js_api：前端 window.pywebview.api.<method> 的调用面。
@@ -102,10 +133,14 @@ class WebApi:
     """
 
     def __init__(self, bus=None, state=None, workers=None, devices=None,
-                 session_factory=ShellSession):
+                 session_factory=ShellSession, auto_update=True):
         self.bus = bus or BackendBus()
         self.state = state or AppState()
         self.workers = workers or Workers()
+        # 是否在 boot() 里启动「自动检查更新」后台线程。
+        # 单测默认关掉：那条线程会真的发 HTTPS 请求（无网络时还要等超时），
+        # 让一个「测 boot 有没有广播事件」的用例变成网络用例既慢又随机失败。
+        self._auto_update = bool(auto_update)
         self.devices = devices or DeviceManager(self.bus)
         self.devices.bus = self.bus          # 确保设备服务事件指向同一总线
         self.session = None                  # boot() 后创建（依赖 adb 环境）
@@ -177,6 +212,14 @@ class WebApi:
         # 只要一个 running 布尔 + 一个 worker key。
         self._diag_lock = threading.Lock()
         self._diag_running = False
+        # ---- 版本更新（检查新版本 -> 前端弹窗提示去下载，见 core/update.py）----
+        # 同一时刻只查一次：自动检查与手动点击可能撞在一起，两次请求除了浪费
+        # 一次额度没有任何好处。_update_last 留着上一次结果，「关于」页随时可看。
+        self._update_lock = threading.Lock()
+        self._update_busy = False
+        self._update_last = None
+        # 上次检查完成的时间戳（节流依据）。0 = 本会话还没查过。
+        self._update_last_ts = 0.0
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -233,6 +276,11 @@ class WebApi:
         # 放在后台线程：列目录本身可能很慢（TEMP 里堆了几万个文件），
         # 不能让它挡住窗口显示。
         self.workers.spawn(None, tmpfiles.boot_sweep)
+        # 版本检查：后台线程里「等 8 秒再查首次」——启动瞬间 adb 探测、命令加载、
+        # 设备首刷都在抢时间，再叠一个网络请求会让窗口第一秒的响应变钝。
+        # 之后每 CHECK_INTERVAL_S 复查一次（见 _update_loop）。
+        if self._auto_update:
+            self.workers.spawn("update_loop", self._update_loop)
         # adb 缺失的引导提示由前端 onBooted（adb_ok=false）统一弹出
         return {"ok": True}
 
@@ -1737,6 +1785,176 @@ class WebApi:
                         % (ok_count, len(failed), "；".join(failed)[:120]))
         elif failed:
             self._push_toast("err", "⚠ 诊断包收集失败：%s" % "；".join(failed)[:160])
+
+    # ------------------------------------------------------------------
+    # 版本更新（发现新版本 -> 弹窗提示去下载，见 core/update.py）
+    # ------------------------------------------------------------------
+    def _update_feed(self):
+        """当前生效的更新源（config.json 里留空 = 内置的 GitHub Releases 地址）。"""
+        try:
+            feed = (get_pref("update_feed", "") or "").strip()
+        except Exception:
+            feed = ""
+        return feed or updater.FEED_URL
+
+    def update_info(self):
+        """「关于」页要的版本信息：当前版本 / 是否自动检查 / 上次结果（不发请求）。"""
+        try:
+            enabled = bool(get_pref("update_check", True))
+        except Exception:
+            enabled = True
+        last = self._update_last
+        return {"ok": True,
+                "version": VERSION,
+                "enabled": enabled,
+                "feed": self._update_feed(),
+                "interval_s": updater.CHECK_INTERVAL_S,
+                "checking": self._update_busy,
+                "last": dict(last) if isinstance(last, dict) else None}
+
+    def update_check(self, force=None):
+        """检查更新：主线程立即返回，结果经 `update` 事件异步送达。
+
+        force=True（用户在关于页点「检查更新」）时跳过开关与 12 小时节流 ——
+        用户主动点了就必须真去查，否则「点了没反应」比不提供按钮更糟。
+        """
+        if self.state.shutting_down:
+            return {"ok": False, "reason": "shutting_down"}
+        force = bool(force)
+        if not force:
+            try:
+                if not bool(get_pref("update_check", True)):
+                    return {"ok": True, "status": "disabled"}
+            except Exception:
+                pass
+            if not updater.due(self._update_last_ts):
+                return {"ok": True, "status": "skipped"}
+        with self._update_lock:
+            if self._update_busy:
+                # 已经有一次在查：不排队（排队会让用户看到过期的结果被当成新的）
+                if force:
+                    self._push_status("info", "ℹ 正在检查更新，请稍等…")
+                return {"ok": False, "reason": "busy"}
+            self._update_busy = True
+        self.bus.push("update_state", {"running": True})
+        self.workers.spawn("update", self._do_update_check, self._update_feed(), force)
+        return {"ok": True, "status": "started"}
+
+    def _do_update_check(self, feed, manual):
+        """真正的检查（后台线程）：广播结果；自动检查失败时保持沉默。"""
+        try:
+            res = updater.check(VERSION, feed)
+        except Exception as e:      # 兜底：这条线程不能带着 _update_busy=True 死掉，
+            res = {"status": "error", "current": VERSION, "feed": feed,   # 否则按钮永久转圈
+                   "version": "", "notes": "", "url": "", "asset": {},
+                   "error": "检查更新时发生内部错误：%s" % e}
+        finally:
+            with self._update_lock:
+                self._update_busy = False
+            self.bus.push("update_state", {"running": False})
+
+        self._update_last = res
+        now = time.time()
+        # 节流时间戳：查成功（含「已是最新」）按整间隔算；查失败只等 1 小时再试 ——
+        # 开会切网 / VPN 掉线这类短暂断网，不该让更新提示消失半天。
+        if res.get("status") == "error":
+            self._update_last_ts = now - updater.CHECK_INTERVAL_S + 3600
+        else:
+            self._update_last_ts = now
+
+        skipped = ""
+        try:
+            skipped = str(get_pref("update_skipped_version", "") or "").strip()
+        except Exception:
+            skipped = ""
+        if (res.get("status") == "update" and not manual and skipped
+                and updater.parse_version(skipped) == updater.parse_version(
+                    res.get("version"))):
+            # 用户点过「跳过此版本」：不弹窗，但结果照常广播（关于页仍能看到）
+            self.bus.push("update", dict(res, silenced=True))
+            return
+        self.bus.push("update", dict(res, silenced=False))
+        # 手动查：无论什么结果都说一句（否则用户不知道点没点上）；
+        # 自动查：只有真有新版才说，其余情况（已是最新 / 网络不通）一律闭嘴。
+        if manual or res.get("status") == "update":
+            kind = {"update": "info", "latest": "ok", "ahead": "info"}.get(
+                res.get("status"), "err")
+            self._push_status(kind, updater.summary(res))
+
+    def update_open(self, url=None):
+        """用系统默认浏览器打开下载页（只允许白名单主机，见 _UPDATE_HOSTS）。"""
+        target = (url or "").strip()
+        if not target and isinstance(self._update_last, dict):
+            target = (self._update_last.get("url") or "").strip()
+        if not target:
+            return {"ok": False, "reason": "还没有可打开的下载页，请先点「检查更新」"}
+        extra = ()
+        try:
+            from urllib.parse import urlparse
+            h = urlparse(self._update_feed()).hostname
+            extra = (h,) if h else ()
+        except Exception:
+            extra = ()
+        if not _host_allowed(target, extra):
+            return {"ok": False,
+                    "reason": ("拒绝打开这个地址：%s（只允许 GitHub 域名，"
+                               "或 config.json 里 update_feed 所配置的域名）"
+                               % target[:100])}
+        try:
+            import webbrowser
+            opened = webbrowser.open(target)
+        except Exception as e:
+            return {"ok": False, "reason": "打开浏览器失败：%s" % e}
+        self._push_status("info", "已在浏览器中打开下载页（%s）" % target)
+        return {"ok": True, "url": target, "opened": bool(opened)}
+
+    def update_skip(self, version=None):
+        """记住「跳过此版本」：该版本不再自动弹窗（手动检查仍如实显示）。"""
+        ver = (version or "").strip()
+        if not ver and isinstance(self._update_last, dict):
+            ver = str(self._update_last.get("version") or "").strip()
+        if not ver:
+            return {"ok": False, "reason": "没有可跳过的版本号"}
+        if updater.parse_version(ver) is None:
+            return {"ok": False, "reason": "版本号格式不认识：%s" % ver[:40]}
+        try:
+            save_prefs({"update_skipped_version": ver})
+        except Exception as e:
+            return {"ok": False, "reason": "保存失败：%s" % e}
+        self._push_status("info", "已跳过版本 %s（更新到更新版本时仍会提示）" % ver)
+        return {"ok": True, "version": ver}
+
+    def update_unskip(self):
+        """取消「跳过此版本」（关于页提供一个「恢复提示」出口）。"""
+        try:
+            save_prefs({"update_skipped_version": ""})
+        except Exception as e:
+            return {"ok": False, "reason": "保存失败：%s" % e}
+        return {"ok": True, "version": ""}
+
+    def _update_sleep(self, seconds):
+        """更新检查专用的可中断等待（只在程序关闭时提前退出）。
+
+        刻意不复用 _interruptible_sleep：那个函数还会因「用户点了停止」把休眠
+        提前打断，而这里是 12 小时级的等待 —— 一旦 aborted 长期为真，整个循环
+        会退化成满速空转（每轮都立刻返回 → 立刻又检查 → 再立刻返回）。
+        """
+        deadline = time.time() + max(0.0, float(seconds))
+        while not self.state.shutting_down:
+            left = deadline - time.time()
+            if left <= 0:
+                return
+            time.sleep(min(0.5, left))
+
+    def _update_loop(self):
+        """后台定期检查更新：首查延迟 8 秒，之后按 CHECK_INTERVAL_S 复查。"""
+        self._update_sleep(8.0)
+        while not self.state.shutting_down:
+            try:
+                self.update_check(False)
+            except Exception:
+                pass        # 检查更新出任何问题都不能拖垮这条后台线
+            self._update_sleep(updater.CHECK_INTERVAL_S)
 
 
     def _mic_start(self, save_dir):

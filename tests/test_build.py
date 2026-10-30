@@ -554,3 +554,68 @@ def test_main_keeps_existing_dist_config(monkeypatch, tmp_path):
     assert rc == 0
     data = json.loads((dist / "config.json").read_text(encoding="utf-8"))
     assert data == {"save_dir": "D:\\kept"}
+
+
+# ---------------------------------------------------------------------------
+# 分发件（--package）：给「只想用」的同事的那个 zip
+# ---------------------------------------------------------------------------
+def _fake_dist(tmp_path, version="2026.1103.1200", with_exe=True):
+    """造一个「dist/ 已经打完」的目录：exe + 可编辑文件 + 默认配置。"""
+    root = tmp_path / "proj"
+    (root / "core").mkdir(parents=True)
+    (root / "core" / "constants.py").write_text(
+        'VERSION = "%s"\n' % version, encoding="utf-8")
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    if with_exe:
+        (dist / (build.APP_NAME + (".exe" if os.name == "nt" else ""))).write_bytes(b"MZ")
+    for rel in build.SIDE_FILES:
+        (dist / rel).write_text("x", encoding="utf-8")
+    (dist / "assets").mkdir()
+    (dist / "assets" / "app.ico").write_bytes(b"ico")
+    (dist / "config.json").write_text('{"save_dir": ""}', encoding="utf-8")
+    return root, dist
+
+
+def test_win_package_contains_exe_and_editable_files(tmp_path):
+    root, dist = _fake_dist(tmp_path)
+    zp = build.make_win_package(dist, tmp_path / "out", root=root)
+    assert zp.exists()
+    assert zp.name == "ADBDeviceCommander_v2026.1103.1200_win64.zip"
+    names = zipfile.ZipFile(zp).namelist()
+    top = zp.stem + "/"
+    assert top + (build.APP_NAME + (".exe" if os.name == "nt" else "")) in names
+    # 少一个文件同事那边就是「指令是空的 / 图标没了」，逐个都盯着
+    for rel in build.SIDE_FILES:
+        assert top + rel in names, "%s 应在分发件里" % rel
+    assert top + "assets/app.ico" in names
+    assert top + "config.json" in names
+
+
+def test_win_package_is_wrapped_in_single_top_dir(tmp_path):
+    """解压不能把 exe 和一堆 json 散落在下载文件夹里（否则 exe 与 json 不同目录，
+    同目录那份 json 就不生效，用户改了半天没反应）。"""
+    root, dist = _fake_dist(tmp_path)
+    names = zipfile.ZipFile(build.make_win_package(dist, tmp_path / "out",
+                                                   root=root)).namelist()
+    top = names[0].split("/")[0]
+    assert all(n.startswith(top + "/") for n in names), names
+    assert "index.html" not in names
+
+
+def test_win_package_warns_when_exe_missing(tmp_path, capsys):
+    root, dist = _fake_dist(tmp_path, with_exe=False)
+    zp = build.make_win_package(dist, tmp_path / "out", root=root)
+    assert zp.exists()                     # 仍然出包（至少 json / 说明还在）
+    assert "缺少" in capsys.readouterr().err
+
+
+def test_win_package_name_matches_update_asset_suffix():
+    """跨层一致：更新检查靠 `_win64.zip` 后缀挑 Windows 包。
+
+    改名（比如去掉 _win64）不会报错，只会让自动更新悄悄退化成「随便挑一个
+    zip」——用户可能下到源码包，解压出来没有 exe。
+    """
+    from core import update
+    assert build.win_package_name().endswith(update.ASSET_SUFFIX)
+    assert build.win_package_name().startswith("ADBDeviceCommander_v")

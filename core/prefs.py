@@ -175,6 +175,17 @@ PREFS_DEFAULTS = {
     "perf_interval_ms": 1000,
     "perf_metric": "cpu",
     "perf_thresholds": "",
+    # 版本更新（见 core/update.py）
+    #   update_check            启动后自动检查新版本（默认开：这是「不想手动问同事
+    #                           现在该用哪版」的唯一出路；关掉后仍可在关于页手动查）
+    #   update_feed             更新源地址。留空 = 用 core.update.FEED_URL（GitHub
+    #                           Releases）。内网部署时改成自建 version.json 地址，
+    #                           字段只要 version / notes / url 三个即可。
+    #   update_skipped_version  点过「跳过此版本」的版本号：同版本不再自动弹窗
+    #                           （手动检查仍会如实显示，否则用户以为检查坏了）
+    "update_check": True,
+    "update_feed": "",
+    "update_skipped_version": "",
 }
 
 # 数值型键的合法范围（含端点）：越界 / 非数字一律回退默认，避免手改 config.json
