@@ -700,12 +700,20 @@ class PerfMonitor:
         if self.on_status and not self._stop.is_set():
             self.on_status("err", "性能监控已中断：%s" % (self.error or "设备无响应"))
 
-    def stop(self):
-        """停止采样并等线程退出（最多 3 秒，绝不死等）。"""
+    def request_stop(self):
+        """只置停止信号，不等待（供批量收尾先统一置信号，见 stop_monitors）。"""
         self._stop.set()
+
+    def join_stop(self, timeout=3.0):
+        """等采样线程退出（上限 timeout，绝不死等）。"""
         th = self._thread
         if th is not None and th.is_alive():
-            th.join(timeout=3)
+            th.join(timeout=timeout)
+
+    def stop(self):
+        """停止采样并等线程退出（最多 3 秒，绝不死等）。"""
+        self.request_stop()
+        self.join_stop(3)
 
     def alive(self):
         th = self._thread
@@ -749,6 +757,42 @@ class PerfMonitor:
     def all_samples(self):
         with self._lock:
             return [dict(s) for s in self._samples]
+
+
+def stop_monitors(monitors, timeout=3.0):
+    """批量停止采样会话：**先统一置信号，再逐个等**，总耗时≈最慢的那台。
+
+    PerfMonitor.stop() 是「置信号 + join(3s)」，而采样线程绝大多数时间正卡在
+    `adb shell` 里（_run 的超时是 8s），join 必然等满 3 秒。多台设备逐个调用
+    时这些等待会累加：4 台设备点「停止」要卡 12 秒，关窗口同样要 12 秒才消失
+    —— 用户看到的正是「点停止没反应 / 程序关不掉」。
+    信号同时置下去后各线程并发退出，最坏也就一个 timeout。
+    """
+    mons = [m for m in (monitors or ()) if m is not None]
+    # 支持两段式的走批量路径；只有 stop() 的对象（测试替身 / 别的实现）
+    # 退回逐个 stop —— 不能因为接口不全就把它漏掉，那等于没停。
+    two_phase, single = [], []
+    for m in mons:
+        if (callable(getattr(m, "request_stop", None))
+                and callable(getattr(m, "join_stop", None))):
+            two_phase.append(m)
+        else:
+            single.append(m)
+    for m in two_phase:
+        try:
+            m.request_stop()
+        except Exception:
+            pass
+    for m in two_phase:
+        try:
+            m.join_stop(timeout)
+        except Exception:
+            pass
+    for m in single:
+        try:
+            m.stop()
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #

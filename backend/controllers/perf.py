@@ -6,7 +6,8 @@ from backend.controller import (
     PERF_MIN_INTERVAL, PERF_PKG_CACHE_S, PerfMonitor, load_prefs,
     os, perf_build_thresholds, perf_default_threshold_expr, perf_format_thresholds,
     perf_list_installed, perf_parse_thresholds, perf_pkg_display, perf_rule_text,
-    perf_threshold_items, perf_write_compare, perf_write_report, save_prefs,
+    perf_stop_monitors, perf_threshold_items, perf_write_compare,
+    perf_write_report, save_prefs,
     time
 )
 
@@ -113,11 +114,7 @@ class PerfMixin:
         # 新会话就位后再关旧会话：启动失败时旧数据还在，用户不会白丢一段曲线。
         with self._perf_lock:
             old, self._perfs = dict(self._perfs), started
-        for mon in old.values():
-            try:
-                mon.stop()
-            except Exception:
-                pass
+        perf_stop_monitors(old.values())
         primary = serials[0] if serials[0] in started else next(iter(started))
         info = infos[primary]
         if len(started) == 1:
@@ -144,10 +141,9 @@ class PerfMixin:
                 targets = dict(self._perfs)
         if not targets:
             return {"ok": True, "samples": 0, "sessions": {}}
+        perf_stop_monitors(targets.values())
         per, total = {}, 0
         for s, mon in targets.items():
-            if mon.alive():
-                mon.stop()
             per[s] = mon.count()
             total += per[s]
         if len(per) == 1:

@@ -5,7 +5,7 @@ from backend.controller import (
     AppState, BackendBus, DeviceAudioCapture, DeviceManager,
     FileService, FrameServer, LogcatCapture, LogcatMonitor,
     Path, ScrcpyLauncher, ShellSession, VideoRecorder,
-    Workers, itertools, load_commands, load_prefs_checked,
+    Workers, itertools, load_commands, load_prefs_checked, perf_stop_monitors,
     prefs_path, resolve_save_dir, resource_path, save_click_deltas,
     threading, tmpfiles
 )
@@ -241,13 +241,11 @@ class WebApiBase:
             pass
         # 性能监控线程：不主动停的话它会一直每隔 N 秒调一次 adb，并且在窗口
         # 关闭后继续向已销毁的 webview 推事件（pywebview 侧会报 evaluate_js 失败）。
+        #   批量停：先统一置停止信号再等，否则每台都要等满 join 超时（采样线程
+        #   多数时间卡在 adb shell 里），4 台设备就让窗口多挂十几秒才消失。
         with self._perf_lock:
             mons, self._perfs = list(self._perfs.values()), {}
-        for mon in mons:
-            try:
-                mon.stop()
-            except Exception:
-                pass
+        perf_stop_monitors(mons)
         return {"ok": True}
 
     def take_events(self):

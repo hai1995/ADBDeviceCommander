@@ -2,6 +2,8 @@
 """backend.perf_service —— 性能采样解析 / 采样器 / 报告生成单测（全部离线）。"""
 import os
 import re
+import threading
+import time
 
 import pytest
 
@@ -1042,3 +1044,57 @@ def test_report_html_size_stays_bounded_for_long_sessions():
     """
     html = svc.build_report_html(_dense_samples(8000), {"serial": "A1"})
     assert len(html.encode("utf-8")) < 1.2 * 1024 * 1024, len(html)
+
+
+# --------------------------------------------------------------------------- #
+# 多台设备「停止监控」的收尾
+# --------------------------------------------------------------------------- #
+class _SlowMon:
+    """真实线程的采样会话替身：收到信号后还要 0.5 秒才退（模拟卡在 adb 里）。"""
+
+    def __init__(self):
+        self._ev = threading.Event()
+        self._th = threading.Thread(target=self._run, daemon=True)
+        self._th.start()
+
+    def _run(self):
+        self._ev.wait(5)
+        time.sleep(0.5)
+
+    def request_stop(self):
+        self._ev.set()
+
+    def join_stop(self, timeout=3.0):
+        self._th.join(timeout)
+
+    def alive(self):
+        return self._th.is_alive()
+
+
+def test_stop_monitors_signals_all_before_waiting():
+    """多台收尾必须「先全部置信号、再等」：逐台 stop 会把等待累加成卡死。
+
+    回归：PerfMonitor.stop() = 置信号 + join(3s)，而采样线程多数时间卡在
+    `adb shell` 里（超时 8s），join 必然等满。4 台设备点「停止」要卡 12 秒，
+    关窗口同样要 12 秒才消失 —— 用户看到的是「点停止没反应 / 程序关不掉」。
+    """
+    mons = [_SlowMon() for _ in range(3)]
+    t0 = time.time()
+    svc.stop_monitors(mons)
+    spent = time.time() - t0
+    assert spent < 1.1, "三台各 0.5 秒：并行收尾应约 0.5 秒，实际 %.2f 秒" % spent
+    assert not any(m.alive() for m in mons)
+
+
+def test_stop_monitors_falls_back_to_plain_stop():
+    """只实现了 stop() 的对象也必须被停掉（接口不全 ≠ 可以漏）。"""
+    class _Legacy:
+        def __init__(self):
+            self.stopped = 0
+
+        def stop(self):
+            self.stopped += 1
+
+    m = _Legacy()
+    svc.stop_monitors([m, None])
+    assert m.stopped == 1

@@ -79,6 +79,7 @@ from backend.perf_service import (
     default_threshold_expr as perf_default_threshold_expr,
     threshold_items as perf_threshold_items, ALERT_CRIT_RATIO as PERF_CRIT_RATIO,
     pkg_display as perf_pkg_display, list_packages as perf_list_installed,
+    stop_monitors as perf_stop_monitors,
 )
 
 PERF_THRESHOLDS = DEFAULT_THRESHOLDS
@@ -175,6 +176,7 @@ __all__ = [
     "perf_parse_thresholds",
     "perf_pkg_display",
     "perf_rule_text",
+    "perf_stop_monitors",
     "perf_threshold_items",
     "perf_write_compare",
     "perf_write_report",
