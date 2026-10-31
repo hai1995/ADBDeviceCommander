@@ -99,14 +99,31 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${{ steps.bump.outputs.tag }}"
           for f in core/constants.py main.py README.md; do
             [ -f "$f" ] && git add "$f"
           done
           if git diff --cached --quiet; then
-            echo "版本号无变化，跳过提交"
+            # 版本号没变：典型场景是同一分钟里连点两次「Run workflow」——
+            # 版本号格式是 YYYY.MMDD.HHMM，同一分钟必然算出同一个值。
+            # 旧实现只打一行「跳过提交」就往下走，可后面两个 job 都是按
+            # tag 检出代码的（ref: ${{ needs.prepare.outputs.tag }}），而 tag
+            # 压根没创建 —— 它们在 checkout 阶段报 "reference is not a tree"，
+            # 跟真正的原因（版本号撞车）毫无关系，只能靠猜。
+            # 现在分两种情形：tag 已存在且**正好指向当前提交**才复用（同分钟
+            # 重跑，源码一致）；否则明确失败，把原因和做法写清楚。
+            HEAD_SHA=$(git rev-parse HEAD)
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 \
+               && [ "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$HEAD_SHA" ]; then
+              echo "版本号与本 tag 一致，复用已存在的 $TAG（源码内容相同）"
+            else
+              echo "::error::版本号 ${{ steps.bump.outputs.version }} 与当前源码一致，未产生新提交，也没有指向当前提交的 tag。"
+              echo "::error::最常见的原因是同一分钟内触发了两次发版（版本号精确到分钟）。请等下一分钟再触发，或显式填写一个更大的 version。"
+              exit 1
+            fi
           else
             git commit -m "release: v${{ steps.bump.outputs.version }}"
-            git tag "v${{ steps.bump.outputs.version }}"
+            git tag "$TAG"
             BRANCH=$(git rev-parse --abbrev-ref HEAD)
             git push origin "$BRANCH" --tags
           fi
@@ -122,11 +139,22 @@ jobs:
           print(os.environ["CUSTOM_NOTES"])
           PY
           else
+            # 排除「release: v…」这条提交本身：它就是本次发版产生的，
+            # 写进更新说明只会让弹窗第一行变成「- release: v2026.1031.1256」，
+            # 用户看不出这一版到底改了什么。
             PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || true)
             if [ -n "$PREV" ]; then
-              git log "${PREV}..HEAD" --pretty=format:'- %s' > notes/release-notes.md
+              git log "${PREV}..HEAD" --pretty=format:'- %s' \
+                --invert-grep --grep='^release: v' > notes/release-notes.md
             else
-              git log --pretty=format:'- %s' -n 30 > notes/release-notes.md
+              git log --pretty=format:'- %s' -n 30 \
+                --invert-grep --grep='^release: v' > notes/release-notes.md
+            fi
+            # 自上次发版以来只有发版提交（或全被过滤掉）时别交一份空说明：
+            # gh release create 拿到空文件会建出一个没有正文的 Release。
+            if [ ! -s notes/release-notes.md ]; then
+              echo "- 本次为版本发布，自上一版以来没有额外的功能或修复变更。" \
+                > notes/release-notes.md
             fi
           fi
           echo "--- 说明预览 ---"
@@ -237,8 +265,18 @@ jobs:
             if (-not (Test-Path $a)) { throw "缺少附件：$a" }
           }
 
-          gh release create $tag @assets --title "ADB 设备指令台 $tag" `
-            --notes-file dist-notes/release-notes.md
+          # 该 tag 已经有 Release 时不能再 create（gh 会报 already exists），
+          # 而「重跑一次修更新说明 / 补附件」是很实际的需求（上一版的说明写错、
+          # 或构建产物要重打）。此时改为更新标题与说明，附件随后 upload --clobber。
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag 已存在：更新说明与附件"
+            gh release edit $tag --title "ADB 设备指令台 $tag" `
+              --notes-file dist-notes/release-notes.md
+          } else {
+            gh release create $tag @assets --title "ADB 设备指令台 $tag" `
+              --notes-file dist-notes/release-notes.md
+          }
 
           # latest.json：程序内更新检查的**静态源**（走 GitHub CDN，无需认证、无限流）。
           $pkg = "ADBDeviceCommander_v${ver}_win64.zip"
