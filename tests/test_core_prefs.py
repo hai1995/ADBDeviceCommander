@@ -782,3 +782,30 @@ def test_sanitize_only_warns_when_value_really_invalid():
     clean, warnings = prefs.sanitize_prefs({"perf_interval_ms": "999999"})
     assert clean["perf_interval_ms"] == prefs.PREFS_DEFAULTS["perf_interval_ms"]
     assert len(warnings) == 1 and "perf_interval_ms" in warnings[0]
+
+
+def test_save_prefs_checked_reports_write_failure(monkeypatch, tmp_path):
+    """写不进磁盘时必须如实返回 False，不能吞掉。
+
+    回归：_atomic_write 在目录只读 / 磁盘满 / 文件被占时只返回 False，而
+    save_prefs 历来把返回值整个丢掉 —— 设置页显示「已保存」，重启后所有改动
+    凭空消失，用户没有任何线索可查。
+    """
+    import core.prefs as prefs
+    monkeypatch.setattr(prefs, "prefs_path", lambda: str(tmp_path / "config.json"))
+    monkeypatch.setattr(prefs, "_atomic_write", lambda p: False)
+    merged, ok = prefs.save_prefs_checked({"mirror_fps": 3})
+    assert ok is False, "写失败必须如实上报"
+    assert merged["mirror_fps"] == 3, "内存里的合并结果照常返回（本次运行可用）"
+    # 兼容旧调用方：save_prefs 仍返回 dict（行为不变）
+    assert prefs.save_prefs({"mirror_fps": 4})["mirror_fps"] == 4
+
+
+def test_save_prefs_checked_true_when_written(monkeypatch, tmp_path):
+    """正常落盘时返回 True，避免调用方把每次保存都当失败去弹警告。"""
+    import core.prefs as prefs
+    monkeypatch.setattr(prefs, "prefs_path", lambda: str(tmp_path / "config.json"))
+    merged, ok = prefs.save_prefs_checked({"mirror_fps": 5})
+    assert ok is True
+    assert merged["mirror_fps"] == 5
+    assert prefs.load_prefs()["mirror_fps"] == 5

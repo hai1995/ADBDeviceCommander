@@ -627,6 +627,26 @@ def get_pref(key, default=None):
     return default if v is None else v
 
 
+def save_prefs_checked(patch: dict):
+    """合并写入偏好，返回 (合并后的完整 dict, 是否真的落盘)。
+
+    `_atomic_write` 失败（目录只读 / 文件被占用 / 磁盘满）时只返回 False，
+    而 save_prefs 历来把返回值整个吞掉 —— 设置页于是显示「已保存」，重启后
+    改动全部回到默认值，用户完全不知道该去查什么。需要向用户交代的调用方
+    （设置页 save_settings）改用本函数。
+
+    其余语义与 save_prefs 完全一致：patch 先过 sanitize、读-改-写整体持锁。
+    """
+    if not isinstance(patch, dict) or not patch:
+        return load_prefs(), True
+    # patch 同样清洗：非法值纠正后再合并（而不是原样写进文件）
+    clean_patch, _w = sanitize_prefs(patch)
+    with _SAVE_LOCK:
+        prefs = load_prefs()
+        prefs.update(clean_patch)
+        return prefs, bool(_atomic_write(prefs))
+
+
 def save_prefs(patch: dict) -> dict:
     """合并写入偏好，返回合并后的完整 dict（patch 先过 sanitize，
     前端误传 / 手改都不会把文件写坏）；失败时返回现有内容（尽力而为）。
@@ -638,16 +658,11 @@ def save_prefs(patch: dict) -> dict:
     （_wifi_remember）、录屏选项回写可能来自不同线程。没有这把锁时，两处几乎
     同时进来会各自读到同一份旧内容、各自合并、后写的把先写的**整块覆盖掉**
     —— 表现就是「刚改的开关过一会儿自己弹回去了」，且极难复现。
+
+    只关心合并结果、不关心落盘成功与否的调用方继续用本函数；
+    要区分「写了」与「写失败」的，用 save_prefs_checked。
     """
-    if not isinstance(patch, dict) or not patch:
-        return load_prefs()
-    # patch 同样清洗：非法值纠正后再合并（而不是原样写进文件）
-    clean_patch, _w = sanitize_prefs(patch)
-    with _SAVE_LOCK:
-        prefs = load_prefs()
-        prefs.update(clean_patch)
-        _atomic_write(prefs)
-        return prefs
+    return save_prefs_checked(patch)[0]
 
 
 def apply_adb_dir(adb_dir, env=None) -> bool:

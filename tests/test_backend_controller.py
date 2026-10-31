@@ -3122,3 +3122,24 @@ def test_mirror_start_recovers_from_dead_entry(monkeypatch):
     assert res["skipped"] == []
     assert api.mirror_status()["pipe"] == [], "死条目应被摘掉"
     api.mirror_stop(None)
+
+
+def test_save_settings_reports_unwritable_config(monkeypatch, tmp_path):
+    """config.json 写不进去时必须当面说清，不能回一句「已保存」。
+
+    回归：save_settings 之前无条件回 ok=True、也没检查过写盘结果。程序装在
+    Program Files（或 config.json 被标成只读）时，用户改完主题 / 保存目录 /
+    投屏参数，界面一切正常，重启后全部回到默认值，且没有任何提示可循。
+    """
+    import core.prefs as prefs
+    monkeypatch.setattr(prefs, "prefs_path",
+                        lambda: str(tmp_path / "config.json"))
+    monkeypatch.setattr(prefs, "_atomic_write", lambda p: False)
+    api = _make_api()
+    res = api.save_settings({"mirror_fps": 3})
+    assert res["ok"] is True, "本次运行内确实已生效，不该报成请求失败"
+    assert res["settings"]["_persist_ok"] is False
+    assert "重启后会恢复原值" in res["settings"]["_persist_note"]
+    statuses = _events_by_kind(api).get("status", [])
+    hits = [p for p in statuses if "未能写入" in p["text"]]
+    assert hits and hits[0].get("toast"), "写盘失败必须弹 toast 强提醒：%r" % statuses

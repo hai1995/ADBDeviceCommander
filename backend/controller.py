@@ -34,7 +34,7 @@ from core.constants import (
 )
 from core.commands import load_commands, save_click_deltas, save_user_commands, merge_builtins
 from core.prefs import (load_prefs, load_prefs_checked, save_prefs,
-                         apply_adb_dir, get_pref, prefs_path,
+                         save_prefs_checked, apply_adb_dir, get_pref, prefs_path,
                          resolve_save_dir)
 from core import clipboard
 from core import tmpfiles
@@ -187,6 +187,7 @@ __all__ = [
     "safe_name",
     "save_click_deltas",
     "save_prefs",
+    "save_prefs_checked",
     "save_user_commands",
     "scrcpy_probe_info",
     "subprocess",

@@ -3,7 +3,7 @@
 
 from backend.controller import (
     adb_kwargs, apply_adb_dir, load_prefs, os,
-    prefs_path, resolve_save_dir, save_prefs, subprocess,
+    prefs_path, resolve_save_dir, save_prefs, save_prefs_checked, subprocess,
     wifi
 )
 
@@ -18,7 +18,7 @@ class SettingsMixin:
         """
         if not isinstance(patch, dict) or not patch:
             return {"ok": False, "reason": "empty_patch"}
-        merged = save_prefs(patch)
+        merged, wrote = save_prefs_checked(patch)
         if "adb_dir" in patch:
             apply_adb_dir(merged.get("adb_dir"))
             # 配置变更后立即回测一次，供前端即时更新关于页 / 引导文案
@@ -32,6 +32,18 @@ class SettingsMixin:
             eff, note = resolve_save_dir(merged, ensure_dir=True)
             merged["_save_dir_effective"] = eff
             merged["_save_dir_note"] = note
+        if not wrote:
+            # 内存里已经生效（本次运行可用），但文件没写进去——重启就没了。
+            # 早前这里无条件回 ok=True，用户改完主题 / 保存目录 / 投屏参数，
+            # 界面一切正常，第二天打开又是旧设置，且没有任何线索可查。
+            # 典型场景：程序放在 Program Files，或 config.json 被标成只读。
+            note = ("设置未能写入 %s（目录只读 / 文件被占用 / 磁盘已满？），"
+                    "本次改动只在当前运行生效，重启后会恢复原值。"
+                    "可把程序放到可写目录，或去掉 config.json 的只读属性后重试。"
+                    % prefs_path())
+            merged["_persist_ok"] = False
+            merged["_persist_note"] = note
+            self._push_toast("err", "⚠ " + note)
         return {"ok": True, "settings": merged}
 
     def config_info(self):
