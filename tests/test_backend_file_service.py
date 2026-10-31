@@ -262,3 +262,53 @@ def test_download_reports_clear_error_when_no_file_landed(monkeypatch, tmp_path)
     local, err = FileService().download("SERIAL", "/sdcard/x.txt", str(tmp_path))
     assert local is None
     assert err and "落文件" in err
+
+
+
+# ---------------------------------------------------------------------------
+# 失败原因：adb 的报错大多在 stdout 上，别让界面显示空原因
+# ---------------------------------------------------------------------------
+def _fail_run(stdout="", stderr=""):
+    """构造一个 rc=1 的 adb 结果（模拟设备端命令失败）。"""
+    return type("R", (), {"stdout": stdout, "stderr": stderr,
+                          "returncode": 1})()
+
+
+def test_make_dir_reports_error_printed_on_stdout(monkeypatch):
+    """`adb shell mkdir` 的报错走 **stdout**，不能因此给出空原因。
+
+    回归：所有文件操作都只读 `r.stderr`；而 adb shell 把远端命令的输出
+    （包括 `mkdir: '/system/x': Read-only file system`）原样转在 stdout，
+    stderr 是空的 —— 界面于是显示「⚠ 创建目录失败 /system/x: 」，
+    原因那一栏一片空白，用户只能靠猜。
+    """
+    monkeypatch.setattr(fs_mod.subprocess, "run",
+                        lambda cmd, **kw: _fail_run(
+                            stdout="mkdir: '/system/x': Read-only file system"))
+    ok, err = FileService().make_dir("S", "/system/x")
+    assert ok is False
+    assert "Read-only file system" in err
+
+
+def test_failure_without_any_output_has_readable_reason(monkeypatch):
+    """rc 非 0 且两路都空：至少要说清「adb 没给出原因」，不能是空串。"""
+    monkeypatch.setattr(fs_mod.subprocess, "run", lambda cmd, **kw: _fail_run())
+    for ok, err in (FileService().remove("S", ["/sdcard/x"]),
+                    FileService().make_dir("S", "/sdcard/x"),
+                    FileService().touch("S", "/sdcard/x"),
+                    FileService().rename("S", "/a", "/b"),
+                    FileService().upload("S", "/tmp/a", "/sdcard/a")):
+        assert ok is False
+        assert err and "没有给出原因" in err, err
+
+
+def test_download_failure_text_comes_from_stdout(monkeypatch, tmp_path):
+    """pull 失败时 adb 把错误写在 stdout，界面不能只显示一个空原因。"""
+    monkeypatch.setattr(
+        fs_mod.subprocess, "run",
+        lambda cmd, **kw: _fail_run(
+            stdout="adb: error: failed to copy '/sdcard/a' to "
+                   "'%s/a': remote No such file or directory" % tmp_path))
+    local, err = FileService().download("S", "/sdcard/a", str(tmp_path))
+    assert local is None
+    assert "failed to copy" in err

@@ -179,18 +179,23 @@ def discover_commands(directory=None):
         per_file.append((p, cmds))
 
     if not per_file:
-        # 没有有效命令合集文件 → 在运行目录生成 commands.json
+        # 没有有效命令合集文件 → 在运行目录生成 commands.json。
+        # `_write_json_atomic` **返回 bool 而不抛异常**，所以这里不能再用
+        # try/except 判成败：目录只读 / 磁盘满时异常根本不会发生，界面照样收到
+        # 「已在运行目录生成 commands.json」—— 而磁盘上什么都没有，用户下次
+        # 启动又看到同一条提示，来回找那个并不存在的文件。
         target = os.path.join(directory, PRIMARY_COMMAND_FILE)
         starter, _ = normalize_commands(DEMO_COMMANDS)
-        try:
-            _write_json_atomic(target, DEMO_COMMANDS)
+        if _write_json_atomic(target, DEMO_COMMANDS):
             warnings.append(
                 "未检测到有效的命令合集文件，已在运行目录生成 %s（可直接编辑其中命令）"
                 % PRIMARY_COMMAND_FILE)
-        except Exception as ex:
+        else:
             warnings.append(
-                "未检测到命令合集文件，且生成 %s 失败：%s"
-                % (PRIMARY_COMMAND_FILE, ex))
+                "未检测到有效的命令合集文件，且无法在运行目录生成 %s"
+                "（目录只读 / 磁盘空间不足？）——本次先用内置示例命令，"
+                "重启后不会保留。请把程序放到可写目录，或自行放一份命令合集 json"
+                % PRIMARY_COMMAND_FILE)
         per_file = [(target, starter)]
 
     merged = []

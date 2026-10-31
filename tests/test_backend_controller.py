@@ -2876,3 +2876,137 @@ def test_import_commands_accepts_bom_prefixed_json(monkeypatch):
     res = api.import_commands(payload)
     assert res["ok"] is True, res
     assert any(c.get("id") == "u_bom" for c in api.state.commands)
+
+
+
+# ---------------------------------------------------------------------------
+# 命令库：对话框字符串路径 / 导出回退 / 数字 id 导入
+# ---------------------------------------------------------------------------
+class _DialogWindow:
+    """pywebview 窗口替身：create_file_dialog 原样返回调用方给的值。"""
+
+    def __init__(self, ret):
+        self.ret = ret
+        self.calls = []
+
+    def create_file_dialog(self, *a, **kw):
+        self.calls.append((a, kw))
+        return self.ret
+
+
+def _fake_webview(monkeypatch):
+    """注入最小 webview 模块（CI 上没有真 pywebview）。
+
+    `_open_dialog` 只用 OPEN_DIALOG 常量与 active_window 兜底；file_types 的
+    版本探测取不到 webview.util，会退化成字符串格式 —— 正是兼容性最好的那档。
+    """
+    import sys
+    import types
+    mod = types.ModuleType("webview")
+    mod.OPEN_DIALOG = 1
+    mod.active_window = lambda: None
+    monkeypatch.setitem(sys.modules, "webview", mod)
+    return mod
+
+
+def test_import_dialog_accepts_plain_string_path(monkeypatch, tmp_path):
+    """对话框返回**字符串**（而不是列表）时也要能导入。
+
+    回归：import_commands_dialog 早前另抄了一份对话框代码，而那份漏了
+    「返回值可能是 str」的兼容 —— `files[0]` 取到的是路径的第一个字符，
+    接着报「读取文件失败：[Errno 2] ... 'C'」。_open_dialog 早就处理了这一档。
+    """
+    import json
+    _fake_webview(monkeypatch)
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    f = tmp_path / "backup.json"
+    f.write_text(json.dumps([{"id": "u_str", "name": "字符串路径",
+                              "commands": [{"command": "adb devices"}]}]),
+                 encoding="utf-8")
+    api.window = _DialogWindow(str(f))        # 老代码会取 str 的第一个字符
+    res = api.import_commands_dialog()
+    assert res["ok"] is True, res
+    assert any(c.get("id") == "u_str" for c in api.state.commands)
+
+
+def test_import_commands_normalizes_numeric_id(monkeypatch):
+    """备份里 `"id": 1`（数字）要与内存态的 "1" 视为同一条。
+
+    回归：合并键直接用原值，1 与 "1" 各占一条 —— 文件里存下两条只差一个
+    引号的命令，下次启动时后一条被判重名、静默改成 auto2，用户看到的是
+    「导入成功，但那条命令莫名其妙重复出现」。
+    """
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    api.state.commands = [{"id": "1", "name": "已有命令", "labels": ["通用"],
+                           "commands": [{"command": "adb devices"}]}]
+    res = api.import_commands([{"id": 1, "name": "数字 id 备份",
+                                "commands": [{"command": "adb shell date"}]}])
+    assert res["ok"] is True, res
+    assert res["added"] == 0, "同一条命令应按 id 覆盖，而不是新增一条"
+    ids = [c.get("id") for c in api.state.commands]
+    assert ids.count("1") == 1, ids
+
+
+def test_save_commands_tolerates_empty_payload(monkeypatch):
+    """commands 为 None 时不能「写成功却抛 TypeError」。
+
+    回归：保存成功后提示语用 len(commands) 拼条数，None 直接抛 TypeError ——
+    文件其实已经写进去了，用户看到的却是一次调用失败，重试还是同样的结果。
+    """
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    res = api.save_commands(None)
+    assert res["ok"] is True, res
+    status = _events_by_kind(api).get("status") or []
+    assert any("已保存" in (p.get("text") or "") for p in status), status
+
+
+def test_export_commands_save_falls_back_to_tempdir(monkeypatch, tmp_path):
+    """程序目录不可写时要**真的**退到系统临时目录。
+
+    回归：早前只判断 makedirs 有没有抛错。程序装在 Program Files 这类只读
+    位置时目录本来就在，makedirs 一声不响地成功，「回退」永远不触发，
+    用户点「导出备份」只得到一句 Permission denied —— 而导出恰恰是他换
+    电脑前最需要做的事。
+    """
+    import tempfile
+    api = _make_api()
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")     # 拿普通文件当父目录
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    patch_ctrl(monkeypatch, "program_dir", lambda: str(blocker / "sub"))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmpdir))
+    res = api.export_commands_save()
+    assert res["ok"] is True, res
+    assert os.path.dirname(res["path"]) == str(tmpdir)
+    assert "临时目录" in (res.get("note") or "")
+    assert os.path.exists(res["path"])
+
+
+def test_export_commands_save_keeps_both_backups_within_one_second(
+        monkeypatch, tmp_path):
+    """同一秒内连点两次导出，不能把第一份覆盖掉（走 unique_path）。"""
+    import backend.controllers.commands as cmds_ctrl
+    from datetime import datetime as real_datetime
+
+    api = _make_api()
+    patch_ctrl(monkeypatch, "program_dir", lambda: str(tmp_path))
+
+    class _FixedNow:
+        @staticmethod
+        def now():
+            return real_datetime(2026, 1, 1, 12, 0, 0)
+
+    class _FakeDt:
+        datetime = _FixedNow
+
+    monkeypatch.setattr(cmds_ctrl, "datetime", _FakeDt)
+    first = api.export_commands_save()
+    second = api.export_commands_save()
+    assert first["ok"] and second["ok"]
+    assert first["path"] != second["path"]
+    assert second["path"].endswith("_2.json"), second["path"]
+    assert os.path.exists(first["path"]) and os.path.exists(second["path"])

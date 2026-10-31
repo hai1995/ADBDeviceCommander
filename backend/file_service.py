@@ -27,6 +27,24 @@ def shq(text) -> str:
     return "'" + str(text).replace("'", "'\\''") + "'"
 
 
+def _err_text(r, fallback="adb 返回失败（没有给出原因）"):
+    """从 CompletedProcess 里取一句**非空**的失败原因。
+
+    `adb shell <cmd>` 的报错几乎都走 **stdout**（远端命令的输出本来就在
+    stdout），例如 `mkdir: '/system/x': Read-only file system`；push / pull 的
+    部分错误同样落在 stdout。只读 stderr 会拿到空串，界面于是显示
+    「⚠ 创建目录失败 /system/x: 」—— 原因那一栏一片空白，用户只能凭猜。
+    两路都收，都没有才用兜底文案（至少说明「adb 没给出原因」）。
+    成功（returncode == 0）时恒返回空串：调用方约定「err 为空 = 成功」，
+    而 push / pull 的正常进度恰恰写在 stdout 上。
+    """
+    if getattr(r, "returncode", 0) == 0:
+        return ""
+    text = ((getattr(r, "stderr", "") or "") + "\n"
+            + (getattr(r, "stdout", "") or "")).strip()
+    return text[:200] or fallback
+
+
 class FileService:
     def __init__(self, adb="adb"):
         self.adb = adb
@@ -45,7 +63,7 @@ class FileService:
         # 不加 --time-style=long-iso 等 GNU 扩展，兼容 Android Toybox / BusyBox / BSD
         r = self._shell(serial, ["ls", "-la", shq(posix_join(path, "."))], timeout=20)
         if r.returncode != 0:
-            return None, (r.stderr or r.stdout or "ls 失败").strip()[:200]
+            return None, _err_text(r, "ls 失败")
         items = parse_ls_output(r.stdout or "")
         # 极少数设备 ls -la 输出被截断或异常导致解析为空：兜底 ls -l 再试一次
         if not items:
@@ -59,26 +77,26 @@ class FileService:
 
     def make_dir(self, serial, path):
         r = self._shell(serial, ["mkdir", "-p", shq(path)], timeout=20)
-        return r.returncode == 0, (r.stderr or "").strip()[:200]
+        return r.returncode == 0, _err_text(r)
 
     def touch(self, serial, path):
         r = self._shell(serial, ["touch", shq(path)], timeout=20)
-        return r.returncode == 0, (r.stderr or "").strip()[:200]
+        return r.returncode == 0, _err_text(r)
 
     def remove(self, serial, paths):
         r = self._shell(serial, ["rm", "-rf"] + [shq(p) for p in paths],
                         timeout=60)
-        return r.returncode == 0, (r.stderr or "").strip()[:200]
+        return r.returncode == 0, _err_text(r)
 
     def rename(self, serial, old, new):
         r = self._shell(serial, ["mv", shq(old), shq(new)], timeout=20)
-        return r.returncode == 0, (r.stderr or "").strip()[:200]
+        return r.returncode == 0, _err_text(r)
 
     def upload(self, serial, local, remote):
         r = subprocess.run(
             [self.adb, "-s", serial, "push", local, remote],
             **adb_kwargs(120))
-        return r.returncode == 0, (r.stderr or "").strip()[:200]
+        return r.returncode == 0, _err_text(r)
 
     def download(self, serial, remote, local_dir):
         # 目录建不出来（无权限 / 非法盘符）要回一句人话，否则 worker 线程里
@@ -91,7 +109,7 @@ class FileService:
             [self.adb, "-s", serial, "pull", remote, local_dir],
             **adb_kwargs(120))
         if r.returncode != 0:
-            return None, (r.stderr or "").strip()[:200]
+            return None, _err_text(r, "pull 失败（adb 没有给出原因）")
         base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
         # 落盘名是 **adb 自己**按设备端原名生成的，不是我们净化后的名字：
         # `adb pull` 只认远端文件名，我们无法告诉它「落地时换个名」。所以先按
@@ -159,4 +177,4 @@ class FileService:
                         "note": "文件较大(%d 字节)，已拉取到本地临时文件" % sz}, None
         except Exception as e:
             return None, str(e)
-        return None, (r.stderr or "查看失败").strip()[:200]
+        return None, _err_text(r, "查看失败")

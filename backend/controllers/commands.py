@@ -6,7 +6,7 @@ from backend.controller import (
     get_pref, is_subshell_command, json, merge_adb_shell_commands_detailed,
     merge_builtins, needs_device, os, program_dir,
     root_intent, save_user_commands, tempfile, time,
-    transform, uuid
+    transform, unique_path, uuid
 )
 
 class CommandMixin:
@@ -54,7 +54,10 @@ class CommandMixin:
                 c.pop("builtin", None)
                 user_cmds.append(c)
         self.state.commands = merge_builtins(user_cmds)
-        self._push_status("ok", "✓ 命令已保存（%d 条）" % len(commands))
+        # 用 user_cmds 的长度而不是 len(commands)：commands 为 None 时后者
+        # 直接 TypeError —— 而此刻文件其实已经写成功了，用户看到的是一条
+        # 「保存失败」似的异常，重试还是同样的结果。顺带也扣掉了非对象条目。
+        self._push_status("ok", "✓ 命令已保存（%d 条）" % len(user_cmds))
         return {"ok": True}
 
     def export_commands(self):
@@ -90,19 +93,29 @@ class CommandMixin:
         if not data.get("ok"):
             return data
         text = json.dumps(data["commands"], ensure_ascii=False, indent=2)
-        out_dir = program_dir()
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except Exception:
-            out_dir = tempfile.gettempdir()
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(out_dir, "commands_export_%s.json" % ts)
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-        except Exception as e:
-            return {"ok": False, "reason": "写入失败：%s" % e}
-        return {"ok": True, "path": path}
+        name = "commands_export_%s.json" % ts
+        primary = program_dir()
+        # 先试程序目录，**真的写不进去才**退到系统临时目录。早前只判断
+        # makedirs 有没有抛错：程序装在 Program Files 这类只读位置时目录本来
+        # 就在，makedirs 一声不响地成功，"回退" 永远不触发 —— 用户点「导出
+        # 备份」只得到一句 Permission denied，而导出恰恰是他换电脑前最需要
+        # 做的事。unique_path：同一秒内连点两次不会把第一份覆盖掉。
+        last_err = ""
+        for out_dir in (primary, tempfile.gettempdir()):
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+                path = unique_path(os.path.join(out_dir, name))
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except OSError as e:
+                last_err = str(e)
+                continue
+            return {"ok": True, "path": path,
+                    "note": ("程序目录不可写，已改存到临时目录"
+                             if os.path.normcase(out_dir)
+                             != os.path.normcase(primary) else "")}
+        return {"ok": False, "reason": "写入失败：%s" % last_err}
 
     def _dialog_types(self, pairs):
         """把 ((描述, 通配符), ...) 转成当前 pywebview 版本接受的 file_types。
@@ -131,11 +144,6 @@ class CommandMixin:
             return pairs
         # 新版：拼成 '描述 (*.ext)' 字符串
         return tuple("%s (%s)" % (desc, ext) for desc, ext in pairs)
-
-    def _make_file_types(self):
-        """命令导入用的 file_types（JSON / 所有文件）。"""
-        return self._dialog_types((("JSON 命令备份", "*.json"),
-                                  ("所有文件", "*.*")))
 
     def _open_dialog(self, pairs, label=""):
         """弹原生「打开文件」对话框，返回选中文件路径；取消 / 不可用返回空串。
@@ -181,47 +189,19 @@ class CommandMixin:
     def import_commands_dialog(self):
         """弹出原生文件选择框（默认定位到程序目录），读取 JSON 并导入合并。
 
-        与 import_commands 互为顺操作：对话框返回选中文件 -> 读取内容 ->
-        交给 import_commands 按 id 合并（已存在覆盖、不存在新增）。取消选择
-        时返回 reason="cancelled"，调用方可据此静默忽略。
+        对话框复用 _open_dialog：早前这里另抄了一份（连三种签名兜底一起抄），
+        两处随即开始漂移 —— _open_dialog 早已兼容「后端返回字符串而不是列表」
+        （GTK / QT 在 allow_multiple=False 时正是如此），这份没有，于是
+        `files[0]` 取到的是**路径的第一个字符**，接着报
+        「读取文件失败：[Errno 2] No such file or directory: 'C'」。
+        取消选择时返回 reason="cancelled"，调用方可据此静默忽略。
         """
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
-        try:
-            import webview
-            # 新版 pywebview 已移除模块级 create_file_dialog，必须走窗口实例。
-            # pywebview 会在创建窗口时把 api.window 注入到本对象；此处优先用
-            # self.window，再回退到 active_window()，保证跨版本可用。
-            win = getattr(self, "window", None)
-            if win is None and hasattr(webview, "active_window"):
-                win = webview.active_window()
-            if win is None or not hasattr(win, "create_file_dialog"):
-                return {"ok": False, "reason": "当前环境不支持原生文件对话框"}
-            ft = self._make_file_types()
-            directory = str(program_dir())  # WinForms 后端要求字符串，确保非 Path
-            try:
-                files = win.create_file_dialog(
-                    webview.OPEN_DIALOG,
-                    directory=directory,
-                    allow_multiple=False,
-                    file_types=ft,
-                )
-            except TypeError:
-                # 不同版本 create_file_dialog 签名略有差异，做一次位置参数兜底：
-                # 先带过滤器用 5 参数签名，再退化为不带过滤器的 3 参数签名。
-                try:
-                    files = win.create_file_dialog(
-                        webview.OPEN_DIALOG, directory, False, None, ft
-                    )
-                except TypeError:
-                    files = win.create_file_dialog(
-                        webview.OPEN_DIALOG, directory, False
-                    )
-        except Exception as e:
-            return {"ok": False, "reason": "打开文件对话框失败：%s" % e}
-        if not files:
+        path = self._open_dialog((("JSON 命令备份", "*.json"),
+                                  ("所有文件", "*.*")))
+        if not path:
             return {"ok": False, "reason": "cancelled"}
-        path = files[0]
         try:
             # utf-8-sig：用户在记事本里「另存为 UTF-8」会写入 BOM，而
             # json.loads 遇 \ufeff 直接报 "Unexpected UTF-8 BOM" —— 一个看不见的
@@ -267,12 +247,14 @@ class CommandMixin:
             existing[d.get("id")] = d
         added = 0
         for c in incoming:
-            cid = c.get("id")
-            if not cid or cid not in existing:
-                if not cid:
-                    c = dict(c); c["id"] = "u_" + uuid.uuid4().hex[:10]
+            cid = self._norm_cmd_id(c.get("id"))
+            if not cid:
+                cid = "u_" + uuid.uuid4().hex[:10]
+            c = dict(c)
+            c["id"] = cid
+            if cid not in existing:
                 added += 1
-            existing[c.get("id")] = c
+            existing[cid] = c
         merged = list(existing.values())
         ok, err = save_user_commands(merged)
         if not ok:
@@ -286,6 +268,21 @@ class CommandMixin:
         self._push_status("ok", "✓ 已导入命令（新增 %d 条，共 %d 条用户命令）"
                           % (added, len(merged)))
         return {"ok": True, "added": added, "total": len(merged)}
+
+    @staticmethod
+    def _norm_cmd_id(raw_id):
+        """命令 id 归一化（与 core.commands.normalize_commands 同一规则）。
+
+        导入的备份可能来自手写 json：`"id": 1`（数字）。不归一化的话它会以
+        整数 1 作为合并键，与内存态里的 "1" 各占一条 —— 文件里存下两条只差
+        一个引号的同 id 命令，下次启动时后一条被判重名、静默改成 auto2，
+        用户看到的是「导入成功，但那条命令莫名其妙重复出现」。
+        """
+        if isinstance(raw_id, str):
+            return raw_id.strip()
+        if isinstance(raw_id, (int, float)) and not isinstance(raw_id, bool):
+            return str(raw_id)
+        return ""
 
     def load_commands(self):
         """返回当前完整命令列表（用户命令 + 内置默认，已 merge_builtins 归一化）。

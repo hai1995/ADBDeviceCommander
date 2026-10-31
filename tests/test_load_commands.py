@@ -837,3 +837,22 @@ def test_save_user_commands_roundtrip(monkeypatch, tmp_path):
     with open(str(tmp_path / "commands.json"), encoding="utf-8") as f:
         assert json.load(f) == [{"id": "a", "name": "n",
                                  "labels": ["通用"], "commands": []}]
+
+
+
+def test_generate_failure_is_reported_not_claimed(monkeypatch, tmp_path):
+    """生成 commands.json 失败时不能报「已生成」。
+
+    回归：`_write_json_atomic` 在上一轮改成「返回 bool 而不抛异常」，而这段
+    调用方仍用 try/except 判成败 —— 异常再也不会发生，于是目录只读 / 磁盘
+    满时界面照样收到「已在运行目录生成 commands.json」，而磁盘上什么都没有。
+    用户下次启动又看到同一条提示，来回复盘一个并不存在的文件。
+    """
+    monkeypatch.setattr(cmds_mod, "_write_json_atomic",
+                        lambda path, data: False)
+    cmds, warns, _files = cmds_mod.discover_commands(str(tmp_path))
+    text = "".join(warns)
+    assert "无法在运行目录生成" in text, warns
+    assert "已在运行目录生成" not in text, warns
+    # 写盘失败不影响本次可用性：内存里仍有示例命令
+    assert cmds and all(isinstance(c, dict) for c in cmds)
