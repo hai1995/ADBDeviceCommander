@@ -39,7 +39,7 @@ import subprocess
 import tempfile
 import zipfile
 
-from core.constants import VERSION, adb_kwargs, safe_name
+from core.constants import VERSION, adb_kwargs, safe_name, unique_path
 from core import devinfo
 
 # 默认 / 上限 logcat 行数。上限不是「随便定一个」：单条 threadtime 约 150 字节，
@@ -707,7 +707,10 @@ def collect(adb, serial, out_dir, with_logcat=True,
 
         # ---- 打包 ----
         name = "diag_%s_%s.zip" % (safe_name(serial_s, "device"), ts)
-        zip_path = os.path.join(out_dir, name)
+        # 时间戳只到秒，而 batch 里同一台设备被连点两次 / 用户「再收一份」很容易
+        # 落在同一秒：ZipFile(..., "w") 会直接把同名文件截断 —— 用户手上那份
+        # （可能已经发出去）悄悄变成第二份的内容。宁可多一个 _2。
+        zip_path = unique_path(os.path.join(out_dir, name))
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
                 for fn in (F_DEVICE, F_PROPS, F_LOGCAT, F_PROCESS, F_APPS,

@@ -7,6 +7,7 @@
   * /data/anr 无权限（只在该文件里写一行说明，整包照常产出）。
 这些分支在产品里都是「用户机器上才会遇到」的路径，靠假 runner 复现。
 """
+import datetime
 import json
 import os
 import zipfile
@@ -555,3 +556,19 @@ def test_script_sections_are_all_consumed():
                               devinfo.MARK_UP))
     assert "ro.product.model" in block
     assert "@@WM" not in block
+
+
+def test_collect_twice_in_same_second_keeps_both_zips(tmp_path):
+    """同一秒内连收两份诊断包，第二份不能把第一份覆盖掉。
+
+    回归：文件名只到秒（diag_<序列号>_<时间戳>.zip），ZipFile(..., "w") 会直接
+    截断同名文件 —— 用户手上那份（可能已经发给别人了）悄悄变成第二份的内容。
+    """
+    same = datetime.datetime(2026, 10, 31, 12, 0, 0)
+    z1, _m1, e1 = diag.collect("adb", "S1", str(tmp_path), now=same,
+                               with_logcat=False, runner=make_runner())
+    z2, _m2, e2 = diag.collect("adb", "S1", str(tmp_path), now=same,
+                               with_logcat=False, runner=make_runner())
+    assert e1 is None and e2 is None
+    assert z1 != z2, "同秒的第二份必须另起一个文件名"
+    assert os.path.exists(z1) and os.path.exists(z2)
