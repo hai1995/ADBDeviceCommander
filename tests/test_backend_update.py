@@ -313,6 +313,27 @@ def test_update_open_reports_browser_failure(api, monkeypatch):
     assert "打开浏览器失败" in res["reason"]
 
 
+def test_update_open_does_not_claim_success_when_browser_refuses(api, monkeypatch):
+    """webbrowser.open 返回 False（但不抛）时不能说「已打开」。
+
+    回归：没有默认浏览器 / 远程桌面会话没有浏览器关联 / 被安全软件或组策略
+    拦下时，webbrowser.open 是**返回 False**而不是抛异常。旧实现不看返回值，
+    照样推一条「已在浏览器中打开下载页」并回 ok=True —— 用户盯着毫无反应的
+    屏幕，只能猜是程序卡了还是浏览器崩了；而地址就握在手里，抄下来手开就完了。
+    """
+    api.bus.take()                                  # 清掉构造期的事件
+    monkeypatch.setattr("webbrowser.open", lambda u: False)
+    api._update_last = dict(OK_UPDATE)
+    res = api.update_open()
+    assert res["ok"] is False
+    assert res["opened"] is False
+    assert OK_UPDATE["url"] in res["reason"], "失败原因里必须给出可手动打开的地址"
+    evs = api.bus.take() or []
+    texts = [e["payload"].get("text", "") for e in evs
+             if e.get("kind") == "status" and isinstance(e.get("payload"), dict)]
+    assert any("没能唤起浏览器" in x for x in texts), texts
+
+
 # --------------------------------------------------------------------------- #
 # 后台循环的等待
 # --------------------------------------------------------------------------- #

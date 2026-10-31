@@ -131,8 +131,18 @@ class UpdateMixin:
             opened = webbrowser.open(target)
         except Exception as e:
             return {"ok": False, "reason": "打开浏览器失败：%s" % e}
+        if not opened:
+            # webbrowser.open 在「没有默认浏览器 / 被组策略或安全软件拦下 /
+            # 远程桌面会话里没有浏览器关联」时是**返回 False**，不抛异常。
+            # 旧实现不看返回值，照样报「已在浏览器中打开下载页」——用户盯着
+            # 毫无反应的屏幕，只能猜是程序卡了还是浏览器崩了，而地址就在
+            # 提示里，抄下来手开就完事了。
+            self._push_status("warn", "⚠ 没能唤起浏览器，请手动访问：%s" % target)
+            return {"ok": False, "url": target, "opened": False,
+                    "reason": ("没能唤起系统浏览器（没有默认浏览器，或被安全策略"
+                               "拦下）。请手动访问：%s" % target)}
         self._push_status("info", "已在浏览器中打开下载页（%s）" % target)
-        return {"ok": True, "url": target, "opened": bool(opened)}
+        return {"ok": True, "url": target, "opened": True}
 
     def update_skip(self, version=None):
         """记住「跳过此版本」：该版本不再自动弹窗（手动检查仍如实显示）。"""
