@@ -223,7 +223,11 @@ class CommandMixin:
             return {"ok": False, "reason": "cancelled"}
         path = files[0]
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            # utf-8-sig：用户在记事本里「另存为 UTF-8」会写入 BOM，而
+            # json.loads 遇 \ufeff 直接报 "Unexpected UTF-8 BOM" —— 一个看不见的
+            # 字符就让导入失败，且错误信息完全指不到真正原因。utf-8-sig 同时
+            # 兼容无 BOM 的普通 UTF-8（与 config.json / 命令库的读法一致）。
+            with open(path, "r", encoding="utf-8-sig") as f:
                 text = f.read()
         except Exception as e:
             return {"ok": False, "reason": "读取文件失败：%s" % e}
@@ -241,7 +245,9 @@ class CommandMixin:
             return {"ok": False, "reason": "shutting_down"}
         if isinstance(payload, str):
             try:
-                payload = json.loads(payload)
+                # 前端 / 第三方工具传进来的字符串可能带 BOM（记事本另存为 UTF-8），
+                # json.loads 对 \ufeff 直接报 "Unexpected UTF-8 BOM"。
+                payload = json.loads(payload.lstrip("\ufeff"))
             except Exception as e:
                 return {"ok": False, "reason": "JSON 解析失败：%s" % e}
         if isinstance(payload, dict) and "commands" in payload:

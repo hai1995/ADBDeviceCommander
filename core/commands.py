@@ -10,6 +10,7 @@ json（commands.json / quick_commands.json / 其它顶层为数组或对象的 *
 import json
 import os
 import re
+import uuid
 
 from core.constants import program_dir
 from core.builtin_commands import BUILTIN_COMMANDS
@@ -416,18 +417,28 @@ def _write_json_atomic(path, data):
 
     `open(path, "w")` 会先把原文件截断为 0 字节，此时若进程崩溃 / 断电 / 磁盘写满，
     用户的命令文件就变成空文件或半截 JSON —— 下次启动全部回退到内置默认。
+
+    **返回是否真的写成功**（不能吞掉）：调用方 save_user_commands 要把失败如实
+    回报给界面。早前这里 catch 后什么都不说，于是「目录只读 / 磁盘满」时界面照样
+    弹「✓ 命令已保存（N 条）」，用户下次启动才发现刚改的命令全没了。
+
+    临时文件用**唯一名**：点击计数（防抖 Timer 线程）与界面保存（js_api 线程）
+    可能同时落盘，固定 <path>.tmp 会让两个写入流互相截断 —— os.replace 之后
+    文件里可能是「半份 A + 半份 B」的坏 JSON，下次启动整份命令库丢失。
     """
-    tmp = path + ".tmp"
+    tmp = "%s.%s.tmp" % (path, uuid.uuid4().hex[:8])
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
+        return True
     except Exception:
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
         except Exception:
             pass
+        return False
 
 
 def merge_builtins(user_cmds):
@@ -494,10 +505,11 @@ def save_user_commands(commands):
     的角标语义弄丢。commands 来源是前端归一化后的结构（id/name/labels/
     commands/clickCount/inputOnly），直接 dump 即保持文件既有格式（list），
     避免下次启动又被 load_commands 重新归一化掉格式。
+
+    返回 (ok, 错误文本)：写盘失败必须让界面知道（只读目录 / 磁盘满 / 文件被
+    占用都是真实场景），否则「已保存」的提示与磁盘上的旧内容互相矛盾。
     """
     p = primary_command_path()
-    try:
-        _write_json_atomic(p, commands or [])
+    if _write_json_atomic(p, commands or []):
         return True, None
-    except Exception as e:
-        return False, str(e)
+    return False, "无法写入 %s（目录只读 / 磁盘空间不足 / 文件被占用？）" % p

@@ -2846,3 +2846,33 @@ def test_subshell_hints_go_to_console_not_status():
     assert any("« 已退出交互式子 shell" in t for t in console), console
     status = [p["text"] for p in by_kind.get("status", [])]
     assert not any("交互式子 shell" in t for t in status), status
+
+
+# ---------------------------------------------------------------------------
+# 命令库保存 / 导入的失败路径与 BOM 兼容
+# ---------------------------------------------------------------------------
+def test_save_commands_reports_disk_failure(monkeypatch):
+    """写盘失败必须原样报错，不能提示「已保存」。
+
+    回归：core.commands._write_json_atomic 早年吞掉异常且不返回，导致
+    save_user_commands 恒为 (True, None) —— 只读目录下界面绿色提示「✓ 命令已
+    保存」，实际一条都没落盘，下次启动全丢。
+    """
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands",
+               lambda cmds: (False, "无法写入 commands.json（目录只读）"))
+    res = api.save_commands(list(CMDS))
+    assert res["ok"] is False
+    assert "只读" in res["reason"]
+    status = _events_by_kind(api).get("status") or []
+    assert any("保存命令失败" in (p.get("text") or "") for p in status), status
+
+
+def test_import_commands_accepts_bom_prefixed_json(monkeypatch):
+    """带 UTF-8 BOM 的备份文件必须能导入（记事本「另存为 UTF-8」就会写 BOM）。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    payload = '\ufeff[{"id": "u_bom", "name": "带 BOM", "commands": []}]'
+    res = api.import_commands(payload)
+    assert res["ok"] is True, res
+    assert any(c.get("id") == "u_bom" for c in api.state.commands)

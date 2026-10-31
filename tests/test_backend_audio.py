@@ -519,3 +519,41 @@ def test_wav_with_fmt_still_accepted(tmp_path):
     good.write_bytes(_wav_bytes())
     assert au._wav_duration(str(good)) == len(b"\x00\x01" * 64)
     assert au._wav_ok(str(good)) is True
+
+
+def test_device_audio_pull_never_writes_into_cwd(monkeypatch, tmp_path):
+    """设备音频的落地目录必须是系统临时目录，绝不能是「当前工作目录」。
+
+    回归：`os.environ.get("TEMP", ".")` 在 TEMP 缺失时（非 Windows 开发态、
+    被裁剪的环境）直接把 wav 写进 CWD —— 项目根下那几十个
+    adb_devaudio_*.wav 就是这么来的，而且没人会想到去那儿找。
+    """
+    import tempfile
+    import backend.audio_service as au
+
+    tmpdir = tmp_path / "tmpdir"
+    work = tmp_path / "cwd"
+    tmpdir.mkdir()
+    work.mkdir()
+    monkeypatch.delenv("TEMP", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmpdir))
+    monkeypatch.setattr(tempfile, "tempdir", None)   # 清掉 gettempdir 的缓存
+    monkeypatch.chdir(work)
+
+    dsts = []
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "adb" and "pull" in cmd:
+            dsts.append(cmd[-1])
+            with open(cmd[-1], "wb") as f:
+                f.write(_wav_bytes())
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    cap = au.DeviceAudioCapture("adb")
+    cap._procs = {"A1": (object(), "/data/local/tmp/a.wav")}
+    local = cap.stop("A1")
+    assert local, "应拉回可用的 wav"
+    assert dsts, "应当执行过一次 pull"
+    assert os.path.dirname(dsts[0]) == str(tmpdir)
+    assert os.path.dirname(dsts[0]) != os.getcwd()

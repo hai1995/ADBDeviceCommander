@@ -790,3 +790,50 @@ def test_section_survives_merge_for_frontend():
     merged = merge_builtins([])
     assert all("section" in c for c in merged)
     assert {c["section"] for c in merged} == set(BUILTIN_SECTIONS)
+
+
+# ---------------------------------------------------------------------------
+# 写回：失败必须能上报（否则界面「已保存」与磁盘上的旧内容互相矛盾）
+# ---------------------------------------------------------------------------
+def test_write_json_atomic_reports_failure(tmp_path):
+    """目录不存在时写入应返回 False，而不是静默吞掉异常。
+
+    回归：早前 `_write_json_atomic` 把所有异常 catch 掉且不返回值，于是
+    save_user_commands 永远返回 (True, None)：只读目录 / 磁盘满时界面照样弹
+    「✓ 命令已保存（N 条）」，用户下次启动才发现刚改的命令全没了。
+    """
+    ok = cmds_mod._write_json_atomic(
+        str(tmp_path / "not_exists" / "commands.json"), [{"id": "a"}])
+    assert ok is False
+    assert not os.path.exists(str(tmp_path / "not_exists"))
+
+
+def test_write_json_atomic_uses_unique_tmp_and_succeeds(tmp_path):
+    """正常路径：写成功返回 True，且不留下 .tmp 残留文件（并发写各用各的临时文件，互不截断）。"""
+    target = str(tmp_path / "commands.json")
+    assert cmds_mod._write_json_atomic(target, [{"id": "a", "name": "n"}]) is True
+    assert os.path.exists(target)
+    assert [n for n in os.listdir(str(tmp_path)) if n.endswith(".tmp")] == []
+    with open(target, encoding="utf-8") as f:
+        assert json.load(f) == [{"id": "a", "name": "n"}]
+
+
+def test_save_user_commands_propagates_write_failure(monkeypatch, tmp_path):
+    """save_user_commands 必须把写盘失败转成 (False, 可读原因)。"""
+    monkeypatch.setattr(
+        cmds_mod, "primary_command_path",
+        lambda directory=None: str(tmp_path / "ro" / "commands.json"))
+    ok, err = cmds_mod.save_user_commands([{"id": "a"}])
+    assert ok is False
+    assert err and "commands.json" in err
+
+
+def test_save_user_commands_roundtrip(monkeypatch, tmp_path):
+    monkeypatch.setattr(cmds_mod, "primary_command_path",
+                        lambda directory=None: str(tmp_path / "commands.json"))
+    ok, err = cmds_mod.save_user_commands(
+        [{"id": "a", "name": "n", "labels": ["通用"], "commands": []}])
+    assert (ok, err) == (True, None)
+    with open(str(tmp_path / "commands.json"), encoding="utf-8") as f:
+        assert json.load(f) == [{"id": "a", "name": "n",
+                                 "labels": ["通用"], "commands": []}]

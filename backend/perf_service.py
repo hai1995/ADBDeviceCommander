@@ -1388,6 +1388,19 @@ CSV_HEADER = ["time", "cpu_percent", "app_cpu_percent", "mem_used_mb",
               "jank_cumulative_percent", "battery_percent", "battery_temp_c"]
 
 
+def _csv_cell(v):
+    """CSV 单元格取值：只有「确实没采到」才留空。
+
+    不能用 `v or ""`：0 是完全合法的读数（CPU 0%、应用 CPU 0%、卡顿率 0%），
+    而 `0 or ""` 会被写成空单元格。在 Excel 里「空」代表没数据、「0」代表采到了
+    且为 0 —— 混为一谈会把「全程不卡」误读成「卡顿数据缺失」，也会让平均值 /
+    过滤统计悄悄跳过这些行（0 被当成缺测丢掉）。
+    """
+    if not _is_num(v):
+        return ""
+    return v
+
+
 def write_csv(samples, path):
     """写 CSV（utf-8-sig：Excel 直接双击不乱码）。返回写入行数。
 
@@ -1401,12 +1414,12 @@ def write_csv(samples, path):
         w.writerow(CSV_HEADER)
         for s in samples:
             w.writerow([
-                _ts(s.get("t") or 0, "%Y-%m-%d %H:%M:%S"), s.get("cpu") or "",
-                s.get("app_cpu") or "", s.get("mem_used") or "",
-                s.get("mem_total") or "", s.get("pss") or "",
-                s.get("fps") or "", s.get("jank") or "",
-                s.get("jank_cum") or "",
-                s.get("batt") or "", s.get("temp") or ""])
+                _ts(s.get("t") or 0, "%Y-%m-%d %H:%M:%S"),
+                _csv_cell(s.get("cpu")), _csv_cell(s.get("app_cpu")),
+                _csv_cell(s.get("mem_used")), _csv_cell(s.get("mem_total")),
+                _csv_cell(s.get("pss")), _csv_cell(s.get("fps")),
+                _csv_cell(s.get("jank")), _csv_cell(s.get("jank_cum")),
+                _csv_cell(s.get("batt")), _csv_cell(s.get("temp"))])
             rows += 1
     return rows
 

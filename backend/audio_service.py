@@ -12,6 +12,7 @@ backend.audio_service —— 音频采集（电脑麦克风 / 设备端）+ ffmp
 import ctypes
 import os
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -367,8 +368,13 @@ class DeviceAudioCapture:
         # 在补写 wav 头的中途，拉回来的就是一个播不了的残文件。
         kill_device_process(self.adb, serial, "tinycap")
         local = None
+        # 必须用 tempfile.gettempdir() 而不是 os.environ["TEMP"]：Windows 上
+        # 后者通常存在，但非 Windows（开发态 / 调试脚本）或环境被裁剪（服务、
+        # 精简启动器）时它是空的，早前的 `os.environ.get("TEMP", ".")` 就把
+        # 录音直接写进了**当前工作目录**——项目根下那一堆 adb_devaudio_*.wav
+        # 就是这么来的。gettempdir() 走 TEMP/TMPDIR 再兜底 /tmp，永远有值。
         tmp = os.path.join(
-            os.environ.get("TEMP", "."),
+            tempfile.gettempdir(),
             # safe_name：无线序列号含冒号，Windows 临时文件名会非法
             "adb_devaudio_%s_%s.wav" % (safe_name(serial), time.strftime("%H%M%S")))
         # pull 带重试（容忍收尾/落盘延迟）；并校验 wav 头，损坏则丢弃，避免污染合成视频

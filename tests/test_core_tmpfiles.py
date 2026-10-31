@@ -110,3 +110,22 @@ def test_symlink_is_not_followed(tmp_path):
                                      directory=str(tmp_path))
     assert stat["removed"] == 0
     assert os.path.exists(target)
+
+
+def test_boot_sweep_covers_upload_and_devaudio_leftovers(tmp_path):
+    """启动清理必须覆盖另外两类本程序产物，否则崩溃一次就留下几百 MB 孤儿。
+
+    adb_up_*（上传中转）与 adb_devaudio_*.wav（录屏时的设备音频）正常路径都由
+    调用方删掉，只在进程被强杀 / 异常退出时残留 —— 恰恰是用户既不知道文件名、
+    也不知道它们在哪的那一类。此前 DEFAULT_PREFIXES 只有 adb_view_，这两类
+    永远清不掉。
+    """
+    keep = _mk(tmp_path, "别删我.txt", age_s=7200)
+    up = _mk(tmp_path, "adb_up_deadbeef_a.apk", age_s=7200)
+    wav = _mk(tmp_path, "adb_devaudio_A1_121845.wav", age_s=7200)
+    view = _mk(tmp_path, "adb_view_ab_log.txt", age_s=7200)
+    stat = tmpfiles.boot_sweep(min_age_s=3600.0, directory=str(tmp_path))
+    assert stat["removed"] == 3, stat
+    assert os.path.exists(keep), "非本程序的文件一个都不能动"
+    for p in (up, wav, view):
+        assert not os.path.exists(p), "应删除：%s" % p

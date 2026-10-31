@@ -225,3 +225,40 @@ def test_download_sanitizes_illegal_remote_name(monkeypatch, tmp_path):
     assert err is None
     assert local and os.path.exists(local)
     assert ":" not in os.path.basename(local), "本地文件名不得含冒号：%s" % local
+
+
+def test_download_finds_file_pulled_under_original_name(monkeypatch, tmp_path):
+    """adb 只按**设备端原名**落盘，它不认识我们的净化规则。
+
+    回归：早前 pull 成功后只查净化后的路径，于是真机上「文件其实已经下载好了」
+    被判成失败，而且错误文本是 None —— 界面显示「下载失败 /sdcard/a:b.txt: None」。
+    这里复现「落盘用的是原名」，断言仍能拿到路径、并尽量改成净化名。
+    """
+    import pytest
+    if os.name == "nt":
+        pytest.skip("Windows 不允许创建含冒号的文件名，无法复现该场景")
+
+    def fake_run(cmd, **kw):
+        if "pull" in cmd:
+            with open(os.path.join(cmd[-1], "a:b.txt"), "wb") as f:
+                f.write(b"data")
+        return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    local, err = FileService().download("SERIAL", "/sdcard/a:b.txt",
+                                        str(tmp_path))
+    assert err is None, "文件确实下载成功了，不能报错：%r" % (err,)
+    assert local and os.path.exists(local)
+    assert ":" not in os.path.basename(local), "应已改名为净化后的名字"
+    assert os.path.exists(os.path.join(str(tmp_path), "a_b.txt"))
+
+
+def test_download_reports_clear_error_when_no_file_landed(monkeypatch, tmp_path):
+    """pull 返回 0 但本地没有文件：必须给出可读原因，而不是 (None, None)。"""
+    monkeypatch.setattr(
+        fs_mod.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": "",
+                                         "returncode": 0})())
+    local, err = FileService().download("SERIAL", "/sdcard/x.txt", str(tmp_path))
+    assert local is None
+    assert err and "落文件" in err

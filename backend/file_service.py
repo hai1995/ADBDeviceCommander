@@ -92,11 +92,27 @@ class FileService:
             **adb_kwargs(120))
         if r.returncode != 0:
             return None, (r.stderr or "").strip()[:200]
-        base = os.path.basename(remote.rstrip("/"))
-        # 设备端文件名可能含 Windows 非法字符（如冒号；Android 允许但 Windows
-        # 不允许），直接拼路径会让 pull 落盘失败——净化后再拼。
-        local = os.path.join(local_dir, safe_name(base))
-        return (local if os.path.exists(local) else None), None
+        base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
+        # 落盘名是 **adb 自己**按设备端原名生成的，不是我们净化后的名字：
+        # `adb pull` 只认远端文件名，我们无法告诉它「落地时换个名」。所以先按
+        # 原名找、找得到再尽力改成净化名（设备端文件名可能含 Windows 非法字符，
+        # 如冒号 —— Android 允许、Windows 不允许）。
+        # 早前只查净化名：真机上一次「已经下载成功」会被判成失败，且错误文本是
+        # None，界面显示成「下载失败 <路径>: None」，用户以为文件丢了。
+        raw_local = os.path.join(local_dir, base)
+        safe_local = os.path.join(local_dir, safe_name(base))
+        if os.path.exists(safe_local):
+            return safe_local, None
+        if os.path.exists(raw_local):
+            if raw_local != safe_local:
+                try:
+                    os.replace(raw_local, safe_local)
+                    return safe_local, None
+                except OSError:
+                    pass          # 改不了名（占用 / 权限）就把真实路径回给用户
+            return raw_local, None
+        # pull 返回 0 却找不到文件：目录被外部清掉 / adb 把内容放进了子目录
+        return None, "adb 报告成功但本地没有落文件（目标目录：%s）" % local_dir
 
     def view(self, serial, path, max_inline_bytes=1024 * 1024):
         """小文件直接 cat 内容返回；大文件 pull 到临时目录返回本地路径标记。

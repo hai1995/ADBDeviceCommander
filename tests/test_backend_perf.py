@@ -892,3 +892,39 @@ def test_list_packages_empty_device_is_failure(monkeypatch):
     monkeypatch.setattr(svc.subprocess, "run", lambda a, **k: _Proc(""))
     r = svc.list_packages("adb", "S1")
     assert r["ok"] is False and "应用" in r["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# CSV 导出：0 与「没采到」必须分得开
+# --------------------------------------------------------------------------- #
+def test_write_csv_keeps_zero_readings(tmp_path):
+    """读数为 0 时不能写成空单元格。
+
+    回归：早前用的是 `s.get(k) or ""`，于是 CPU 0%、应用 CPU 0%、**卡顿率 0%**
+    （最常见的一种健康表现）全被写成空。Excel / pandas 会把空当缺测丢弃，
+    用户看到的是「卡顿率这一列全程没有数据」，与磁盘上真实采到的「一路 0」
+    完全是两回事。
+    """
+    import csv as _csv
+    path = str(tmp_path / "perf.csv")
+    n = svc.write_csv([
+        {"t": 1000.0, "cpu": 0.0, "app_cpu": 0.0, "mem_used": 0.0,
+         "mem_total": 0.0, "pss": 0.0, "fps": 0.0, "jank": 0.0,
+         "jank_cum": 0.0, "batt": 0, "temp": 0.0},
+        {"t": 1001.0, "cpu": None, "app_cpu": None, "mem_used": None,
+         "mem_total": None, "pss": None, "fps": None, "jank": None,
+         "jank_cum": None, "batt": None, "temp": None},
+    ], path)
+    assert n == 2
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 2
+    # 第一行：全是真实的 0，必须原样写出来
+    assert rows[0]["cpu_percent"] == "0.0"
+    assert rows[0]["app_cpu_percent"] == "0.0"
+    assert rows[0]["jank_percent"] == "0.0"
+    assert rows[0]["battery_percent"] == "0"
+    assert rows[0]["battery_temp_c"] == "0.0"
+    # 第二行：确实没采到，才是空
+    assert rows[1]["cpu_percent"] == ""
+    assert rows[1]["jank_percent"] == ""
