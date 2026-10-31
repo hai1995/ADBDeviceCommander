@@ -40,6 +40,12 @@ class WebApiBase:
         self._mirror_pipes = {}                 # serial -> PipeMirror
         self._mirror_snaps = {}                 # serial -> SnapMirror
         self._frame_server = FrameServer()
+        # 「正在启动中」的设备：_start_one_mirror 是同步的（要等首帧，最长
+        # FIRST_DATA_TIMEOUT=6s），这段时间设备还没登记进上面两张表。不占位
+        # 的话，连点两次「投屏」会各走一遍启动流程（scrcpy 那边已修过同一个
+        # 坑，这里当时漏了）。
+        self._mirror_starting = set()
+        self._mirror_lock = threading.Lock()
         # 性能监控：可同时监控多台受控设备（用于横向对比），上限 PERF_MAX_DEVICES。
         # 每台一条独立采样线程 + 一份环形缓冲，前端按 serial 分色画多线。
         # 会话对象在 perf_start 时创建，perf_stop / shutdown 时收尾。

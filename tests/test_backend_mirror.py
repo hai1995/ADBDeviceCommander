@@ -448,3 +448,43 @@ def test_device_size_falls_back_to_lone_size_line(monkeypatch):
 
     monkeypatch.setattr(svc.subprocess, "run", lambda *a, **k: _R())
     assert svc.device_size("adb", "S") == (720, 1280)
+
+def test_pipe_failed_start_does_not_announce_interrupt(monkeypatch):
+    """启动失败**不要**回调 on_status —— 那一档由 start() 的返回值负责。
+
+    回归：启动失败路径也会走到 _emit()，controller 收到后推一条「投屏已中断」；
+    紧接着它按降级链拉起低帧率预览并提示「已开启投屏」。用户于是先看到红字
+    中断、再看到绿字开启，同一台设备在两条消息里既中断又开启，像是程序在乱报。
+    """
+    calls = []
+    factory = _PopenFactory([[b""]])          # 设备端 screenrecord 秒退、零字节
+    m = _pipe(monkeypatch, factory,
+              on_status=lambda s, e: calls.append((s, e)))
+    ok, err = m.start()
+    assert ok is False and err
+    assert calls == [], "没投起来的链路不该报告「已中断」"
+
+
+def test_pipe_announces_after_started_then_player_closed(monkeypatch):
+    """上面那条守卫不能把真正的中断也一起静音：投起来之后再断，必须照常回调。"""
+    calls = []
+    factory = _DeadPlayerFactory([[b"frame-1"]])
+    m = _pipe(monkeypatch, factory,
+              on_status=lambda s, e: calls.append((s, e)))
+    ok, _ = m.start()
+    assert ok is True
+    m._thread.join(timeout=5)
+    assert calls, "投屏中断必须通知界面"
+    assert "播放器窗口已关闭" in calls[0][1]
+
+
+def test_pipe_reports_reason_when_restarts_exhausted(monkeypatch):
+    """重连到上限后要留下原因，不能静默停下（画面停住、状态栏一个字都没有）。"""
+    chunks = [[b"chunk"]] * (svc.MAX_RESTARTS + 2)   # 每一轮都有一块数据、随即退出
+    factory = _PopenFactory(chunks)
+    m = _pipe(monkeypatch, factory)
+    monkeypatch.setattr(svc, "MAX_RESTARTS", 2)      # 缩短到 2 轮，别真跑 500 次
+    ok, _ = m.start()
+    assert ok is True
+    m._thread.join(timeout=10)
+    assert "重连" in m.error and "screenrecord" in m.error

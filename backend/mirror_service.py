@@ -288,6 +288,12 @@ class PipeMirror:
         self._thread = None
         self.restarts = 0
         self.error = ""
+        # 「已经给用户开出画面」才允许回调 on_status。start() 判定失败时，
+        # controller 会立刻降级到低帧率预览并提示「已开启投屏」；若失败路径
+        # 也回调，用户会先看到一条红字「投屏已中断」，紧接着又看到绿字
+        # 「已开启投屏」—— 同一台设备同时「中断」和「开启」，只能让人以为
+        # 程序在乱报（实际上那一档根本没起来）。
+        self._started_ok = False
 
     # ---- 命令 ----
     def _adb_cmd(self):
@@ -411,6 +417,7 @@ class PipeMirror:
                             # 只有**真的写进播放器**才算「出画面」：写失败时提前
                             # 置位会让 start() 误报成功，用户拿到一个黑窗口。
                             got = True
+                            self._started_ok = True   # 此后中断才值得回调整
                             self._first_data.set()
                             self._done.set()     # 放行 start() 的同步等待
                 except Exception as e:
@@ -452,6 +459,11 @@ class PipeMirror:
             # 正常跑满 180s 上限 → 续流
             self.restarts += 1
             if self.restarts > MAX_RESTARTS:
+                # 设备端 screenrecord 反复退出（编码器被别的应用占着 / 该 ROM
+                # 限制了单次时长）：停止重连，并把原因留下来。原来是静默
+                # break —— 画面停住，状态栏一个字都没有。
+                self.error = ("已连续重连 %d 次仍未恢复，投屏停止"
+                              "（设备端 screenrecord 反复退出）" % MAX_RESTARTS)
                 break
             ok, err = self._spawn_adb()
             if not ok:
@@ -461,6 +473,11 @@ class PipeMirror:
         self._emit()
 
     def _emit(self):
+        # 没投起来就没什么可「中断」的：这条回调的语义是「已经在投的链路断了」，
+        # 由 controller 转成红字状态。启动失败的那一档由 start() 的返回值负责，
+        # 调用方会降级并给出正常提示。
+        if not self._started_ok:
+            return
         if self.on_status:
             try:
                 self.on_status(self.serial, self.error)

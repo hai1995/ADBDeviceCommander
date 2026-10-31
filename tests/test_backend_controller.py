@@ -3039,3 +3039,86 @@ def test_perf_export_surfaces_partial_failure(monkeypatch, tmp_path):
     warns = [p for p in _events_by_kind(api).get("status", [])
              if p.get("type") == "warn" and "未生成" in p.get("text", "")]
     assert warns and "B2" in warns[0]["text"], "缺的那台必须在状态栏点名"
+
+
+def test_mirror_start_twice_spawns_only_one_window(monkeypatch):
+    """连点两次「投屏」只能开一个窗口。
+
+    回归：_start_one_mirror 是同步的（要等首帧，最长 FIRST_DATA_TIMEOUT=6s），
+    设备要等它返回才登记进 _mirror_pipes —— 第二次点击查重时表里还是空的，
+    于是同一台设备开出两个播放器窗口 + 两条设备端 screenrecord，互相抢 adb
+    输入（scrcpy 那边已修过同一个坑，这条降级链当时漏了）。
+    """
+    api = _mirror_api(monkeypatch)
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
+    patch_ctrl(monkeypatch, "find_player",
+               lambda pref: ("ffplay", "/bin/ffplay", "PATH"))
+    patch_ctrl(monkeypatch, "plan_size", lambda adb, serial: "")
+    gate = threading.Event()
+    built = []
+
+    class _SlowPipe:
+        def __init__(self, *a, **kw):
+            built.append(a)          # 每 new 一次 = 多开一个播放器窗口
+
+        def start(self):
+            gate.wait(5)             # 模拟「等首帧」的那几秒
+            return True, ""
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            pass
+
+    patch_ctrl(monkeypatch, "PipeMirror", _SlowPipe)
+    first = {}
+    t = threading.Thread(target=lambda: first.update(api.mirror_start(None, "pipe")))
+    t.start()
+    assert wait_until(lambda: len(built) == 1), "第一个请求应已进入启动流程"
+    second = api.mirror_start(None, "pipe")
+    gate.set()
+    t.join(5)
+    assert len(built) == 1, "同一台设备只应拉起一个播放器窗口"
+    assert second["skipped"] == ["A1"]
+    assert first["started"][0]["mode"] == "pipe"
+
+
+def test_mirror_start_recovers_from_dead_entry(monkeypatch):
+    """登记表里只剩「已死」的投屏对象时，不能让设备永远卡在「已在投屏」。
+
+    回归：后台链路收尾回调与「启动成功后登记」之间有竞态 —— 回调先到（此时
+    还没登记，pop 不到东西），随后 start() 才把已死的实例登记进来。之后每次点
+    「投屏」都被跳过，状态里又看不到任何在投设备，用户只能重启程序。
+    """
+    api = _mirror_api(monkeypatch)
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
+    patch_ctrl(monkeypatch, "find_player", lambda pref: ("", None, "无"))
+
+    class _Dead:
+        def alive(self):
+            return False
+
+        def stop(self):
+            pass
+
+    class _Snap:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            return True, ""
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            pass
+
+    api._mirror_pipes["A1"] = _Dead()
+    patch_ctrl(monkeypatch, "SnapMirror", _Snap)
+    res = api.mirror_start(None, "snap")
+    assert res["started"], "死条目不该阻断重开"
+    assert res["skipped"] == []
+    assert api.mirror_status()["pipe"] == [], "死条目应被摘掉"
+    api.mirror_stop(None)

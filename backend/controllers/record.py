@@ -527,6 +527,28 @@ class RecordMixin:
         self._mirror_pipes.pop(serial, None)
         self._mirror_snaps.pop(serial, None)
 
+    def _mirror_live(self, serial):
+        """取该设备仍存活的投屏对象；登记表里只剩「已死」的条目时顺手摘掉。
+
+        为什么要摘：后台链路收尾回调（_on_mirror_error）与「启动成功后登记」
+        之间有竞态 —— 回调可能先到（此时还没登记，pop 不到任何东西），随后
+        start() 才把已死的实例登记进来。之后每次点「投屏」都被判成「已在投屏中」
+        跳过，而状态里又看不到任何在投设备，用户只能重启程序。
+        调用方需持有 _mirror_lock（本方法只读表 + 摘死条目，不自己加锁）。
+        """
+        for table in (self._mirror_pipes, self._mirror_snaps):
+            m = table.get(serial)
+            if m is None:
+                continue
+            try:
+                alive = bool(m.alive())
+            except Exception:
+                alive = False          # 探活本身抛错 = 当作已死，让用户能重开
+            if alive:
+                return m
+            table.pop(serial, None)    # 死条目摘掉，腾出「可重开」的位置
+        return None
+
     def _start_one_mirror(self, serial, pref, mode):
         """对单台设备按 mode 逐级降级地开投屏，返回 {mode, frame_url} 或 {error}。
 
@@ -589,13 +611,25 @@ class RecordMixin:
         pref = self._mirror_prefs()
         started, skipped, failed = [], [], []
         for s in serials:
-            if s in self._mirror_pipes or s in self._mirror_snaps:
+            # 查重与占位必须在同一把锁里完成：_start_one_mirror 是**同步**的
+            # （等首帧最长 6s），期间登记表里还没有这台设备。连点两次的间隙
+            # 足以让两条 js_api 调用都通过查重，各自拉起一个播放器窗口 + 一条
+            # 设备端 screenrecord，互相抢 adb 输入。
+            with self._mirror_lock:
+                busy = (self._mirror_live(s) is not None
+                        or s in self._mirror_starting)
+                if not busy:
+                    self._mirror_starting.add(s)
+            if busy:
                 skipped.append(s)
                 continue
             try:
                 res = self._start_one_mirror(s, pref, mode)
             except Exception as ex:
                 res = {"error": str(ex)}
+            finally:
+                with self._mirror_lock:
+                    self._mirror_starting.discard(s)
             if res.get("mode"):
                 started.append({"serial": s, "mode": res["mode"],
                                 "frame_url": res.get("frame_url") or ""})
@@ -643,7 +677,12 @@ class RecordMixin:
 
     def mirror_status(self):
         """当前备用投屏状态（前端用来刷新按钮与预览区可见性）。"""
-        return {
-            "pipe": [s for s, m in self._mirror_pipes.items() if m.alive()],
-            "snap": [s for s, m in self._mirror_snaps.items() if m.alive()],
-        }
+        with self._mirror_lock:
+            # 顺便剪掉已死的条目：前端每次都调这个接口，下一次就不会再显示
+            # 「投屏中」而按钮却被跳过（见 _mirror_live 的说明）。
+            return {
+                "pipe": [s for s in list(self._mirror_pipes)
+                         if self._mirror_live(s) is not None],
+                "snap": [s for s in list(self._mirror_snaps)
+                         if self._mirror_live(s) is not None],
+            }
