@@ -742,3 +742,43 @@ def test_atomic_write_uses_unique_temp_name(monkeypatch, tmp_path):
     assert len(seen) >= 2
     assert len(set(seen)) == len(seen)
     assert all(s.startswith(p) and s.endswith(".tmp") for s in seen)
+
+
+def test_sanitize_tolerates_non_decimal_digits():
+    """config.json 里写了上标数字不能让启动直接崩。
+
+    回归：`_as_int` 用 s.isdigit() 判「是不是数字」，而 '²'、'①' 这类非十进制
+    数字 isdigit() 也返回 True，紧接着 int() 抛 ValueError。sanitize_prefs 的
+    调用链（启动 → load_prefs → 各控制器）没有任何兜底，于是手改配置时多打一个
+    上标，程序启动就是一段 traceback，报错还只有一句 invalid literal。
+    """
+    clean, warnings = prefs.sanitize_prefs({"perf_interval_ms": "\u00b2"})
+    assert clean["perf_interval_ms"] == prefs.PREFS_DEFAULTS["perf_interval_ms"]
+    assert any("perf_interval_ms" in w for w in warnings)
+
+
+def test_sanitize_accepts_fullwidth_digits():
+    """全角数字（中文输入法下很常见）应当照常识别，而不是回退默认值。"""
+    clean, warnings = prefs.sanitize_prefs(
+        {"perf_interval_ms": "\uff11\uff12\uff10\uff10"})
+    assert clean["perf_interval_ms"] == 1200
+    assert warnings == []
+
+
+def test_sanitize_only_warns_when_value_really_invalid():
+    """「写法不同」不该报错，「真的认不出」才提示。
+
+    回归：早前只要清洗后的值与原文不相等就记一条警告，于是 config.json 里写
+    `"perf_interval_ms": "1500"`（带引号）会得到
+    「值 '1500' 不是 200~10000 的数字，已恢复为 1500」——同一句话里既说不是
+    数字、又说恢复成了这个数字。开关写 1 / 0 同理。这类假警告会淹没真问题。
+    """
+    clean, warnings = prefs.sanitize_prefs({"perf_interval_ms": "1500",
+                                            "keep_input": 1})
+    assert clean["perf_interval_ms"] == 1500
+    assert clean["keep_input"] is True
+    assert warnings == []
+    # 真正越界的值仍然要提示
+    clean, warnings = prefs.sanitize_prefs({"perf_interval_ms": "999999"})
+    assert clean["perf_interval_ms"] == prefs.PREFS_DEFAULTS["perf_interval_ms"]
+    assert len(warnings) == 1 and "perf_interval_ms" in warnings[0]

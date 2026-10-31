@@ -146,7 +146,11 @@ def plan_devices(prev_checked, prev_state, prev_model, devices, prev_absent=None
         if prev_state.get(s) != cur[s][0] or prev_model.get(s) != cur[s][1]
     )
 
-    changed = bool(added or removed or stat_changed)
+    # gone 也算变化：设备「超宽限消失」的那一轮，它只是从 kept_absent 里消失，
+    # 并不在 removed 里（上一轮它就已经不在列表中了），items 却少了一张卡片。
+    # 漏掉它，前端就收不到新的 items，那张置灰卡片会一直挂在界面上——而状态栏
+    # 那边已经播过「设备已断开（已移除）」，两边自相矛盾。
+    changed = bool(added or removed or stat_changed or gone)
 
     # 首次加载：之前完全没有设备历史（勾选 / 状态 / 消失记忆都为空）
     first_load = not prev_checked and not prev_state and not prev_absent

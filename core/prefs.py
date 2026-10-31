@@ -244,7 +244,12 @@ def _as_int(v, default, lo, hi):
     n = v
     if isinstance(v, str):
         s = v.strip()
-        n = int(s) if s.isdigit() else None
+        # 用 isdecimal 而不是 isdigit：后者对「非十进制数字」也返回 True
+        # （'²'、'①' 之类），随后 int() 抛 ValueError —— 而 sanitize_prefs 的调用
+        # 链（启动 → load_prefs → 各控制器）没有任何兜底，一个写在 config.json
+        # 里的上标数字就能让程序启动即崩，且报错只有一句 invalid literal。
+        # 全角数字（'１２'）isdecimal 仍为 True，int() 也认，属于合法输入。
+        n = int(s) if s.isdecimal() else None
     if isinstance(n, bool) or not isinstance(n, int):
         return default
     if n < lo or n > hi:
@@ -319,8 +324,11 @@ def sanitize_prefs(raw):
             nv = _as_bool(v, dv)
             if nv is not v:
                 clean[k] = nv
-                warnings.append("%s 的值 %r 不是有效的开关，已恢复为 %s"
-                                % (k, v, "开" if nv else "关"))
+                # 只有「确实认不出」才提示。1 / 0 转成 True / False 属于等价写法，
+                # 提示「1 不是有效的开关，已恢复为 开」只会让人以为配置写错了。
+                if _as_bool(v, None) is None:
+                    warnings.append("%s 的值 %r 不是有效的开关，已恢复为 %s"
+                                    % (k, v, "开" if nv else "关"))
         elif k in STR_KEYS:
             if not isinstance(v, str):
                 clean[k] = dv
@@ -336,8 +344,11 @@ def sanitize_prefs(raw):
             nv = _as_int(v, dv, lo, hi)
             if nv != v:
                 clean[k] = nv
-                warnings.append("%s 的值 %r 不是 %d~%d 的数字，已恢复为 %r"
-                                % (k, v, lo, hi, nv))
+                # 同上：'1000' 这种带引号的数字是合法输入（只是写法不同），
+                # 不该报「'1000' 不是 200~10000 的数字，已恢复为 1000」。
+                if _as_int(v, None, lo, hi) is None:
+                    warnings.append("%s 的值 %r 不是 %d~%d 的数字，已恢复为 %r"
+                                    % (k, v, lo, hi, nv))
     return clean, warnings
 
 

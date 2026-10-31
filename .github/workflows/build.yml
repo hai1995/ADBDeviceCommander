@@ -22,6 +22,21 @@
 # 注意：tag 必须与源码里的 VERSION 一致，否则下面的「版本号一致性」步骤会失败。
 # 这不是洁癖 —— Release 标题、zip 文件名、程序自报版本号三处一旦不一致，
 # 用户看到的「我有新版」和实际下到的包就对不上，排查起来极其难受。
+#
+# Action 版本策略
+# --------------
+# 统一停在各仓库「支持 Node 24 的最低大版本」：checkout@v5 / setup-python@v6 /
+# setup-node@v5 / upload-artifact@v6 / download-artifact@v7。原来那套
+# checkout@v4 + setup-python@v5 跑在 Node 20 上，GitHub 已停用该运行时，每次
+# 运行都在日志开头刷一串 deprecation 警告。
+#
+# 没有直接跳到各仓库的最新大版本：checkout v6/v7 改的是「PR 检出策略」
+# （拒绝在 pull_request_target / workflow_run 下检出 fork），本项目只用普通
+# pull_request，多跳一级只多一份无收益的回归面。真要再升，先在本文件把
+# 触发方式看清楚，别跟着 dependabot 盲跳。
+#
+# 前端用的 Node 同步从 20 提到 22：Node 20 已于 2026-04 EOL，jsdom 侧 63 个
+# 测试文件在 22 上本地全绿（版本与本机一致，出问题能就地复现）。
 name: build
 
 on:
@@ -60,9 +75,9 @@ jobs:
     name: 测试（Python 3.11 + 前端 jsdom）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -89,9 +104,9 @@ jobs:
       - name: Python 单测
         run: python -m pytest -q
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: 前端依赖（jsdom）
         working-directory: tests/frontend
@@ -110,9 +125,9 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -151,7 +166,7 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY "### 产物"
           $lines | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "- ``$_``" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ADBDeviceCommander-${{ github.ref_name }}
           path: |

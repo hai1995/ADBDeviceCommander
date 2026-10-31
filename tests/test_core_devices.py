@@ -108,3 +108,33 @@ def test_usable_and_label_helpers():
     assert is_usable("offline") is False
     assert state_label("unauthorized") == "未授权（请在设备屏幕上确认调试授权）"
     assert state_label("weird") == "weird"
+
+
+def test_gone_device_triggers_changed_so_card_disappears():
+    """设备「超宽限消失」的那一轮必须置 changed=True，否则置灰卡片永远挂着。
+
+    回归：changed 只看 added / removed / stat_changed。设备要到第 3 轮才从宽限
+    转成 gone，而它上一轮就已经不在列表里了 —— removed 为空、added 为空、
+    stat_changed 为空，于是 changed=False。可后端算出的 items 已经少了一张卡片，
+    前端却收不到新快照：界面一直显示那张 reconnecting 的灰卡，而状态栏同时播过
+    「设备已断开（已移除）」，两边自相矛盾。
+    """
+    devices = [("xyz789", "device", "Pixel2")]
+    model = {"xyz789": "Pixel2", "abc123": "Pixel"}
+    p1 = plan_devices({"abc123": True}, {"abc123": "device"}, model, devices)
+    assert p1["changed"] is True
+    assert any(it["serial"] == "abc123" and it["state"] == "reconnecting"
+               for it in p1["items"])
+
+    # 第 2 轮：仍在宽限内，卡片没变，不该重渲染（每 5 秒整表重建同样是问题）
+    p2 = plan_devices(p1["checked"], p1["states"], model, devices,
+                      prev_absent=p1["absent_streak"])
+    assert p2["changed"] is False
+    assert any(it["serial"] == "abc123" for it in p2["items"])
+
+    # 第 3 轮：超过宽限 -> 卡片消失，必须重渲染
+    p3 = plan_devices(p2["checked"], p2["states"], model, devices,
+                      prev_absent=p2["absent_streak"])
+    assert p3["gone"] == ["abc123"]
+    assert all(it["serial"] != "abc123" for it in p3["items"])
+    assert p3["changed"] is True

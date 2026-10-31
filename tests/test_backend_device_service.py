@@ -145,11 +145,16 @@ def test_device_unplugged_grace_remembers_selection(monkeypatch):
     assert mgr.refresh(verbose=False) is False
     bus.take()
     assert mgr.device_checked.get("B2") is True        # 第 2 轮：宽限内仍保留勾选
-    # 第 3 轮（超过宽限）B2 真正断开：遗忘勾选并播报“已断开”
-    assert mgr.refresh(verbose=False) is False
+    # 第 3 轮（超过宽限）B2 真正断开：遗忘勾选、播报「已断开」，并广播新列表。
+    # changed 必须为 True —— 这一轮 items 里已经没有 B2 了，不广播的话界面上那张
+    # reconnecting 灰卡会一直挂着，而状态栏同时显示「已断开」，两边自相矛盾。
+    assert mgr.refresh(verbose=False) is True
     ev3 = bus.take()
     assert any("已断开" in e["payload"]["text"]
                for e in ev3 if e["kind"] == "status")
+    dev3 = next(e for e in ev3 if e["kind"] == "devices")
+    assert dev3["payload"]["gone"] == ["B2"]
+    assert [it["serial"] for it in dev3["payload"]["items"]] == ["A1"]
     assert mgr.device_checked.get("B2") is not True    # 勾选已遗忘
 
 
