@@ -501,3 +501,32 @@ def test_diag_options_reads_prefs(api):
     assert opt["with_logcat"] is False
     assert opt["logcat_lines"] == 5000
     assert opt["running"] is False
+
+
+def test_wifi_connect_accepts_mdns_name_and_keeps_port(api, monkeypatch):
+    """Android 11+ 的 mDNS 服务名能直接连，且不会把记住的端口改成默认值。
+
+    回归两处：
+      * 校验层把含下划线的 mDNS 名当「非法字符」拒绝，用户对着设备上显示的
+        那串名字无从下手；
+      * 记住地址时无条件写 wifi_port，mDNS 名没有端口、split_endpoint 回落
+        5555，于是用户自定义过的端口被悄悄改回默认。
+    """
+    api.save_settings({"wifi_port": 6037})          # 先记住一个自定义端口
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _R("connected to adb-26151FDF60083B-9tP4nl._adb-tls-connect._tcp")
+
+    _patch_run(monkeypatch, fake_run)
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    name = "adb-26151FDF60083B-9tP4nl._adb-tls-connect._tcp"
+    res = api.wifi_connect(name)
+    assert res["ok"] is True, res
+    assert res["address"] == name, "mDNS 名应原样下发（不追加 :5555）"
+    assert _adb(calls, "adb", "connect")[0] == ["adb", "connect", name]
+    # 端口保持用户设置，不被 mDNS 的「无端口」冲掉
+    assert api.wifi_state()["port"] == 6037
+    assert api.wifi_state()["recent"] == [name]

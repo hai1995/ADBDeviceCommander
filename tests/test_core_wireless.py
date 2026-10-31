@@ -221,3 +221,32 @@ def test_normalize_endpoint_string_forms_still_work():
     """类型防御不能误伤正常的字符串写法。"""
     assert w.normalize_endpoint("172.16.0.9") == ("172.16.0.9:5555", "")
     assert w.normalize_endpoint("  172.16.0.9:6000  ") == ("172.16.0.9:6000", "")
+
+
+# ---------------------------------------------------------------------------
+# Android 11+ 无线调试：mDNS 服务名
+# ---------------------------------------------------------------------------
+def test_normalize_accepts_mdns_service_name():
+    """mDNS 服务名必须原样放行，且不追加端口。
+
+    回归：它含下划线，过不了普通主机名白名单，用户把设备上显示的那串名字粘进来，
+    收到的却是「只允许字母、数字、点、横线」—— 而他并没有写错。
+    """
+    name = "adb-26151FDF60083B-9tP4nl._adb-tls-connect._tcp"
+    assert w.normalize_endpoint(name) == (name, "")
+    assert w.normalize_endpoint("  " + name + "  ") == (name, "")
+
+
+def test_normalize_rejects_mdns_lookalike_with_bad_chars():
+    """带 mDNS 标记但含非法字符的输入仍要拦住（不给 shell 元字符开口子）。"""
+    addr, err = w.normalize_endpoint("adb-x._adb-tls-connect._tcp; reboot")
+    assert addr == ""
+    assert "mDNS" in err
+
+
+def test_has_explicit_port():
+    assert w.has_explicit_port("192.168.1.5:5555") is True
+    assert w.has_explicit_port("[fe80::1]:5555") is True
+    assert w.has_explicit_port("192.168.1.5") is False
+    assert w.has_explicit_port("adb-x._adb-tls-connect._tcp") is False
+    assert w.has_explicit_port("") is False

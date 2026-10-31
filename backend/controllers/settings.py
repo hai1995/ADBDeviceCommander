@@ -116,9 +116,14 @@ class SettingsMixin:
     def _wifi_remember(self, addr):
         """把地址写进「最近连接」（config.json），并记住端口。"""
         recent = wifi.add_recent(self._wifi_recent(), addr)
+        patch = {"wifi_recent": wifi.recent_to_pref(recent)}
+        # 只有地址里真的写了端口才更新 wifi_port。mDNS 服务名（Android 11+ 的
+        # 无线调试）不带端口，split_endpoint 会回落到默认 5555 —— 照抄就会把
+        # 用户自定义过的端口悄悄改回 5555。
+        if wifi.has_explicit_port(addr):
+            patch["wifi_port"] = wifi.split_endpoint(addr)[1]
         try:
-            save_prefs({"wifi_recent": wifi.recent_to_pref(recent),
-                        "wifi_port": wifi.split_endpoint(addr)[1]})
+            save_prefs(patch)
         except Exception:
             pass                       # 配置只读时不该让连接本身失败
         return recent

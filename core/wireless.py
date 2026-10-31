@@ -37,6 +37,9 @@ _IPV6_CHARS_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
 # mDNS 无线设备的序列号里没有冒号，形如
 # `adb-26151FDF60083B-9tP4nl._adb-tls-connect._tcp`（Android 11+ 无线调试）
 _MDNS_MARKERS = ("_adb-tls-connect", "_adb-tls-pairing")
+# mDNS 服务名的合法字符：字母数字 + `.` `-` `_`（下划线是 mDNS 服务标签的一部分，
+# 也是它过不了普通主机名白名单的唯一原因）。
+_MDNS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 
 
 def is_wireless_serial(serial) -> bool:
@@ -124,6 +127,14 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
         return "", "请输入设备 IP（或 IP:端口）"
     if is_v6:
         return "[%s]:%d" % (host, port), ""
+    # Android 11+ 的无线调试给的是一串 mDNS 服务名（没有冒号、带下划线），
+    # `adb connect adb-XXXX._adb-tls-connect._tcp` 是它的正规用法。若走下面的
+    # 主机名白名单，用户会收到「只允许字母、数字、点、横线」——而他要做的只是把
+    # 设备上显示的那串名字粘进来。这里原样放行，且**不追加默认端口**。
+    if any(m in host for m in _MDNS_MARKERS):
+        if _MDNS_NAME_RE.match(host):
+            return host, ""
+        return "", "mDNS 服务名含非法字符（形如 adb-XXXX._adb-tls-connect._tcp）"
     # 只由数字和点组成、且带点的输入必然是「想写 IP」：非法时直接说清哪里不对。
     # 否则它会落进主机名白名单被当成合法主机名，一路走到 adb connect 才失败，
     # 用户看到的是「连接超时 / 无法解析」——与真正的原因（地址写错）无关。
@@ -133,6 +144,21 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
     if not (_IPV4_RE.match(host) or _HOST_RE.match(host)):
         return "", "IP / 主机名含非法字符（只允许字母、数字、点、横线）"
     return "%s:%d" % (host, port), ""
+
+
+def has_explicit_port(addr) -> bool:
+    """地址里是否**真的写了**端口（`host:p` 或 `[v6]:p`）。
+
+    与 split_endpoint 的分工：后者为了让调用方总有端口可用，解析不出时回落到
+    DEFAULT_PORT；但「回落值」不能被当成「用户填的端口」写回配置 —— mDNS 服务名
+    根本没有端口，照抄回落的 5555 会把用户自定义过的端口悄悄改回默认值
+    （下次开无线调试又变回 5555，而他并不记得自己改过）。
+    """
+    s = (addr or "").strip()
+    if s.startswith("["):
+        end = s.find("]")
+        return end > 0 and s[end + 1:].startswith(":")
+    return s.count(":") == 1
 
 
 def split_endpoint(addr):
