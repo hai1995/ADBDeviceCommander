@@ -163,7 +163,8 @@ def test_view_large_cat_output_falls_back_to_pull(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kw):
         records.append(list(cmd))
-        if "cat" in cmd:
+        if "head" in cmd:
+            # 设备端按 head -c 裁出「上限 + 1」字节：超过上限 → 不许内联
             return type("R", (), {"stdout": "x" * 100, "stderr": "",
                                   "returncode": 0})()
         if "pull" in cmd:
@@ -186,7 +187,7 @@ def test_view_temp_name_is_unique_per_call(monkeypatch, tmp_path):
     pulls = []
 
     def fake_run(cmd, **kw):
-        if "cat" in cmd:
+        if "head" in cmd or "cat" in cmd:
             return type("R", (), {"stdout": "", "stderr": "",
                                   "returncode": 1})()
         pulls.append(cmd[-1])
@@ -312,3 +313,54 @@ def test_download_failure_text_comes_from_stdout(monkeypatch, tmp_path):
     local, err = FileService().download("S", "/sdcard/a", str(tmp_path))
     assert local is None
     assert "failed to copy" in err
+
+def test_view_caps_remote_read_instead_of_catting_whole_file(monkeypatch, tmp_path):
+    """查看文件只从设备取「上限 + 1」字节，不再整段 cat 进内存。
+
+    回归：用户点开一个几百 MB 的日志时，旧实现先把整份内容读进 Python 字符串
+    （str 还要再涨 2~4 倍），再判「太大」丢掉 —— 峰值内存与耗时全白付，极端
+    情况直接 MemoryError 把程序带走。
+    """
+    records = []
+
+    def fake_run(cmd, **kw):
+        records.append(list(cmd))
+        if "head" in cmd:
+            return type("R", (), {"stdout": "x" * 11, "stderr": "",
+                                  "returncode": 0})()
+        if "pull" in cmd:
+            return type("R", (), {"stdout": "", "stderr": "",
+                                  "returncode": 1})()
+        return type("R", (), {"stdout": "x" * 999, "stderr": "",
+                              "returncode": 0})()
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    svc = FileService()
+    svc.view("SERIAL", "/sdcard/huge.log", max_inline_bytes=10)
+    head = [c for c in records if "head" in c]
+    assert head, "应优先用 head -c 有界读取"
+    at = head[0].index("head")
+    assert head[0][at:at + 3] == ["head", "-c", "11"], (
+        "要让设备端只给「上限 + 1」字节：%r" % (head[0],))
+    assert not [c for c in records if "cat" in c], "head 成功时不该再 cat 全量"
+
+
+def test_view_falls_back_to_cat_when_head_unsupported(monkeypatch):
+    """老 ROM 的 head 不认 -c 时退回整段 cat（旧行为），功能不能丢。"""
+    records = []
+
+    def fake_run(cmd, **kw):
+        records.append(list(cmd))
+        if "head" in cmd:
+            return type("R", (), {"stdout": "", "stderr": "head: invalid option -- c",
+                                  "returncode": 255})()
+        if "cat" in cmd:
+            return type("R", (), {"stdout": "hello", "stderr": "",
+                                  "returncode": 0})()
+        return type("R", (), {"stdout": "", "stderr": "", "returncode": 1})()
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    svc = FileService()
+    res, err = svc.view("SERIAL", "/sdcard/a.txt", max_inline_bytes=1024)
+    assert err is None and res["text"] == "hello"
+    assert [c for c in records if "cat" in c], "head 失败应退回 cat"

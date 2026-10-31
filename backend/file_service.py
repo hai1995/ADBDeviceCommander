@@ -140,12 +140,25 @@ class FileService:
         卡死。pull 落地的临时文件名带随机串，避免并行查看不同目录下的同名
         文件时互相覆盖（后拉完的顶掉先拉完的， modal 显示错内容）。
         """
+        limit = max_inline_bytes
+        # 只取「上限 + 1」字节：早前直接 cat 整个文件，用户点开几百 MB 的日志时
+        # 这几百 MB 会先整个进内存（Python str 还要再涨 2~4 倍），随后才被判为
+        # 「太大」丢掉 —— 峰值内存与耗时全白付，极端情况下直接 MemoryError
+        # 把整个程序带走。head -c 在设备端就裁掉，取回量恒定。
+        # 老 ROM（Android 6 之前的 toolbox）head 不认 -c，会返回非零：此时退回
+        # 整段 cat，用输出长度判上限 —— 也就是旧版行为，功能不受影响。
         try:
-            r = self._shell(serial, ["cat", shq(path)], timeout=20)
+            r = self._shell(serial, ["head", "-c", str(limit + 1), shq(path)],
+                            timeout=20)
+            if r.returncode != 0:
+                r = self._shell(serial, ["cat", shq(path)], timeout=20)
         except Exception as e:
             return None, str(e)
-        if r.returncode == 0 and len(r.stdout or "") <= max_inline_bytes:
-            return {"text": r.stdout, "local": None}, None
+        out = r.stdout or ""
+        # 按**字节**算而不是字符数：head 是按字节裁的，中文一个字符占 3 字节，
+        # 用 len(str) 比会把「已被截断」误判成「没超限」，于是把半截文件当完整的给用户。
+        if r.returncode == 0 and len(out.encode("utf-8", "replace")) <= limit:
+            return {"text": out, "local": None}, None
         # 失败（可能大文件/二进制）或输出超限：尝试 pull
         try:
             # 先清理上一轮遗留的临时副本：这类文件每次「查看」都会新增一份，
