@@ -388,6 +388,55 @@ def test_apk_install_rejects_second_batch_while_running(api, monkeypatch,
     assert _wait(lambda: any("已安装到 2 台" in t for t in _status_texts(api)))
 
 
+def test_apk_spawn_failure_does_not_lock_installs(api, monkeypatch, tmp_path):
+    """连线程都起不来时，批次账必须当场结清，不能把安装功能永久锁死。
+
+    回归：原实现先置 `_apk_batch`、再逐个 `workers.spawn`。线程起不来
+    （进程线程数耗尽 / 内存告急）时异常直接冒到 js_api 线程，账停在
+    total=2、done=0：此后每次点「安装」都被「上一批安装还没结束」挡回去，
+    `apk_state` 也停在 running（按钮一直转圈）—— 只能重启程序。
+    """
+    api._apk_path = _mk_apk(tmp_path)
+    api.bus.take()                                   # 清掉构造期事件
+
+    def boom(*a, **k):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.workers, "spawn", boom)
+    res = api.apk_install()
+    assert res["ok"] is True                          # 请求本身被接受
+    assert api._apk_batch is None, "账没结清，后续安装会被永久拒绝"
+
+    evs = api.bus.take() or []
+    kinds = [(e["kind"], e["payload"]) for e in evs if e["kind"] == "apk_state"]
+    assert {"running": False} in [p for _k, p in kinds], kinds
+    texts = [e["payload"].get("text", "") for e in evs
+             if e["kind"] == "status"]
+    assert any("2 失败" in x for x in texts), texts
+
+    # 允许再次安装（不是永久锁），且这次能真的跑起来
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)  # 只记账
+    assert api.apk_install()["ok"] is True
+
+
+def test_apk_worker_exception_still_settles_batch(api, monkeypatch, tmp_path):
+    """worker 里抛未预期异常时同样要记账 —— 否则批次永远差一台。"""
+    api._apk_path = _mk_apk(tmp_path)
+    api.devices.device_checked = {"A1": True}
+    api.bus.take()
+
+    import backend.controllers.apk as apk_mod
+
+    def boom(**kw):
+        raise ValueError("参数拼装炸了")
+
+    monkeypatch.setattr(apk_mod.apkinfo, "install_args", boom)
+    api.apk_install()
+    assert _wait(lambda: api._apk_batch is None), "异常路径把批次账卡住了"
+    texts = _status_texts(api)
+    assert any("安装失败" in x and "参数拼装炸了" in x for x in texts), texts
+
+
 def test_apk_batch_counts_each_device_once(api):
     """同一台设备被记账两次时，只算一台。
 

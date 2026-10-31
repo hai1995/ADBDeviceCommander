@@ -64,8 +64,17 @@ class ApkMixin:
         self.bus.push("apk_state", {"running": True})
         for s in targets:
             # key 带序列号：同一台设备连点两次不会叠加，不同设备互不阻塞
-            self.workers.spawn("apk_install_" + s, self._do_apk_install, s, path,
-                               bool(replace), bool(downgrade), bool(grant))
+            try:
+                self.workers.spawn("apk_install_" + s, self._do_apk_install, s,
+                                   path, bool(replace), bool(downgrade),
+                                   bool(grant))
+            except Exception as e:
+                # 线程起不来（进程线程数耗尽 / 内存告急）时把这台直接记成失败，
+                # 让批次账能走到 done == total。否则 _apk_batch 永远挂着：之后
+                # 每次「安装」都被上面那句「上一批安装还没结束」挡回去，
+                # apk_state 也停在 running —— 安装功能彻底锁死，只能重启程序。
+                self._apk_batch_done(
+                    s, {"ok": False, "message": "无法启动安装线程：%s" % e}, path)
         self._push_status(
             "info", "开始安装 %s → %d 台设备（%s）"
             % (os.path.basename(path), len(targets),
@@ -77,10 +86,13 @@ class ApkMixin:
 
     def _do_apk_install(self, serial, path, replace, downgrade, grant):
         """单台设备的安装（后台线程）：失败不抛，结果进状态栏 + 批次账。"""
-        args = apkinfo.install_args(replace=replace, downgrade=downgrade,
-                                    grant=grant)
-        out, err = "", ""
+        res = {"ok": False, "code": "", "message": "安装未完成"}
+        # 记账必须无条件发生（finally）：这个线程的任何一次「没记上账」都会让
+        # _apk_batch 永远差一台，而 _apk_batch 非空时后续每次安装都被「上一批
+        # 安装还没结束」挡回去 —— 安装功能就此锁死，只能重启程序。
         try:
+            args = apkinfo.install_args(replace=replace, downgrade=downgrade,
+                                        grant=grant)
             r = subprocess.run(
                 [self._adb_argv(), "-s", serial] + args + [path],
                 **adb_kwargs(300))
@@ -97,19 +109,23 @@ class ApkMixin:
                     **adb_kwargs(300))
                 res = apkinfo.parse_install_output(
                     (r2.stdout or "") + "\n" + (r2.stderr or ""))
+            if res["ok"]:
+                self._push_status("ok", "✓ 安装成功：%s ← %s"
+                                  % (serial, os.path.basename(path)))
+            else:
+                self._push_status("err", "✗ 安装失败：%s — %s"
+                                  % (serial, res["message"]), toast=True)
         except subprocess.TimeoutExpired:
             res = {"ok": False, "code": "",
                    "message": "安装超时（5 分钟）：包太大或设备 IO 卡住，可重试"}
-        except Exception as e:
-            res = {"ok": False, "code": "", "message": "安装异常：%s" % e}
-
-        if res["ok"]:
-            self._push_status("ok", "✓ 安装成功：%s ← %s"
-                              % (serial, os.path.basename(path)))
-        else:
             self._push_status("err", "✗ 安装失败：%s — %s"
                               % (serial, res["message"]), toast=True)
-        self._apk_batch_done(serial, res, path)
+        except Exception as e:
+            res = {"ok": False, "code": "", "message": "安装异常：%s" % e}
+            self._push_status("err", "✗ 安装失败：%s — %s"
+                              % (serial, res["message"]), toast=True)
+        finally:
+            self._apk_batch_done(serial, res, path)
 
     def _apk_batch_done(self, serial, res, path):
         """批次汇总：全部设备到齐后弹一条 toast（不逐台刷屏）。"""
