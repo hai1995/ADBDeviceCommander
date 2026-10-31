@@ -3143,3 +3143,95 @@ def test_save_settings_reports_unwritable_config(monkeypatch, tmp_path):
     statuses = _events_by_kind(api).get("status", [])
     hits = [p for p in statuses if "未能写入" in p["text"]]
     assert hits and hits[0].get("toast"), "写盘失败必须弹 toast 强提醒：%r" % statuses
+
+
+# --------------------------------------------------------------------------- #
+# 多设备录屏收尾
+# --------------------------------------------------------------------------- #
+def _rec_session_with(tmp_path, serials, with_devaudio=False):
+    files = {}
+    for s in serials:
+        p = tmp_path / ("rec_%s.mp4" % s)
+        p.write_bytes(b"\x00" * 64)
+        files[s] = str(p)
+    return {
+        "ts": "20261031_230000", "dir": str(tmp_path), "with_zip": False,
+        "videos": dict(files), "mic_path": None, "mic_started": False,
+        "devaudio": {s: "/data/local/tmp/a_%s.wav" % s for s in serials}
+        if with_devaudio else {},
+        "logcat_captures": {},
+        "pointer_location_prev": {}, "show_touches_prev": {},
+    }, files
+
+
+def test_multi_device_teardown_runs_in_parallel(monkeypatch, tmp_path):
+    """多设备收尾必须并行：单台 stop 里的那一段等待不能乘以台数。
+
+    回归：_session_teardown 逐台串行 stop，而每台的 stop 要走「kill 设备端
+    screenrecord → 等本地 adb 退出 → 轮询设备端文件就绪 → pull」；设备端根本
+    没生成文件时，_pull_and_finish 还会把 6 次退避全走完（约 9 秒）。5 台设备
+    点「停止」要等 40 秒以上才出现「录屏已完成」，其间 _rec_lock 一直被占着，
+    别的录屏动作全排不上——用户只会以为程序卡死了。
+    """
+    api = _make_api()
+    sess, files = _rec_session_with(tmp_path, ("A1", "B1", "C1"))
+
+    class _SlowVideo:
+        def is_recording(self, s):
+            return True
+
+        def stop(self, s):
+            time.sleep(0.6)
+            return True, files[s], None
+
+        def set_system_setting(self, *a, **kw):
+            raise AssertionError("本用例不应触碰设备系统设置")
+
+    api.video = _SlowVideo()
+    api._rec_session = sess
+
+    t0 = time.time()
+    res = api.screen_record_stop()
+    spent = time.time() - t0
+
+    assert res["ok"] is True, res
+    assert spent < 1.4, (
+        "3 台设备各 0.6 秒：并行约 0.6 秒，串行要 1.8 秒；实际 %.2f 秒" % spent)
+    assert api._rec_session == {}, "收尾后会话必须清空，否则录屏功能被锁死"
+
+
+def test_devaudio_teardown_failure_keeps_video(tmp_path):
+    """设备音频收尾炸了，视频仍要照常落盘并计入汇总。
+
+    回归：音频那条循环没有单独兜底，一次异常会让 _session_teardown 整体中断
+    （外层 try/finally 只负责清会话），已经 pull 回来的视频既不合音频、也不进
+    zip，汇总 toast 还会说「0 个文件已保存」——用户以为这段录像没了。
+    """
+    api = _make_api()
+    sess, files = _rec_session_with(tmp_path, ("A1",), with_devaudio=True)
+
+    class _Video:
+        def is_recording(self, s):
+            return True
+
+        def stop(self, s):
+            return True, files[s], None
+
+        def set_system_setting(self, *a, **kw):
+            return True
+
+    class _BadAudio:
+        def stop(self, s):
+            raise RuntimeError("tinycap 收尾失败")
+
+    api.video = _Video()
+    api.device_audio = _BadAudio()
+    api._rec_session = sess
+
+    res = api.screen_record_stop()
+    assert res["ok"] is True, res
+    statuses = _events_by_kind(api).get("status", [])
+    texts = [p["text"] for p in statuses]
+    assert any("设备音频收尾失败" in x for x in texts), texts
+    assert any("录屏已保存" in x for x in texts), texts
+    assert api._rec_session == {}

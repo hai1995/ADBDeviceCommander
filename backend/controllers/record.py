@@ -6,7 +6,7 @@ from backend.controller import (
     PipeMirror, SnapMirror, _have_ffmpeg, ffmpeg_mux,
     find_player, find_scrcpy, load_prefs, os,
     plan_size, probe_player, safe_name, scrcpy_probe_info,
-    time, zipfile
+    ThreadPoolExecutor, time, zipfile
 )
 
 class RecordMixin:
@@ -300,36 +300,15 @@ class RecordMixin:
         # 可视化 overlay 必须**先于**视频收尾恢复：它们是设备系统设置，
         # 早一点恢复，用户设备就少一瞬处于「开着准星/圆点」的意外状态。
         self._restore_overlays(sess)
-        local_videos = {}
+        videos_map = sess.get("videos", {}) or {}
+        devaudio_map = sess.get("devaudio", {}) or {}
         dead = sess.get("dead") or set()
-        for s in list(sess.get("videos", {}).keys()):
-            local = None
-            if self.video.is_recording(s):
-                ok, lp, err = self.video.stop(s)
-                if ok:
-                    local = lp
-                elif s in dead:
-                    # 进程意外死亡（adb root 等）：文案说清「视频不完整」，
-                    # 与普通收尾失败区分开（用户据此知道该重录，而不是怀疑程序坏了）。
-                    self._push_toast(
-                        "warn",
-                        "⚠ %s 录屏被意外中断，视频不完整（%s）。残片已保留在保存目录，"
-                        "音频未合成；请完整重录。" % (s, err or "设备端进程已提前退出"))
-                else:
-                    self._push_toast(
-                        "warn", "⚠ 录屏收尾失败 %s：%s" % (s, err or "未知原因"))
-            else:
-                # 会话已被其他路径收尾弹出（stop_all / 异常清理等）时，
-                # 这里再用 stop() 只会得到「该设备未在录制」。必须用启动时记录的
-                # 本地路径兜底，否则这段视频既不合成音频、也不进 zip、界面也无提示。
-                local = sess.get("videos", {}).get(s)
-            if local and os.path.exists(local):
-                local_videos[s] = local
-        local_devaudio = {}
-        for s in list(sess.get("devaudio", {}).keys()):
-            lp = self.device_audio.stop(s)
-            if lp:
-                local_devaudio[s] = lp
+        serials = list(videos_map.keys()) + [
+            s for s in devaudio_map if s not in videos_map]
+        teardown = self._teardown_devices(serials, dead, videos_map, devaudio_map)
+        local_videos = {s: v for s, (v, _a) in teardown.items()
+                        if v and os.path.exists(v)}
+        local_devaudio = {s: a for s, (_v, a) in teardown.items() if a}
         mic_path = None
         if self._mic is not None:
             try:
@@ -403,6 +382,60 @@ class RecordMixin:
                 zpath = z
                 self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
         return rec_files, zpath
+
+    def _teardown_devices(self, serials, dead, videos_map, devaudio_map):
+        """逐设备收尾（拉视频 + 拉设备端音频），**多台设备并行**。
+
+        单台设备的 stop 要走「kill 设备端进程 → 等本地 adb 退出 → 轮询设备端
+        文件就绪 → pull」，而 _pull_and_finish 在设备端根本没生成文件时会把
+        6 次退避全部走完（约 9 秒）；设备端音频那条链同理（tinycap 的 wav 也
+        要等落盘）。串行时这些等待会被乘以台数：5 台设备点「停止」，要 40 秒
+        以上才见到「录屏已完成」，其间 _rec_lock 一直被占着，别的录屏动作全
+        排不上。各设备之间是彼此独立的 adb 调用、没有共享状态，直接并行。
+
+        返回 {serial: (本地视频路径或 None, 本地音频路径或 None)}。
+        逐台兜住异常：一台收尾炸了不该让其余设备连文件都拉不回来。
+        """
+        def one(s):
+            local_v = None
+            if s in videos_map:
+                if self.video.is_recording(s):
+                    ok, lp, err = self.video.stop(s)
+                    if ok:
+                        local_v = lp
+                    elif s in dead:
+                        # 进程意外死亡（adb root 等）：文案说清「视频不完整」，
+                        # 与普通收尾失败区分开（用户据此知道该重录，而不是怀疑程序坏了）。
+                        self._push_toast(
+                            "warn",
+                            "⚠ %s 录屏被意外中断，视频不完整（%s）。残片已保留在"
+                            "保存目录，音频未合成；请完整重录。"
+                            % (s, err or "设备端进程已提前退出"))
+                    else:
+                        self._push_toast(
+                            "warn", "⚠ 录屏收尾失败 %s：%s" % (s, err or "未知原因"))
+                else:
+                    # 会话已被其他路径收尾弹出（stop_all / 异常清理等）时，
+                    # 这里再用 stop() 只会得到「该设备未在录制」。必须用启动时记录的
+                    # 本地路径兜底，否则这段视频既不合成音频、也不进 zip、界面也无提示。
+                    local_v = videos_map.get(s)
+            local_a = None
+            if s in devaudio_map:
+                try:
+                    local_a = self.device_audio.stop(s)
+                except Exception as e:
+                    # 音频收尾失败不能连累视频落盘，也不能让整轮收尾中断
+                    self._push_status(
+                        "warn", "⚠ %s 设备音频收尾失败：%s" % (s, e))
+                    local_a = None
+            return s, (local_v, local_a)
+
+        if len(serials) <= 1:
+            return dict(one(s) for s in serials)
+        # 上限 4：再多的设备同时 pull 也挤在同一条 adb server 通道上，
+        # 并发度拉满只会让每条都变慢，还平白多占内存。
+        with ThreadPoolExecutor(max_workers=min(4, len(serials))) as pool:
+            return dict(pool.map(one, serials))
 
     @staticmethod
     def _zip_paths(paths, zip_path):

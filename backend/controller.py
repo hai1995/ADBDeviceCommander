@@ -28,6 +28,7 @@ import zipfile
 import itertools
 import datetime
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from core.constants import (
     VERSION, AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
     resource_path, unique_path,
@@ -137,6 +138,7 @@ __all__ = [
     "ScreenCapturer",
     "ShellSession",
     "SnapMirror",
+    "ThreadPoolExecutor",
     "VERSION",
     "VideoRecorder",
     "Workers",
