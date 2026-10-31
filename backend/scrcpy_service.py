@@ -179,6 +179,7 @@ class ScrcpyLauncher:
     def __init__(self):
         self._procs = {}            # serial -> Popen
         self._logs = {}             # serial -> 日志临时文件路径
+        self._pending = set()       # 正在 _spawn 中、还没登记进 _procs 的序列号
         self._lock = threading.Lock()
 
     # ---- 查询 ----
@@ -215,7 +216,7 @@ class ScrcpyLauncher:
 
         返回 {started, skipped, failed: [(serial, 原因)]}：
           started  本次真正开起来的
-          skipped  已经在投屏、不重复开的
+          skipped  已经在投屏（含**正在启动中**）、不重复开的
           failed   启动即失败（含秒退原因）
         """
         started, skipped, failed = [], [], []
@@ -225,9 +226,22 @@ class ScrcpyLauncher:
                 if old is not None and old.poll() is None:
                     skipped.append(serial)
                     continue
+                # 「正在启动中」也算已在投屏。_spawn 里要等 START_SETTLE_S 才把
+                # Popen 登记进 _procs，这段时间 _procs 还是空的 —— 而 launch()
+                # 的「查重」和「登记」本来就分处锁的两端，锁只护住了后半段。
+                # 于是连点两次「投屏」（或快捷键重复触发）各走一遍 _spawn，
+                # 同一台设备开出两个 scrcpy 窗口，互相抢 adb 输入。
+                if serial in self._pending:
+                    skipped.append(serial)
+                    continue
+                self._pending.add(serial)
                 self._procs.pop(serial, None)
 
-            ok, reason = self._spawn(serial, exe)
+            try:
+                ok, reason = self._spawn(serial, exe)
+            finally:
+                with self._lock:
+                    self._pending.discard(serial)
             if ok:
                 started.append(serial)
             else:

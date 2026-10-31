@@ -8,6 +8,8 @@ import ctypes
 import os
 import threading
 
+import pytest
+
 from core.constants import _WAVEHDR
 
 
@@ -583,3 +585,82 @@ def test_device_audio_stop_removes_unusable_leftover(monkeypatch, tmp_path):
     cap._procs = {"A1": (object(), "/data/local/tmp/a.wav")}
     assert cap.stop("A1") is None
     assert os.listdir(str(tmp_path)) == [], "残片必须清掉"
+
+
+# ---------------------------------------------------------------------------
+# WAV 长度 / WinMM 错误码 / 句柄释放
+# ---------------------------------------------------------------------------
+def test_wav_duration_uses_real_file_length(tmp_path):
+    """头里声明的 data 长度不可全信：文件被截断时以实际字节数为准。
+
+    回归：旧实现用**头里的** riff_size 反算「剩余字节」，等于用头校验头 ——
+    一段只剩几十字节的残录音仍被算成「有几十 KB 音频」，通过 _wav_ok 后
+    直接喂给 ffmpeg。
+    """
+    import backend.audio_service as au
+
+    full = _wav_bytes(pcm=b"\x00\x01" * 64)          # 128 字节 PCM
+    truncated = tmp_path / "cut.wav"
+    truncated.write_bytes(full[:44] + full[44:64])     # 头照旧写着 128，实际只剩 20
+    assert au._wav_duration(str(truncated)) == 20
+
+
+def test_wav_duration_header_only_returns_none(tmp_path):
+    """只有 44 字节头、data 段 0 字节：判为「没有音频」，不返回头里的大小。"""
+    import backend.audio_service as au
+
+    p = tmp_path / "hdr.wav"
+    p.write_bytes(_wav_bytes(pcm=b""))
+    assert au._wav_duration(str(p)) is None
+
+
+def test_mm_error_code_is_translated_for_humans():
+    """waveIn* 的错误码要翻成人话，否则用户只看到一串数字。"""
+    import backend.audio_service as au
+
+    au._check_mmresult(0, "waveInStart")        # 0 = 成功
+    au._check_mmresult(None, "waveInStart")     # 部分替身 / 老驱动返回 None
+    with pytest.raises(RuntimeError) as ei:
+        au._check_mmresult(32, "waveInStart")
+    msg = str(ei.value)
+    assert "waveInStart" in msg and "32" in msg and "音频格式" in msg
+
+    with pytest.raises(RuntimeError) as ei2:
+        au._check_mmresult(999, "waveInAddBuffer")
+    assert "未知错误" in str(ei2.value)
+
+
+def test_release_device_is_idempotent(tmp_path):
+    """释放两次不能重复 unprepare（否则第二次是对已失效句柄操作）。"""
+    winmm = _FakeWinMM()
+    mr = _make_recorder(tmp_path, winmm)
+
+    mr._release_device()
+    assert winmm.calls == ["unprepare"] * 4 + ["close"]
+    assert mr._wavein is None
+
+    mr._release_device()
+    assert winmm.calls == ["unprepare"] * 4 + ["close"], "句柄已置空，第二次应直接返回"
+
+
+def test_start_releases_handle_when_open_fails(tmp_path):
+    """_open() 半途失败必须把已开的录音句柄关掉。
+
+    回归：_open() 里 waveInStart 校验失败会抛异常，而 start() 只管把异常
+    往上传 —— waveInOpen 开出来的句柄从未 close，麦克风被本进程一直占着，
+    用户打开别的录音软件全部拿不到设备，只能重启程序。
+    """
+    winmm = _FakeWinMM()
+    mr = _make_recorder(tmp_path, winmm)
+    mr._running = False
+
+    def _boom():
+        raise RuntimeError("waveInStart 失败，错误码 8（设备不支持该操作）")
+
+    mr._open = _boom
+    with pytest.raises(RuntimeError):
+        mr.start(str(tmp_path))
+
+    assert "close" in winmm.calls, "打开失败后必须 waveInClose，否则麦克风被独占"
+    assert mr._running is False
+    assert mr._wavein is None

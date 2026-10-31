@@ -9,6 +9,8 @@
 真实调用 scrcpy 的行为（窗口有没有出来）只能在用户机器上看，这里不假装能测。
 """
 import os
+import threading
+import time
 
 import pytest
 
@@ -211,3 +213,37 @@ def test_launch_failure_leaves_no_empty_log(monkeypatch, tmp_path):
     res = svc.ScrcpyLauncher().launch(["A1"], "/fake/scrcpy")
     assert res["started"] == [] and res["failed"]
     assert os.listdir(str(tmp_path)) == []
+
+
+def test_launch_dedupes_concurrent_start(monkeypatch):
+    """连点两次（并发进来）也只开一个窗口。
+
+    回归：launch() 把「查重」和「登记」拆在锁的两端，而 _spawn 里要等
+    START_SETTLE_S 才把 Popen 写进 _procs —— 第二次点击落在这段时间内时
+    _procs 还是空的，于是同一台设备开出两个 scrcpy 窗口，互相抢 adb 输入
+    （这正是本类 docstring 里承诺不会发生的事）。
+    """
+    L = svc.ScrcpyLauncher()
+    spawned = []
+    gate = threading.Event()
+
+    def slow_spawn(serial, exe):
+        spawned.append(serial)
+        gate.wait(2)
+        return True, ""
+
+    monkeypatch.setattr(L, "_spawn", slow_spawn)
+    first = []
+    th = threading.Thread(target=lambda: first.append(L.launch(["A1"], "/fake/scrcpy")))
+    th.start()
+    deadline = time.time() + 2
+    while not spawned and time.time() < deadline:      # 等它真正进入 _spawn
+        time.sleep(0.01)
+
+    second = L.launch(["A1"], "/fake/scrcpy")          # 第二次点击
+    gate.set()
+    th.join(3)
+
+    assert spawned == ["A1"], "同一台设备只能启动一次"
+    assert first[0]["started"] == ["A1"]
+    assert second == {"started": [], "skipped": ["A1"], "failed": []}

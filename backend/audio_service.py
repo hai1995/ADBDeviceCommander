@@ -21,6 +21,34 @@ from core.constants import (
     _WAVEHDR, adb_kwargs, adb_popen_kwargs, safe_name, unique_path)
 
 
+# MMSYSERR / WAVERR 里最常见的几个：报错时直接翻成人话，用户才知道该动哪里。
+_MM_ERROR_TEXT = {
+    1: "未指明的错误",
+    2: "设备号越界（这台机器上没有这个录音设备）",
+    4: "设备已被占用（别的程序正在录音？）",
+    5: "句柄无效",
+    6: "没有可用的音频驱动",
+    7: "内存不足",
+    8: "设备不支持该操作",
+    11: "参数无效",
+    12: "句柄正被占用",
+    32: "设备不支持该音频格式（声道 / 采样率 / 位深）",
+}
+
+
+def _check_mmresult(mr, what):
+    """WinMM 调用返回非 0 就抛可读异常（0 / None 视为成功）。
+
+    这些接口**返回错误码而不抛异常**，不校验就等于「什么都没发生」：
+    waveInStart 失败时 start() 照样返回成功，界面显示「录音中」，停止后却
+    一句「未录到声音」—— 用户以为是自己没说话。校验之后错误当场就有名字。
+    """
+    if not mr:
+        return
+    raise RuntimeError("%s 失败，错误码 %s（%s）"
+                       % (what, mr, _MM_ERROR_TEXT.get(mr, "未知错误")))
+
+
 def _have_ffmpeg():
     try:
         r = subprocess.run(["ffmpeg", "-version"], **adb_kwargs(10))
@@ -36,11 +64,11 @@ def _wav_duration(path):
     写出的那种。tinycap 写出的头有时字段顺序不同，宁可判为不可用也不要喂给 ffmpeg。
     """
     try:
+        total = os.path.getsize(path)
         with open(path, "rb") as f:
             head = f.read(12)
             if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
                 return None
-            riff_size = int.from_bytes(head[4:8], "little")
             fmt_seen = False
             # fmt 块之后紧跟 data 块；逐块跳过，遇到 data 立即返回长度
             for _ in range(8):
@@ -58,9 +86,14 @@ def _wav_duration(path):
                     # 只会得到一个 0 秒的空壳视频。
                     if not fmt_seen:
                         return None
-                    # 文件实际长度才是权威（有些写头时把长度写大了）
-                    actual = max(0, riff_size + 8 - f.tell())
-                    return min(csize, actual) if actual else csize
+                    # 文件实际长度才是权威：有的写头时把长度写大，有的干脆
+                    # 写 0xFFFFFFFF（流式 WAV）。早前用**头里的** riff_size 反算
+                    # 「剩余字节」，等于用头校验头 —— 一段被截断的残录音仍会被
+                    # 认为「有几十 KB 音频」，通过 _wav_ok 后直接喂给 ffmpeg。
+                    actual = max(0, total - f.tell())
+                    if actual <= 0:
+                        return None          # data 段一个字节都没有
+                    return min(csize, actual)
                 else:
                     f.seek(csize + (csize & 1), os.SEEK_CUR)
             return None
@@ -482,8 +515,7 @@ class MicRecorder:
         mr = winmm.waveInOpen(
             ctypes.byref(phwi), 0, ctypes.byref(fmt),
             self._callback, 0, CALLBACK_FUNCTION)
-        if mr != 0:
-            raise RuntimeError("waveInOpen 失败，错误码 %d" % mr)
+        _check_mmresult(mr, "waveInOpen")
         self._wavein = phwi
         self._fmt = fmt
 
@@ -497,12 +529,16 @@ class MicRecorder:
             hdr.lpData = ctypes.cast(buf, ctypes.c_void_p)
             hdr.dwBufferLength = buf_size
             hdr.dwFlags = 0
-            winmm.waveInPrepareHeader(phwi, ctypes.byref(hdr),
-                                      ctypes.sizeof(_WAVEHDR))
-            winmm.waveInAddBuffer(phwi, ctypes.byref(hdr),
-                                  ctypes.sizeof(_WAVEHDR))
+            _check_mmresult(
+                winmm.waveInPrepareHeader(phwi, ctypes.byref(hdr),
+                                          ctypes.sizeof(_WAVEHDR)),
+                "waveInPrepareHeader")
+            _check_mmresult(
+                winmm.waveInAddBuffer(phwi, ctypes.byref(hdr),
+                                      ctypes.sizeof(_WAVEHDR)),
+                "waveInAddBuffer")
             self._hdrs.append((hdr, buf))
-        winmm.waveInStart(phwi)
+        _check_mmresult(winmm.waveInStart(phwi), "waveInStart")
 
     def start(self, save_dir):
         if self._running:
@@ -517,7 +553,15 @@ class MicRecorder:
         self._chunks = []
         self._collected = set()
         self._stop.clear()
-        self._open()
+        try:
+            self._open()
+        except Exception:
+            # _open 里 waveInOpen 可能已经成功，只是准备缓冲区 / 启动采集失败。
+            # 此时必须把句柄关掉：否则麦克风被本进程一直占着，用户打开任何别的
+            # 录音软件都拿不到设备 —— 而界面上只有一句「无法开始录音」，
+            # 重启程序才恢复。_running 仍为 False，stop() 不会代劳。
+            self._release_device()
+            raise
         self._running = True
         return True, self._path
 
@@ -539,19 +583,8 @@ class MicRecorder:
             winmm.waveInReset(self._wavein)
         except Exception:
             pass
-        # 三步各自独立兜底：任一步失败都不能阻断下一步，否则 waveInClose 被跳过，
-        # 麦克风设备会一直被本进程占用（其它录音程序随之失效）。
-        try:
-            for hdr, _buf in self._hdrs:
-                winmm.waveInUnprepareHeader(
-                    self._wavein, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
-        except Exception:
-            pass
-        try:
-            winmm.waveInClose(self._wavein)
-        except Exception:
-            pass
         self._running = False
+        self._release_device()
         self._write_wav()
         # 空录音（麦克风被占用 / 全程静音 / 权限不足）会写出只有 44 字节头的 wav，
         # 这种文件任何播放器都打不开。删掉并回 None，让调用方明确提示「未录到声音」。
@@ -560,6 +593,31 @@ class MicRecorder:
             self._path = None
             return None
         return self._path
+
+    def _release_device(self):
+        """尽力释放 WinMM 句柄（unprepare → close），任一步失败都不影响下一步。
+
+        单独抽出来是因为它有两个调用点：正常 stop()，以及 start() 中 _open()
+        半途失败 —— 后者早前根本没做收尾（异常直接往上传，句柄留在进程里）。
+        方法自身幂等：句柄关掉后置空，重复调用直接返回。
+        """
+        winmm = getattr(self, "_winmm", None)
+        hwi = getattr(self, "_wavein", None)
+        if winmm is None or hwi is None:
+            return
+        # 这两步各自兜底：unprepare 失败也绝不能跳过 close，否则麦克风设备会一直
+        # 被本进程占用（其它录音程序随之失效）。
+        try:
+            for hdr, _buf in getattr(self, "_hdrs", []):
+                winmm.waveInUnprepareHeader(
+                    hwi, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        except Exception:
+            pass
+        try:
+            winmm.waveInClose(hwi)
+        except Exception:
+            pass
+        self._wavein = None
 
     def _drain_buffers(self):
         """停止后把各缓冲区里已录到的残余数据（dwBytesRecorded）并入 _chunks。
