@@ -389,6 +389,15 @@ class DeviceAudioCapture:
             except Exception:
                 pass
             time.sleep(0.5 * (attempt + 1))
+        if local is None:
+            # 五轮都没拿到可用的 wav（pull 失败 / 文件头不完整 / 设备端还没写完）：
+            # 把已经落盘的残片删掉。它不会被合成，留在 TEMP 里既白占空间，
+            # 又让人看到 adb_devaudio_*.wav 误以为这次录音是好的。
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
         try:
             subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", remote_wav],
                            **adb_kwargs(10))

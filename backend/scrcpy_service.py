@@ -183,7 +183,7 @@ class ScrcpyLauncher:
 
     # ---- 查询 ----
     def alive(self):
-        """当前仍在投屏的序列号列表（顺带清理已退出的句柄）。"""
+        """当前仍在投屏的序列号列表（顺带清理已退出的句柄与日志）。"""
         with self._lock:
             out = []
             for serial, p in list(self._procs.items()):
@@ -191,7 +191,23 @@ class ScrcpyLauncher:
                     out.append(serial)
                 else:
                     self._procs.pop(serial, None)
+                    self._drop_log(serial)
             return out
+
+    def _drop_log(self, serial):
+        """删掉该设备的 scrcpy 日志（须持锁调用）。
+
+        秒退路径已在 _spawn 里删过；用户自己关窗口时这里补删 —— 否则 TEMP 里
+        会按设备数各留一份日志，直到下次程序启动被 core.tmpfiles 扫掉才消失。
+        """
+        path = self._logs.pop(serial, None)
+        if not path:
+            return
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
 
     # ---- 启动 ----
     def launch(self, serials, exe):
@@ -236,6 +252,12 @@ class ScrcpyLauncher:
         except Exception as e:
             if f is not None:
                 f.close()
+                # 刚建的日志文件是空的，Popen 都没起来就没人会用：顺手删掉，
+                # 免得每失败一次就在 TEMP 里留一个 0 字节文件。
+                try:
+                    os.remove(log_path)
+                except Exception:
+                    pass
             return False, "启动失败：%s" % e
         else:
             if f is not None:

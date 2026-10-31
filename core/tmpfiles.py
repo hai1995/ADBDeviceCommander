@@ -9,8 +9,8 @@ core.tmpfiles —— 系统临时目录里「本程序遗留文件」的保守�
 它们在哪、叫什么。
 
 清理策略刻意保守（宁可留，也不误删）：
-  * 只碰调用方显式给的前缀（默认 adb_view_ / adb_up_ / adb_devaudio_），
-    绝不递归、绝不删别人的文件；
+  * 只碰调用方显式给的前缀（默认 adb_view_ / adb_up_ / adb_devaudio_ /
+    adc_scrcpy_），绝不递归、绝不删别人的文件；
   * ``keep_newest``：按 mtime 保留最新的 N 个 —— 用户刚打开、系统查看器可能还
     在读的那一份一定在保留集合里；
   * ``min_age_s``：只删「足够旧」的，刚生成的文件一律跳过（同样是为了避免删掉
@@ -29,12 +29,16 @@ import time
 #                 只在进程被强杀 / 崩溃时残留）
 #   adb_devaudio_ 录屏时设备端音频 pull 回来的 wav（合成后由调用方删除，
 #                 同上，异常路径会残留）
-# 后两个早前没纳入清理：一次崩溃就会在 TEMP 里留下几百 MB 的孤儿文件，
+#   adc_scrcpy_   投屏时 scrcpy 的 stdout/stderr 日志（正常路径由 ScrcpyLauncher
+#                 在窗口退出时删除；进程被强杀 / 崩溃时残留）
+# 后几个早前没纳入清理：一次崩溃就会在 TEMP 里留下几百 MB 的孤儿文件，
 # 而用户既不知道文件名也不知道它们在哪，只能等系统清理工具。
 VIEW_PREFIX = "adb_view_"
 UPLOAD_PREFIX = "adb_up_"
 DEVAUDIO_PREFIX = "adb_devaudio_"
-DEFAULT_PREFIXES = (VIEW_PREFIX, UPLOAD_PREFIX, DEVAUDIO_PREFIX)
+SCRCPY_LOG_PREFIX = "adc_scrcpy_"
+DEFAULT_PREFIXES = (VIEW_PREFIX, UPLOAD_PREFIX, DEVAUDIO_PREFIX,
+                    SCRCPY_LOG_PREFIX)
 
 
 def _candidates(directory, prefixes):
@@ -66,7 +70,7 @@ def sweep(prefixes=DEFAULT_PREFIXES, keep_newest=8, min_age_s=600.0,
     参数
     ----
     prefixes    只处理文件名以这些前缀开头的文件（默认 DEFAULT_PREFIXES：
-                adb_view_ / adb_up_ / adb_devaudio_）
+                adb_view_ / adb_up_ / adb_devaudio_ / adc_scrcpy_）
     keep_newest 按 mtime 降序保留最新 N 个；传 0 表示不按数量保留（只按年龄）
     min_age_s   只删除「修改时间早于 now - min_age_s」的文件
     directory   目标目录，默认系统临时目录

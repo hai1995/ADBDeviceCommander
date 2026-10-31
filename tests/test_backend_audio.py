@@ -557,3 +557,29 @@ def test_device_audio_pull_never_writes_into_cwd(monkeypatch, tmp_path):
     assert dsts, "应当执行过一次 pull"
     assert os.path.dirname(dsts[0]) == str(tmpdir)
     assert os.path.dirname(dsts[0]) != os.getcwd()
+
+
+def test_device_audio_stop_removes_unusable_leftover(monkeypatch, tmp_path):
+    """pull 回来的是残片（wav 头不完整）时必须删掉，不能留在 TEMP 里。
+
+    回归：五轮 pull 都没拿到可用 wav 时，前面几轮落盘的残片原地留着。它不会
+    被合成，却会以 `adb_devaudio_*.wav` 的名字躺在 TEMP 里 —— 用户看到会以为
+    这次录音是好的，实际是一段打不开的文件。
+    """
+    import tempfile
+    import backend.audio_service as au
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(au.time, "sleep", lambda s: None)   # 免等 5 轮退避
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "adb" and "pull" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"RIFF")          # 4 字节：_wav_ok 必判不可用
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    cap = au.DeviceAudioCapture("adb")
+    cap._procs = {"A1": (object(), "/data/local/tmp/a.wav")}
+    assert cap.stop("A1") is None
+    assert os.listdir(str(tmp_path)) == [], "残片必须清掉"

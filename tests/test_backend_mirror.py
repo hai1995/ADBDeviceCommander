@@ -364,3 +364,87 @@ def test_snap_stop_drops_frame():
     srv.set_frame("S1", b"x")
     m.stop()
     assert srv.get_frame("S1") is None
+
+
+# ---------------------------------------------------------------- 播放器消失
+
+
+class _DeadPlayerFactory(_PopenFactory):
+    """播放器一拉起来就已经「没了」（模拟用户把窗口关掉 / 播放器自己崩了）。"""
+
+    def __call__(self, cmd, **kw):
+        p = super().__call__(cmd, **kw)
+        if "screenrecord" not in cmd:
+            p.poll = lambda: 1
+        return p
+
+
+def test_pipe_stops_when_player_window_closed(monkeypatch):
+    """播放器窗口被关掉后必须收手，不能继续重开 screenrecord。
+
+    回归：转发循环只在「adb 退出」时判断要不要续流，从不看播放器。用户关掉
+    ffplay 之后，每轮都是「读到一块 → 写 stdin 失败 → 重开 screenrecord」，
+    能一路刷到 MAX_RESTARTS（500）次：设备端编码器被反复抢占、adb 进程成串
+    泄漏，而状态栏只报一句「转发中断」，没人能看出是「窗口关了」。
+    """
+    factory = _DeadPlayerFactory([[b"frame-1"], [b"frame-2"], [b"frame-3"]])
+    m = _pipe(monkeypatch, factory)
+    m._player_err = "Failed to initialize video output"
+    ok, _ = m.start()
+    assert ok is True, "首帧确实写进去了（写失败才算失败）"
+    m._thread.join(timeout=5)
+    assert "播放器窗口已关闭" in m.error
+    assert len(factory.adb_procs) == 1, "窗口已关就不该再重开 screenrecord"
+
+
+def test_pipe_first_data_requires_successful_write(monkeypatch):
+    """「出画面」的判定必须发生在写进播放器之后。
+
+    旧顺序是「先置 first_data 再 write」：写失败时 start() 依然返回成功，
+    用户拿到的是一个黑窗口 + 一句 6 秒后的超时错误。
+    """
+    class _BrokenStdin(_FakeStdin):
+        def write(self, b):
+            raise BrokenPipeError("player gone")
+
+    factory = _PopenFactory([[b"frame"]])
+    m = _pipe(monkeypatch, factory)
+    orig_popen = factory.__call__
+
+    def _popen(cmd, **kw):
+        p = orig_popen(cmd, **kw)
+        if "screenrecord" not in cmd:
+            p.stdin = _BrokenStdin()
+        return p
+
+    monkeypatch.setattr(svc.subprocess, "Popen", _popen)
+    ok, err = m.start()
+    assert ok is False
+    assert err, "写失败必须报错，而不是当作已出画面"
+    m.stop()
+
+
+def test_device_size_prefers_physical_over_override(monkeypatch):
+    """`wm size` 同时给出 Override 与 Physical 时必须取 Physical。
+
+    回归：判断条件写成 `if "Physical size" in line or "size" in line.lower():`
+    —— 后半个条件让前半个失效，谁先出现就用谁。用户设过 `wm size 1000x1000`
+    的机器上会拿临时分辨率去算缩放，投屏结束后 SetClipboard 式的「临时值」
+    就被固化进了命令参数。
+    """
+    class _R:
+        stdout = "Override size: 1000x1000\nPhysical size: 1080x2400"
+        returncode = 0
+
+    monkeypatch.setattr(svc.subprocess, "run", lambda *a, **k: _R())
+    assert svc.device_size("adb", "S") == (1080, 2400)
+
+
+def test_device_size_falls_back_to_lone_size_line(monkeypatch):
+    """个别 ROM 只打一行 `Override size`：没有 Physical 时仍要能读出分辨率。"""
+    class _R:
+        stdout = "Override size: 720x1280\n"
+        returncode = 0
+
+    monkeypatch.setattr(svc.subprocess, "run", lambda *a, **k: _R())
+    assert svc.device_size("adb", "S") == (720, 1280)

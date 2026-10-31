@@ -129,3 +129,17 @@ def test_boot_sweep_covers_upload_and_devaudio_leftovers(tmp_path):
     assert os.path.exists(keep), "非本程序的文件一个都不能动"
     for p in (up, wav, view):
         assert not os.path.exists(p), "应删除：%s" % p
+
+
+def test_boot_sweep_covers_scrcpy_logs(tmp_path):
+    """scrcpy 日志也要纳入启动清理。
+
+    ScrcpyLauncher 正常路径会删自己的日志，但进程被强杀 / 崩溃时删不掉：
+    每台设备一个 adc_scrcpy_<序列号>.log，长期下来没人知道它们是什么。
+    """
+    log = _mk(tmp_path, "adc_scrcpy_A1.log", age_s=7200)
+    keep = _mk(tmp_path, "scrcpy-A1.txt", age_s=7200)     # 前缀不同，不能碰
+    stat = tmpfiles.boot_sweep(min_age_s=3600.0, directory=str(tmp_path))
+    assert stat["removed"] == 1, stat
+    assert not os.path.exists(log)
+    assert os.path.exists(keep)

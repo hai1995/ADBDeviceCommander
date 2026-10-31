@@ -181,3 +181,33 @@ def test_alive_drops_exited_process(fast):
     assert L.alive() == ["A1"]
     procs[0]._alive = False          # 用户手动关掉投屏窗口
     assert L.alive() == []
+
+
+def test_alive_removes_log_of_closed_window(fast):
+    """用户关掉投屏窗口后，日志文件也要跟着删掉。
+
+    回归：alive() 只把进程从表里摘掉，日志留在 _logs 里 —— 每台设备在 TEMP
+    里各留一份 adc_scrcpy_*.log，直到下次程序启动被 tmpfiles 扫掉才消失。
+    """
+    procs = fast()
+    L = svc.ScrcpyLauncher()
+    L.launch(["A1"], "/fake/scrcpy")
+    log = L._logs["A1"]
+    assert os.path.exists(log)
+    procs[0]._alive = False           # 用户手动关掉窗口
+    assert L.alive() == []
+    assert not os.path.exists(log), "窗口关掉后日志应一并删除"
+
+
+def test_launch_failure_leaves_no_empty_log(monkeypatch, tmp_path):
+    """Popen 直接失败时，别在 TEMP 留下一个 0 字节日志文件。"""
+    monkeypatch.setattr(svc, "START_SETTLE_S", 0)
+    monkeypatch.setattr(svc.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def _boom(*a, **k):
+        raise OSError("cannot start")
+
+    monkeypatch.setattr(svc.subprocess, "Popen", _boom)
+    res = svc.ScrcpyLauncher().launch(["A1"], "/fake/scrcpy")
+    assert res["started"] == [] and res["failed"]
+    assert os.listdir(str(tmp_path)) == []

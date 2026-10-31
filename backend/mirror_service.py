@@ -209,13 +209,22 @@ def device_size(adb, serial):
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10,
                            creationflags=no_window_flags())
-        for line in (r.stdout or "").splitlines():
-            if "Physical size" in line or "size" in line.lower():
+        text = r.stdout or ""
+        # 两轮扫描：先只认 `Physical size`（真实分辨率），整份输出里都没有它
+        # 时才退而接受其它带 "size" 的行（个别 ROM 只打一行 `Override size`）。
+        # 原来写的是 `if "Physical size" in line or "size" in line.lower():` ——
+        # 后半个条件让前半个形同虚设，谁先出现就用谁，与上面「只认 Physical」
+        # 的承诺并不一致：`wm size` 先打 Override 的 ROM 上会拿到临时分辨率。
+        for want in ("physical size", "size"):
+            for line in text.splitlines():
+                if want not in line.lower():
+                    continue
                 part = line.split(":")[-1].strip()
-                if "x" in part:
-                    w, _, h = part.partition("x")
-                    if w.strip().isdigit() and h.strip().isdigit():
-                        return int(w), int(h)
+                if "x" not in part:
+                    continue
+                w, _, h = part.partition("x")
+                if w.strip().isdigit() and h.strip().isdigit():
+                    return int(w), int(h)
     except Exception:
         pass
     return 0, 0
@@ -274,6 +283,7 @@ class PipeMirror:
         self._first_data = threading.Event()   # 已收到首帧 = 链路可用
         self._done = threading.Event()         # 结论就绪（收到首帧 或 已判定失败）
         self._player = None
+        self._player_err = ""                  # 播放器 stderr 末尾（失败时给原因）
         self._adb_proc = None
         self._thread = None
         self.restarts = 0
@@ -305,6 +315,12 @@ class PipeMirror:
                 stderr=subprocess.PIPE, creationflags=no_window_flags())
         except Exception as e:
             return False, "播放器启动失败：%s" % e
+        # 必须有人把 stderr 读走：管道容量只有 64KB，mpv / vlc 这类会持续
+        # 打日志的播放器写满之后就会**阻塞在写日志上**，随之不再消费 stdin，
+        # 画面卡死而原因完全看不出来。读走的同时留末尾一段，秒退时能报真因。
+        threading.Thread(target=self._drain_player_err,
+                         args=(self._player.stderr,), daemon=True,
+                         name="mirror-player-%s" % self.serial).start()
         ok, err = self._spawn_adb()
         if not ok:
             self._kill_player()
@@ -330,6 +346,52 @@ class PipeMirror:
             return False, "screenrecord 启动失败：%s" % e
         return True, ""
 
+    def _drain_player_err(self, stream):
+        """把播放器的 stderr 持续读走，只留末尾 400 字符（供秒退时报原因）。
+
+        不读的后果不是「少一条日志」：管道写满 64KB 后播放器会阻塞在写日志上，
+        于是不再消费 stdin —— 表现为画面突然卡死，而我们这边仍在一路 write，
+        看起来像「设备不吐数据」。异常一律吞掉，这条线程不能影响转发。
+        """
+        try:
+            for raw in iter(stream.readline, b""):
+                if self._stop.is_set():
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    self._player_err = (self._player_err + " " + line)[-400:]
+        except Exception:
+            pass
+
+    def _player_alive(self):
+        """播放器窗口是否还开着（用户直接关窗口 = poll() 非 None）。"""
+        p = self._player
+        if p is None:
+            return False
+        try:
+            return p.poll() is None
+        except Exception:
+            return False
+
+    def _close_player(self, wait=2.0):
+        """收掉播放器进程：terminate → 短暂等待 → 仍活着才 kill。"""
+        player = self._player
+        if player is None:
+            return
+        try:
+            if player.poll() is not None:
+                return
+            player.terminate()
+        except Exception:
+            return
+        try:
+            player.wait(timeout=wait)
+        except Exception:
+            try:
+                player.kill()
+            except Exception:
+                pass
+
     def _feed_loop(self):
         """转发循环：adb stdout → 播放器 stdin；adb 退出即续流（直到被 stop）。"""
         while not self._stop.is_set():
@@ -343,12 +405,14 @@ class PipeMirror:
                         chunk = proc.stdout.read1(CHUNK)
                         if not chunk:
                             break
+                        self._player.stdin.write(chunk)
+                        self._player.stdin.flush()
                         if not got:
+                            # 只有**真的写进播放器**才算「出画面」：写失败时提前
+                            # 置位会让 start() 误报成功，用户拿到一个黑窗口。
                             got = True
                             self._first_data.set()
                             self._done.set()     # 放行 start() 的同步等待
-                        self._player.stdin.write(chunk)
-                        self._player.stdin.flush()
                 except Exception as e:
                     self.error = "转发中断：%s" % e
                 try:
@@ -358,8 +422,22 @@ class PipeMirror:
                 try:
                     proc.wait(timeout=5)
                 except Exception:
-                    pass
+                    # 读循环已退出但 adb 还活着：必须主动收掉。否则每次中断都留
+                    # 一个挂着设备端 screenrecord 的 adb 进程，而续流又会再起
+                    # 一个新的 —— 几轮下来设备端编码器被抢光。
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             if self._stop.is_set():
+                break
+            if not self._player_alive():
+                # 用户把播放器窗口关了：继续「续流」是纯粹的空转 —— 每轮都是
+                # 立刻写失败、立刻重开 screenrecord，能一路刷到 MAX_RESTARTS，
+                # 设备端编码器被反复占用，报出来的却只有一句「转发中断」。
+                tail = (self._player_err or "").strip()
+                self.error = ("播放器窗口已关闭，投屏停止"
+                              + ("（%s）" % tail[-200:] if tail else ""))
                 break
             if not got:
                 # 一个字节都没收到就退出 = 设备端命令不可用（ROM 移除 /
@@ -391,19 +469,13 @@ class PipeMirror:
 
     def _kill_player(self):
         """只收播放器（screenrecord 起不来的失败路径用：播放器窗口不该留着）。"""
-        player = self._player
-        if player is not None:
-            try:
-                if player.poll() is None:
-                    player.terminate()
-            except Exception:
-                pass
+        self._close_player()
 
     def stop(self):
         """停止投屏：先断 adb（停止喂数据），再收播放器，最后清设备端残留。"""
         self._stop.set()
         self._done.set()          # 放行可能还在同步等待的 start()
-        proc, player = self._adb_proc, self._player
+        proc = self._adb_proc
         if proc is not None:
             try:
                 if proc.poll() is None:
@@ -416,12 +488,7 @@ class PipeMirror:
             kill_device_process(self.adb, self.serial, "screenrecord")
         except Exception:
             pass
-        if player is not None:
-            try:
-                if player.poll() is None:
-                    player.terminate()
-            except Exception:
-                pass
+        self._close_player()
 
     def alive(self):
         return (not self._stop.is_set()
