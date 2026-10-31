@@ -40,6 +40,7 @@ backend.perf_service —— 设备性能实时采样（CPU / 内存 / FPS / 电�
 """
 import csv
 import datetime
+import itertools
 import os
 import re
 import subprocess
@@ -727,11 +728,23 @@ class PerfMonitor:
         except (TypeError, ValueError):
             since = 0
         with self._lock:
-            out = [dict(s) for s in self._samples if s.get("seq", 0) > since]
+            total = len(self._samples)
             seq = self._seq
+            # 样本 seq 连续递增（只在 append 时 +1），环形缓冲只从头部淘汰，
+            # 故第 i 个样本的 seq 恒为 seq - total + 1 + i —— 可以直接算出
+            # 「从哪个下标起是新的」，只复制新增的那几条。
+            # 旧实现每次都对整个缓冲跑一遍 `s.get("seq") > since`：前端每 0.6s
+            # 轮询一次，长会话（上限 2 万点 × 4 台设备）下白白扫十几万次字典，
+            # 全压在 js_api 线程上，与 take_events 抢 GIL。
+            start = since - (seq - total + 1) + 1
+            if start < 0:
+                start = 0
+            elif start > total:
+                start = total
+            out = [dict(s) for s in itertools.islice(self._samples, start, None)]
         return {"running": self.alive(), "seq": seq, "samples": out,
                 "info": dict(self.info), "error": self.error,
-                "interval": self.interval, "count": self.count()}
+                "interval": self.interval, "count": total}
 
     def all_samples(self):
         with self._lock:
@@ -1050,6 +1063,60 @@ def _hover_strips(cells, y, ih, title_fn):
     return out
 
 
+_MAX_SEG_POINTS = 1500     # 单段折线的点数上限（≈ 绘图区像素宽度的 2 倍）
+
+
+def _thin_seg(seg, max_points=_MAX_SEG_POINTS):
+    """把一段折线按**像素列**归并（每列只留最高/最低两点），点数压到 ~2×图宽。
+
+    20000 个采样点铺在 706px 宽的绘图区里，平均每列挤 28 个 —— 中间那 26 个
+    对可见形状毫无贡献，却让每条 <path> 涨到 200KB（六张图 = 4MB 的 HTML，
+    浏览器打开要几秒、滚动发涩，而报告是双击就看的离线文件）。
+
+    归并只丢「同一列里的中间值」：每列保留竖直方向的最高与最低两点（按出现
+    先后排列），因此尖峰（掉一次帧、CPU 冲顶）一定还在，曲线的形状与原图
+    肉眼无差；首点与末点也一定保留（面积图的端点用的是它们）。
+
+    点数少于一屏时原样返回 —— 少于 1500 点的图本来就没有可省的像素。
+    """
+    if len(seg) <= max_points:
+        return seg
+    out = []
+
+    def flush(a, b):
+        if a is b:
+            out.append(a)
+        elif a[2] <= b[2]:
+            out.append(a)
+            out.append(b)
+        else:
+            out.append(b)
+            out.append(a)
+
+    col, lo, hi = None, None, None
+    for k, (x, y) in enumerate(seg):
+        c = int(x)
+        if c != col:
+            if lo is not None:
+                flush(lo, hi)
+            col, lo, hi = c, (x, y, k), (x, y, k)
+        else:
+            if y < lo[1]:
+                lo = (x, y, k)
+            if y > hi[1]:
+                hi = (x, y, k)
+    if lo is not None:
+        flush(lo, hi)
+    res = [(x, y) for x, y, _k in out]
+    # 折线的首末点同时是**面积块的端点**：归并会把它们当「同列的中间值」丢掉，
+    # 于是面积块的左右边缘各缩进一个像素。显式补回，让形状与原图严格一致。
+    if res and res[0] != seg[0]:
+        res.insert(0, seg[0])
+    if res and res[-1] != seg[-1]:
+        res.append(seg[-1])
+    return res
+
+
 def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
     """把一条指标画成内联 SVG（面积 + 折线 + 网格 + 首尾时间 + 超标色带 +
     悬停提示）。鼠标停在图上任意位置会浮出该时刻的时间与读数（SVG 原生
@@ -1157,6 +1224,7 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
             lines.append('<circle cx="%.1f" cy="%.1f" r="1.6" fill="%s"/>'
                          % (seg[0][0], seg[0][1], color))
             continue
+        seg = _thin_seg(seg)                 # 同列只留最高/最低，尖峰不丢
         d = "M" + " L".join("%.1f %.1f" % p for p in seg)
         lines.append('<path d="%s" fill="none" stroke="%s" stroke-width="1.8" '
                      'vector-effect="non-scaling-stroke" '
@@ -1553,6 +1621,7 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
                 lines.append('<circle cx="%.1f" cy="%.1f" r="1.6" fill="%s"/>'
                              % (seg[0][0], seg[0][1], color))
                 continue
+            seg = _thin_seg(seg)             # 与单设备报告同一套路
             lines.append('<path d="M%s" fill="none" stroke="%s" stroke-width="1.7" '
                          'vector-effect="non-scaling-stroke" '
                          'stroke-linejoin="round"/>'

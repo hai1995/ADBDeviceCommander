@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """backend.perf_service —— 性能采样解析 / 采样器 / 报告生成单测（全部离线）。"""
 import os
+import re
 
 import pytest
 
@@ -956,3 +957,88 @@ def test_start_reports_exception_reason(monkeypatch):
     monkeypatch.setattr(mon, "_run", _boom)
     ok, err = mon.start()
     assert ok is False and "No such file" in err
+
+
+# --------------------------------------------------------------------------- #
+# 增量快照 / 报告体积
+# --------------------------------------------------------------------------- #
+def test_snapshot_after_ring_trim_still_returns_only_new_samples(monkeypatch):
+    """环形缓冲淘汰过样本后，snapshot(since) 仍要只返回「更新的那几条」。
+
+    回归：为了不再每次轮询都全量扫描（前端 0.6s 一次，长会话下上限 2 万点 ×
+    多台设备），改成按「seq 连续递增 + 只从头淘汰」直接算出起始下标。算错
+    的后果不是报错，而是**少给或多给样本**：少给 → 曲线断在中途；多给 →
+    前端按 seq 去重后看起来正常，但增量拉取失去意义。
+    """
+    monkeypatch.setattr(svc, "MAX_SAMPLES", 4)
+    mon = _monitor()
+    for i in range(1, 11):                     # seq 1..10，缓冲只剩 7..10
+        with mon._lock:
+            mon._seq += 1
+            mon._samples.append({"seq": mon._seq, "cpu": float(i)})
+
+    assert [s["seq"] for s in mon.all_samples()] == [7, 8, 9, 10]
+    assert [s["seq"] for s in mon.snapshot(7)["samples"]] == [8, 9, 10]
+    assert [s["seq"] for s in mon.snapshot(9)["samples"]] == [10]
+    assert mon.snapshot(10)["samples"] == []
+    # since 落在已被淘汰的区间（或 0）时，返回当前缓冲的全部
+    assert [s["seq"] for s in mon.snapshot(3)["samples"]] == [7, 8, 9, 10]
+    assert mon.snapshot(0)["count"] == 4
+
+
+def _dense_samples(n=8000, spike_at=None, spike=100.0):
+    t0 = 1793200000.0
+    out = []
+    for i in range(n):
+        cpu = 20 + (i % 30) * 0.5
+        if spike_at is not None and i == spike_at:
+            cpu = spike
+        out.append({"t": t0 + i, "seq": i + 1, "cpu": cpu, "app_cpu": cpu / 2,
+                    "mem_used": 3000 + i % 200, "mem_total": 7800,
+                    "pss": 220 + i % 50, "fps": 58 - (i % 12),
+                    "jank": 1 + i % 3, "jank_cum": 100 + i,
+                    "batt": 88, "temp": 33 + (i % 5) * 0.2})
+    return out
+
+
+def test_chart_thinning_keeps_every_column_extreme():
+    """降采样的唯一铁律：同一像素列的最高/最低点必须留下。
+
+    去掉中间值不会改变可见形状，但**丢掉极值就是丢掉结论** —— 掉一次帧、
+    CPU 冲一次顶，恰恰是用户翻报告时要找的那一下。
+    """
+    seg = [(100.0, 50.0), (100.2, 10.0), (100.6, 90.0), (100.9, 40.0),
+           (101.0, 40.0), (101.1, 41.0), (102.0, 30.0), (103.0, 33.0)]
+    thin = svc._thin_seg(seg, max_points=2)          # 强制走降采样分支
+    assert thin[0] == seg[0], "首点必须保留（面积图的起点）"
+    assert thin[-1] == seg[-1], "末点必须保留（面积图的终点）"
+    for col, lo, hi in ((100, 10.0, 90.0), (101, 40.0, 41.0)):
+        ys = [y for x, y in thin if int(x) == col]
+        assert lo in ys and hi in ys, (col, ys)
+    # 每列最多两个点（首/末所在的边界列会额外保留端点，最多三个）
+    counts = {}
+    for x, _y in thin:
+        counts[int(x)] = counts.get(int(x), 0) + 1
+    assert counts[101] <= 2 and counts[102] <= 2, counts
+    assert max(counts.values()) <= 3, counts
+
+
+def test_chart_path_is_thinned_but_spike_survives():
+    """两万个采样点的图不能按点数线性膨胀，但尖峰必须还在图上。"""
+    samples = _dense_samples(8000, spike_at=4000, spike=100.0)
+    svg = svc._svg_chart(samples, "cpu", "#34e0ea", "%", 100)
+    d = re.findall(r'd="([^"]+)"', svg)
+    coords = [p for one in d for p in re.findall(r"[ML]([0-9.]+) ([0-9.]+)", one)]
+    assert len(coords) <= 1500 * 2, "折线点数应被压到绘图区宽度的两倍以内"
+    # cap=100 → 纵轴 0..100，尖峰值 100 落在绘图区上沿 y=pad_t=12
+    assert ("12.0" in {y for _x, y in coords}), "尖峰被降采样丢掉了"
+
+
+def test_report_html_size_stays_bounded_for_long_sessions():
+    """一小时以上的会话（8000 点）报告不能涨到几 MB —— 双击打开会卡住。
+
+    回归：折线按采样点数逐点输出，8000 点 × 6 张图 ≈ 1.9MB；降采样后与
+    样本数基本无关（悬停热区按像素列合并，上限 760 条/图）。
+    """
+    html = svc.build_report_html(_dense_samples(8000), {"serial": "A1"})
+    assert len(html.encode("utf-8")) < 1.2 * 1024 * 1024, len(html)
