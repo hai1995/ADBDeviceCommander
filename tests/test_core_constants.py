@@ -7,7 +7,10 @@ adb 输出固定为 UTF-8，而中文 Windows 的默认编码是 cp936：不显�
 import subprocess as sp
 import sys
 
-from core.constants import adb_kwargs, adb_popen_kwargs, no_window_flags, safe_name
+from core.constants import (
+    adb_kwargs, adb_popen_kwargs, no_window_flags, safe_name,
+    unique_path,
+)
 
 
 def test_adb_kwargs_uses_utf8_and_hides_window():
@@ -75,3 +78,41 @@ def test_safe_name_falls_back_when_empty():
     assert safe_name(None) == "device"
     assert safe_name(':::') == "device"
     assert safe_name("", fallback="x") == "x"
+
+
+# ---------------------------------------------------------------------------
+# unique_path：同一秒内的第二份产物不能覆盖第一份
+# ---------------------------------------------------------------------------
+def test_unique_path_returns_path_when_free(tmp_path):
+    p = str(tmp_path / "a.txt")
+    assert unique_path(p) == p
+
+
+def test_unique_path_appends_counter_instead_of_overwriting(tmp_path):
+    """已存在就补 _2 / _3：时间戳只到秒，「停止 → 立刻再开始」很容易撞名。"""
+    p = str(tmp_path / "a.txt")
+    (tmp_path / "a.txt").write_text("旧内容", encoding="utf-8")
+    assert unique_path(p) == str(tmp_path / "a_2.txt")
+    (tmp_path / "a_2.txt").write_text("x", encoding="utf-8")
+    assert unique_path(p) == str(tmp_path / "a_3.txt")
+    # 原文件一个字节都没被动过
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "旧内容"
+
+
+def test_unique_path_considers_related_suffixes(tmp_path):
+    """勾了「结束后打包」时源 txt 已被删，只剩同名 .zip —— 也必须算作已占用。
+
+    只查 txt 会误判为空位，停止时 ZipFile(..., "w") 又把那份唯一的压缩包覆盖掉。
+    """
+    p = str(tmp_path / "a.txt")
+    (tmp_path / "a.txt.zip").write_bytes(b"PK")
+    assert unique_path(p, suffixes=(".zip",)) == str(tmp_path / "a_2.txt")
+    # 不传 suffixes 时不看 .zip（调用方明确知道自己只产这一个文件）
+    assert unique_path(p) == p
+
+
+def test_unique_path_handles_no_extension(tmp_path):
+    """报告一类「共用一个基名、各自加扩展名」的场合，基名本身没有扩展名。"""
+    p = str(tmp_path / "perf_X_20260101")
+    (tmp_path / "perf_X_20260101.csv").write_text("x", encoding="utf-8")
+    assert unique_path(p, suffixes=(".html", ".csv")) == str(tmp_path / "perf_X_20260101_2")

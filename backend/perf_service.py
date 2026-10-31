@@ -47,7 +47,7 @@ import threading
 import time
 from collections import deque
 
-from core.constants import adb_kwargs
+from core.constants import adb_kwargs, unique_path
 
 # 环形缓冲上限：1Hz 约 5.5 小时。够长（够挂机跑一夜），又不会把内存吃穿
 # （单样本 ~200B，20000 条约 4MB）。
@@ -1429,8 +1429,10 @@ def write_report(samples, info, out_dir, thresholds=None):
     os.makedirs(out_dir, exist_ok=True)
     serial = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(info.get("serial") or "device"))
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = "perf_%s_%s" % (serial, stamp)
-    html_path = os.path.join(out_dir, base + ".html")
+    # 同一秒内连跑两次不能让后一份报告覆盖前一份（html 与 csv 同源，一起避让）
+    base = unique_path(os.path.join(out_dir, "perf_%s_%s" % (serial, stamp)),
+                       suffixes=(".html", ".csv"))
+    html_path = base + ".html"
     csv_path = os.path.join(out_dir, base + ".csv")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(build_report_html(samples, info, thresholds))
@@ -1803,8 +1805,8 @@ def write_compare_report(entries, out_dir, thresholds=None):
         return {}
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(out_dir, "perf_compare_%d_dev_%s.html"
-                        % (len(entries), stamp))
+    path = unique_path(os.path.join(
+        out_dir, "perf_compare_%d_dev_%s.html" % (len(entries), stamp)))
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     return {"html": path, "devices": len(entries)}

@@ -30,7 +30,7 @@ import datetime
 import tempfile
 from core.constants import (
     VERSION, AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
-    resource_path,
+    resource_path, unique_path,
 )
 from core.commands import load_commands, save_click_deltas, save_user_commands, merge_builtins
 from core.prefs import (load_prefs, load_prefs_checked, save_prefs,
@@ -196,6 +196,7 @@ __all__ = [
     "time",
     "tmpfiles",
     "transform",
+    "unique_path",
     "updater",
     "uuid",
     "wifi",

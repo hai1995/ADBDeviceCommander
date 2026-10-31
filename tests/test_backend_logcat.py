@@ -529,3 +529,58 @@ def test_level_filter_desc_hides_full_selection():
     assert _Api._level_filter_desc(list("VDIWEF")) == ""
     assert _Api._level_filter_desc(["I", "W"]) == "（级别: I/W）"
     assert _Api._level_filter_desc(["E", "F"]) == "（级别: E/F）"
+
+
+# ---------------------------------------------------------------------------
+# 同一秒内「停止 → 再抓」：绝不能覆盖上一份结果
+# ---------------------------------------------------------------------------
+def _start_capture_path(tmp_path, monkeypatch):
+    """以固定的时间戳启动一次抓取，返回控制器算出的路径（不真起 worker）。"""
+    seen = {}
+
+    def spy_start(self, serial, path, buffers, level_filter=None):
+        seen["path"] = path
+        return False          # 假装已在抓取，避免起真线程
+
+    monkeypatch.setattr(ls.LogcatCapture, "start", spy_start)
+    monkeypatch.setattr(time, "strftime", lambda fmt: "20260101_120000")
+    api = WebApi()
+    api.state.adb_path = "adb"
+    api.logcat_capture_start("X", str(tmp_path), ["main"])
+    return seen["path"]
+
+
+def test_capture_path_not_overwritten_within_one_second(tmp_path, monkeypatch):
+    """同一秒内再次抓取必须换个名字，不能把上一份日志截断成 0 字节。
+
+    回归：文件名时间戳只到秒，用户「停止 → 立刻再抓」很容易落在同一秒：
+    `open(path, "w")` 直接把上一次抓好的日志清空，界面上那份「已抓 N MB」的
+    文件变成空文件。
+    """
+    first = _start_capture_path(tmp_path, monkeypatch)
+    assert os.path.basename(first) == "logcat_X_20260101_120000.txt"
+    with open(first, "w", encoding="utf-8") as f:
+        f.write("上次抓到的内容")
+
+    second = _start_capture_path(tmp_path, monkeypatch)
+    assert second != first
+    assert second.endswith("_2.txt"), second
+    # 上一份内容必须原封不动
+    with open(first, encoding="utf-8") as f:
+        assert f.read() == "上次抓到的内容"
+
+
+def test_capture_path_avoids_overwriting_existing_zip(tmp_path, monkeypatch):
+    """上一份已被打包成 zip（源 txt 已删）时，同样要换名字。
+
+    只检查 txt 是否存在是不够的：勾了「结束后打包」的抓取会把 txt 打成同名
+    zip 并删掉源文件，于是 txt 不在、zip 在 —— 停止时 `ZipFile(..., "w")`
+    又把这唯一一份压缩包覆盖掉。
+    """
+    zip_path = os.path.join(str(tmp_path), "logcat_X_20260101_120000.txt.zip")
+    with open(zip_path, "wb") as f:
+        f.write(b"PK\x05\x06" + b"\x00" * 18)      # 空 zip 的结尾记录
+
+    path = _start_capture_path(tmp_path, monkeypatch)
+    assert path.endswith("_2.txt"), path
+    assert os.path.exists(zip_path)

@@ -17,7 +17,8 @@ import threading
 import time
 
 from backend.device_proc import kill_device_process
-from core.constants import _WAVEHDR, adb_kwargs, adb_popen_kwargs, safe_name
+from core.constants import (
+    _WAVEHDR, adb_kwargs, adb_popen_kwargs, safe_name, unique_path)
 
 
 def _have_ffmpeg():
@@ -511,7 +512,8 @@ class MicRecorder:
         except Exception as e:
             return False, "无法创建目录：%s" % e
         ts = time.strftime("%Y%m%d_%H%M%S")
-        self._path = os.path.join(save_dir, "mic_%s.wav" % ts)
+        # 同一秒内「停止 → 再录」不能把上一段录音覆盖掉（时间戳只到秒）
+        self._path = unique_path(os.path.join(save_dir, "mic_%s.wav" % ts))
         self._chunks = []
         self._collected = set()
         self._stop.clear()

@@ -3,7 +3,7 @@
 
 from backend.controller import (
     load_prefs, os, resolve_save_dir, safe_name,
-    time
+    time, unique_path
 )
 
 class LogcatMixin:
@@ -44,8 +44,9 @@ class LogcatMixin:
             return {"ok": False, "reason": "mkdir", "text": str(e)}
         ts = time.strftime("%Y%m%d_%H%M%S")
         # safe_name：无线 ADB 序列号（IP:端口）含冒号，Windows 下文件名非法
-        path = os.path.join(
-            save_dir, "logcat_%s_%s.txt" % (safe_name(serial), ts))
+        path = unique_path(
+            os.path.join(save_dir, "logcat_%s_%s.txt" % (safe_name(serial), ts)),
+            suffixes=(".zip",))
         ok = self.logcat_capture.start(serial, path, buffers,
                                        level_filter=level_filter)
         if not ok:

@@ -154,6 +154,32 @@ def safe_name(text, fallback: str = "device") -> str:
     return s
 
 
+def unique_path(path, suffixes=()):
+    """返回一个「当前不存在的」路径：已占用就补 `_2` / `_3`… 后缀。
+
+    时间戳类文件名只精确到秒，而「停止 → 立刻再开始」很容易落在同一秒里。
+    此时若直接写同名文件：txt 被 `open(..., "w")` 截断成 0 字节、zip 被
+    `ZipFile(..., "w")` 覆盖、报告被整份替换 —— 上一份**用户已经拿到的产物**
+    悄悄没了，界面上还显示着它的名字和大小。宁可多一个 `_2` 也不覆盖。
+
+    suffixes：需要一并视为「已占用」的同源扩展名。抓取日志勾了「结束后打包」
+    时，txt 会被打包成 `xxx.txt.zip` 并删掉源文件 —— 只查 txt 会误判为空位，
+    停止时又把那份 zip 覆盖掉。
+    """
+    def taken(p):
+        if os.path.exists(p):
+            return True
+        return any(os.path.exists(p + sfx) for sfx in suffixes)
+
+    if not taken(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    i = 2
+    while taken("%s_%d%s" % (stem, i, ext)):
+        i += 1
+    return "%s_%d%s" % (stem, i, ext)
+
+
 def is_usable(state: str) -> bool:
     """只有 state == "device" 才能下发命令"""
     return (state or "").strip() == "device"
