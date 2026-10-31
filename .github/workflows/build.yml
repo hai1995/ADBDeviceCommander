@@ -73,7 +73,11 @@ jobs:
     # 运行记录显示为失败、且 jobs 列表为空（total_count=0），日志里什么都看不到，
     # 极难自查。第一版就是这么挂的。
     name: 测试（Python 3.11 + 前端 jsdom）
-    runs-on: ubuntu-latest
+    # 固定到 ubuntu-24.04：`ubuntu-latest` 将于 2026-10-19 起迁移到 Ubuntu 26
+    # （actions/runner-images#14748），镜像里的 Node / Python / 系统库会整体换代。
+    # 本项目的测试与前端构建依赖这些预装环境，迁移当天若无人盯着，push 会突然
+    # 变红且原因藏在镜像变更里。固定到具体版本 = 升级由我们自己挑时间做。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 

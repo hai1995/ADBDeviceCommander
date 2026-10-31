@@ -61,7 +61,9 @@ jobs:
   # ---------------------------------------------------------------------------
   prepare:
     name: 递增版本号 + 打 tag + 生成说明
-    runs-on: ubuntu-latest
+    # 固定到 ubuntu-24.04（理由见 build.yml 同一处注释）：发版流程最不该
+    # 被「镜像换代」这种与代码无关的变更打断。
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.bump.outputs.version }}
       tag: ${{ steps.bump.outputs.tag }}
@@ -140,8 +142,9 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: 测试（Python 3.11 + 前端 jsdom）
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: prepare
+    # 同 prepare：固定镜像版本，避免发版当天踩到 Ubuntu 26 迁移。
     steps:
       - uses: actions/checkout@v5
         with:
