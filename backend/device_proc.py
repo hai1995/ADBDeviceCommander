@@ -54,7 +54,12 @@ def device_pid(adb, serial, name):
     try:
         r = subprocess.run([adb, "-s", serial, "shell", "pidof", name],
                            **adb_kwargs(10))
-        pids = (r.stdout or "").split()
+        # 只认纯数字：adb shell 会把设备端的报错并进 **stdout**
+        # （`/system/bin/sh: pidof: not found`），按空白切分后第一个 token 是
+        # "pidof:"。拿它去 kill 杀不掉任何东西，更糟的是 kill_device_process
+        # 会据此认为「已按 PID 精准结束」，连 pkill 兜底都不走 —— 设备端
+        # screenrecord / tinycap 就成了孤儿，继续写卡、继续占着麦克风。
+        pids = [t for t in (r.stdout or "").split() if t.isdigit()]
         if pids:
             return pids[0]
     except Exception:

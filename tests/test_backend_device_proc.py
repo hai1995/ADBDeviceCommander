@@ -111,3 +111,47 @@ def test_graceful_kill_sends_term_only_when_still_alive(monkeypatch):
     assert dp.kill_device_process("adb", "A1", "tinycap", wait=0.6) is True
     sigs = [c[5] for c in calls if "kill" in c]
     assert sigs == ["-INT", "-TERM"], sigs
+
+def test_device_pid_ignores_pidof_error_text(monkeypatch):
+    """`pidof: not found` 打在 stdout 时不能把 "pidof:" 当成 PID。
+
+    回归：按空白切分后直接取第一个 token，没有数字校验。老 ROM / 精简 ROM
+    没有 pidof 时，device_pid 返回 "pidof:"，随后 `kill -INT pidof:` 杀不掉
+    任何东西，更糟的是 kill_device_process 据此判为「已按 PID 精准结束」，
+    连 pkill 兜底都不走 —— 设备端 screenrecord / tinycap 成了孤儿，继续写卡、
+    继续占着麦克风。
+    """
+    class _R:
+        def __init__(self, out="", rc=0):
+            self.stdout = out
+            self.returncode = rc
+
+    def fake_run(cmd, **kw):
+        if "pidof" in cmd:
+            return _R("/system/bin/sh: pidof: not found\n", 127)
+        return _R("", 1)                      # ps 也拿不到
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert dp.device_pid("adb", "A1", "screenrecord") is None
+
+
+def test_kill_falls_back_to_pkill_when_pidof_unavailable(monkeypatch):
+    """拿不到 PID 时必须退化为 pkill，否则等于什么都没做。"""
+    calls = []
+
+    class _R:
+        def __init__(self, out="", rc=0):
+            self.stdout = out
+            self.returncode = rc
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "pidof" in cmd:
+            return _R("sh: pidof: not found\n", 127)
+        return _R("", 1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(dp.time, "sleep", lambda s: None)
+    assert dp.kill_device_process("adb", "A1", "screenrecord", wait=0.6) is False
+    assert any(c[-3:] == ["pkill", "-INT", "screenrecord"] for c in calls), calls
+    assert any(c[-3:] == ["pkill", "-TERM", "screenrecord"] for c in calls), calls
