@@ -530,3 +530,24 @@ def test_wifi_connect_accepts_mdns_name_and_keeps_port(api, monkeypatch):
     # 端口保持用户设置，不被 mDNS 的「无端口」冲掉
     assert api.wifi_state()["port"] == 6037
     assert api.wifi_state()["recent"] == [name]
+
+
+def test_device_info_reports_error_that_arrives_on_stdout(api, monkeypatch):
+    """adb shell 把报错并进 stdout 时，不能解析成一张全空的信息表。
+
+    回归：判据曾是「rc 非 0 **且 stdout 为空**」，而 `error: closed` 正好落在
+    stdout —— 它被当成 getprop 输出照常解析，弹窗里一排空白行，用户看不到
+    任何原因，只会以为设备就是这样。
+    """
+    _patch_run(monkeypatch, lambda cmd, **kw: _R("error: closed", "", 1))
+    res = api.device_info("A1")
+    assert res["ok"] is False
+    assert "closed" in res["reason"]
+
+
+def test_device_info_keeps_data_when_rc_is_nonzero(api, monkeypatch):
+    """真读到内容时即使退出码非 0 也照常展示（别把能用的数据判成失败）。"""
+    _patch_run(monkeypatch, lambda cmd, **kw: _R(_INFO_RAW, "", 1))
+    res = api.device_info("A1")
+    assert res["ok"] is True
+    assert ["型号", "MI 11"] in res["rows"]

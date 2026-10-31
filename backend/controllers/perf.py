@@ -326,6 +326,13 @@ class PerfMixin:
             msg = "✓ 已生成 %d 份性能报告（共 %d 个采样点）：%s" % (
                 len(saved), total_rows, os.path.dirname(saved[0]["html"]) or ".")
         self._push_status("ok", msg, toast=True)
+        if errors:
+            # 只报「✓ 已生成 N 份」会让用户以为全都导出了：对比报告正是拿这批
+            # 文件拼的，少一台等于结论缺一半。失败的设备单独说清楚。
+            self._push_status(
+                "warn", "⚠ 有 %d 份报告未生成：%s" % (
+                    len(errors),
+                    "；".join("%s（%s）" % (k, v) for k, v in errors.items())))
         return {"ok": True, "files": saved, "html": saved[0]["html"],
                 "csv": saved[0]["csv"], "rows": total_rows,
                 "samples": total_samples, "sessions": len(saved),

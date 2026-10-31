@@ -3010,3 +3010,32 @@ def test_export_commands_save_keeps_both_backups_within_one_second(
     assert first["path"] != second["path"]
     assert second["path"].endswith("_2.json"), second["path"]
     assert os.path.exists(first["path"]) and os.path.exists(second["path"])
+
+
+def test_perf_export_surfaces_partial_failure(monkeypatch, tmp_path):
+    """一台成功、一台写报告失败时，不能只报「✓ 已生成 1 份」。
+
+    对比报告是拿这批文件拼的，少一台就等于结论缺一半 —— 用户看到「已生成」
+    就不会再去目录里核对少的是哪台。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
+    patch_ctrl(monkeypatch, "PerfMonitor", _FakePerfMon)
+    api.perf_start(None, 1000)
+
+    def _fake_report(samples, info, out_dir, thresholds=None):
+        if info["serial"] == "B2":
+            raise OSError("磁盘空间不足")
+        return {"html": str(tmp_path / "a.html"), "csv": str(tmp_path / "a.csv"),
+                "rows": 1}
+
+    patch_ctrl(monkeypatch, "perf_write_report", _fake_report)
+    patch_ctrl(monkeypatch, "perf_write_compare",
+               lambda *a, **k: {"html": str(tmp_path / "cmp.html")})
+    monkeypatch.setattr(api, "_default_save_dir", lambda: str(tmp_path))
+    res = api.perf_export()
+    assert res["ok"] is True and res["sessions"] == 1
+    assert "B2" in res["errors"]
+    warns = [p for p in _events_by_kind(api).get("status", [])
+             if p.get("type") == "warn" and "未生成" in p.get("text", "")]
+    assert warns and "B2" in warns[0]["text"], "缺的那台必须在状态栏点名"

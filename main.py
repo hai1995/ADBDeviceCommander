@@ -22,7 +22,7 @@ import os
 import sys
 import time
 
-from core.constants import PROJECT_ROOT
+from core.constants import PROJECT_ROOT, unique_path
 from backend.controller import WebApi
 from core.envcheck import (
     run_all, WEBVIEW2_DOWNLOAD_URL, WEBVIEW2_CLIENT_GUID, WEBVIEW2_PV_SUBKEYS,
@@ -242,7 +242,9 @@ def _write_crash_log(title, exc_type, exc, tb):
         try:
             os.makedirs(d, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(d, "crash_%s.log" % stamp)
+            # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
+            # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
+            path = unique_path(os.path.join(d, "crash_%s.log" % stamp))
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             return path

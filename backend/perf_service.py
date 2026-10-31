@@ -579,10 +579,17 @@ class PerfMonitor:
         _collect 第一帧还拿不到 pkg、采不到应用级指标。
         """
         try:
-            raw = self._run(["shell", self._script()]).stdout
-        except Exception:
+            r = self._run(["shell", self._script()])
+        except Exception as ex:
+            # 不记原因的话，start() 只能报一句「读取设备状态失败（是否已授权？）」
+            # —— 而真正的答案（device offline / unauthorized / adb 不存在）就在
+            # 这个异常里，用户照着那句猜会去检查授权，方向完全是错的。
+            self.error = "读取设备状态失败：%s" % ex
             return
-        sec = _split_sections(raw)
+        if getattr(r, "returncode", 0) != 0:
+            err = (r.stderr or "").strip() or (r.stdout or "").strip()
+            self.error = "设备无响应：%s" % (err[:120] or "adb 返回非零")
+        sec = _split_sections(r.stdout or "")
         self._prev = self._diff_state(sec)
         if self.auto_pkg:
             self._apply_focus(self._prev)

@@ -24,10 +24,16 @@ class DeviceInfoMixin:
             return {"ok": False, "reason": "读取设备信息超时（设备可能无响应）"}
         except Exception as e:
             return {"ok": False, "reason": "读取设备信息失败：%s" % e}
-        if r.returncode != 0 and not (r.stdout or "").strip():
-            detail = ((r.stderr or "").strip() or "设备未返回内容")[:160]
-            return {"ok": False, "reason": "读取设备信息失败：%s" % detail}
         info = devinfo.parse_info(r.stdout or "")
+        # adb shell 会把设备端的报错并进 **stdout**（`error: closed`、
+        # `sh: xxx: not found` 都在这一路），所以不能拿「stdout 是否为空」判断
+        # 成败：报错落在 stdout 时，它会被当正常的 getprop 输出解析，弹窗里是
+        # 一排全空的信息行 —— 用户看不到任何原因，只会以为设备就是这样。
+        # 判据改为「解析出了内容」：真读到东西（哪怕 rc 非 0）照常展示。
+        if r.returncode != 0 and not any(v for _k, v in devinfo.rows(info)):
+            detail = ((r.stderr or "").strip() or (r.stdout or "").strip()
+                      or "设备未返回内容")[:160]
+            return {"ok": False, "reason": "读取设备信息失败：%s" % detail}
         rows = devinfo.rows(info)
         return {"ok": True, "serial": s, "info": info,
                 "rows": [[k, v] for k, v in rows],

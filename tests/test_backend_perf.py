@@ -928,3 +928,31 @@ def test_write_csv_keeps_zero_readings(tmp_path):
     # 第二行：确实没采到，才是空
     assert rows[1]["cpu_percent"] == ""
     assert rows[1]["jank_percent"] == ""
+
+
+def test_start_reports_adb_reason_not_a_guess(monkeypatch):
+    """基线读不到时要把 adb 自己的话带出来。
+
+    回归：_baseline() 把返回值与异常一起吞掉，start() 只能报一句「读取设备
+    状态失败（设备是否已授权？）」—— 而设备其实是 offline / adb 根本不存在，
+    用户照着「去授权」排查，方向完全是错的。
+    """
+    mon = _monitor()
+    monkeypatch.setattr(mon, "_read_device_info", lambda: None)
+    monkeypatch.setattr(mon, "_run", lambda *a, **k: _Proc(
+        "", code=1, err="error: device offline"))
+    ok, err = mon.start()
+    assert ok is False and "device offline" in err
+
+
+def test_start_reports_exception_reason(monkeypatch):
+    """adb 调用直接抛异常（找不到 adb / 超时）时同样要给出原因。"""
+    mon = _monitor()
+    monkeypatch.setattr(mon, "_read_device_info", lambda: None)
+
+    def _boom(*a, **k):
+        raise OSError("adb: No such file or directory")
+
+    monkeypatch.setattr(mon, "_run", _boom)
+    ok, err = mon.start()
+    assert ok is False and "No such file" in err
