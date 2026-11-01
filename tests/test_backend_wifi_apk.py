@@ -600,3 +600,38 @@ def test_device_info_keeps_data_when_rc_is_nonzero(api, monkeypatch):
     res = api.device_info("A1")
     assert res["ok"] is True
     assert ["型号", "MI 11"] in res["rows"]
+
+
+# ------------------------------------------- 配置只读时的「只差没说出来」
+def test_wifi_connect_warns_when_recent_not_persisted(api, monkeypatch):
+    """连上了但「最近连接」没落盘时必须提示，不能只留一句「已连接」。
+
+    回归：_wifi_remember 直接 save_prefs 并吞掉异常。配置只读 / 被占用时，
+    用户下次打开无线调试弹窗，最近地址是空的 —— 而刚才明明连上过。
+    """
+    import core.prefs as prefs
+    monkeypatch.setattr(prefs, "_atomic_write", lambda *a, **k: False)
+    _patch_run(monkeypatch, lambda cmd, **kw: _R(
+        "", "connected to 192.168.1.23:5555"))
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    res = api.wifi_connect("192.168.1.23")
+    assert res["ok"] is True                      # 连接本身不受影响
+    texts = _status_texts(api)
+    assert any("最近连接" in t and "没能写入" in t for t in texts), texts
+
+
+def test_wifi_enable_warns_when_port_not_persisted(api, monkeypatch):
+    """端口没记住时必须说清：下次开启会退回默认端口，而用户无从得知。"""
+    import core.prefs as prefs
+    monkeypatch.setattr(prefs, "_atomic_write", lambda *a, **k: False)
+
+    def fake_run(cmd, **kw):
+        if len(cmd) > 3 and cmd[3] == "shell":
+            return _R("default via 192.168.1.1 dev wlan0 src 192.168.1.23\n")
+        return _R("", "restarting in TCP mode port: 6666")
+
+    _patch_run(monkeypatch, fake_run)
+    res = api.wifi_enable("A1", port=6666)
+    assert res["ok"] is True
+    assert any("端口没能写入" in t for t in _status_texts(api))

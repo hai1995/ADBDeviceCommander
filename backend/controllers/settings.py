@@ -3,7 +3,7 @@
 
 from backend.controller import (
     adb_kwargs, apply_adb_dir, load_prefs, os,
-    prefs_path, resolve_save_dir, save_prefs, save_prefs_checked, subprocess,
+    prefs_path, resolve_save_dir, save_prefs_checked, subprocess,
     wifi
 )
 
@@ -134,10 +134,19 @@ class SettingsMixin:
         # 用户自定义过的端口悄悄改回 5555。
         if wifi.has_explicit_port(addr):
             patch["wifi_port"] = wifi.split_endpoint(addr)[1]
+        # 配置只读时**不能让连接本身失败**，但也绝不能说没事：这条地址本该出现在
+        # 「最近连接」里，下次进来却发现是空的 —— 用户会以为程序没记住，只能重敲。
         try:
-            save_prefs(patch)
-        except Exception:
-            pass                       # 配置只读时不该让连接本身失败
+            wrote = save_prefs_checked(patch)[1]
+        except Exception as e:
+            wrote = False
+            self._push_status("warn", "⚠ 已连接，但保存「最近连接」时出错：%s" % e)
+            return recent
+        if not wrote:
+            self._push_status(
+                "warn", "⚠ 已连接，但「最近连接」没能写入 %s"
+                        "（目录只读 / 文件被占用 / 磁盘已满？），"
+                        "下次需要重新输入地址。" % prefs_path())
         return recent
 
     def wifi_state(self):
@@ -281,9 +290,17 @@ class SettingsMixin:
         ok_any = any(x["ok"] for x in results)
         first_addr = next((x["address"] for x in results if x["address"]), "")
         if ok_any:
+            # 端口记不住时，下次「开启无线调试」会退回默认端口 —— 而这次明明
+            # 是按用户填的端口开的，之后连不上没有任何线索。宁可提示一句。
             try:
-                save_prefs({"wifi_port": p})
-            except Exception:
-                pass
+                wrote = save_prefs_checked({"wifi_port": p})[1]
+            except Exception as e:
+                wrote = False
+                self._push_status("warn", "⚠ 无线调试已开启，但保存端口失败：%s" % e)
+            if not wrote:
+                self._push_status(
+                    "warn", "⚠ 无线调试已开启（端口 %d），但端口没能写入 %s"
+                            "（目录只读 / 文件被占用？），下次会按默认端口处理。"
+                            % (p, prefs_path()))
         return {"ok": ok_any, "port": p, "results": results,
                 "address": first_addr}
