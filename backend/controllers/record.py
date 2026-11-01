@@ -12,6 +12,13 @@ from backend.controller import (
 class RecordMixin:
     """录屏、投屏（scrcpy/备用）、麦克风。"""
 
+    # overlay 键 → 界面上的名字（失败提示里点名用，避免把 pointer_location
+    # 这种系统键名直接甩给用户）
+    _OVERLAY_LABELS = {
+        KEY_POINTER_LOCATION: "指针位置",
+        KEY_SHOW_TOUCHES: "触摸圆点",
+    }
+
     def _mic_start(self, save_dir):
         """启动电脑麦克风录音；任何一步失败都返回 (False, 人话原因)，**绝不外抛**。
 
@@ -231,12 +238,34 @@ class RecordMixin:
 
         读不到原值（adb 瞬断）时**不入表**：没有备份就不恢复，
         胜过把用户原来的 "0" 误删成默认——防错优先于功能完整。
+
+        写失败要说出来：`settings put` 被系统策略拒绝时通常**不返回非零**
+        （SecurityException 打在 stdout 上），旧实现直接丢掉返回值 —— 用户勾了
+        「指针位置」，录完回放才发现画面里既没准星也没圆点，而全程零提示。
         """
         ok, old = self.video.get_system_setting(self.state.adb_path, serial, key)
         if not ok:
             return
         self._rec_session.setdefault(prev_field, {})[serial] = old
-        self.video.set_system_setting(self.state.adb_path, serial, key, "1")
+        ok, err = self._set_device_setting(serial, key, "1")
+        if not ok:
+            self._push_status(
+                "warn", "⚠ %s 未能开启「%s」%s，本次录屏不会出现该标记"
+                        % (serial, self._OVERLAY_LABELS.get(key, key),
+                           "（%s）" % err if err else ""))
+
+    def _set_device_setting(self, serial, key, value):
+        """写设备 Settings.System，返回 (是否成功, 失败原因)。
+
+        优先走带原因的 `set_system_setting_ex`；只提供旧接口
+        （`set_system_setting`，回 bool）的对象照样能用，只是拿不到具体原因。
+        """
+        fn = getattr(self.video, "set_system_setting_ex", None)
+        if fn is not None:
+            return fn(self.state.adb_path, serial, key, value)
+        ok = self.video.set_system_setting(
+            self.state.adb_path, serial, key, value)
+        return bool(ok), ""
 
     def _restore_overlays(self, sess):
         """把会话里备份的 pointer_location / show_touches 原值写回各设备
@@ -245,6 +274,10 @@ class RecordMixin:
         所有收尾路径（停止 / 启动失败撤销 / 异常撤销）都必须经过这里，
         否则用户设备会一直开着 overlay——下次正常用手机时满屏准星/圆点。
         单台失败不影响其余设备（各自独立 try）。
+
+        恢复失败**必须报**：这是唯一会让「设备状态没还回去」无声发生的地方。
+        用户不会知道系统里还留着一个自己没开过的开关，而下次录制又会去读它当
+        「原值」——一次失败就此固化成新默认值。
         """
         for field, key in (("pointer_location_prev", KEY_POINTER_LOCATION),
                            ("show_touches_prev", KEY_SHOW_TOUCHES)):
@@ -254,9 +287,14 @@ class RecordMixin:
                     # 否则会在系统设置里留下一个用户从未创建过的条目。
                     val = None if (old is None or str(old).strip().lower()
                                    in ("null", "")) else str(old).strip()
-                    self.video.set_system_setting(self.state.adb_path, s, key, val)
-                except Exception:
-                    pass
+                    ok, err = self._set_device_setting(s, key, val)
+                except Exception as ex:
+                    ok, err = False, str(ex)[:160]
+                if not ok:
+                    self._push_status(
+                        "warn", "⚠ %s 的「%s」未能恢复原值%s，请在设备系统设置里手动关闭"
+                                % (s, self._OVERLAY_LABELS.get(key, key),
+                                   "（%s）" % err if err else ""))
 
     def screen_record_stop(self):
         """停止录屏：收尾合成 / 打包 / 清理会话（与 start / shutdown 串行）。"""

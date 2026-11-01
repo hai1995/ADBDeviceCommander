@@ -119,6 +119,20 @@ def _events_by_kind(api):
     return out
 
 
+def _patch_set_setting(monkeypatch, video, fn):
+    """把「写设备系统设置」的替身同时接到新旧两个方法上。
+
+    生产代码走 `set_system_setting_ex`（要拿到失败原因，见
+    VideoRecorder.set_system_setting_ex），旧接口 `set_system_setting` 回 bool。
+    替身只要接到 `set_system_setting` 上，这里替它包一层 ex —— 否则用例记不到
+    任何写入，断言会以「写了个空」的形式失败，与真正的回归混在一起。
+    """
+    monkeypatch.setattr(video, "set_system_setting", fn, raising=False)
+    monkeypatch.setattr(
+        video, "set_system_setting_ex",
+        lambda adb, s, k, v: (bool(fn(adb, s, k, v)), ""), raising=False)
+
+
 # ---------------------------------------------------------------------------
 # boot / shutdown
 # ---------------------------------------------------------------------------
@@ -752,6 +766,9 @@ def test_reap_dead_recordings_tears_down_and_resets_ui(monkeypatch, tmp_path):
 
         def set_system_setting(self, adb, s, key, v):
             return True
+
+        def set_system_setting_ex(self, adb, s, key, v):
+            return True, ""
 
     api.video = FakeVideo()
 
@@ -1889,7 +1906,7 @@ def test_pointer_location_enabled_and_restored_on_stop(monkeypatch, tmp_path):
         return True
 
     monkeypatch.setattr(api.video, "get_system_setting", fake_get)
-    monkeypatch.setattr(api.video, "set_system_setting", fake_set)
+    _patch_set_setting(monkeypatch, api.video, fake_set)
 
     res = api.screen_record_start(None, save_dir=str(tmp_path),
                                   pointer_location=True, show_touches=False)
@@ -1913,9 +1930,9 @@ def test_show_touches_restores_previous_value(monkeypatch, tmp_path):
     puts = []
     monkeypatch.setattr(api.video, "get_system_setting",
                         lambda adb, serial, key: (True, "0"))
-    monkeypatch.setattr(api.video, "set_system_setting",
-                        lambda adb, serial, key, value: puts.append(
-                            (serial, key, value)) or True)
+    _patch_set_setting(monkeypatch, api.video,
+                       lambda adb, serial, key, value: puts.append(
+                           (serial, key, value)) or True)
 
     api.screen_record_start(None, save_dir=str(tmp_path),
                             pointer_location=False, show_touches=True)
@@ -1933,9 +1950,9 @@ def test_show_touches_not_restored_when_read_fails(monkeypatch, tmp_path):
     puts = []
     monkeypatch.setattr(api.video, "get_system_setting",
                         lambda adb, serial, key: (False, None))
-    monkeypatch.setattr(api.video, "set_system_setting",
-                        lambda adb, serial, key, value: puts.append(
-                            (serial, key, value)) or True)
+    _patch_set_setting(monkeypatch, api.video,
+                       lambda adb, serial, key, value: puts.append(
+                           (serial, key, value)) or True)
 
     res = api.screen_record_start(None, save_dir=str(tmp_path),
                                   pointer_location=False, show_touches=True)
@@ -1966,9 +1983,9 @@ def test_overlays_restored_on_start_failure_cancel(monkeypatch, tmp_path):
     puts = []
     monkeypatch.setattr(api.video, "get_system_setting",
                         lambda adb, serial, key: (True, "1"))
-    monkeypatch.setattr(api.video, "set_system_setting",
-                        lambda adb, serial, key, value: puts.append(
-                            (serial, key, value)) or True)
+    _patch_set_setting(monkeypatch, api.video,
+                       lambda adb, serial, key, value: puts.append(
+                           (serial, key, value)) or True)
 
     res = api.screen_record_start(None, save_dir=str(tmp_path),
                                   pointer_location=True, show_touches=True)
@@ -3241,6 +3258,9 @@ def test_multi_device_teardown_runs_in_parallel(monkeypatch, tmp_path):
         def set_system_setting(self, *a, **kw):
             raise AssertionError("本用例不应触碰设备系统设置")
 
+        def set_system_setting_ex(self, *a, **kw):
+            raise AssertionError("本用例不应触碰设备系统设置")
+
     api.video = _SlowVideo()
     api._rec_session = sess
 
@@ -3273,6 +3293,9 @@ def test_devaudio_teardown_failure_keeps_video(tmp_path):
 
         def set_system_setting(self, *a, **kw):
             return True
+
+        def set_system_setting_ex(self, *a, **kw):
+            return True, ""
 
     class _BadAudio:
         def stop(self, s):
@@ -3354,3 +3377,57 @@ def test_perf_total_failure_lists_every_reason(monkeypatch):
     assert "设备无响应" in res["error"] and "包名不存在" in res["error"], res["error"]
     texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
     assert any("设备无响应" in t and "包名不存在" in t for t in texts), texts
+
+
+def test_overlay_enable_failure_is_announced(monkeypatch, tmp_path):
+    """设备拒绝开启 overlay 时必须说出来：否则录完才发现画面里没有准星。
+
+    `settings put` 被系统策略拒绝时通常**不返回非零**（SecurityException 打在
+    stdout 上），旧实现直接丢掉返回值 —— 用户勾了「指针位置」，回放录像时既没
+    准星也没圆点，全程零提示，只能怀疑是录屏功能坏了。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api.video, "start",
+                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
+    monkeypatch.setattr(api.video, "get_system_setting",
+                        lambda adb, s, key: (True, "null"))
+    _patch_set_setting(monkeypatch, api.video, lambda adb, s, k, v: False)
+
+    api.screen_record_start(None, save_dir=str(tmp_path),
+                            pointer_location=True, show_touches=False)
+
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    assert any("未能开启" in t and "指针位置" in t for t in texts), texts
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_overlay_restore_failure_is_announced(monkeypatch, tmp_path):
+    """恢复原值失败时也要说出来：设备上会一直留着一个用户没开过的开关。
+
+    这是唯一会让「设备状态没还回去」无声发生的地方。用户不会知道系统里还留着
+    一个自己没开过的开关，而下次录制又会去读它当「原值」—— 一次失败就此固化
+    成新默认值。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api.video, "start",
+                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
+    monkeypatch.setattr(api.video, "stop",
+                        lambda s: (True, str(tmp_path / "r.mp4"), None))
+    monkeypatch.setattr(api.video, "get_system_setting",
+                        lambda adb, s, key: (True, "0"))
+    state = {"ok": True}
+
+    def fake_set(adb, s, k, v):
+        return state["ok"]
+
+    _patch_set_setting(monkeypatch, api.video, fake_set)
+
+    api.screen_record_start(None, save_dir=str(tmp_path),
+                            pointer_location=True, show_touches=False)
+    state["ok"] = False                      # 收尾时设备拒写（拔线 / 策略变化）
+    api.screen_record_stop()
+
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    assert any("未能恢复原值" in t and "指针位置" in t
+               and "手动关闭" in t for t in texts), texts
+    api.workers.shutdown(timeout=2.0)
