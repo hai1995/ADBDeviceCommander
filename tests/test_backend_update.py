@@ -342,3 +342,30 @@ def test_update_sleep_exits_on_shutdown(api):
     t0 = time.time()
     api._update_sleep(30)
     assert time.time() - t0 < 1.0      # 关闭时不能还睡满 30 秒
+
+
+def test_update_skip_reports_save_failure(api, monkeypatch):
+    """配置写不进去时不能报「已跳过」：重启后照旧弹窗，按钮看起来像坏了。
+
+    save_prefs 的返回值从来没人看（落盘失败只回 False），于是「跳过此版本」
+    在只读目录里是个纯假成功：点完提示已跳过，重启后同一个版本又弹出来，
+    用户再点几次也一样 —— 他要处理的是目录权限，而不是这个按钮。
+    """
+    import backend.controllers.update as upd
+
+    monkeypatch.setattr(upd, "save_prefs_checked",
+                        lambda patch: ({}, False), raising=False)
+    res = api.update_skip(V_NEW)
+    assert res["ok"] is False, res
+    assert "无法写入" in res["reason"], res["reason"]
+
+
+def test_update_unskip_reports_save_failure(api, monkeypatch):
+    """「恢复提示」写盘失败同样要说：否则用户以为已恢复，实际没生效。"""
+    import backend.controllers.update as upd
+
+    monkeypatch.setattr(upd, "save_prefs_checked",
+                        lambda patch: ({}, False), raising=False)
+    res = api.update_unskip()
+    assert res["ok"] is False, res
+    assert "无法写入" in res["reason"], res["reason"]

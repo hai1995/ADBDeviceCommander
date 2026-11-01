@@ -2,7 +2,7 @@
 """backend.controllers.update —— 版本更新检查 / 下载 / 跳过"""
 
 from backend.controller import (
-    VERSION, _host_allowed, get_pref, save_prefs,
+    VERSION, _host_allowed, get_pref, save_prefs_checked,
     time, updater
 )
 
@@ -153,19 +153,24 @@ class UpdateMixin:
             return {"ok": False, "reason": "没有可跳过的版本号"}
         if updater.parse_version(ver) is None:
             return {"ok": False, "reason": "版本号格式不认识：%s" % ver[:40]}
-        try:
-            save_prefs({"update_skipped_version": ver})
-        except Exception as e:
-            return {"ok": False, "reason": "保存失败：%s" % e}
+        _merged, wrote = save_prefs_checked({"update_skipped_version": ver})
+        if not wrote:
+            # 写盘失败（程序装在只读目录 / 配置文件被占用 / 磁盘满）：不能报
+            # 「已跳过」。重启后同一个版本照样弹窗，用户会以为这个按钮坏了，
+            # 再点几次也一样 —— 他要处理的是目录权限，而不是一个假成功。
+            msg = "配置无法写入（程序目录是否只读？），未能记住跳过版本"
+            self._push_status("err", "⚠ " + msg)
+            return {"ok": False, "reason": msg, "version": ver}
         self._push_status("info", "已跳过版本 %s（更新到更新版本时仍会提示）" % ver)
         return {"ok": True, "version": ver}
 
     def update_unskip(self):
         """取消「跳过此版本」（关于页提供一个「恢复提示」出口）。"""
-        try:
-            save_prefs({"update_skipped_version": ""})
-        except Exception as e:
-            return {"ok": False, "reason": "保存失败：%s" % e}
+        _merged, wrote = save_prefs_checked({"update_skipped_version": ""})
+        if not wrote:
+            msg = "配置无法写入（程序目录是否只读？），未能恢复更新提示"
+            self._push_status("err", "⚠ " + msg)
+            return {"ok": False, "reason": msg}
         return {"ok": True, "version": ""}
 
     def _update_sleep(self, seconds):

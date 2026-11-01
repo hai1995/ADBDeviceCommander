@@ -3431,3 +3431,21 @@ def test_overlay_restore_failure_is_announced(monkeypatch, tmp_path):
     assert any("未能恢复原值" in t and "指针位置" in t
                and "手动关闭" in t for t in texts), texts
     api.workers.shutdown(timeout=2.0)
+
+
+def test_perf_threshold_save_failure_is_reported(monkeypatch):
+    """配置写不进去时不能报「✓ 告警阈值已更新」。
+
+    save_prefs 把落盘失败整个吞掉（只读目录 / 文件被占用时返回 False，没人看），
+    于是界面弹「已更新」，下次启动阈值却回到旧值 —— 用户只能怀疑自己没点对。
+    """
+    import backend.controllers.perf as perf_ctrl
+
+    monkeypatch.setattr(perf_ctrl, "save_prefs_checked",
+                        lambda patch: ({}, False), raising=False)
+    api = _make_api()
+    res = api.perf_set_thresholds({"fps": 58})
+    assert res["ok"] is False, res
+    assert any("无法写入" in e for e in res["errors"]), res["errors"]
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    assert not any("已更新" in t for t in texts), texts

@@ -7,7 +7,7 @@ from backend.controller import (
     os, perf_build_thresholds, perf_default_threshold_expr, perf_format_thresholds,
     perf_list_installed, perf_parse_thresholds, perf_pkg_display, perf_rule_text,
     perf_stop_monitors, perf_threshold_items, perf_write_compare,
-    perf_write_report, save_prefs,
+    perf_write_report, save_prefs_checked,
     time
 )
 
@@ -250,10 +250,14 @@ class PerfMixin:
         if errs:
             return {"ok": False, "reason": "invalid", "errors": errs}
         expr = perf_format_thresholds(th) if th else "off"
-        try:
-            save_prefs({"perf_thresholds": expr})
-        except Exception as ex:
-            return {"ok": False, "reason": "save_failed", "errors": [str(ex)]}
+        # 用 save_prefs_checked 而不是 save_prefs：后者把落盘失败整个吞掉
+        # （只读目录 / 文件被占用时返回 False 但没人看），于是界面照旧弹
+        # 「✓ 告警阈值已更新」，下次启动阈值却又回到旧值 —— 用户只能怀疑
+        # 自己没点对。这里宁可报一句「配置无法写入」，也不要假成功。
+        _merged, wrote = save_prefs_checked({"perf_thresholds": expr})
+        if not wrote:
+            return {"ok": False, "reason": "save_failed",
+                    "errors": ["配置无法写入（程序目录是否只读？），阈值未保存"]}
         payload = self._perf_threshold_payload()
         payload["ok"] = True
         if th:
