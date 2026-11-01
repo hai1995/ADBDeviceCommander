@@ -112,6 +112,41 @@ def test_session_recovers_after_timeout(sess):
     assert "back" in sess.out_lines
 
 
+def test_timeout_reason_reaches_output_callback(sess):
+    """超时原因必须送到 output_callback，不能只丢进没人读的 out_queue。
+
+    生产环境（backend/controllers/base.py）构造会话时一定传 output_callback，
+    队列压根没人消费：早前「⏱ 命令执行超过 N 秒」只入队，用户看到指令台输出
+    戛然而止，界面上没有任何解释，只能反复重试。
+    """
+    assert sess.run("sleep 5", timeout=1) is False
+    assert any("超过 1 秒" in line for line in sess.out_lines), sess.out_lines
+
+
+def test_last_error_explains_why_it_failed(sess):
+    """失败要给得出原因（供调用方拼提示），且不能被 kill 的「已停止」盖掉。"""
+    assert sess.last_error == "", "初始状态不该带失败原因"
+    assert sess.run("sleep 5", timeout=1) is False
+    assert "超过 1 秒" in sess.last_error, sess.last_error
+
+
+def test_last_error_cleared_after_success(sess):
+    """成功一次就要把上次的失败原因清掉，否则下条命令会背上一轮的锅。"""
+    assert sess.run("sleep 5", timeout=1) is False
+    assert sess.run("echo ok", timeout=5) is True
+    assert sess.last_error == ""
+
+
+def test_session_death_is_reported_not_silent(sess):
+    """会话进程自己没了（被安全软件杀 / 崩溃）时，必须说清是「意外结束」。
+
+    这种情况 run() 返回 False，若只记成笼统的「已被停止」，用户会以为是自己
+    误点了停止按钮——真相是 powershell 已经退出并被重建。
+    """
+    assert sess.run("kill -9 $$", timeout=5) is False
+    assert "意外结束" in sess.last_error, sess.last_error
+
+
 def test_kill_marks_aborted_and_clears_interactive(sess):
     """kill 要同时置中止位、清交互态：前者让等待方立刻让出，后者让停止按钮熄灭。"""
     sess.run("sh", interactive=True)

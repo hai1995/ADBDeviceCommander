@@ -73,6 +73,8 @@ class ShellSession:
         self.in_interactive_shell = False
         # 当前工作目录（CMD 风格提示符用）。每条非交互命令结束后由 sentinel 行带回。
         self.current_dir = os.getcwd()
+        # 最近一次 run() 失败的原因（人话，供调用方拼进提示）。成功时清空。
+        self.last_error = ""
         self._start()
 
     def _start(self):
@@ -120,6 +122,22 @@ class ShellSession:
             self._pending.remove((init_tag, init_ev))
         except ValueError:
             pass
+
+    def _emit(self, text, kind="out"):
+        """把一行面向用户的文本交给上层：**优先走回调**，没有回调才入队。
+
+        生产环境（backend/controllers/base.py）构造会话时一定传 output_callback，
+        out_queue 因此根本没人消费。早前「⏱ 命令执行超过 N 秒」「✗ 写入命令失败」
+        这两条关键原因只 push 进队列，等于丢进黑洞：指令台输出戛然而止，界面上
+        没有任何解释，用户只能反复重试。凡是要给人看的文本都必须走这里。
+        """
+        if self.output_callback:
+            try:
+                self.output_callback(text)
+                return
+            except Exception:
+                pass                          # 回调自身出错则退回队列，不丢消息
+        self.out_queue.put((kind, text))
 
     def _read_loop(self):
         # 固定住本 reader 对应的进程：kill() 会终止进程并让 _start() 重建会话，
@@ -178,12 +196,14 @@ class ShellSession:
                     self._start()
                 self._eof.clear()
                 self._abort.clear()
+                self.last_error = ""
                 self.in_interactive_shell = True
                 try:
                     self.proc.stdin.write(script + "\n")
                     self.proc.stdin.flush()
                 except Exception as ex:
-                    self.out_queue.put(("err", "✗ 写入命令失败: %s" % ex))
+                    self.last_error = "写入命令失败: %s" % ex
+                    self._emit("✗ " + self.last_error, "err")
                     return False
             return True
 
@@ -196,6 +216,7 @@ class ShellSession:
                 self._start()
             self._eof.clear()
             self._abort.clear()
+            self.last_error = ""
             self._pending.append((sentinel, done))
             # sentinel 后拼上执行完命令后的当前路径，用于刷新提示符
             payload = script + '\n' + self._sentinel_stmt(sentinel) + '\n'
@@ -207,13 +228,15 @@ class ShellSession:
                     self._pending.remove((sentinel, done))
                 except ValueError:
                     pass
-                self.out_queue.put(("err", "✗ 写入命令失败: %s" % ex))
+                self.last_error = "写入命令失败: %s" % ex
+                self._emit("✗ " + self.last_error, "err")
                 return False
         # 阶段 2：等 sentinel（不持锁，允许其他 run 接着写）
         deadline = time.time() + timeout if timeout else None
         while not (done.is_set() or self._abort.is_set() or self._eof.is_set()):
             if deadline and time.time() > deadline:
-                self.out_queue.put(("err", "⏱ 命令执行超过 %s 秒，已自动终止。" % timeout))
+                self.last_error = "命令执行超过 %s 秒，已自动终止" % timeout
+                self._emit("⏱ %s。" % self.last_error, "err")
                 self.kill()
                 break
             time.sleep(0.05)
@@ -221,7 +244,20 @@ class ShellSession:
             self._pending.remove((sentinel, done))
         except ValueError:
             pass
-        return done.is_set() and not self._abort.is_set()
+        if done.is_set() and not self._abort.is_set():
+            return True
+        # 失败原因按「最能解释现象的那个」定：超时已在上面记好，别再被覆盖成
+        # 笼统的「已停止」——kill() 超时路径同样会置 _abort，顺序敏感。
+        if not self.last_error:
+            if self._abort.is_set():
+                self.last_error = "已被停止"
+            elif self._eof.is_set():
+                # 会话进程自己没了（powershell 被安全软件杀 / 崩溃 / 内存不足）：
+                # 界面上表现为「输出突然结束」，不给原因就完全无从排查。
+                self.last_error = "命令会话进程意外结束（已自动重建，可重试）"
+            else:
+                self.last_error = "未等到命令结束标记"
+        return False
 
     @property
     def aborted(self):

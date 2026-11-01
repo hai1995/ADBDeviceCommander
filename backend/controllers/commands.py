@@ -435,7 +435,10 @@ class CommandMixin:
                 # 就是「整程序卡死、点不动」。超时由 run() 内部杀会话并返回 False。
                 ok = self.session.run(cmd, timeout=timeout)
             if not ok:
-                self._push_status("info", "✗ 执行中断")
+                # 带上会话给的失败原因：只写「执行中断」时，用户分不清是自己点了
+                # 停止、命令超时，还是 powershell 会话被安全软件干掉后静默重建了。
+                reason = (getattr(self.session, "last_error", "") or "").strip()
+                self._push_status("info", "✗ 执行中断" + ("：%s" % reason if reason else ""))
                 return False
             delay = 0
             if not interactive and 0 <= end_idx < len(entries):

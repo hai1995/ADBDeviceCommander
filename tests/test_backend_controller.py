@@ -2829,6 +2829,24 @@ def test_timeout_stops_remaining_commands():
     assert len(sess.calls) == 1, "第一条中断后不应继续下发"
 
 
+def test_interrupt_status_carries_session_reason():
+    """中断原因要带到状态栏：只说「执行中断」，用户分不清是超时、被停止，
+    还是会话进程被安全软件干掉后静默重建——三种情况的处置完全不同。"""
+    class ReasonSession(InteractiveSession):
+        last_error = "命令执行超过 120 秒，已自动终止"
+
+        def run(self, script, timeout=None, interactive=False):
+            super().run(script, timeout=timeout, interactive=interactive)
+            return False
+
+    sess = ReasonSession()
+    api = _make_api(session=sess)
+    _no_sleep(api)
+    api._run_entries(_entries(("adb devices", 0)), None)
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("执行中断" in t and "超过 120 秒" in t for t in texts), texts
+
+
 def test_subshell_hints_go_to_console_not_status():
     """进 / 出子 shell 的提示要落在指令台里。
 
