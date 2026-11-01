@@ -841,3 +841,31 @@ def test_copy_image_keeps_non_png_untouched(tmp_path, monkeypatch):
     assert call["png"] == b"", "非 PNG 不投 CF_PNG"
     assert call["pix"] is None
     assert call["raw"] == jpg
+
+
+def test_decode_png_bounds_inflate_size():
+    """IHDR 报 10x10、IDAT 却解压出 20MB（压缩炸弹）：只能取预期长度。
+
+    旧实现直接 `zlib.decompress` 把整个流解开再判长度：一张畸形截图就能让
+    截图线程多吃几十 MB（几百 MB 的极值直接 MemoryError）。IHDR 里的宽高
+    本来已经限定了解压后**应该**有多大，按它截断即可。
+    """
+    import tracemalloc
+    w = h = 10
+    payload = b"\x00" * (20 * 1024 * 1024)
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    data = (PNG_MAGIC + _chunk(b"IHDR", ihdr)
+            + _chunk(b"IDAT", zlib.compress(payload, 9))
+            + _chunk(b"IEND", b""))
+    del payload
+
+    tracemalloc.start()
+    try:
+        res = cb.decode_png(data)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert res is not None and len(res[2]) == w * h * 4
+    assert peak < 4 * 1024 * 1024, \
+        "解压没有按预期长度截断，峰值 %.1f MB" % (peak / 1048576.0)

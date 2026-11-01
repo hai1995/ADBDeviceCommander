@@ -165,8 +165,12 @@ def decode_png(data):
         stride = w * bpp
         if stride * h > _MAX_DIB_BYTES:
             return None
-        raw = zlib.decompress(b"".join(idat))
-        if len(raw) < h * (stride + 1):
+        # 解压上限按「预期像素数据长度」截断：畸形 / 恶意 PNG 可以让 IHDR 报一张
+        # 10x10 的小图，IDAT 却解压出几百 MB（压缩炸弹）。一次性 decompress 会先
+        # 把内存吃满，之后才走到下面的长度校验——而那时程序已经被拖垮了。
+        want = h * (stride + 1)
+        raw = zlib.decompressobj().decompress(b"".join(idat), want)
+        if len(raw) < want:
             return None
         # 注意它固定输出 RGBA，故只在 PNG 本身就是 RGBA（ct=6，stride 一致）时才用，
         # 否则行距对不上会把图切坏。加速器的任何异常都必须导向回落，绝不能连累主路径。
