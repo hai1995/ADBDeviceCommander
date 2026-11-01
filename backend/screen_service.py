@@ -52,7 +52,13 @@ class ScreenCapturer:
                 creationflags=no_window_flags())
             data, err = proc.communicate(timeout=30)
             if proc.returncode != 0 or not data:
-                return None, (err or b"").decode(errors="ignore")[:200] or "空数据"
+                # adb 的报错几乎都落在 **stdout**（`error: device 'xxx' not found`
+                # 就是典型），只解 stderr 会得到空串，界面于是显示「截图失败：空
+                # 数据」—— 用户完全看不出是设备没连上。两路都收，优先给带内容的
+                # 那一句。
+                both = ((err or b"") + b"\n" + (data or b"")).strip()
+                text = both.decode("utf-8", "ignore").strip()[:200]
+                return None, text or "设备未返回图像（adb 没有给出原因）"
             # 归一化再落盘：部分车机 / 定制 ROM 的 screencap 会在 PNG 前先吐几行
             # 自己的东西，字节流因此「开头不是图片签名」——写下来是一张打不开的
             # 图，复制到剪贴板也会连累到 GDI+ 报「参数无效」。这里按签名切出有效
@@ -221,10 +227,22 @@ class VideoRecorder:
                 time.sleep(1.5)
             if proc.poll() is not None:
                 err = ""
-                try:
-                    err = (proc.stderr.read() or "")[:300]
-                except Exception:
-                    pass
+                # 设备端 screenrecord 的报错（`Unable to open file` /
+                # `Permission denied` / `Codec ... not found`）是**远端命令的
+                # 输出**，经 `adb shell` 落在 stdout；stderr 通常只有 adb 客户端
+                # 自己的错误。只读 stderr 时这里恒为空，用户能看到的只有一句
+                # 「screenrecord 提前退出」——最需要原因的时候偏偏没有原因。
+                for stream in ("stderr", "stdout"):
+                    f = getattr(proc, stream, None)
+                    if f is None:
+                        continue
+                    try:
+                        text = (f.read() or "").strip()
+                    except Exception:
+                        continue
+                    if text:
+                        err = text[:300]
+                        break
                 return proc, err
         except Exception:
             pass

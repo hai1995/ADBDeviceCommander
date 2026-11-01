@@ -644,3 +644,63 @@ def test_screenshot_uses_jpg_ext_when_device_returns_jpeg(monkeypatch, tmp_path)
     assert path.endswith(".jpg"), path
     with open(path, "rb") as f:
         assert f.read() == jpg
+
+
+def test_screenshot_failure_reports_adb_error_from_stdout(monkeypatch, tmp_path):
+    """截图失败时要说清原因：adb 的报错在 stdout，只读 stderr 就会变成「空数据」。
+
+    设备未连接时 `adb exec-out screencap -p` 把 `error: device 'A1' not found`
+    打到 stdout 然后退出。旧实现只解 stderr（空），界面显示「截图失败：空数据」
+    —— 用户完全看不出是设备没连上，只能反复重试。
+    """
+    class _Proc:
+        returncode = 1
+
+        def communicate(self, timeout=None):
+            return b"error: device 'A1' not found\n", b""
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+    assert path is None
+    assert "not found" in err, err
+
+
+def test_early_exit_reports_device_side_error_from_stdout(monkeypatch, tmp_path):
+    """screenrecord 提前退出时，原因在 stdout（设备端输出），不能只读 stderr。
+
+    `adb shell screenrecord` 的报错（Unable to open file / Permission denied）
+    是远端命令的输出，落在 stdout；stderr 往往为空。旧实现只读 stderr，用户
+    永远只看到一句「screenrecord 提前退出」，没有任何原因 —— 而这一刻恰恰最
+    需要原因（是权限、是文件被占用、还是这台设备根本没有 screenrecord）。
+    """
+    import io
+
+    class _Ok:
+        returncode = 0
+        stdout = stderr = ""
+
+    class _EarlyProc:
+        def __init__(self):
+            self.stdout = io.StringIO("Unable to open file: /data/local/tmp/x.mp4\n")
+
+        def poll(self):
+            return 1
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _EarlyProc())
+    monkeypatch.setattr(ss.subprocess, "run", lambda *a, **k: _Ok())
+    vr = ss.VideoRecorder(_Bus(), "adb")
+    ok, err = vr.start("A1", str(tmp_path))
+    assert ok is False
+    assert "Unable to open file" in err, err
