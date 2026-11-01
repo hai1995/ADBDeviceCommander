@@ -856,3 +856,40 @@ def test_generate_failure_is_reported_not_claimed(monkeypatch, tmp_path):
     assert "已在运行目录生成" not in text, warns
     # 写盘失败不影响本次可用性：内存里仍有示例命令
     assert cmds and all(isinstance(c, dict) for c in cmds)
+
+
+def _two_files(tmp_path, a, b):
+    """在 tmp 目录写两份命令文件（a.json / b.json），返回 discover 结果。"""
+    for name, data in (("a.json", a), ("b.json", b)):
+        with open(tmp_path / name, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    return cmds_mod.discover_commands(str(tmp_path))
+
+
+def test_cross_file_duplicate_ids_get_renamed(tmp_path):
+    """两份命令文件里同 id、内容不同：不能合并成「点哪条都跑第一条」。
+
+    normalize_commands 只在单个文件内保证 id 唯一；两份文件都没写 id（或都从
+    同一份模板拷来）时各自生成 auto1，合并后内存里有两条同 id 命令。run_command
+    按 id 取第一条匹配 —— 用户点第二张卡片，跑的是第一张的指令，界面与行为不符，
+    且没有任何报错。
+    """
+    a = [{"name": "看时间", "commands": [{"command": "date"}]}]
+    b = [{"name": "看内存", "commands": [{"command": "free -m"}]}]
+    cmds, warns, _files = _two_files(tmp_path, a, b)
+    ids = [c["id"] for c in cmds]
+    assert len(ids) == len(set(ids)), ids
+    by_name = {c["name"]: c for c in cmds}
+    assert by_name["看时间"]["commands"][0]["command"] == "date"
+    assert by_name["看内存"]["commands"][0]["command"] == "free -m"
+    # 改名必须说出来：静默改 id 会让用户在自己的 json 里找不到命令
+    assert any("已自动改名" in w for w in warns), warns
+
+
+def test_cross_file_same_id_same_content_is_not_renamed(tmp_path):
+    """同 id 且内容一致仍然照旧去重（不该因为「id 重复」就把重复项留下）。"""
+    a = [{"id": "x", "name": "看时间", "commands": [{"command": "date"}]}]
+    b = [{"id": "x", "name": "看时间", "commands": [{"command": "date"}]}]
+    cmds, warns, _files = _two_files(tmp_path, a, b)
+    assert [c["id"] for c in cmds] == ["x"]
+    assert not any("已自动改名" in w for w in warns), warns

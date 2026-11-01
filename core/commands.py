@@ -144,6 +144,53 @@ def dedupe_commands(cmds):
     return out, removed
 
 
+def ensure_unique_ids(cmds, warnings=None):
+    """合并后的命令 id 必须**全局唯一**：同 id 不同内容的后来者自动改名。
+
+    normalize_commands 只在**单个文件内**保证 id 唯一（重复 / 缺失都补 autoN）。
+    但 merge 阶段是跨文件拼接：两份命令合集都没有写 id（或都从同一份模板里
+    拷出来）时，各自都会生成 auto1 / auto2 …，合并后内存里就存在两条同 id、
+    内容却完全不同的命令。
+
+    `run_command` 用 `next(c for c in commands if c["id"] == cmd_id)` 取**第一条**
+    匹配，于是：
+
+      * 用户点第二张卡片，执行的是第一张卡片的命令 —— 界面写着 A，跑的是 B；
+      * 点击计数也一起加到第一条上，把「常用命令靠前」的排序带偏。
+
+    两种情况都不会有任何报错，用户只能看到「点的和跑的不一样」。
+
+    这里只改**冲突的那一条**（第一条保留原 id），并把改了什么写进 warnings ——
+    静默改名会让用户在自己的 json 里找不到命令，反而更难排查。
+    """
+    used = set()
+    renamed = []
+    for c in cmds:
+        if not isinstance(c, dict):
+            continue
+        cid = c.get("id") or ""
+        if not cid:
+            continue
+        if cid not in used:
+            used.add(cid)
+            continue
+        base, n = cid, 2
+        while cid in used:
+            cid = "%s_%d" % (base, n)
+            n += 1
+        c["id"] = cid
+        used.add(cid)
+        renamed.append((base, c.get("name") or "", cid))
+    if renamed and warnings is not None:
+        head = "；".join("「%s」→「%s」" % (name or base, new)
+                         for base, name, new in renamed[:3])
+        more = "" if len(renamed) <= 3 else "，等 %d 条" % len(renamed)
+        warnings.append(
+            "有 %d 条命令在多份命令文件里用了相同的 id（内容不同），已自动改名"
+            "以免点错命令：%s%s" % (len(renamed), head, more))
+    return cmds
+
+
 def discover_commands(directory=None):
     """扫描目录、读取所有有效命令合集文件、合并去重。
 
@@ -202,6 +249,9 @@ def discover_commands(directory=None):
     for _p, cmds in per_file:
         merged.extend(cmds)
     merged, removed = dedupe_commands(merged)
+    # 跨文件同 id（不同内容）必须改名：run_command 按 id 取第一条匹配，
+    # 否则点第二张卡片跑的是第一条的命令（见 ensure_unique_ids 的说明）。
+    ensure_unique_ids(merged, warnings)
     if len(per_file) > 1 or removed:
         warnings.append(
             "已合并 %d 个命令文件%s"
