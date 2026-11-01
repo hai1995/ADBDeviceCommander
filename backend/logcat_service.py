@@ -181,6 +181,14 @@ class LogcatMonitor:
                       {"serial": serial, "status": "running",
                        "buffers": buffers})
         batch, last = [], time.time()
+        # 未产出任何日志行时收集到的「非日志行」（adb 的报错正是这个形态：
+        # `error: device 'xxx' not found` / `adb: device offline`）。平时它们只是
+        # 被原样丢给前端当纯文本；设备掉线时，这是唯一能说清原因的东西。
+        err_lines = []
+        # 收到的**真日志行数**（不受级别/关键字过滤影响）。判「有没有收到日志」
+        # 必须用它：用户把级别全取消勾选、或关键字一个都没命中时，过滤后的行数
+        # 天然是 0，拿它当判据就会把正常监控误报成「设备离线」。
+        stats = {"seen": 0}
         # 启动爆发期：先用定长窗口接住历史 dump，只留最近的若干行
         t0 = time.time()
         boot_buf = []
@@ -195,9 +203,14 @@ class LogcatMonitor:
             for raw in proc.stdout:
                 if stop_ev.is_set():
                     break
-                item = self._classify_and_filter(raw, levels, keyword, only_exc)
+                item = self._classify_and_filter(raw, levels, keyword, only_exc,
+                                                 stats)
                 if item is None:
                     continue
+                if "raw" in item:
+                    # 只在「还没收到任何日志」时留几条，正常跑起来后零额外开销
+                    if not stats["seen"] and len(err_lines) < 5:
+                        err_lines.append(item["raw"])
                 if item.get("exc"):
                     exc += 1
                 total += 1
@@ -278,16 +291,31 @@ class LogcatMonitor:
                 self._procs.pop(serial, None)
                 self._stops.pop(serial, None)
                 self._stopreq.discard(serial)
-            self.bus.push("logcat",
-                          {"serial": serial, "status": "stopped",
-                           "total": total, "exc": exc})
+            if not stop_ev.is_set() and not stats["seen"]:
+                # 没点停止、却一条日志都没解析到就退出了：设备离线 / 序列号失效 /
+                # logd 没跑时，adb 只往 stdout 打一行原因然后退出。此前那行被当成
+                # 普通文本推给前端，紧接着又推 stopped —— 界面显示「空闲，0 行」，
+                # 看起来像「点了一下就自动停了」，完全看不出设备根本没连上。
+                detail = "；".join(x.strip() for x in err_lines if x.strip())[:300]
+                self.bus.push("logcat",
+                              {"serial": serial, "status": "error",
+                               "total": total, "exc": exc,
+                               "text": "logcat 没有输出任何日志就退出了%s。"
+                                       "设备可能已断开 / 离线，或 logd 未运行"
+                                       % ("：" + detail if detail else "")})
+            else:
+                self.bus.push("logcat",
+                              {"serial": serial, "status": "stopped",
+                               "total": total, "exc": exc})
 
     @staticmethod
-    def _classify_and_filter(raw, levels, keyword, only_exc):
+    def _classify_and_filter(raw, levels, keyword, only_exc, stats=None):
         rec = classify_line(raw)
         if rec is None:
             # 非 threadtime 行（标题/分隔/空行）原样保留给前端做纯文本渲染
             return {"raw": (raw or "").rstrip("\n")}
+        if stats is not None:
+            stats["seen"] = stats.get("seen", 0) + 1
         if rec["level"] not in levels:
             return None
         if only_exc and not rec["exc"]:
@@ -415,9 +443,22 @@ class LogcatCapture:
         # 抓取永远卡在「运行中」（is_running 恒 True、再 start 判 already_running、
         # 用户点停止也停不掉），并泄漏一个 adb logcat 进程。
         f = None
+        # 一行都没写进去时留下的前几行原文（多为 adb 的报错：device not found 等），
+        # 供末段判断「设备没连上」时把原因带出来。
+        err_lines = []
+        # 是否解析到过**真日志行**（threadtime 形态）。不能拿「读到的行数」判断：
+        # 设备离线时 adb 恰好会吐一行 `error: device ... not found`，那一行也是
+        # 「读到了」。只在前几行判断一次，拿到日志行后不再产生开销。
+        logish = 0
+        err_reported = False      # 已在 except 里报过错，末段不要再报一次
         try:
             f = open(path, "w", encoding="utf-8", errors="replace")
             for raw in proc.stdout:
+                if not logish:
+                    if classify_line(raw) is not None:
+                        logish = 1
+                    elif len(err_lines) < 5:
+                        err_lines.append(raw.rstrip("\n"))
                 # 级别过滤（与实时监控同语义）：能识别出级别的行按用户勾选
                 # 的集合过滤；识别不出的行（标题/分隔线）原样写盘。
                 if levels is not None:
@@ -427,6 +468,7 @@ class LogcatCapture:
                 f.write(raw)
                 lines += 1
         except Exception as e:
+            err_reported = True
             self.bus.push("logcat_capture",
                           {"serial": serial, "status": "error",
                            "text": "抓取异常：%s" % e})
@@ -445,6 +487,9 @@ class LogcatCapture:
             with self._lock:
                 self._procs.pop(serial, None)
                 self._starting.discard(serial)
+                # 在 discard 之前取：finally 后段要靠它区分「用户点了停止」和
+                # 「adb 自己退出了」
+                stopped_by_user = serial in self._stopreq
                 self._stopreq.discard(serial)
                 flags = self._flags.pop(serial, {"zip_on_stop": False})
             # 打包条件：仅「结束后打包 zip」——抓取过程不做任何按大小的自动
@@ -466,12 +511,25 @@ class LogcatCapture:
                 size_out = os.path.getsize(path)
             else:
                 size_out = 0
-            self.bus.push("logcat_capture",
-                          {"serial": serial, "status": "stopped",
-                           "path": path, "lines": lines, "size": size_out,
-                           # 打了包：zipped 事件已另行通知「已打包」，
-                           # stopped 不再重复弹完成 toast（前端据此二选一）。
-                           "packaged": bool(zpath)})
+            if not stopped_by_user and not logish and not err_reported:
+                # 用户没点停止、却一行都没写进去就退出了：设备离线 / 序列号失效时
+                # adb 只往 stdout 打一行原因然后退出。此前这行被原样写进 txt，
+                # 紧接着推 stopped —— 前端弹的是「✓ 抓取完毕：0 行」，一个完美的
+                # 假成功：用户以为抓到了空日志，实际是设备根本没连上。
+                detail = "；".join(err_lines)[:300]
+                self.bus.push("logcat_capture",
+                              {"serial": serial, "status": "error",
+                               "path": path, "lines": 0, "size": size_out,
+                               "text": "抓取没有收到任何日志就结束了%s。"
+                                       "设备可能已断开 / 离线，或 logd 未运行"
+                                       % ("：" + detail if detail else "")})
+            else:
+                self.bus.push("logcat_capture",
+                              {"serial": serial, "status": "stopped",
+                               "path": path, "lines": lines, "size": size_out,
+                               # 打了包：zipped 事件已另行通知「已打包」，
+                               # stopped 不再重复弹完成 toast（前端据此二选一）。
+                               "packaged": bool(zpath)})
 
     @staticmethod
     def _zip_one(path):

@@ -584,3 +584,120 @@ def test_capture_path_avoids_overwriting_existing_zip(tmp_path, monkeypatch):
     path = _start_capture_path(tmp_path, monkeypatch)
     assert path.endswith("_2.txt"), path
     assert os.path.exists(zip_path)
+
+
+class _EofProc:
+    """输出完给定行就 EOF（模拟 adb 报错后自己退出）。
+
+    `_FakeLogcatProc` 是无限循环产出的，适合「一直跑着」的场景；这里要的恰恰
+    相反：设备离线时 `adb logcat` 打一行原因就退出，读循环拿到 EOF。
+    """
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+        self._i = 0
+        self.returncode = 0
+
+    @property
+    def stdout(self):
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._i >= len(self._lines):
+            raise StopIteration
+        line = self._lines[self._i]
+        self._i += 1
+        return line
+
+    def terminate(self):
+        pass
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _wait_payload(bus, kind, status, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        for e in bus.events:
+            if e["kind"] == kind and (e["payload"] or {}).get("status") == status:
+                return e["payload"]
+        time.sleep(0.02)
+    return None
+
+
+def _statuses(bus, kind):
+    return [(e["payload"] or {}).get("status")
+            for e in bus.events if e["kind"] == kind]
+
+
+def test_capture_offline_device_is_an_error_not_an_empty_success(tmp_path, monkeypatch):
+    """设备离线：必须报错，不能报「✓ 抓取完毕：0 行」。
+
+    旧行为：adb 的 `error: device 'A1' not found` 被原样写进 txt，紧接着推
+    stopped —— 前端弹「✓ 抓取完毕：0 行」并生成一份只有一行报错的文件。用户
+    以为抓到了空日志（甚至拿去做证据），实际是设备根本没连上。
+    """
+    proc = _EofProc(["error: device 'A1' not found\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda cmd, **kw: proc)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("A1", str(tmp_path / "a.txt"), ["main"]) is True
+
+    payload = _wait_payload(bus, "logcat_capture", "error")
+    assert payload is not None, _statuses(bus, "logcat_capture")
+    assert "not found" in payload["text"], payload
+    assert "stopped" not in _statuses(bus, "logcat_capture"), \
+        "已经报错收尾，不能再推 stopped 把状态盖回「空闲」"
+
+
+def test_monitor_offline_device_is_an_error_not_a_silent_stop(monkeypatch):
+    """实时监控同理：一条日志都没收到就退出，界面必须说清原因。"""
+    proc = _EofProc(["error: device 'A1' not found\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda cmd, **kw: proc)
+
+    bus = _FakeBus()
+    mon = ls.LogcatMonitor(bus, adb_path="adb")
+    assert mon.start("A1", ["main"]) is True
+
+    payload = _wait_payload(bus, "logcat", "error")
+    assert payload is not None, _statuses(bus, "logcat")
+    assert "not found" in payload["text"], payload
+    assert "stopped" not in _statuses(bus, "logcat")
+
+
+def test_capture_all_levels_filtered_is_not_an_offline_error(tmp_path, monkeypatch):
+    """用户取消了全部级别 → 一行都不写盘，但设备是好的，不能误报「设备离线」。"""
+    proc = _EofProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda cmd, **kw: proc)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("A1", str(tmp_path / "b.txt"), ["main"],
+                     level_filter=[]) is True
+
+    payload = _wait_payload(bus, "logcat_capture", "stopped")
+    assert payload is not None, _statuses(bus, "logcat_capture")
+    assert payload["lines"] == 0
+    assert "error" not in _statuses(bus, "logcat_capture")
+
+
+def test_monitor_keyword_miss_is_not_an_offline_error(monkeypatch):
+    """关键字一个都没命中同属「过滤后为空」，不能当成设备掉线。"""
+    proc = _EofProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda cmd, **kw: proc)
+
+    bus = _FakeBus()
+    mon = ls.LogcatMonitor(bus, adb_path="adb")
+    assert mon.start("A1", ["main"], keyword="no-such-key") is True
+
+    payload = _wait_payload(bus, "logcat", "stopped")
+    assert payload is not None, _statuses(bus, "logcat")
+    assert "error" not in _statuses(bus, "logcat")
