@@ -335,10 +335,12 @@ def _snap(monkeypatch, chunks, server=None, fps=2):
 def test_snap_start_ok_publishes_frame(monkeypatch):
     """抓到第一帧才会起后台循环：否则「启动了」却没有画面，比直接报错更迷惑。"""
     srv = svc.FrameServer()
-    m = _snap(monkeypatch, [b"\x89PNG"], srv)
+    # 桩必须给**完整** PNG 签名：_grab 现在会按图片签名校验字节（rc=0 也可能
+    # 只是一句提示文本，那种情况不能当帧塞给前端）。
+    m = _snap(monkeypatch, [b"\x89PNG\r\n\x1a\nframebytes"], srv)
     ok, err = m.start()
     assert ok is True and not err
-    assert srv.get_frame("S1") == b"\x89PNG"
+    assert srv.get_frame("S1") == b"\x89PNG\r\n\x1a\nframebytes"
     m.stop()
 
 
@@ -488,3 +490,60 @@ def test_pipe_reports_reason_when_restarts_exhausted(monkeypatch):
     assert ok is True
     m._thread.join(timeout=10)
     assert "重连" in m.error and "screenrecord" in m.error
+
+
+# ------------------------------------------------- 低帧率预览：失败要说清原因
+
+
+class _GrabProc:
+    """`screencap -p` 的替身：可指定 rc / 输出 / stderr。"""
+
+    def __init__(self, data, err=b"", rc=0):
+        self._data, self._err, self.returncode = data, err, rc
+
+    def communicate(self, timeout=None):
+        return self._data, self._err
+
+    def kill(self):
+        pass
+
+
+def _grab_with(monkeypatch, data, err=b"", rc=0):
+    monkeypatch.setattr(svc.subprocess, "Popen",
+                        lambda *a, **k: _GrabProc(data, err, rc))
+    m = svc.SnapMirror("adb", "S1", svc.FrameServer(), 2)
+    return m._grab()
+
+
+def test_snap_grab_reports_device_error_from_stdout(monkeypatch):
+    """设备离线：报 adb 的原话，而不是「空数据」。
+
+    `exec-out screencap` 在设备不在线时把 `error: device 'A1' not found` 打到
+    **stdout** 然后退出。旧实现只解 stderr（空），预览界面显示「截图失败：
+    空数据」—— 用户看不出是设备没连上，反复点「投屏」也只是一直空数据。
+    """
+    data, err = _grab_with(monkeypatch, b"error: device 'A1' not found\n", rc=1)
+    assert data is None
+    assert "not found" in err, err
+    assert "空数据" not in err
+
+
+def test_snap_grab_rejects_non_image_bytes_even_on_success(monkeypatch):
+    """rc=0 也可能只是一句提示：不能把它当帧发给前端。
+
+    个别 ROM / 中间层会把提示文本打到 stdout 后正常退出。旧实现无条件返回这份
+    字节，FrameServer 照发，前端 <img> 拿到一段文本 —— 界面是一张破图，状态栏
+    与日志里一个字都没有，用户只能怀疑「投屏坏了」。
+    """
+    data, err = _grab_with(monkeypatch, b"WARNING: linker: unused DT entry\n", rc=0)
+    assert data is None
+    assert "无法识别" in err, err
+
+
+def test_snap_grab_strips_leading_junk_before_png(monkeypatch):
+    """PNG 前面混了几行设备自己的输出：切干净再发（否则前端同样是破图）。"""
+    junk = b"read: unexpected EOF\n"
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    data, err = _grab_with(monkeypatch, junk + png, rc=0)
+    assert data == png, (data, err)
+    assert err is None

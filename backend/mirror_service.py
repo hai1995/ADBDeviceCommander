@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote
 
 from backend.device_proc import kill_device_process
+from core import imgbytes
 from core.constants import no_window_flags
 
 # ---- 播放器：按「延迟表现」排序，越靠前越优先 ----
@@ -682,7 +683,21 @@ class SnapMirror:
                 creationflags=no_window_flags())
             data, err = proc.communicate(timeout=SNAP_TIMEOUT_S)
             if proc.returncode != 0 or not data:
-                return None, (err or b"").decode("utf-8", "replace")[:200] or "空数据"
+                # adb 的报错几乎都落在 **stdout**（`error: device 'A1' not found`
+                # 就是典型，远端命令的输出本来就在那一路）。只解 stderr 会得到
+                # 空串，预览界面于是显示「截图失败：空数据」—— 用户完全看不出
+                # 是设备没连上，还以为图是空的。
+                both = ((err or b"") + b"\n" + (data or b"")).strip()
+                text = both.decode("utf-8", "ignore").strip()[:200]
+                return None, text or "设备未返回图像（adb 没有给出原因）"
+            # rc=0 也不等于「拿到了图」：个别 ROM / 中间层会把一句提示打到
+            # stdout 后正常退出。旧实现直接把它塞进帧服务 —— 前端 <img> 拉到
+            # 一段文本，界面上是一张破图，而日志与状态栏一个字都没有。
+            # 按图片签名校验，并顺手切掉 PNG 前面那些前导垃圾（与截图同源问题，
+            # 见 core.imgbytes）。
+            data, kind, note = imgbytes.normalize(data)
+            if not data:
+                return None, "设备返回的画面无法识别（%s）" % note
             return data, None
         except Exception as e:
             # 超时时 communicate 只抛错、不终止子进程：卡住的 adb 会变孤儿
