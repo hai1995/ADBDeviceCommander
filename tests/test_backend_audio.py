@@ -664,3 +664,47 @@ def test_start_releases_handle_when_open_fails(tmp_path):
     assert "close" in winmm.calls, "打开失败后必须 waveInClose，否则麦克风被独占"
     assert mr._running is False
     assert mr._wavein is None
+
+
+def test_device_audio_start_ex_explains_early_exit(monkeypatch):
+    """启动即退出要带出原因：tinycap 多半卡在 root 上，用户得知道下一步做什么。
+
+    回归：start() 只回 False，调用方只能播一句「音频采集启动失败」—— 是缺
+    root？还是设备没有音频输入？完全没有线索。
+    """
+    import backend.audio_service as au
+
+    class _DeadProc:
+        def poll(self):
+            return 1
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(au.subprocess, "Popen", lambda cmd, **kw: _DeadProc())
+    cap = au.DeviceAudioCapture("adb")
+    ok, why = cap.start_ex("A1", "/data/local/tmp/a.wav")
+    assert ok is False
+    assert "退出码 1" in why and "root" in why, why
+    # 旧接口语义不变（其它调用方仍按 bool 用）
+    assert cap.start("A1", "/data/local/tmp/a.wav") is False
+
+
+def test_device_audio_start_ex_reports_popen_failure(monkeypatch):
+    """adb 拉不起来时也要说清是哪一步失败，而不是一个光秃秃的 False。"""
+    import backend.audio_service as au
+
+    def boom(cmd, **kw):
+        raise OSError("adb 不在 PATH")
+
+    monkeypatch.setattr(au.subprocess, "Popen", boom)
+    cap = au.DeviceAudioCapture("adb")
+    ok, why = cap.start_ex("A1", "/data/local/tmp/a.wav")
+    assert ok is False
+    assert "tinycap" in why and "adb 不在 PATH" in why, why

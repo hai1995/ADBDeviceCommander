@@ -349,9 +349,19 @@ class DeviceAudioCapture:
             return serial in self._procs
 
     def start(self, serial, remote_wav):
+        """启动设备端 tinycap，返回是否成功（需要原因请用 start_ex）。"""
+        return self.start_ex(serial, remote_wav)[0]
+
+    def start_ex(self, serial, remote_wav):
+        """启动设备端 tinycap，返回 `(ok, 原因)`。
+
+        为什么要带原因：tinycap 在多数 ROM 上需要 root，会**立刻退出**。只回
+        False 时调用方只能播一句「音频采集启动失败」，用户手上是什么线索都没有
+        —— 而真正的原因（需要 root / 没有音频输入）恰好决定了下一步该做什么。
+        """
         with self._lock:
             if serial in self._procs:
-                return False
+                return False, "该设备已在采集设备音频"
         try:
             proc = subprocess.Popen(
                 [self.adb, "-s", serial, "shell", "tinycap", remote_wav],
@@ -360,22 +370,26 @@ class DeviceAudioCapture:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 **adb_popen_kwargs())
-        except Exception:
-            return False
+        except Exception as e:
+            return False, "无法启动 tinycap：%s" % e
         # 探测 tinycap 是否真的跑起来了：很多 ROM 上 tinycap 需要 root，会立刻退出，
         # 而 supported() 只查了 `command -v tinycap`。不做这一步，start() 会对一个
         # 已经死掉进程返回 True —— 状态栏照样显示「（含设备音频）」，停止时 pull
         # 必然失败，用户最终拿到一段没有声音的视频且不知道原因。
+        rc = None
         try:
             if proc.poll() is None:
                 time.sleep(1.0)
-            if proc.poll() is not None:
-                return False
+            rc = proc.poll()
         except Exception:
             pass
+        if rc is not None:
+            return False, ("tinycap 启动后立即退出（退出码 %s）："
+                           "多数机型需要 root 才能录设备端声音，可先执行 adb root 再试"
+                           % rc)
         with self._lock:
             self._procs[serial] = (proc, remote_wav)
-        return True
+        return True, ""
 
     def stop(self, serial):
         """停止并 pull 回本地临时文件，返回本地 wav 路径或 None。"""

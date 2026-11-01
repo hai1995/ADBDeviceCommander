@@ -141,11 +141,21 @@ class RecordMixin:
                 # 保证 adb shell 命令与后续 pull 的路径完全一致。
                 remote = "/data/local/tmp/adb_rec_%s_%s_audio.wav" % (
                     safe_name(s), sess_ts)
-                if self.device_audio.start(s, remote):
+                # 带原因版本：tinycap 在多数机型上需要 root，会立刻退出。只说
+                # 「启动失败」用户不知道该 adb root 还是换台设备，最后只能放弃。
+                start_ex = getattr(self.device_audio, "start_ex", None)
+                if start_ex is not None:
+                    da_ok, da_err = start_ex(s, remote)
+                else:                       # 兼容只有 start() 的旧实现 / 替身
+                    da_ok, da_err = bool(self.device_audio.start(s, remote)), ""
+                if da_ok:
                     self._rec_session["devaudio"][s] = remote
                     da = True
                 else:
-                    self._push_toast("warn", "⚠ 设备 %s 音频采集启动失败" % s)
+                    self._push_toast(
+                        "warn", "⚠ 设备 %s 音频采集未启动：%s"
+                                "（本次录屏不含设备声音）"
+                                % (s, da_err or "未知原因"))
             ok, local = self.video.start(s, save_dir, extra_name=sess_ts)
             if ok:
                 ok_any = True
