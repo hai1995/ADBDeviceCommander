@@ -138,3 +138,27 @@ def test_gone_device_triggers_changed_so_card_disappears():
     assert p3["gone"] == ["abc123"]
     assert all(it["serial"] != "abc123" for it in p3["items"])
     assert p3["changed"] is True
+
+
+def test_plan_model_backfill_is_not_a_state_change():
+    """设备刚连上时 model 先空、下一轮才补上：这不是「状态变化」。
+
+    旧实现把 state 与 model 的差异合并进 stat_changed，上层据此播报
+    「⚠ 设备 X 状态变为『可用』」—— 而它一直是可用，变的只是型号。用户被引去
+    查设备状态（拔插线、重授权），真正的原因（adb 只是晚一轮才读到型号）无关。
+    """
+    plan = plan_devices({"abc123": True}, {"abc123": "device"},
+                        {"abc123": ""}, [("abc123", "device", "Pixel")])
+    assert plan["model_changed"] == ["abc123"]
+    assert plan["state_changed"] == []
+    # 仍要重渲染卡片（否则界面上一直是 unknown model），所以 changed 照旧为真
+    assert plan["stat_changed"] == ["abc123"]
+    assert plan["changed"] is True
+
+
+def test_plan_real_state_change_is_reported_as_state_change():
+    """状态真的变了（device → unauthorized）才进 state_changed。"""
+    plan = plan_devices({"abc123": True}, {"abc123": "device"},
+                        {"abc123": "Pixel"}, [("abc123", "unauthorized", "Pixel")])
+    assert plan["state_changed"] == ["abc123"]
+    assert plan["model_changed"] == []

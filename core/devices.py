@@ -94,6 +94,8 @@ def plan_devices(prev_checked, prev_state, prev_model, devices, prev_absent=None
         "recovered": [serial],        # 上一轮消失、本轮重连的设备
         "newly_absent": [serial],     # 本轮刚消失（仅首次播报，宽限内保留勾选）
         "stat_changed": [serial],     # 状态/型号变化设备（不再强制取消勾选）
+        "state_changed": [serial],    # 其中**状态**真的变了的那部分（播报用）
+        "model_changed": [serial],    # 仅型号补全 / 变化（不播报「状态变为」）
         "dropped": [serial],          # 兼容字段：新版不再因「不可用」强制取消勾选
         "auto_serial": str|None,      # 需要自动勾选的设备（唯一可用且从未勾选）
         "usable_serials": [serial],   # 当前可用设备
@@ -140,11 +142,22 @@ def plan_devices(prev_checked, prev_state, prev_model, devices, prev_absent=None
     # 重连：上一轮处于「宽限内消失（prev_absent）」且本轮重新出现在列表中
     recovered = sorted(s for s in added if s in prev_absent)
 
-    # 状态/型号变化（仅本轮在列表中的设备）
-    stat_changed = sorted(
+    # 状态 / 型号变化（仅本轮在列表中的设备）。
+    # 两者必须**分开**：设备刚连上时 `adb devices -l` 常先给一行不带 model: 的
+    # 条目，下一轮才补上型号，此时 state 毫无变化。合并成一个列表播报，用户会
+    # 看到「设备 X 状态变为『可用』」—— 而它一直可用，真正变的只是型号；
+    # 上层（backend.device_service）据此只对 state_changed 播报状态变化。
+    state_changed = sorted(
         s for s in (cur_serials & prev_present)
-        if prev_state.get(s) != cur[s][0] or prev_model.get(s) != cur[s][1]
+        if prev_state.get(s) != cur[s][0]
     )
+    model_changed = sorted(
+        s for s in (cur_serials & prev_present)
+        if prev_state.get(s) == cur[s][0] and prev_model.get(s) != cur[s][1]
+    )
+    # stat_changed 保留为并集：型号补全同样要重渲染卡片（否则界面上一直是
+    # "unknown model"），但它不该触发「状态变为…」的播报。
+    stat_changed = sorted(set(state_changed) | set(model_changed))
 
     # gone 也算变化：设备「超宽限消失」的那一轮，它只是从 kept_absent 里消失，
     # 并不在 removed 里（上一轮它就已经不在列表中了），items 却少了一张卡片。
@@ -204,6 +217,8 @@ def plan_devices(prev_checked, prev_state, prev_model, devices, prev_absent=None
         "recovered": recovered,
         "newly_absent": newly_absent,
         "stat_changed": stat_changed,
+        "state_changed": state_changed,
+        "model_changed": model_changed,
         "dropped": [],
         "auto_serial": auto_serial,
         "usable_serials": usable_list,

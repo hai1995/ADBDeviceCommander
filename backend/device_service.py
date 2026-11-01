@@ -139,7 +139,7 @@ class DeviceManager:
                                 continue
                             self.bus.push("status", {
                                 "type": "info", "text": "✓ 检测到新设备：%s" % s})
-                        for s in plan["stat_changed"]:
+                        for s in plan["state_changed"]:
                             self.bus.push("status", {
                                 "type": "warn",
                                 "text": "⚠ 设备 %s 状态变为「%s」"

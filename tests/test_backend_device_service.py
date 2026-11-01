@@ -441,3 +441,25 @@ def test_start_server_self_heals_after_consecutive_failures(monkeypatch):
     assert state["n"] == 5                           # 自愈后的那次 devices 成功
     assert mgr._fail_streak == 0
     assert mgr.get_items()[0]["ok"] is True
+
+
+def test_model_backfill_does_not_announce_state_change(monkeypatch):
+    """型号补全不该播「状态变为」：设备一直可用，变的只是型号。
+
+    `adb devices -l` 在设备刚连上时常常先给一行不带 model: 的条目，下一轮才
+    补上型号。旧实现把「型号变了」也算作 stat_changed，于是自动轮询（5 秒一次）
+    会冒出一句「⚠ 设备 A1 状态变为『可用』」，用户看到状态没变却被告知状态变了。
+    """
+    bus, mgr = _fresh(monkeypatch, [("A1", "device", "")])
+    mgr.refresh(verbose=False)
+    bus.take()
+    monkeypatch.setattr(ds.subprocess, "run", _fake_run_factory(
+        lines=_adb_lines([("A1", "device", "Pixel")])))
+    assert mgr.refresh(verbose=False) is True
+    events = bus.take()
+    assert not any("状态变为" in ((e.get("payload") or {}).get("text") or "")
+                   for e in events if e["kind"] == "status"), events
+    dev_ev = next(e for e in events if e["kind"] == "devices")
+    # 仍要重渲染（界面上那台设备的型号要从空补成 Pixel）
+    assert dev_ev["payload"]["stat_changed"] == ["A1"]
+    assert mgr.device_model.get("A1") == "Pixel"
