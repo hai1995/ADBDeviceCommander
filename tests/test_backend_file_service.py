@@ -364,3 +364,57 @@ def test_view_falls_back_to_cat_when_head_unsupported(monkeypatch):
     res, err = svc.view("SERIAL", "/sdcard/a.txt", max_inline_bytes=1024)
     assert err is None and res["text"] == "hello"
     assert [c for c in records if "cat" in c], "head 失败应退回 cat"
+
+
+def test_view_returns_non_empty_reason_when_pull_fails(monkeypatch):
+    """head 成功取回内容但超限、随后的 pull 失败：原因不能是空串。
+
+    旧实现 `return None, _err_text(r, "查看失败")`，而 r 是**成功**的 head
+    （rc=0），_err_text 的契约是「成功恒返回空串」—— 于是 view 返回
+    (None, "")。上层 _do_file_view 用「err 是否为空」判断成败，空串让它把
+    res=None 当成成功去 .get()，用户看到的是：
+
+        查看失败 /sdcard/big.log: 'NoneType' object has no attribute 'get'
+
+    与真正的原因（pull 失败 / 没有权限）毫无关系。
+    """
+    def fake_run(cmd, **kw):
+        if "head" in cmd:
+            return type("R", (), {"stdout": "x" * 64, "stderr": "",
+                                  "returncode": 0})()
+        if "pull" in cmd:
+            return type("R", (), {"stdout": "adb: error: failed to stat remote "
+                                            "object /sdcard/big.log: No such file",
+                                  "stderr": "", "returncode": 1})()
+        return type("R", (), {"stdout": "", "stderr": "", "returncode": 1})()
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    svc = FileService()
+    res, err = svc.view("SERIAL", "/sdcard/big.log", max_inline_bytes=8)
+    assert res is None
+    assert err, "失败必须带原因，空串会被上层当成成功"
+    assert "No such file" in err, err
+
+
+def test_view_explains_directory_target_instead_of_returning_empty_reason(monkeypatch):
+    """点开一个目录：pull「成功」但落地的是目录，原因同样不能为空。
+
+    adb pull 对目录会整棵拉下来，落地不是文件。旧实现在这种分支给出空串，
+    上层同样会去解包 None。
+    """
+    import os as _os
+
+    def fake_run(cmd, **kw):
+        if "head" in cmd:
+            return type("R", (), {"stdout": "x" * 64, "stderr": "",
+                                  "returncode": 0})()
+        if "pull" in cmd:
+            _os.makedirs(cmd[-1], exist_ok=True)     # 落地成目录
+            return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
+        return type("R", (), {"stdout": "", "stderr": "", "returncode": 1})()
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    svc = FileService()
+    res, err = svc.view("SERIAL", "/sdcard/somedir", max_inline_bytes=8)
+    assert res is None
+    assert err and "目录" in err, err

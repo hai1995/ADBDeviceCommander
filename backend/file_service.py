@@ -190,4 +190,13 @@ class FileService:
                         "note": "文件较大(%d 字节)，已拉取到本地临时文件" % sz}, None
         except Exception as e:
             return None, str(e)
-        return None, _err_text(r, "查看失败")
+        # pull 也没成：必须给一句**非空**原因。这里不能直接用
+        # `_err_text(r, ...)` —— r 是上一次成功（rc==0）的 head，而 _err_text 的
+        # 契约是「成功恒返回空串」，于是取出空串。上层 _do_file_view 用「err 是否
+        # 为空」判断成败，空串会让它把 res=None 当成功去 .get()，用户最终看到的是
+        # 「查看失败 X: 'NoneType' object has no attribute 'get'」。
+        if getattr(pr, "returncode", 0) == 0:
+            # pull 返回成功却没落地成文件：目标本身是目录（adb pull 会把整个目录
+            # 拉下来），或者落地后被别的进程清掉了。
+            return None, "目标不是可查看的文件（可能是目录，请先进入目录再选文件）"
+        return None, (_err_text(pr, "") or "查看失败（adb 未给出原因）")
