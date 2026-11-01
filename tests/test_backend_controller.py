@@ -3307,3 +3307,50 @@ def test_command_hint_tells_unusable_checked_devices_apart():
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
     assert any("都不可用" in t and "C3" in t for t in texts), texts
     assert not any("请先在左侧勾选设备" in t for t in texts), texts
+
+
+def test_perf_partial_failure_is_announced(monkeypatch):
+    """部分设备没起来时必须单独说清楚：否则用户以为全都监控上了。
+
+    勾了 3 台、实际只监控 2 台，界面只有一句「✓ 已开始性能监控：2 台设备」，
+    导出对比报告时才发现少一台，也查不到原因（failed 只躺在返回值里，
+    前端从不读它）。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
+
+    class _Bad(_FakePerfMon):
+        def start(self):
+            if self.serial == "B2":
+                return False, "读取设备状态失败"
+            return True, ""
+
+    patch_ctrl(monkeypatch, "PerfMonitor", _Bad)
+    res = api.perf_start(None, 1000)
+    assert res["ok"] is True
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    assert any("未能开始性能监控" in t and "B2" in t and "读取设备状态失败" in t
+               for t in texts), texts
+
+
+def test_perf_total_failure_lists_every_reason(monkeypatch):
+    """全部失败时不能只报第一台：其余设备的原因同样要找出来。
+
+    只报第一台时，用户按那句「设备离线」去拔插线，而真正卡住的是另一台的
+    「包名不存在」—— 两台的原因压根不是一回事。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1", "B2"])
+
+    class _Bad(_FakePerfMon):
+        def start(self):
+            if self.serial == "B2":
+                return False, "包名不存在"
+            return False, "设备无响应"
+
+    patch_ctrl(monkeypatch, "PerfMonitor", _Bad)
+    res = api.perf_start(None, 1000)
+    assert res["ok"] is False
+    assert "设备无响应" in res["error"] and "包名不存在" in res["error"], res["error"]
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    assert any("设备无响应" in t and "包名不存在" in t for t in texts), texts

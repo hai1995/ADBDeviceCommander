@@ -107,9 +107,17 @@ class PerfMixin:
             started[s] = mon
             infos[s] = dict(mon.info)
         if not started:
-            err = next(iter(failed.values()), "启动失败")
-            self._push_status("err", "⚠ 性能监控启动失败：%s" % err)
-            return {"ok": False, "reason": "start_failed", "error": err,
+            # 全部失败：把**每台**的原因都说出来。只报第一台时，用户按那句
+            # 「设备离线」去查，而真正卡住的是另一台的「包名不存在」。
+            if len(failed) > 1:
+                reason = "；".join("%s（%s）" % (k, v) for k, v in failed.items())
+                self._push_status(
+                    "err", "⚠ 性能监控启动失败（%d 台）：%s"
+                    % (len(failed), reason))
+            else:
+                reason = next(iter(failed.values()), "启动失败")
+                self._push_status("err", "⚠ 性能监控启动失败：%s" % reason)
+            return {"ok": False, "reason": "start_failed", "error": reason,
                     "failed": failed}
         # 新会话就位后再关旧会话：启动失败时旧数据还在，用户不会白丢一段曲线。
         with self._perf_lock:
@@ -125,6 +133,14 @@ class PerfMixin:
             self._push_status(
                 "ok", "✓ 已开始性能监控：%d 台设备（%s · 每 %.1f 秒采样一次）"
                 % (len(started), perf_pkg_display(info), interval))
+        if failed:
+            # 部分成功：失败的那几台**必须**单独说清楚。旧实现只把 failed 塞进
+            # 返回值，而前端从不读它 —— 勾了 3 台、实际只监控 2 台，界面上没有
+            # 任何提示，导出对比报告时才发现少了一台，也查不到原因。
+            self._push_status(
+                "warn", "⚠ 有 %d 台设备未能开始性能监控：%s"
+                % (len(failed),
+                   "；".join("%s（%s）" % (k, v) for k, v in failed.items())))
         return {"ok": True, "serial": primary, "info": info,
                 "interval": interval, "sessions": infos, "failed": failed}
 
