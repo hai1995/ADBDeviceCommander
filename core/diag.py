@@ -731,10 +731,29 @@ def collect(adb, serial, out_dir, with_logcat=True,
 
 
 def summary_line(zip_path, manifest):
-    """一行中文结果说明（状态栏 / toast 用）。"""
+    """一行中文结果说明（状态栏 / toast 用）。
+
+    全部段落都失败时不能再用「✓」开头：设备掉线 / 未授权时每一段 adb 命令都
+    报错，包里其实只有几个「（读取设备信息失败：…）」占位文件 —— 而它们的
+    文件名（设备信息.txt / props.txt / 进程列表.txt…）与正常包一模一样。用户
+    扫到状态栏那个 ✓ 就以为收集成功了，直到拿这个包去分析才发现空无一物，
+    而那一刻设备往往已经不在手边，没法重新收集。
+    """
     m = manifest or {}
     dev = m.get("device") or {}
     who = dev.get("model") or (m.get("serial") or "设备")
-    bad = [p.get("name") for p in (m.get("parts") or []) if not p.get("ok")]
-    tail = ("，缺：%s" % "、".join(bad)) if bad else ""
+    parts = m.get("parts") or []
+    bad = [p.get("name") for p in parts if not p.get("ok")]
+    if parts and len(bad) == len(parts):
+        first = next((p.get("error") for p in parts if p.get("error")), "")
+        why = "，首个原因：%s" % first.strip()[:80] if first else ""
+        return ("⚠ 诊断包已保存，但 %d 项内容全部收集失败%s：%s"
+                "（设备可能已断开或未授权，建议重新连接后再收集）"
+                % (len(parts), why, zip_path))
+    tail = ""
+    if bad:
+        # 段名是文件名，全列出来会把状态栏撑成一行乱麻
+        shown = "、".join(bad[:6])
+        more = "" if len(bad) <= 6 else " 等 %d 项" % len(bad)
+        tail = "，缺 %s%s" % (shown, more)
     return "✓ 诊断包已保存: %s（%s%s）" % (zip_path, who, tail)

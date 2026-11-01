@@ -572,3 +572,30 @@ def test_collect_twice_in_same_second_keeps_both_zips(tmp_path):
     assert e1 is None and e2 is None
     assert z1 != z2, "同秒的第二份必须另起一个文件名"
     assert os.path.exists(z1) and os.path.exists(z2)
+
+
+def test_summary_line_flags_total_failure_instead_of_checkmark():
+    """全部段落都失败时不能以「✓」开头：包里其实什么都没有。
+
+    设备掉线 / 未授权时每段 adb 命令都报错，zip 里只有几个「（读取失败：…）」
+    占位文件，而它们的文件名与正常包完全一样。状态栏那个 ✓ 会让用户以为
+    收集成功，直到拿去分析才发现空无一物。
+    """
+    man = {"serial": "A1", "device": {},
+           "parts": [{"name": "设备信息.txt", "ok": False, "error": "device 'A1' not found"},
+                     {"name": "进程列表.txt", "ok": False, "error": ""}]}
+    line = diag.summary_line("/tmp/a_diag.zip", man)
+    assert not line.startswith("✓"), line
+    assert "全部收集失败" in line
+    assert "device 'A1' not found" in line
+    assert "/tmp/a_diag.zip" in line
+
+
+def test_summary_line_partial_failure_stays_positive_but_names_gaps():
+    """部分失败仍算成功（包有用），但要列出缺了哪几项。"""
+    man = {"serial": "A1", "device": {"model": "Pixel"},
+           "parts": [{"name": "设备信息.txt", "ok": True},
+                     {"name": "进程列表.txt", "ok": False}]}
+    line = diag.summary_line("/tmp/b_diag.zip", man)
+    assert line.startswith("✓")
+    assert "缺 进程列表.txt" in line
