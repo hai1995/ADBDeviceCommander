@@ -387,6 +387,12 @@ class CommandMixin:
         # 关窗瞬间用户看到一条毫无意义的报错。这里静默放弃即可。
         if self.session is None:
             return False
+        # 取局部引用：shutdown() 会把 self.session 置空（kill 完再清引用），而本方法
+        # 跑在后台 worker 里。用 self.session 的话，关窗恰好发生在这条命令序列中途
+        # 时，下一条命令会踩到 None 抛 AttributeError，被 _execute 翻译成一句
+        # 「命令执行出现异常：'NoneType' object has no attribute 'run'」—— 关窗
+        # 瞬间用户看到一条完全没有意义的报错。
+        sess = self.session
         raw_cmds = [e.get("command", "") for e in entries]
         if serial:
             raw_cmds = [transform(c, serial) for c in raw_cmds]
@@ -395,12 +401,16 @@ class CommandMixin:
         for cmd, end_idx in merged:
             if not cmd.strip():
                 continue
+            # 关窗 / 已开始收尾：剩下的命令不再下发（写进一个正在关闭的会话只会
+            # 得到一串失败，用户还来不及看）
+            if self.state.shutting_down:
+                return False
             # root / unroot 切换保护（见 _skip_root_switch）：已在目标状态、
             # 或该设备有进行中的录屏 / 抓取时，本条命令不下发。
             if self._skip_root_switch(cmd, serial):
                 continue
             stripped = cmd.strip()
-            was_interactive = bool(self.session.in_interactive_shell)
+            was_interactive = bool(sess.in_interactive_shell)
             # 交互式（直通）判定的三个来源：
             #   1. 已经在子 shell 里（上一轮 adb shell / powershell 的直通）；
             #   2. 裸 `adb shell`：后面几条已被 merge 合并，只剩单独一条时才直通；
@@ -419,12 +429,12 @@ class CommandMixin:
                     "» 已进入交互式 shell：后续命令直接送入该子 shell，"
                     "输入 exit 可退出并恢复逐条执行")
             if interactive:
-                ok = self.session.run(cmd, interactive=True)
+                ok = sess.run(cmd, interactive=True)
                 if ok and _EXIT_RE.match(stripped):
                     # `exit` 退出的是内层子 shell，外层会话仍然活着。不复位
                     # 直通态的话，之后每条命令都只能"盲写"（不写结束标记、
                     # 无法判断成败），等于把会话永久降级。
-                    self.session.leave_interactive()
+                    sess.leave_interactive()
                     # 子进程退出是异步生效的：紧接着写的命令有概率仍被投递给
                     # 正在退出的那个 shell，留一点间隔再继续。
                     self._interruptible_sleep(0.15)
@@ -433,11 +443,11 @@ class CommandMixin:
                 # 兜底超时：没有它，任何一条"哑"命令（读 stdin 的工具、卡住的
                 # adb）都会永久占用 _user_lock，后续命令全部排队 —— 界面表现
                 # 就是「整程序卡死、点不动」。超时由 run() 内部杀会话并返回 False。
-                ok = self.session.run(cmd, timeout=timeout)
+                ok = sess.run(cmd, timeout=timeout)
             if not ok:
                 # 带上会话给的失败原因：只写「执行中断」时，用户分不清是自己点了
                 # 停止、命令超时，还是 powershell 会话被安全软件干掉后静默重建了。
-                reason = (getattr(self.session, "last_error", "") or "").strip()
+                reason = (getattr(sess, "last_error", "") or "").strip()
                 self._push_status("info", "✗ 执行中断" + ("：%s" % reason if reason else ""))
                 return False
             delay = 0

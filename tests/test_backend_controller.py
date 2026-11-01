@@ -2815,6 +2815,42 @@ def test_cmd_timeout_reads_prefs():
     assert sess2.calls[0]["timeout"] is None, "0 = 不限制"
 
 
+def test_shutdown_between_commands_ends_quietly():
+    """关窗恰好发生在命令序列中途：安静收尾，不能抛「'NoneType' has no 'run'」。
+
+    shutdown() 会先 kill 会话、再把 self.session 置空，而这条序列跑在后台
+    worker 里。旧实现每条命令都重新读 self.session，于是第二条踩到 None，被
+    _execute 兜底成「⚠ 命令执行出现异常：'NoneType' object has no attribute
+    'run'」—— 关窗瞬间弹一条对用户毫无意义的报错。
+    """
+    class ShutdownSession(InteractiveSession):
+        def __init__(self):
+            super().__init__()
+            self.n = 0
+
+        def run(self, script, timeout=None, interactive=False):
+            r = super().run(script, timeout=timeout, interactive=interactive)
+            self.n += 1
+            return r
+
+    sess = ShutdownSession()
+    api = _make_api(session=sess)
+    _no_sleep(api)
+    orig_run = sess.run
+
+    def run_and_shutdown(script, timeout=None, interactive=False):
+        r = orig_run(script, timeout=timeout, interactive=interactive)
+        # 模拟 shutdown()：置收尾标记 + 清会话引用
+        api.state.mark_shutdown()
+        api.session = None
+        return r
+
+    sess.run = run_and_shutdown
+    assert api._run_entries(_entries(("adb devices", 0), ("adb shell ls", 0)),
+                            None) is False
+    assert len(sess.calls) == 1, "关窗后不应再下发剩下的命令"
+
+
 def test_timeout_stops_remaining_commands():
     """超时（run 返回 False）必须停掉后续条目，并给出「执行中断」。"""
     class FailSession(InteractiveSession):
