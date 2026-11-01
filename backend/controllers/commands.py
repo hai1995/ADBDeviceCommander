@@ -353,8 +353,7 @@ class CommandMixin:
                     if loop:
                         serials = self.devices.selected_serials()
                         if not serials:
-                            self._push_status(
-                                "err", "⚠ 命令「%s」需要指定设备，请先在左侧勾选设备。" % name)
+                            self._push_status("err", self._no_device_hint(name))
                             return
                         for serial in serials:
                             self._push_status("info", "──── 设备: %s ────" % serial)
@@ -377,6 +376,25 @@ class CommandMixin:
                 busy, changed = self.state.end_run()
                 if changed:
                     self.bus.push("stop_state", {"running": busy})
+
+    def _no_device_hint(self, name):
+        """「命令需要设备，却一台都不可下发」时的提示。
+
+        设备离线 / 未授权 / 正在重连时 `selected_serials()` 同样是空，与「压根
+        没勾选」表现一致。旧提示一律是「请先在左侧勾选设备」，于是用户会去点
+        一个**已经勾好**的设备，反复几次也解决不了——真正要处理的是设备状态
+        （授权弹窗没点、USB 掉了、adb 掉线）。
+        """
+        try:
+            checked = [s for s, on in (self.devices.device_checked or {}).items()
+                       if on]
+        except Exception:
+            checked = []
+        if checked:
+            return ("⚠ 命令「%s」需要设备，但已勾选的 %d 台当前都不可用"
+                    "（离线 / 未授权 / 正在重连）：%s"
+                    % (name, len(checked), "、".join(sorted(checked))))
+        return "⚠ 命令「%s」需要指定设备，请先在左侧勾选设备。" % name
 
     def _run_entries(self, entries, serial):
         """逐条下发命令；adb shell 交互 / 合并 / delay 与 legacy 语义一致。

@@ -3289,3 +3289,21 @@ def test_devaudio_teardown_failure_keeps_video(tmp_path):
     assert any("设备音频收尾失败" in x for x in texts), texts
     assert any("录屏已保存" in x for x in texts), texts
     assert api._rec_session == {}
+
+
+def test_command_hint_tells_unusable_checked_devices_apart():
+    """勾了但设备都不可用 ≠ 没勾：提示要指到设备状态上。
+
+    设备离线 / 未授权时 selected_serials() 同样是空。旧提示一律「请先在左侧
+    勾选设备」，用户于是去点一个**已经勾好**的设备——反复几次也解决不了，因为
+    真正要处理的是设备状态（授权弹窗没点 / 掉线 / adb 掉线）。
+    """
+    api = _make_api()
+    api.devices.device_state = {"C3": "unauthorized"}
+    api.devices.device_checked = {"C3": True}
+    api._execute({"id": "__custom__", "name": "自定义命令",
+                  "commands": [{"command": "adb shell ls", "delay": 0}]})
+
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("都不可用" in t and "C3" in t for t in texts), texts
+    assert not any("请先在左侧勾选设备" in t for t in texts), texts
