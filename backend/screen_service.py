@@ -23,6 +23,32 @@ from backend.device_proc import kill_device_process
 from core import imgbytes
 from core.constants import adb_kwargs, adb_popen_kwargs, no_window_flags, safe_name
 
+# adb 明确表示「这台设备已经不在了」的报错片段（用于把「设备掉线」与
+# 「文件还没写好」区分开，见 VideoRecorder._remote_probe）。
+# 刻意只收与设备可达性有关的措辞：`No such file or directory` 这类**不**在内，
+# 它是正常的「还没生成」，需要继续退避等待。
+_DEVICE_GONE_HINTS = (
+    "device not found",
+    "device '",
+    "device offline",
+    "device unauthorized",
+    "no devices/emulators found",
+    "no devices found",
+    "cannot connect to daemon",
+    "error: closed",
+    "protocol fault",
+)
+
+# `settings put` 被系统拒绝时，报错文本里必然出现的片段（见 set_system_setting_ex）。
+# 只收明确表示「被拒」的措辞：正常写入时这两路都是空的，不会误报。
+_SETTING_REJECT_HINTS = (
+    "securityexception",
+    "permission denial",
+    "permission denied",
+    "error:",
+    "exception",
+)
+
 
 class ScreenCapturer:
     # 文件名序号：时间戳只精确到秒，同一秒内的两次截图会算出**同一个路径** ——
@@ -278,6 +304,25 @@ class VideoRecorder:
 
         value 为 "1" / "0" / None（None 或 "null"/空 = 删除该键，
         用于恢复「从未设置过」的设备原状）。
+
+        只回 bool：需要知道**为什么**失败的调用方用 set_system_setting_ex。
+        """
+        return VideoRecorder.set_system_setting_ex(adb, serial, key, value)[0]
+
+    @staticmethod
+    def set_system_setting_ex(adb, serial, key, value):
+        """同 set_system_setting，但返回 (是否成功, 失败原因)。
+
+        `settings put` 被系统拒绝时**不一定**返回非零：部分 ROM（尤其是国产
+        定制系统的「安全策略」）把 `java.lang.SecurityException` /
+        `Permission denial` 打到 stdout 后仍以 rc=0 退出。只看 returncode 会
+        把「没改成」当成「改好了」：
+
+          * 录屏开始时 → 用户勾了「指针位置 / 触摸圆点」，录像里却什么都没有；
+          * 录屏结束时 → 以为把设备的值恢复了，实际 overlay 一直开着，用户
+            下次正常用手机时满屏准星，却不知道是谁开的。
+
+        判据与 adb 的其他调用一致：stdout/stderr 里出现明确的拒绝字样即算失败。
         """
         try:
             if value is None or str(value).strip().lower() in ("null", ""):
@@ -287,9 +332,17 @@ class VideoRecorder:
                 cmd = [adb, "-s", serial, "shell", "settings", "put",
                        "system", key, str(value)]
             r = subprocess.run(cmd, **adb_kwargs(10))
-            return r.returncode == 0
-        except Exception:
-            return False
+        except Exception as e:
+            return False, str(e)[:160]
+        out = "%s\n%s" % (r.stdout or "", r.stderr or "")
+        low = out.lower()
+        for hint in _SETTING_REJECT_HINTS:
+            if hint in low:
+                return False, " ".join(out.split())[:160]
+        if r.returncode != 0:
+            return False, (" ".join(out.split())[:160]
+                           or "settings 返回 %d" % r.returncode)
+        return True, ""
 
     def _stop_device_screenrecord(self, adb, serial):
         """精准结束设备端 screenrecord：用 SIGINT 让其优雅收尾（写回 moov 头），这是录出
@@ -353,14 +406,39 @@ class VideoRecorder:
                 continue
 
     @staticmethod
-    def _remote_exists(adb, serial, remote):
-        """设备端文件是否存在（screenrecord 收尾后才生成，故 stop 时需轮询等待）。"""
+    def _remote_probe(adb, serial, remote):
+        """探测设备端文件是否就绪。返回 (就绪, 说明, 设备是否已不可达)。
+
+        收尾/写 moov 有延迟，所以「文件还不存在」值得退避重试；但**设备掉线**
+        是另一回事——`adb shell ls` 会一路失败，重试 9 秒后依然失败，最终报的
+        却是「设备端未生成录屏文件（screenrecord 可能未启动/提前退出）」，把
+        用户引向一个并不存在的问题。两者必须分开：
+
+          * `ls: /path: No such file or directory`（或空输出）→ 文件还没写好，等；
+          * `error: device 'A1' not found` / `device offline` / `error: closed`
+            → 设备已经不在了，再等也没有结果，应立即报真因。
+
+        adb 的报错既可能落在 stdout 也可能落在 stderr（设备端命令的输出本来就
+        在 stdout），两路都要采集，否则这句说明永远是空的。
+        """
         try:
             r = subprocess.run(
                 [adb, "-s", serial, "shell", "ls", remote], **adb_kwargs(15))
-            return r.returncode == 0 and (r.stdout or "").strip() != ""
-        except Exception:
-            return False
+        except Exception as e:
+            return False, str(e)[:200], False
+        out = "%s\n%s" % (r.stdout or "", r.stderr or "")
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return True, "", False
+        low = out.lower()
+        for hint in _DEVICE_GONE_HINTS:
+            if hint in low:
+                return False, " ".join(out.split())[:200], True
+        return False, " ".join(out.split())[:200], False
+
+    @staticmethod
+    def _remote_exists(adb, serial, remote):
+        """设备端文件是否存在（screenrecord 收尾后才生成，故 stop 时需轮询等待）。"""
+        return VideoRecorder._remote_probe(adb, serial, remote)[0]
 
     @staticmethod
     def _mp4_has_moov(path):
@@ -399,7 +477,18 @@ class VideoRecorder:
         # 把真实错误吞成一句空泛的「pull 失败」。
         last_err = "pull 失败"
         for attempt in range(6):
-            if self._remote_exists(self.adb, serial, remote):
+            ready, why, gone = self._remote_probe(self.adb, serial, remote)
+            if gone:
+                # 设备掉线 / 未授权 / adb 连接断了：`ls` 再试一百次也是同一句话。
+                # 旧实现把它与「文件还没写好」一视同仁，白等 9 秒，最后报
+                # 「设备端未生成录屏文件（screenrecord 可能未启动/提前退出）」——
+                # 用户于是去查 screenrecord，而真正的问题是设备已经不在了
+                # （往往是拔了线、锁屏杀掉了 adb、或者无线设备换了 IP）。
+                # 立即返回真因，并把 adb 的原话带上。
+                return False, None, (
+                    "设备已断开，录屏文件无法取回%s"
+                    % ("（%s）" % why if why else ""))
+            if ready:
                 try:
                     r = subprocess.run(
                         [self.adb, "-s", serial, "pull", remote, local],
@@ -436,7 +525,11 @@ class VideoRecorder:
                 except Exception as e:
                     last_err = str(e)[:200]
             else:
-                last_err = "设备端未生成录屏文件 %s（screenrecord 可能未启动/提前退出）" % remote
+                last_err = ("设备端未生成录屏文件 %s（screenrecord 可能未启动/提前退出）"
+                            % remote)
+                if why:
+                    # 带上 adb 原话：`ls` 报的是「文件不存在」还是别的，只有它说得清
+                    last_err += "；%s" % why
             if attempt < 5:
                 time.sleep(0.6 * (attempt + 1))
         return False, None, last_err

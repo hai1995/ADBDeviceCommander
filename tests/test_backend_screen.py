@@ -704,3 +704,119 @@ def test_early_exit_reports_device_side_error_from_stdout(monkeypatch, tmp_path)
     ok, err = vr.start("A1", str(tmp_path))
     assert ok is False
     assert "Unable to open file" in err, err
+
+
+def test_remote_probe_tells_device_gone_apart_from_missing_file(monkeypatch):
+    """`ls` 失败有两种原因：设备不在了 vs 文件还没写好，必须分开。
+
+    旧实现只回一个布尔，两者长得一模一样；收尾循环于是对「设备掉线」也老老实实
+    退避 9 秒，最后报「设备端未生成录屏文件（screenrecord 可能未启动/提前退出）」。
+    """
+    class _R:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    cases = [
+        ("error: device 'A1' not found\n", True),
+        ("error: device offline\n", True),
+        ("error: no devices/emulators found\n", True),
+        ("ls: /sdcard/x.mp4: No such file or directory\n", False),
+    ]
+    for text, gone in cases:
+        monkeypatch.setattr(ss.subprocess, "run",
+                            lambda *a, **k: _R(1, text, ""))
+        ready, why, got_gone = ss.VideoRecorder._remote_probe(
+            "adb", "A1", "/sdcard/x.mp4")
+        assert ready is False
+        assert got_gone is gone, (text, got_gone)
+        assert why, "说明不能为空：否则界面上只剩一句「失败」"
+
+
+def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
+    """设备掉线时不该白等 9 秒、更不该报成「screenrecord 可能没启动」。
+
+    拔线 / 无线设备换 IP / 锁屏后 adb 掉线，都会让 `ls` 一直返回
+    `error: device 'A1' not found`。旧实现对此毫无区分：6 次退避（0.6+1.2+…+3.0
+    ≈ 9 秒）后报「设备端未生成录屏文件（screenrecord 可能未启动/提前退出）」，
+    用户于是去查 screenrecord / 录屏参数，而设备早就不在电脑上了。
+    """
+    sleeps = []
+    monkeypatch.setattr(ss.time, "sleep", lambda s: sleeps.append(s))
+
+    def fake_run(cmd, **kw):
+        if "ls" in cmd:
+            return type("R", (), {"returncode": 1, "stdout":
+                                  "error: device 'A1' not found\n", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    ok, lp, err = vr._pull_and_finish("A1")
+
+    assert ok is False
+    assert "设备已断开" in err, err
+    assert "not found" in err, "必须带上 adb 的原话，否则用户不知道该查什么：%r" % err
+    assert not sleeps, "已知设备不在，就不该再退避等待（白等 9 秒）：%r" % sleeps
+
+
+def test_pull_still_waits_when_file_is_simply_not_written_yet(monkeypatch, tmp_path):
+    """文件还没写好（No such file or directory）必须继续等，不能误判成设备掉线。
+
+    screenrecord 收到 SIGINT 后要几百毫秒才写回 moov 并关闭文件，这段窗口里
+    `ls` 就是「不存在」。把它当成设备掉线会直接丢掉一段正常的录制。
+    """
+    monkeypatch.setattr(ss.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "ls" in cmd:
+            return type("R", (), {"returncode": 1, "stdout":
+                                  "ls: /sdcard/x.mp4: No such file or directory\n",
+                                  "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    ok, lp, err = vr._pull_and_finish("A1")
+
+    assert ok is False
+    assert "设备已断开" not in err, err
+    assert "未生成录屏文件" in err, err
+    assert len([c for c in calls if "ls" in c]) == 6, "应当退避重试满 6 次"
+
+
+def test_set_system_setting_reports_rejection_even_with_zero_exit(monkeypatch):
+    """`settings put` 被系统策略拒绝时 rc 仍为 0：不能当成功。
+
+    `settings put` 碰到 SecurityException / Permission denial 时，报错打在
+    stdout 上、退出码却是 0（国产定制系统的「安全策略」尤其常见）。只看
+    returncode 会把它当成「改好了」：
+
+      * 录屏开始时 → 用户勾了「指针位置 / 触摸圆点」，录像里什么都没有；
+      * 录屏结束时 → 以为恢复了原值，实际 overlay 一直开着，用户下次正常用
+        手机时满屏准星，却不知道是谁开的。
+    """
+    def fake_run(cmd, **kw):
+        return type("R", (), {
+            "returncode": 0,
+            "stdout": "Exception occurred while executing 'put':\n"
+                      "java.lang.SecurityException: Permission denial: writing "
+                      "to settings requires android.permission.WRITE_SECURE_SETTINGS\n",
+            "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    ok, err = ss.VideoRecorder.set_system_setting_ex(
+        "adb", "A1", ss.KEY_POINTER_LOCATION, "1")
+    assert ok is False
+    assert "SecurityException" in err or "Permission denial" in err, err
+
+
+def test_set_system_setting_success_has_no_error_text(monkeypatch):
+    """正常写入（两路输出皆空、rc=0）必须判成功，不能误报。"""
+    monkeypatch.setattr(ss.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {
+                            "returncode": 0, "stdout": "", "stderr": ""})())
+    ok, err = ss.VideoRecorder.set_system_setting_ex(
+        "adb", "A1", ss.KEY_SHOW_TOUCHES, "1")
+    assert ok is True and err == ""
