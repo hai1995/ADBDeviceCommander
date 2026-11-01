@@ -39,6 +39,16 @@ from core.constants import (
 )
 from core.devices import parse_devices, plan_devices
 
+# 手动刷新撞上「已经有一轮在跑」时，最多等这么久（秒）。
+#
+# 为什么要有这个等待：自动轮询每 5 秒调一次 refresh，本身很快；但 adb 卡住时
+# _poll_devices 会重试 4 次（每次 DEVICE_POLL_TIMEOUT 超时 + 间隔），`_busy`
+# 可能被占住几十秒 —— 而这恰恰是用户会去点「刷新」的时刻。旧实现在 _busy 为真时
+# 直接 return False，连 verbose=True 的「刷新完成」提示都不会发：用户点了按钮，
+# 界面上**什么也没发生**，只能反复点。
+# 上限取 12s：比一轮正常轮询长得多，又不至于让用户对着按钮干等半分钟。
+BUSY_WAIT_S = 12.0
+
 
 class DeviceManager:
     """设备列表状态与刷新（可被 WebApi / 自动轮询 / 其它服务共享）。
@@ -57,6 +67,10 @@ class DeviceManager:
         self.device_model = {}     # serial -> model（含宽限内设备的最后已知型号）
         self._absent = {}          # serial -> int（宽限内「消失」的连续缺失计数）
         self._busy = False         # 刷新互斥（adb 卡顿时不叠加刷新线程）
+        # 与 _busy 配对：一轮刷新结束（finally）时 set，等待方据此立刻醒来，
+        # 不必轮询 _busy 状态（轮询会引入 50ms 级别的最小延迟与额外 CPU）。
+        self._idle = threading.Event()
+        self._idle.set()
         # ---- 防误报断连的运行态 ----
         self._had_devices = False  # 上一次成功轮询是否解析出过设备
         self._polled_once = False  # 是否已成功轮询过至少一次（见 refresh 里的 first_load）
@@ -82,21 +96,23 @@ class DeviceManager:
     # ------------------------------------------------------------------
     # 刷新
     # ------------------------------------------------------------------
-    def refresh(self, adb="adb", verbose=False):
+    def refresh(self, adb="adb", verbose=False, wait=False):
         """执行 `adb devices -l` 并广播结果。
 
         返回 True 表示列表有实质变化（前端据此重建设备卡片）。
         verbose=True 用于手动刷新：无论有无变化都补一条“完成”状态；
         自动轮询传 verbose=False，无变化时完全静默，避免每 5 秒刷屏。
+        wait=True 用于**用户在等结果**的场合（手动点「刷新」）：撞上正在进行的
+        一轮时先等它结束（上限 BUSY_WAIT_S）再自己刷一次，等不到就明确告知；
+        wait=False 时维持旧行为（立刻放弃，供自动轮询——它下一秒还会再来，
+        排队没有意义）。
 
         刷新失败（超时 / 异常 / 可疑空结果重试后仍失败）时返回 False 且
         **不清空快照**：界面继续展示上一次的设备列表，防止 adb 偶发抖动被
         用户当成「程序自动断连」。
         """
-        with self._lock:
-            if self._busy:
-                return False
-            self._busy = True
+        if not self._acquire(wait, verbose):
+            return False
         try:
             # adb 的 I/O 放在锁外：即便 adb 卡满 10s，用户勾选设备也不被阻塞
             raw = self._poll_devices(adb, verbose)
@@ -163,6 +179,37 @@ class DeviceManager:
         finally:
             with self._lock:
                 self._busy = False
+            self._idle.set()
+
+    # ------------------------------------------------------------------
+    # 刷新互斥
+    # ------------------------------------------------------------------
+    def _acquire(self, wait, verbose):
+        """尝试占用刷新互斥；占用成功返回 True。
+
+        wait=True 时若已被占用，就等上一轮结束（上限 BUSY_WAIT_S）再抢；
+        等不到（或 wait=False 直接放弃）时，**手动刷新必须给出回音** ——
+        否则用户点「刷新」看到的是彻底的静默，只能反复点。自动轮询
+        （verbose=False）保持静默放弃，它下一秒还会再来。
+        """
+        deadline = time.time() + (BUSY_WAIT_S if wait else 0)
+        while True:
+            with self._lock:
+                if not self._busy:
+                    self._busy = True
+                    self._idle.clear()
+                    return True
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
+            # Event 已 set（上一轮刚结束）时立即返回，下一圈重新抢锁
+            self._idle.wait(remain)
+        if verbose and self.bus:
+            self.bus.push("status", {
+                "type": "warn",
+                "text": "设备刷新正在进行中（上一轮 adb devices 还没返回），"
+                        "请稍后再点一次「刷新」。"})
+        return False
 
     # ------------------------------------------------------------------
     # 防误报断连：轮询 + 重试 + 自愈（I/O 均在锁外执行）

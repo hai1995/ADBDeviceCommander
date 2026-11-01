@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """backend.device_service.DeviceManager —— 设备刷新 / 勾选 / 差异播报单测。"""
 import subprocess
+import threading
+import time
 
 import backend.device_service as ds
 from backend.bus import BackendBus
@@ -463,3 +465,90 @@ def test_model_backfill_does_not_announce_state_change(monkeypatch):
     # 仍要重渲染（界面上那台设备的型号要从空补成 Pixel）
     assert dev_ev["payload"]["stat_changed"] == ["A1"]
     assert mgr.device_model.get("A1") == "Pixel"
+
+
+# ---------------------------------------------------------------------------
+# 刷新互斥：手动点「刷新」不能静默无反应
+# ---------------------------------------------------------------------------
+class _SlowRun:
+    """第一次调用卡住（模拟 adb 卡住的一轮轮询），之后正常返回。"""
+
+    def __init__(self, lines, wait_s=2.0):
+        self.lines = lines
+        self.wait_s = wait_s
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.n = 0
+
+    def __call__(self, cmd, **kw):
+        self.n += 1
+        if self.n == 1:
+            self.started.set()
+            self.release.wait(self.wait_s)
+        return type("R", (), {"stdout": self.lines, "stderr": ""})()
+
+
+def _status_texts(bus):
+    return [(e.get("payload") or {}).get("text") or ""
+            for e in bus.take() if e["kind"] == "status"]
+
+
+def test_manual_refresh_waits_instead_of_silent_drop(monkeypatch):
+    """自动轮询正占着刷新时，手动刷新应等它结束再刷一轮。
+
+    旧实现 `_busy` 为真就 return False，`verbose=True` 的「刷新完成」提示也
+    不会发 —— 用户点按钮看到的是彻底静默。而 adb 卡住时 `_busy` 会被占几十
+    秒（重试 4 次），那正是用户会去点「刷新」的时刻。
+    """
+    bus, mgr = _fresh(monkeypatch, [])
+    slow = _SlowRun(_adb_lines([("A1", "device", "Pixel")]))
+    monkeypatch.setattr(ds.subprocess, "run", slow)
+    monkeypatch.setattr(ds, "BUSY_WAIT_S", 3.0, raising=False)
+
+    holder = threading.Thread(target=lambda: mgr.refresh("adb", verbose=False))
+    holder.start()
+    assert slow.started.wait(2.0)
+    try:
+        slow.release.set()          # 让第一轮跑完
+        mgr.refresh("adb", verbose=True, wait=True)
+    finally:
+        holder.join(3.0)
+    # 两轮看到的是同一台设备（无实质变化），但手动刷新必须留下「刷新完成」回音
+    assert any("刷新完成" in x for x in _status_texts(bus))
+
+
+def test_manual_refresh_reports_when_previous_round_is_stuck(monkeypatch):
+    """等不到（上一轮卡死）时必须明说，不能又是静默。"""
+    bus, mgr = _fresh(monkeypatch, [])
+    slow = _SlowRun(_adb_lines([]), wait_s=1.5)
+    monkeypatch.setattr(ds.subprocess, "run", slow)
+    monkeypatch.setattr(ds, "BUSY_WAIT_S", 0.05, raising=False)
+
+    holder = threading.Thread(target=lambda: mgr.refresh("adb", verbose=False))
+    holder.start()
+    assert slow.started.wait(2.0)
+    try:
+        assert mgr.refresh("adb", verbose=True, wait=True) is False
+        assert any("正在进行中" in x for x in _status_texts(bus))
+    finally:
+        slow.release.set()
+        holder.join(3.0)
+
+
+def test_auto_refresh_gives_up_immediately_without_noise(monkeypatch):
+    """自动轮询保持旧行为：立刻放弃、不播报（它下一秒还会再来）。"""
+    bus, mgr = _fresh(monkeypatch, [])
+    slow = _SlowRun(_adb_lines([]), wait_s=1.5)
+    monkeypatch.setattr(ds.subprocess, "run", slow)
+
+    holder = threading.Thread(target=lambda: mgr.refresh("adb", verbose=False))
+    holder.start()
+    assert slow.started.wait(2.0)
+    try:
+        t0 = time.time()
+        assert mgr.refresh("adb", verbose=False) is False
+        assert time.time() - t0 < 0.5
+        assert bus.take() == []
+    finally:
+        slow.release.set()
+        holder.join(3.0)

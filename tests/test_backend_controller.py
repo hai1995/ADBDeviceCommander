@@ -3449,3 +3449,48 @@ def test_perf_threshold_save_failure_is_reported(monkeypatch):
     assert any("无法写入" in e for e in res["errors"]), res["errors"]
     texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
     assert not any("已更新" in t for t in texts), texts
+
+
+def test_manual_refresh_reports_when_already_running(monkeypatch):
+    """已有刷新在跑时，手动点「刷新」不能再是彻底的静默。
+
+    回归：refresh_devices 用固定 key "refresh"（boot 首刷也是它）交给 Workers，
+    撞上存活线程时 spawn 直接复用 —— 这一次点击既不刷新也不提示，用户只能反复点。
+    """
+    api = _make_api()
+    release = threading.Event()
+    monkeypatch.setattr(api.devices, "refresh",
+                        lambda *a, **kw: release.wait(3.0) or False)
+    assert api.refresh_devices()["ok"] is True
+    assert wait_until(lambda: api.workers.is_running("refresh"))
+    res = api.refresh_devices()
+    assert res.get("running") is True, res
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("正在进行中" in t for t in texts), texts
+    release.set()
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_screen_record_devaudio_failure_reports_reason(monkeypatch, tmp_path):
+    """设备音频起不来时必须给出原因，而不是一句「启动失败」。
+
+    回归：record 只拿到 start() 的 bool，toast 里没有 tinycap 的退出码 / root
+    提示 —— 用户不知道该 adb root 还是换台设备，本次录屏也就悄悄没了声音。
+    """
+    api = _make_api()
+    monkeypatch.setattr(ctrl.DeviceAudioCapture, "supported",
+                        staticmethod(lambda *a, **kw: True))
+    monkeypatch.setattr(
+        api.device_audio, "start_ex",
+        lambda s, r: (False, "tinycap 启动后立即退出（退出码 1）：多数机型需要 root"))
+    monkeypatch.setattr(api.video, "start",
+                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
+
+    res = api.screen_record_start(None, with_devaudio=True,
+                                  save_dir=str(tmp_path))
+    assert res.get("ok") is True, res           # 无设备音频也要照常录屏
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("音频采集未启动" in t and "root" in t for t in texts), texts
+    assert api._rec_session["devaudio"] == {}
+    api._rec_session = {}
+    api.workers.shutdown(timeout=2.0)
