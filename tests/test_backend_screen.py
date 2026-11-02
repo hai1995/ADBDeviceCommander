@@ -820,3 +820,34 @@ def test_set_system_setting_success_has_no_error_text(monkeypatch):
     ok, err = ss.VideoRecorder.set_system_setting_ex(
         "adb", "A1", ss.KEY_SHOW_TOUCHES, "1")
     assert ok is True and err == ""
+
+def test_pull_gives_up_at_once_on_permission_denied(monkeypatch, tmp_path):
+    """`pull` 报权限错误时不该再退避 9 秒 —— 它不会自己变好。
+
+    /sdcard 被策略锁住、目标位置只读时，adb 每次都给同一句 Permission denied。
+    旧实现照样跑满 6 次退避（0.6+1.2+…+3.0 ≈ 9 秒），最后报的还是同一句话；
+    用户面对的就是「点停止后程序卡了十几秒，然后说了一句没头没尾的失败」。
+    """
+    sleeps = []
+    monkeypatch.setattr(ss.time, "sleep", lambda s: sleeps.append(s))
+    pulls = []
+
+    def fake_run(cmd, **kw):
+        if "pull" in cmd:
+            pulls.append(cmd)
+            return type("R", (), {
+                "returncode": 1, "stdout":
+                "adb: error: failed to copy '/sdcard/x.mp4' to 'x.mp4': "
+                "remote Permission denied\n", "stderr": ""})()
+        # ls 探测：文件就在那里（所以问题不在「还没写好」）
+        return type("R", (), {"returncode": 0, "stdout": "-rw-rw---- 1 x.mp4\n",
+                              "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    ok, lp, err = vr._pull_and_finish("A1")
+
+    assert ok is False
+    assert "Permission denied" in err, err
+    assert len(pulls) == 1, "不可恢复的错误只该尝试一次：%d" % len(pulls)
+    assert not sleeps, "已知拿不到，就不该再退避等待：%r" % sleeps

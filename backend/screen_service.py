@@ -39,6 +39,18 @@ _DEVICE_GONE_HINTS = (
     "protocol fault",
 )
 
+# `adb pull` 里**不会自愈**的报错：权限 / 磁盘满 / 只读文件系统 / 目标是目录。
+# 这类错误再等 6 次、白退避 9 秒，最后报的还是同一句话，而现场看着就像「程序
+# 卡住了」。命中即返回，把原因直接给出去（与 _DEVICE_GONE_HINTS 同一思路：
+# 能判定不可恢复的，就别耗在重试上）。
+_FATAL_PULL_HINTS = (
+    "permission denied",
+    "operation not permitted",
+    "no space left",
+    "read-only file system",
+    "is a directory",
+)
+
 # `settings put` 被系统拒绝时，报错文本里必然出现的片段（见 set_system_setting_ex）。
 # 只收明确表示「被拒」的措辞：正常写入时这两路都是空的，不会误报。
 _SETTING_REJECT_HINTS = (
@@ -520,6 +532,10 @@ class VideoRecorder:
                         return True, local, None
                     if err:
                         last_err = err[:200]
+                        low = err.lower()
+                        if any(h in low for h in _FATAL_PULL_HINTS):
+                            # 已经拿到 adb 的明确答复，且它不会因为再等一会儿而变好
+                            return False, None, "取回录屏文件失败：%s" % last_err
                     else:
                         last_err = "pull 返回非零但无错误输出（可能设备端文件未就绪）"
                 except Exception as e:
