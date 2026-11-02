@@ -1804,6 +1804,11 @@ def test_recording_does_not_steal_running_logcat_capture(monkeypatch, tmp_path):
     assert started, "录屏应尝试启动同步 logcat 抓取"
     assert api._rec_session["logcat_captures"] == {}, \
         "未能启动的抓取不得登记进会话：%r" % api._rec_session["logcat_captures"]
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert not any("已同步开始 logcat 抓取" in t for t in texts), (
+        "一条抓取都没起来时不得播报「已同步开始」：%r" % (texts,))
+    assert any("没有附带 logcat" in t for t in texts), (
+        "必须如实说明本次录屏没有日志文件：%r" % (texts,))
 
     api._rec_session["videos"] = {}          # 跳过视频收尾，只看抓取处理
     api.screen_record_stop()

@@ -181,6 +181,7 @@ class RecordMixin:
                 self._push_status("err", "⚠ 录屏启动失败 %s: %s" % (s, local))
         # 同步抓取 logcat（走落盘抓取路径，避免占用实时监控渲染管线）
         if with_logcat:
+            started_caps = 0
             for s in serials:
                 # safe_name：无线序列号含冒号，Windows 下文件名非法
                 lp = os.path.join(
@@ -199,11 +200,21 @@ class RecordMixin:
                 if self.logcat_capture.start(
                         s, lp, ["all"], level_filter=None):
                     self._rec_session["logcat_captures"][s] = lp
+                    started_caps += 1
                 else:
                     self._push_status(
                         "warn", "⚠ %s 已有 logcat 抓取在进行，本次录屏未重复抓取" % s)
-            self._push_status(
-                "info", "已同步开始 logcat 抓取（全部缓冲区 + 全部级别，随录屏停止）")
+            # 只在**真的**起来了至少一条时才播报。原来无条件推「已同步开始
+            # logcat 抓取」：设备上已有抓取在跑时一条都没起，用户却被告知
+            # 日志已在抓，直到停止录屏、打开产物包才发现里面没有 txt ——
+            # 事后复现问题唯一的物证就这么无声地缺了。
+            if started_caps:
+                self._push_status(
+                    "info", "已同步开始 logcat 抓取（全部缓冲区 + 全部级别，随录屏停止）")
+            elif ok_any:
+                self._push_status(
+                    "warn", "⚠ 本次录屏没有附带 logcat：%d 台设备均已存在进行中的抓取，"
+                            "录制产物里不会有日志文件" % len(serials))
         if not ok_any:
             # 全部设备启动失败：撤销本会话残留（麦 / 设备音频 / 同步 logcat
             # 可能已启动）。若不清理，前端看不到「录制中」也就点不到停止，残留
