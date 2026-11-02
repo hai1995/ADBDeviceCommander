@@ -68,6 +68,13 @@ class WebApiBase:
         # 每台设备「最新一次列目录请求」的序号：迟到的旧响应据此丢弃，
         # 避免它把刚打开的目录内容覆盖回上一个目录。
         self._file_req = {}
+        # 每台设备「当前正在看的目录」（file_list 时记录）：批量上传的合并
+        # 刷新据此判断用户是否已经切走，防止把界面弹回上传时的目录。
+        self._file_dir = {}
+        # 批量上传的目录刷新合并：serial -> 待触发的 Timer（见 file.py 的
+        # _schedule_file_refresh）。同一设备只留一个，关闭时统一 cancel。
+        self._file_refresh_timers = {}
+        self._file_refresh_lock = threading.Lock()
         # 截图请求序号：每次截图用独立 worker key（见 screenshot），
         # 否则同一设备连点两次会被同名去重静默吞掉一次。
         self._shot_seq = itertools.count(1)
@@ -218,6 +225,16 @@ class WebApiBase:
             # 收尾完毕即清空会话：否则关闭过程中用户再点一次「停止录屏」，
             # _screen_record_stop_locked 会拿残留的 videos 路径再合成/打包一遍。
             self._rec_session = {}
+        # 待触发的「合并刷新」定时器：关闭时先取消，否则它会在 workers 收尾
+        # 之后再去起一个 adb ls（窗口都关了，日志里只剩一条来源不明的错误）。
+        with self._file_refresh_lock:
+            pending = list(self._file_refresh_timers.values())
+            self._file_refresh_timers.clear()
+        for t in pending:
+            try:
+                t.cancel()
+            except Exception:
+                pass
         self.workers.shutdown(timeout=2.0)
         # 投屏窗口由本程序拉起，关闭时一并收掉（用户早已自己关掉的不会受影响）
         try:

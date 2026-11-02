@@ -3601,3 +3601,83 @@ def test_file_upload_rejects_empty_content(monkeypatch):
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
     assert any("没有收到文件内容" in t for t in texts), texts
     assert not any("上传完成" in t for t in texts), texts
+
+
+def test_file_upload_coalesces_directory_refresh(monkeypatch):
+    """多选上传 N 个文件，只刷一次目录。
+
+    回归：每个文件上传完成后各自 `_file_refresh` 一次 —— 20 个文件就是 20 次
+    `adb shell ls`（每次 100~300ms，全排在 adb 队列里）加 20 次 file 事件，
+    用户看到文件列表反复闪烁、刚勾选的项被一轮轮清空，而真正需要的只是最后
+    那一次（那时目录里才躺齐全部文件）。
+    """
+    import base64
+    api = _make_api()
+    monkeypatch.setattr(api, "_FILE_REFRESH_DEBOUNCE_S", 0.05)
+    monkeypatch.setattr(api.file_svc, "upload", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: fn(*a, **kw))
+    listed = []
+    monkeypatch.setattr(api, "file_list",
+                        lambda s, p: listed.append((s, p)))
+    api._file_dir["A1"] = "/sdcard"          # 用户当前在看 /sdcard
+    b64 = base64.b64encode(b"hi").decode()
+
+    for name in ("a.txt", "b.txt", "c.txt"):
+        api._run_file_op(api._do_file_upload_data, "A1", name, b64,
+                         "/sdcard/" + name)
+
+    assert listed == [], "合并窗口内不该立刻刷目录（实测 %r）" % listed
+    assert wait_until(lambda: len(listed) == 1, 2.0), listed
+    time.sleep(0.2)                          # 再等一个窗口，确认没有第二批
+    assert listed == [("A1", "/sdcard")], listed
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_file_upload_refresh_skipped_after_user_left_dir(monkeypatch):
+    """上传的合并刷新不能把已经切走的用户弹回旧目录。
+
+    回归：上传 20 个文件后用户点进了别的目录，定时器到期仍去列上传时的目录，
+    前端收到 file 事件就把界面拉回去 —— 用户以为自己点错了。
+    """
+    import base64
+    api = _make_api()
+    monkeypatch.setattr(api, "_FILE_REFRESH_DEBOUNCE_S", 0.05)
+    monkeypatch.setattr(api.file_svc, "upload", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: fn(*a, **kw))
+    listed = []
+    monkeypatch.setattr(api, "file_list",
+                        lambda s, p: listed.append((s, p)))
+    api._file_dir["A1"] = "/sdcard"
+    b64 = base64.b64encode(b"hi").decode()
+
+    api._run_file_op(api._do_file_upload_data, "A1", "a.txt", b64,
+                     "/sdcard/a.txt")
+    api._file_dir["A1"] = "/sdcard/Download"   # 合并窗口内切走了
+
+    time.sleep(0.3)
+    assert listed == [], "用户已切到别的目录，这次刷新必须丢弃：%r" % (listed,)
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_shutdown_cancels_pending_file_refresh(monkeypatch):
+    """关闭程序时未到期的合并刷新必须被取消。
+
+    否则它在 workers 收尾之后才触发，去起一个 adb ls：窗口已关，命令没有
+    收件人，日志里只剩一条来源不明的错误。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api, "_FILE_REFRESH_DEBOUNCE_S", 0.3)
+    listed = []
+    monkeypatch.setattr(api, "file_list",
+                        lambda s, p: listed.append((s, p)))
+    api._file_dir["A1"] = "/sdcard"
+
+    api._schedule_file_refresh("A1", "/sdcard/x.txt")
+    assert api._file_refresh_timers, "定时器未登记"
+    api.shutdown()
+
+    time.sleep(0.5)
+    assert listed == [], "关闭后不该再有目录刷新：%r" % (listed,)
+    assert not api._file_refresh_timers, "定时器应已在关闭时清空"

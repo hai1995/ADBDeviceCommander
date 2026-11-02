@@ -2,11 +2,15 @@
 """backend.controllers.file —— 文件浏览 / 增删改 / 上传下载"""
 
 from backend.controller import (
-    os, safe_name, subprocess, sys
+    os, safe_name, subprocess, sys, threading
 )
 
 class FileMixin:
     """设备文件浏览/增删改/上传下载/预览。"""
+
+    # 目录刷新合并窗口（秒）。一次多选上传 N 个文件会在几秒内连续完成 N 次
+    # 上传，每次都刷一次目录的话就是 N 次 `adb shell ls` + N 次列表重建。
+    _FILE_REFRESH_DEBOUNCE_S = 0.4
 
     _FILE_OP_LABELS = {
             "_do_file_list": "列出目录", "_do_file_mkdir": "创建目录",
@@ -61,6 +65,9 @@ class FileMixin:
         #    内容覆盖刚打开的目录。
         seq = next(self._file_seq)
         self._file_req[serial] = seq
+        # 记住「这台设备当前看的是哪个目录」：批量上传的合并刷新据此判断
+        # 用户是否已经切走（切走了就别再把他弹回旧目录）。
+        self._file_dir[serial] = path
         self.workers.spawn("filelist_%s_%d" % (serial, seq),
                            self._run_file_op, self._do_file_list,
                            serial, path, seq)
@@ -80,6 +87,48 @@ class FileMixin:
 
     def _file_refresh(self, serial, path):
         self.file_list(serial, self._parent_dir(path))
+
+    def _schedule_file_refresh(self, serial, path):
+        """把「稍后刷一次目录」合并成一个尾部请求（批量上传用）。
+
+        一次勾选 20 个文件上传，前端会为每个文件单独调一次 file_upload_data，
+        后端也就为每个文件各刷一次目录：20 次 `adb shell ls`（每次 100~300ms，
+        全挤在同一条 adb 队列里）+ 20 次 file 事件让列表重建。用户看到的是
+        文件列表反复闪烁、刚勾上的项被一轮轮清空，而真正需要的只是**最后
+        一次**——那一刻目录里已经躺齐了全部文件。
+
+        合并窗口取 _FILE_REFRESH_DEBOUNCE_S：比单个文件的上传间隔长，又短到
+        用户不会觉得「传完了列表没更新」。同一设备只保留一个待触发定时器
+        （后来的顶掉先前的），不同设备各算各的。
+        """
+        key = serial or ""
+        target = self._parent_dir(path)
+        with self._file_refresh_lock:
+            old = self._file_refresh_timers.pop(key, None)
+            if old is not None:
+                old.cancel()
+            timer = threading.Timer(
+                self._FILE_REFRESH_DEBOUNCE_S, self._fire_file_refresh,
+                args=(key, target))
+            timer.daemon = True
+            self._file_refresh_timers[key] = timer
+            timer.start()
+
+    def _fire_file_refresh(self, serial, target):
+        """合并窗口到期：真正发起一次列目录请求。"""
+        with self._file_refresh_lock:
+            self._file_refresh_timers.pop(serial, None)
+        if self.state.shutting_down:
+            return
+        # 用户在这 0.4 秒里点进了别的目录：这次刷新只会把界面弹回上传时的
+        # 目录（而文件其实已经传好了）。直接丢弃，别打断他的浏览。
+        cur = self._file_dir.get(serial)
+        if cur and cur != target:
+            return
+        try:
+            self.file_list(serial, target)
+        except Exception as ex:
+            self._push_status("err", "⚠ 刷新目录失败 %s：%s" % (target, ex))
 
     def _file_op(self, serial, do_fn, *args, key=None):
         """文件操作公共入口：无设备兜底 + 后台线程派发 + 立即返回。
@@ -212,7 +261,8 @@ class FileMixin:
             self._push_status("ok", "✓ 上传完成: %s" % remote)
         else:
             self._push_status("err", "⚠ 上传失败 %s: %s" % (remote, err))
-        self._file_refresh(serial, remote)
+        # 合并刷新：多选上传时 N 个文件只刷一次目录（见 _schedule_file_refresh）
+        self._schedule_file_refresh(serial, remote)
 
     def file_download(self, serial, remote, local_dir):
         # 每个文件一个独立 worker key（含序列号），保证同一设备批量「下载选中」
