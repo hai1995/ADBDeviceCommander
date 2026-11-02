@@ -605,16 +605,21 @@ def resolve_save_dir(prefs=None, default=None, ensure_dir=False):
     if not isinstance(raw, str) or not raw.strip():
         return default, None
     cfg = raw.strip()
+    mkdir_err = ""
     if not os.path.isdir(cfg) and ensure_dir:
         try:
             os.makedirs(cfg, exist_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            # 用户在本机界面新填的路径建不出来（父级被同名文件占着 / 没权限 /
+            # 盘符不存在）。旧实现吞掉异常后只说「不存在」，而用户去查时那
+            # 个路径看起来一切正常（父目录明明在）—— 提示里必须带上原因。
+            mkdir_err = str(e)
     if os.path.isdir(cfg):
         if os.access(cfg, os.W_OK):
             return cfg, None
         return default, ("配置里的保存目录不可写，已改用默认目录：%s" % default)
-    return default, ("配置里的保存目录在本机不存在，已改用默认目录：%s" % default)
+    return default, ("配置里的保存目录在本机不存在，已改用默认目录：%s%s"
+                     % (default, "（%s）" % mkdir_err if mkdir_err else ""))
 
 
 def get_pref(key, default=None):

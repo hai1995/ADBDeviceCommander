@@ -809,3 +809,20 @@ def test_save_prefs_checked_true_when_written(monkeypatch, tmp_path):
     assert ok is True
     assert merged["mirror_fps"] == 5
     assert prefs.load_prefs()["mirror_fps"] == 5
+
+
+def test_resolve_save_dir_explains_why_dir_cannot_be_created(tmp_path):
+    """用户新填的目录建不出来时，提示里必须有「为什么」。
+
+    ensure_dir=True 对应「用户在设置页填了一个新路径」。父级被同名文件占着 /
+    没权限 / 盘符不存在时 makedirs 会失败，旧实现吞掉异常后只说「不存在」——
+    用户去查那个路径时会发现一切正常（父目录明明在），根本无从下手。
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")        # 同名的普通文件占位
+    eff, note = prefs.resolve_save_dir({"save_dir": str(blocker / "shots")},
+                                       ensure_dir=True)
+    assert eff == prefs.default_save_dir()
+    assert "不存在" in note and "默认目录" in note
+    # 末尾追加了「（<底层异常>）」——不同平台的 errno 文案不同，只看结构
+    assert "（" in note and note.rstrip().endswith("）"), note
