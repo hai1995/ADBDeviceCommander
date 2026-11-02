@@ -105,7 +105,15 @@ class RecordMixin:
                                     pointer_location=True, show_touches=True):
         # 守卫：已有录制会话进行中，避免重复点击覆盖会话引用导致漏停/漏合成
         if self._rec_session:
-            return {"ok": False, "reason": "recording"}
+            # 已经在录、用户又点了一次「开始」：旧实现只回一个 reason 就返回，
+            # 前端把它原样拼进提示，用户看到的是「⚠ 录屏未能启动（recording）」
+            # —— 一句英文机器码，既没说清现在到底在不在录，也没给出下一步。
+            # 这里给一句人话：正在录几台、想重开该先停。
+            n = len(self._rec_session.get("videos") or {})
+            msg = "正在录屏中%s，如需重新开始请先点「停止录屏」" % (
+                "（%d 台设备）" % n if n > 1 else "")
+            self._push_status("info", "ℹ " + msg)
+            return {"ok": False, "reason": "recording", "message": msg}
         serials = self._target_serials(serial)
         if not serials:
             self._push_status("err", "⚠ 录屏前请先勾选至少一个设备。")
@@ -313,6 +321,11 @@ class RecordMixin:
 
     def _screen_record_stop_locked(self):
         if not self._rec_session:
+            # 会话已经不在了（自动收尾已跑过 / 上一轮停止还没回前端）：说一句，
+            # 而不是让用户对着一个「点了没反应」的按钮反复点。这条**不算错误**，
+            # 故不放进 message —— 前端按 message 弹错误 toast，会把它变成
+            # 「⚠ 停止录屏失败：当前没有进行中的录屏」，明明已经停了却说失败。
+            self._push_status("info", "ℹ 当前没有进行中的录屏（可能已经停止过了）")
             return {"ok": False, "reason": "no_session"}
         sess = self._rec_session
         # 整个收尾过程必须包在 try/finally 里：只要中途抛一次（例如保存目录所在

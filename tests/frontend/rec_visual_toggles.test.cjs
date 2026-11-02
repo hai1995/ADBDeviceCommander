@@ -163,7 +163,8 @@ const WATCHDOG_MS = 30000;
 
   console.log("\n[4] 启动失败（ok:false）：回滚按钮态，不卡在「录制中」");
   {
-    const { window, calls } = mkEnv({ ok: false, reason: "no_device" });
+    const { window, calls } = mkEnv({
+      ok: false, reason: "no_device", message: "录屏前请先勾选至少一个设备" });
     const doc = window.document;
     ok(await waitFor(() => !doc.getElementById("tool-rec").disabled,
                      4000, "录屏按钮可点"),
@@ -177,8 +178,12 @@ const WATCHDOG_MS = 30000;
     const statusText = doc.getElementById("status").textContent || "";
     ok(statusText.indexOf("录屏未能启动") >= 0,
        "状态信息提示启动失败（实际：" + statusText.trim() + "）");
-    ok(statusText.indexOf("no_device") >= 0,
-       "失败原因（no_device）透传给用户");
+    /* 原因用后端给的 message（人话），不是 reason 里的机器码：
+       旧版把 reason 原样拼进去，用户看到的是「⚠ 录屏未能启动（no_device）」。 */
+    ok(statusText.indexOf("录屏前请先勾选至少一个设备") >= 0,
+       "失败原因用后端 message 的人话呈现（实际：" + statusText.trim() + "）");
+    ok(statusText.indexOf("no_device") < 0,
+       "状态信息不得出现机器码 no_device");
   }
 
   console.log("\n结果：" + pass + " 通过 / " + fail + " 失败");

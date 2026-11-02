@@ -3681,3 +3681,45 @@ def test_shutdown_cancels_pending_file_refresh(monkeypatch):
     time.sleep(0.5)
     assert listed == [], "关闭后不该再有目录刷新：%r" % (listed,)
     assert not api._file_refresh_timers, "定时器应已在关闭时清空"
+
+
+def test_screen_record_start_twice_says_why_in_plain_words(monkeypatch, tmp_path):
+    """已在录屏时再点「开始」：必须说清「正在录」并给出下一步，而不是回一个机器码。
+
+    回归：守卫只 return {"ok": False, "reason": "recording"}，前端把它原样拼进
+    提示 —— 用户看到的是「⚠ 录屏未能启动（recording）」：一句英文代码，既没
+    说明现在到底在不在录，也没说想重开该先停。
+    """
+    api = _make_api()
+    monkeypatch.setattr(api.video, "start",
+                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
+    assert api.screen_record_start(None, save_dir=str(tmp_path)).get("ok") is True
+    _events_by_kind(api)                      # 清掉启动那一批事件
+
+    res = api.screen_record_start(None, save_dir=str(tmp_path))
+
+    assert res["ok"] is False and res["reason"] == "recording", res
+    assert "正在录屏中" in res.get("message", ""), res
+    assert "停止录屏" in res["message"], "要给出下一步：先停止才能重开"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("正在录屏中" in t for t in texts), texts
+
+    api._rec_session = {}
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_screen_record_stop_without_session_is_not_an_error():
+    """没有会话时点「停止」：说一句「当前没有进行中的录屏」，但**不算失败**。
+
+    旧实现什么都不说（用户对着按钮反复点）；这条也刻意不带 message —— 前端
+    按 message 弹错误 toast，会把「已经停了」说成「⚠ 停止录屏失败：no_session」。
+    """
+    api = _make_api()
+
+    res = api.screen_record_stop()
+
+    assert res["ok"] is False and res["reason"] == "no_session", res
+    assert "message" not in res, "no_session 不是失败，不该让前端弹 err toast"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("当前没有进行中的录屏" in t for t in texts), texts
+    api.workers.shutdown(timeout=2.0)

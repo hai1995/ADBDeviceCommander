@@ -4933,9 +4933,14 @@
         if (els.toolRec) els.toolRec.title = "";
       }
       if (!res || res.ok === false) {
-        // 后端在全部设备启动失败时会自动撤销会话残留并返回 ok:false；
-        // 这里回滚按钮态，避免 UI 卡在“录制中”却没有任何会话可停。
-        pushStatus("err", "⚠ 录屏未能启动" + (res && res.reason ? "（" + res.reason + "）" : ""));
+        /* 后端在全部设备启动失败时会自动撤销会话残留并返回 ok:false；
+           这里回滚按钮态，避免 UI 卡在“录制中”却没有任何会话可停。
+           原因优先用后端给的 message（人话）。reason 是机器码
+           （recording / no_device / start_failed …）：直接拼给用户就是
+           「⚠ 录屏未能启动（recording）」，既看不懂又说不出下一步；
+           而这些分支后端都已各自播报过一句人话，故不再重复贴代码。 */
+        const why = res && res.message;
+        pushStatus("err", "⚠ 录屏未能启动" + (why ? "：" + why : ""));
         setRecRunning(false);
         return;
       }
@@ -4952,8 +4957,11 @@
         setRecInFlight(false);
         if (els.toolRecStop) els.toolRecStop.title = "";
       }
-      if (res && res.ok === false && res.reason) {
-        pushStatus("err", "⚠ 停止录屏失败：" + res.reason);
+      if (res && res.ok === false && res.message) {
+        /* 同样只认 message：reason 是机器码。no_session（后端已用 info 说明
+           「当前没有进行中的录屏」）刻意不带 message —— 它不算失败，不该
+           再弹一条 err toast 把「已经停了」说成「停止失败」。 */
+        pushStatus("err", "⚠ 停止录屏失败：" + res.message);
       }
       setRecRunning(false);
     });
