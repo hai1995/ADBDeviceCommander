@@ -135,6 +135,11 @@ class AutoRefreshMixin:
                 self.logcat_monitor.stop(s)
         for s in self.logcat_capture.running_serials():
             if s not in known:
+                # 正在等重连的抓取是「有意存活」：设备掉线后它会在重连窗口内
+                # 续写同一文件，不能因为它此刻不在设备列表里就被当成孤儿强停——
+                # 那会把刚建立的掉线保护立刻掐断，logcat 照样丢数据。
+                if self.logcat_capture.is_reconnecting(s):
+                    continue
                 self.logcat_capture.stop(s, zip_on_stop=False)
         # 录屏会话（多设备聚合）：只强停「已移除」的那几台，绝不替用户结束整个会话
         # （其余设备可能仍在正常录制）。停止涉及 adb 调用，设备离线时可能短暂阻塞，

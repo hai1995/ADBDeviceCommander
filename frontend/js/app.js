@@ -2043,6 +2043,17 @@
   }
   function onLogcatCapture(p) {
     if (p.status === "running") { lcCapRunning = true; els.lcCapStatus.textContent = "采集中…"; els.lcCapStop.disabled = false; els.lcCapStart.disabled = true; }
+    // 设备掉线、抓取正在等待重连：保持「采集中」，**不要**复位成空闲。否则界面会
+    // 错误地切回「空闲」、用户以为抓取已结束（实际在等重连并续写同一文件）。
+    // 这是「录屏+满缓冲全级别 logcat 同时跑、设备掉线也不丢日志」的关键 UI 不变量。
+    if (p.status === "reconnecting") {
+      lcCapRunning = true;
+      els.lcCapStatus.textContent = "采集中…（设备掉线，等待重连）";
+      els.lcCapStop.disabled = false;
+      els.lcCapStart.disabled = true;
+      pushStatus("warn", p.text || "⚠ logcat 抓取设备掉线，正在等待重连…");
+      return;
+    }
     // 无勾选设备时才禁用「开始抓取」（取反写反过：有设备反而点不了）
     if (p.status === "stopped") {
       lcCapRunning = false; lcCapSerial = null; els.lcCapStatus.textContent = "空闲"; els.lcCapStop.disabled = true; els.lcCapStart.disabled = !checkedDevices().length;
@@ -2054,6 +2065,14 @@
         // 「✓ 抓取完毕：0 行」—— 「0 行」在这里的含义是「根本没开始抓」，
         // 而不是「设备当时没有日志输出」，对用户是完全不同的两个结论。
         pushStatus("info", "ℹ " + (p.text || "已停止 logcat 抓取，本次没有生成文件"));
+      } else if (p.gap) {
+        // 抓取期间设备曾掉线、文件含时间缺口（缺口处已写入 [logcat] 标记行）。
+        // 必须如实告警，绝不能报「✓ 抓取完毕」——否则分析师对照视频流找日志时
+        // 会误以为时间线连续、漏掉的那段正好在案发现场上。
+        const gapMsg = "⚠ Logcat 抓取结束，文件存在时间缺口：" +
+          (p.text || "缺失时段见文件内 [logcat] 标记");
+        pushStatus("warn", gapMsg);
+        showToast("warn", "⚠ logcat 存在时间缺口，详见文件内 [logcat] 标记");
       } else if (p.error) {
         // 写盘中途失败（磁盘满 / 目录被删 / 权限）：文件只有半截，甚至一行
         // 都没进去。后端在 stopped 上带了 error，这里绝不能再报「✓ 抓取完毕」——

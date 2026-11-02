@@ -67,7 +67,11 @@ def device_present(adb, serial, timeout=5):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             **adb_kwargs(timeout))
     except Exception:
-        return False
+        # adb 本身不可达（缺失 / 超时 / 异常）：无法判定设备状态，返回 None（未知）
+        # 而非 False（确认掉线）。这样调用方（logcat 重连等待）才不会把「adb 暂
+        # 时查不到」误判成「设备已掉线」而拉起无意义的重连轮询；同时 None 在
+        # `not probe(...)` 语境下仍等价于「不在」（设备移除检测据此判为掉线）。
+        return None
     if r.returncode != 0:
         return False
     return (r.stdout or b"").strip().lower() == b"device"

@@ -105,6 +105,16 @@ LOGCAT_DROP_NOTICE_MIN = 50
 # 「录制中」，用户点停止后才在约 10 秒的 pull 重试后看到「缺 moov 头」。
 REC_DEATH_CHECK_S = 1.0
 
+# logcat 抓取在设备掉线后的自动重连参数。
+# 录屏（视频流）+ 满缓冲全级别 logcat 同时跑是常规场景；USB 抖动导致 adb 短时
+# 失联时，抓取**绝不能静默结束**——否则后续拿视频流对照日志分析时会发现日志有
+# 缺口，这个功能就等于废了。故 `adb logcat` 因掉线 EOF 时，若 `device_present()`
+# 确认设备确实掉了，会等设备在重连窗口内回来后**往同一个文件续写**，并在文件里
+# 写入明确的缺口标记，绝不把缺口藏成一次「成功抓取」；若窗口耗尽仍未恢复，则
+# 明确告警「文件存在时间缺口」，同样不伪装成成功。
+LOGCAT_CAP_RECONNECT_MAX_S = 900    # 设备掉线后最长等待重连时间（秒，15 分钟）
+LOGCAT_CAP_RECONNECT_POLL_S = 3     # 重连探测轮询间隔（秒）
+
 # adb devices 输出的 state 字段 -> 中文说明
 STATE_LABEL = {
     "device": "在线",

@@ -650,6 +650,7 @@ def test_reap_gone_tools_stops_only_removed_devices():
     class FakeCap:
         def __init__(self, running): self._r = list(running)
         def running_serials(self): return list(self._r)
+        def is_reconnecting(self, s): return False
         def stop(self, s, zip_on_stop=False): stopped_cap.append(s)
 
     # 监控 / 抓取正在 A1、B2、C3、D4 上进行；C3 已从快照移除应被杀，其余不应
@@ -830,7 +831,8 @@ def test_reap_dead_recordings_skips_unknown_serial(monkeypatch, tmp_path):
 
 
 def test_device_present_true_only_when_get_state_device(monkeypatch):
-    """get-state 决定可达性：device→在线；offline / 非零退出 / 异常→视为掉线。"""
+    """get-state 决定可达性：device→True；offline / 非零退出→False（确认掉线）；
+    adb 本身不可达（缺失 / 超时抛异常）→ None（无法判定，未知）。"""
     class _FakeRun:
         def __init__(self, stdout, rc):
             self.stdout = stdout
@@ -847,11 +849,13 @@ def test_device_present_true_only_when_get_state_device(monkeypatch):
     assert device_present("adb", "A1") is False
     monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"", 1))
     assert device_present("adb", "A1") is False
-    # adb 本身不可达（不存在 / 超时抛异常）→ 视为掉线，且不得向上抛
+    # adb 本身不可达（不存在 / 超时抛异常）→ 无法判定状态，返回 None（未知），
+    # 且不得向上抛。调用方据此把「查不到」与「确认掉线」区分开（logcat 重连不会
+    # 因 adb 暂时查不到就拉起无意义轮询）。
     def boom(*a, **k):
         raise FileNotFoundError("adb")
     monkeypatch.setattr(screen_service.subprocess, "run", boom)
-    assert device_present("adb", "A1") is False
+    assert device_present("adb", "A1") is None
 
 
 def test_death_message_says_connection_lost_when_device_gone(monkeypatch):

@@ -423,8 +423,25 @@ class RecordMixin:
                     os.remove(lp)
             except Exception:
                 pass
-        # 同步停止 logcat 抓取，等待写盘后收集 txt
-        for s, p in sess.get("logcat_captures", {}).items():
+        # 同步 logcat 抓取收尾：
+        #  * 录屏**正常结束**（设备仍在）：随会话一起停止，txt 打包进本次 zip
+        #    （保持「录完即拿到 视频+日志 一体包」的便利）；
+        #  * 但**录屏意外死亡的设备**（设备掉线导致 screenrecord 退了），其 logcat
+        #    抓取**绝不跟着会话一起被掐断**——否则后续拿视频流对照日志分析时，日志在
+        #    掉线处被截断、整段丢失，这个功能就等于废了。这类抓取**脱离**本次会话
+        #    继续独立运行（设备重连后自动续写同一文件），由用户稍后在 logcat 面板
+        #    手动停止（单独成包）。这是「录屏+满缓冲全级别 logcat 同时跑」场景下
+        #    不掉数据的关键：视频可以断，日志不能断。
+        dead = sess.get("dead") or set()
+        for s, p in list(sess.get("logcat_captures", {}).items()):
+            if s in dead:
+                sess["logcat_captures"].pop(s, None)
+                self._push_status(
+                    "info",
+                    "ⓘ %s 录屏已中断，但 logcat 抓取保留继续（设备重连后自动续写，"
+                    "请在 logcat 面板手动停止以取回日志）" % s)
+                # 不 stop：让它作为独立抓取继续跑（含重连保护）。
+                continue
             try:
                 self.logcat_capture.stop(s, zip_on_stop=False)
             except Exception:

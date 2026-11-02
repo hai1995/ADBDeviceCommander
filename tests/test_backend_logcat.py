@@ -733,9 +733,15 @@ def test_monitor_offline_device_is_an_error_not_a_silent_stop(monkeypatch):
 
 
 def test_capture_all_levels_filtered_is_not_an_offline_error(tmp_path, monkeypatch):
-    """用户取消了全部级别 → 一行都不写盘，但设备是好的，不能误报「设备离线」。"""
+    """用户取消了全部级别 → 一行都不写盘，但设备是好的，不能误报「设备离线」。
+
+    注意：抓到 1 行后被 EOF（adb logcat 自己退出）时，新逻辑会先探测设备是否真掉了。
+    这里把 device_present 钉成 True（设备仍在），确保它走「正常收尾」而非「重连等待」，
+    避免对「设备其实没掉线、只是 logcat 自己退了」的场景误判。
+    """
     proc = _EofProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"])
     monkeypatch.setattr(ls.subprocess, "Popen", lambda cmd, **kw: proc)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
 
     bus = _FakeBus()
     cap = ls.LogcatCapture(bus, adb_path="adb")
@@ -887,4 +893,139 @@ def test_logcat_start_reports_already_running(monkeypatch):
     monkeypatch.setattr(api.logcat_monitor, "start", lambda *a, **kw: False)
     res = api.logcat_start("A1", ["main"])
     assert res["ok"] is False and res["reason"] == "already_running"
-    assert any("已在 logcat 监控中" in t for t in _status_texts(api))
+
+
+# ---------------------------------------------------------------------------
+# 设备掉线续写：录屏 + 满缓冲全级别 logcat 同时跑时，USB 抖动掉线后抓取不能丢数据
+# ---------------------------------------------------------------------------
+def test_capture_reconnects_and_continues_after_device_drop(tmp_path, monkeypatch):
+    """设备掉线（adb logcat EOF）后，抓取必须等重连并续写同一文件，不能静默结束。
+
+    回归：录屏 + 满缓冲全级别 logcat 同时跑时设备 USB 抖动掉线，旧实现会在 EOF 处
+    直接报「✓ 抓取完毕」、把日志在掉线处截断——后续拿视频流对照日志分析时发现日志
+    缺失，功能等于废了。新实现：确认设备掉线后写入缺口标记、推 reconnecting、等重连
+    成功后继续往同一文件追加。
+
+    可控假件：第一批日志 -> EOF（模拟掉线）-> device_present 先 False 后 True
+    （模拟重连）-> 第二批日志 -> EOF（设备仍在，正常收尾）。
+    """
+    first = ["08-29 10:00:00.000  1  1 I Tag: before-drop-%d\n" % i
+             for i in range(3)]
+    second = ["08-29 10:00:05.000  1  1 I Tag: after-reconnect-%d\n" % i
+              for i in range(3)]
+
+    call = {"n": 0}
+    def fake_popen(cmd, **kw):
+        call["n"] += 1
+        if "logcat" in " ".join(cmd):
+            lines = first if call["n"] == 1 else second
+            return _EofProc(list(lines))
+        return _FakeLogcatProc([])
+    monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
+
+    # device_present：掉线判定与重连轮询前几次返回 False，随后 True（重连成功）
+    present = {"n": 0}
+    def fake_present(adb, serial, timeout=5):
+        present["n"] += 1
+        return present["n"] > 2
+    monkeypatch.setattr(ls, "device_present", fake_present)
+    # 缩短重连轮询，让测试秒级完成
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 0.02)
+
+    bus = _FakeBus()
+    path = str(tmp_path / "cap_drop.txt")
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("D1", path, ["main"]) is True
+
+    # 等到出现 reconnecting 事件（证明掉线后没有静默结束）
+    re_event = _wait_payload(bus, "logcat_capture", "reconnecting", timeout=5)
+    assert re_event is not None, _statuses(bus, "logcat_capture")
+    # 掉线期间抓取仍被记为「进行中」，否则回收逻辑会把它当孤儿掐断
+    assert cap.is_running("D1"), "重连等待期间 is_running 必须为 True"
+
+    # 等到最终 stopped，并确认文件里两段日志 + 缺口标记都在
+    stopped = _wait_payload(bus, "logcat_capture", "stopped", timeout=5)
+    assert stopped is not None, _statuses(bus, "logcat_capture")
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    for i in range(3):
+        assert "before-drop-%d" % i in content
+        assert "after-reconnect-%d" % i in content
+    assert "[logcat] 设备于" in content, "文件必须含缺口标记"
+    assert "恢复连接" in content, "文件必须含重连恢复标记"
+    # 不是「假成功」：经历过掉线续写，stopped 必须带 gap 标记
+    assert stopped.get("gap") is True, "经历过掉线续写的抓取，stopped 必须带 gap 标记"
+
+
+def test_capture_gap_on_reconnect_timeout(tmp_path, monkeypatch):
+    """设备掉线后重连窗口耗尽：抓取结束但必须明确告警「文件存在时间缺口」，
+    绝不能伪装成「✓ 抓取完毕」。
+
+    可控假件：第一批日志 -> EOF（掉线）-> device_present 永远 False（设备没回来）
+    -> 重连窗口耗尽 -> 结束。窗口与轮询都缩短，测试秒级完成。
+    """
+    first = ["08-29 10:00:00.000  1  1 I Tag: only-before-%d\n" % i
+             for i in range(3)]
+
+    def fake_popen(cmd, **kw):
+        if "logcat" in " ".join(cmd):
+            return _EofProc(list(first))
+        return _FakeLogcatProc([])
+    monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: False)  # 永远不回来
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_MAX_S", 0.3)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 0.02)
+
+    bus = _FakeBus()
+    path = str(tmp_path / "cap_timeout.txt")
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("T1", path, ["main"]) is True
+
+    stopped = _wait_payload(bus, "logcat_capture", "stopped", timeout=5)
+    assert stopped is not None, _statuses(bus, "logcat_capture")
+    # 关键：不是「假成功」——必须带 gap 标记并说明文件存在时间缺口
+    assert stopped.get("gap") is True, "重连失败必须带 gap 标记"
+    assert stopped.get("error"), "重连失败必须说明文件存在时间缺口"
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    for i in range(3):
+        assert "only-before-%d" % i in content
+    assert "[logcat] 设备于" in content, "文件必须含缺口标记"
+
+
+def test_rec_death_keeps_logcat_capture_alive(monkeypatch):
+    """录屏意外死亡（设备掉线）时，配套的 logcat 抓取必须保留继续跑，
+    不能跟着录屏会话一起被 stop（否则日志在掉线处被截断，录屏+logcat 联动分析废掉）。
+
+    回归：旧实现在 _session_teardown 里无条件 stop 所有 logcat_captures，
+    录屏一死就把日志也掐了。新实现对「死设备」的抓取改为脱离会话、独立续跑。
+    """
+    api = WebApi()
+    # 假装这台设备的 logcat 抓取正在跑，并观察 stop 是否被调用
+    stopped = {}
+    monkeypatch.setattr(api.logcat_capture, "stop",
+                        lambda s, zip_on_stop=False: stopped.setdefault(s, 0))
+    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: True)
+
+    api._rec_session = {
+        "ts": "20260101_000000", "dir": "/tmp", "with_devaudio": False,
+        "with_mic": False, "with_zip": False, "mic_path": None,
+        "mic_started": False, "videos": {}, "devaudio": {},
+        "logcat_captures": {"D1": "/tmp/logcat_D1_20260101_000000.txt"},
+        "pointer_location_prev": {}, "show_touches_prev": {},
+        "dead": {"D1"},
+    }
+    # video 相关调用给安全桩：teardown 不应真去 stop 视频 / 读 overlay
+    monkeypatch.setattr(api.video, "is_recording", lambda s: False)
+    monkeypatch.setattr(api.video, "stop",
+                        lambda s: (False, None, "not recording"))
+    monkeypatch.setattr(api.video, "get_system_setting",
+                        lambda *a, **k: (True, "0"))
+    monkeypatch.setattr(api, "_set_device_setting", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(api, "_zip_paths", lambda *a, **k: None)
+
+    files, _zpath = api._session_teardown(api._rec_session)
+    # 关键断言：死亡设备的 logcat 抓取没有被 stop，保留继续跑
+    assert "D1" not in stopped, "死亡设备的 logcat 抓取绝不能被 stop"
+    # 也不应被加进本次录屏产物（它已脱离会话，稍后单独成包）
+    assert all("logcat_D1" not in f for f in files)

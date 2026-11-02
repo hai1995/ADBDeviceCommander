@@ -23,8 +23,10 @@ import zipfile
 
 from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
                             LOGCAT_DROP_NOTICE_MIN, LOGCAT_DROP_NOTICE_SEC,
+                            LOGCAT_CAP_RECONNECT_MAX_S, LOGCAT_CAP_RECONNECT_POLL_S,
                             adb_popen_kwargs)
 from core.logcat import classify_line
+from backend.screen_service import device_present
 
 
 def _terminate(proc):
@@ -356,6 +358,9 @@ class LogcatCapture:
         # 已收到 stop() 的 serial：worker 启动完成时据此立刻收尾，避免「启动后
         # 马上点停止」时 stop 找不到 proc 而返回 False、抓取线程再也停不掉。
         self._stopreq = set()
+        # 正处于「设备掉线、等待重连」的 serial：供孤儿回收（_reap_gone_tools）
+        # 豁免——这类抓取是有意存活的，不能被当成「设备已移除」而强停。
+        self._reconnecting = set()
 
     def is_running(self, serial):
         with self._lock:
@@ -365,6 +370,16 @@ class LogcatCapture:
         """当前正在抓取的设备序列号（供「设备移除后强停孤儿抓取」使用）。"""
         with self._lock:
             return list(set(self._procs.keys()) | self._starting)
+
+    def is_reconnecting(self, serial):
+        """抓取是否正处于「设备掉线、等待重连」状态。
+
+        供 autorefresh._reap_gone_tools 豁免：这种抓取是**有意存活**的（在等
+        设备重连并续写同一文件），绝不能因为它此刻不在设备列表里就被当成
+        「已移除的孤儿」强停——否则设备一掉线，刚建立的续写保护立刻被回收逻辑掐断。
+        """
+        with self._lock:
+            return serial in self._reconnecting
 
     def start(self, serial, path, buffers, level_filter=None):
         """启动抓取，写入 path（txt，单文件）。返回 True 表示新启动。
@@ -416,39 +431,29 @@ class LogcatCapture:
             self.stop(s, zip_on_stop=zip_on_stop)
 
     # ------------------------------------------------------------------
+    # 重连等待：设备掉线后轮询直到重连 / 用户停止 / 超时。
+    # 返回 "ok"（设备回来了）/ "stopped"（用户中途点了停止）/ "timeout"（窗口耗尽）。
+    def _wait_reconnect(self, serial):
+        deadline = time.time() + LOGCAT_CAP_RECONNECT_MAX_S
+        while True:
+            with self._lock:
+                if serial in self._stopreq:
+                    return "stopped"
+            # device_present 异常（adb 缺失/无响应）一律视为「还没回来」，继续等；
+            # 它只做 get-state 探测，不会外抛。
+            try:
+                if device_present(self.adb_path, serial):
+                    return "ok"
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                return "timeout"
+            time.sleep(LOGCAT_CAP_RECONNECT_POLL_S)
+
     def _worker(self, serial, path, buffers, levels=None):
         adb = self.adb_path
         cmd = _logcat_cmd(adb, serial, buffers)
         lines = 0
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                **adb_popen_kwargs())
-        except Exception as e:
-            self.bus.push("logcat_capture",
-                          {"serial": serial, "status": "error",
-                           "text": "启动抓取失败：%s" % e})
-            with self._lock:
-                self._starting.discard(serial)
-                self._stopreq.discard(serial)
-            return
-        with self._lock:
-            self._starting.discard(serial)
-            stop_now = serial in self._stopreq
-            self._procs[serial] = proc
-        # 启动期间就被点停止：立刻收尾，也不要开始写文件
-        if stop_now:
-            _terminate(proc)
-        else:
-            # 同监控：已经点了停止就不播 running（前端会把「开始」锁上再拨回来）
-            self.bus.push("logcat_capture",
-                          {"serial": serial, "status": "running", "path": path})
-        # f 必须先初始化再进 try：open() 失败（保存目录被删 / 磁盘掉线 / 只读）时
-        # 旧实现让 finally 里去读未绑定的 f，直接抛 UnboundLocalError —— finally 随之
-        # 中断，_procs/_starting/_stopreq/_flags 全部没清理、子进程也没 terminate：
-        # 抓取永远卡在「运行中」（is_running 恒 True、再 start 判 already_running、
-        # 用户点停止也停不掉），并泄漏一个 adb logcat 进程。
-        f = None
         # 一行都没写进去时留下的前几行原文（多为 adb 的报错：device not found 等），
         # 供末段判断「设备没连上」时把原因带出来。
         err_lines = []
@@ -462,39 +467,171 @@ class LogcatCapture:
         # 成功 toast 会把前一条错误盖掉 —— 用户看到的是「✓ 抓取完毕」，而文件
         # 只有半截，甚至一行都没写进去。
         write_error = ""
+        gap_written = False        # 文件里是否写过「设备掉线」缺口标记
+        f = None
+
+        session = 0
+        outcome_error = ""         # 重连窗口耗尽等原因导致的最终报错（区别于写盘异常）
         try:
-            # 启动瞬间就停止（stop_now）：不建文件、不读输出。旧行为照样
-            # open(path, "w")，磁盘上留下一个 0 字节 txt，前端随后弹「✓ 抓取
-            # 完毕：0 行」—— 一份看起来「设备当时没有日志输出」的假证据。
-            f = None if stop_now else open(path, "w", encoding="utf-8",
-                                           errors="replace")
-            for raw in (() if stop_now else proc.stdout):
+            while True:
+                session += 1
+                try:
+                    proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        **adb_popen_kwargs())
+                except Exception as e:
+                    err_reported = True
+                    write_error = "启动抓取失败：%s" % e
+                    self.bus.push("logcat_capture",
+                                  {"serial": serial, "status": "error",
+                                   "text": write_error})
+                    break
+                with self._lock:
+                    self._starting.discard(serial)
+                    self._procs[serial] = proc
+                if session == 1:
+                    # 「启动瞬间点停止」必须在 open 文件之前判定：stop() 在 Popen 返回前
+                    # （_starting 窗口内）调用时，此处已能看到 _stopreq，从而跳过建文件、
+                    # 不留 0 字节 txt（否则前端弹「✓ 抓取完毕：0 行」误导用户）。检查点
+                    # 放在 Popen 之后——抢在 Popen 返回前点停止的场景，此刻 _stopreq
+                    # 才刚刚被写入，前置到 Popen 之前会落入竞态、仍建出空文件。
+                    with self._lock:
+                        stop_during_start = serial in self._stopreq
+                    if stop_during_start:
+                        _terminate(proc)
+                        with self._lock:
+                            self._procs.pop(serial, None)
+                            self._stopreq.discard(serial)
+                            self._flags.pop(serial, None)
+                            self._reconnecting.discard(serial)
+                        self.bus.push("logcat_capture",
+                                      {"serial": serial, "status": "stopped",
+                                       "path": path, "lines": 0, "size": 0,
+                                       "packaged": False, "no_file": True,
+                                       "text": "已停止：还没写入任何日志就结束了，"
+                                               "本次没有生成日志文件"})
+                        return
+                    # 首会话：开文件 + 播 running（重连的后续会话复用同一文件句柄）
+                    try:
+                        f = open(path, "w", encoding="utf-8", errors="replace")
+                    except Exception as e:
+                        err_reported = True
+                        write_error = "抓取异常：%s" % e
+                        self.bus.push("logcat_capture",
+                                      {"serial": serial, "status": "error",
+                                       "text": write_error})
+                        _terminate(proc)
+                        with self._lock:
+                            self._procs.pop(serial, None)
+                            self._stopreq.discard(serial)
+                            self._flags.pop(serial, None)
+                            self._reconnecting.discard(serial)
+                        break
+                    self.bus.push("logcat_capture",
+                                  {"serial": serial, "status": "running",
+                                   "path": path})
+                # ---- 读循环：把日志写入同一文件（重连后继续追加）----
+                try:
+                    for raw in proc.stdout:
+                        with self._lock:
+                            if serial in self._stopreq:
+                                break
+                        if not logish:
+                            if classify_line(raw) is not None:
+                                logish = 1
+                            elif len(err_lines) < 5:
+                                err_lines.append(raw.rstrip("\n"))
+                        # 级别过滤（与实时监控同语义）：能识别出级别的行按用户勾选
+                        # 的集合过滤；识别不出的行（标题/分隔线）原样写盘。
+                        if levels is not None:
+                            rec = classify_line(raw)
+                            if rec is not None and rec["level"] not in levels:
+                                continue
+                        f.write(raw)
+                        lines += 1
+                        # 周期性 flush：进程崩溃时也能保住已落盘的日志（而非全卡在
+                        # OS 写缓冲里随进程一起丢）。
+                        if lines % 1000 == 0:
+                            f.flush()
+                except Exception as e:
+                    err_reported = True
+                    write_error = "抓取异常：%s" % e
+                    self.bus.push("logcat_capture",
+                                  {"serial": serial, "status": "error",
+                                   "text": write_error})
+                    break
+                finally:
+                    # 终止 adb 子进程（无论正常 EOF / 用户停止 / 写盘异常）。
+                    # 注意：此处**不**从 _procs 移除进程——重连等待期间保留它，
+                    # 使 is_running() / stop() 仍认得这次抓取在进行，用户点「停止」
+                    # 不会被当成「当前没有进行中的抓取」而静默忽略。下一轮会话会
+                    # 用新进程覆盖它。
+                    _terminate(proc)
+                # ---- 读循环结束（EOF / 用户停止 / 写盘异常）----
+                with self._lock:
+                    if serial in self._stopreq:
+                        break
                 if not logish:
-                    if classify_line(raw) is not None:
-                        logish = 1
-                    elif len(err_lines) < 5:
-                        err_lines.append(raw.rstrip("\n"))
-                # 级别过滤（与实时监控同语义）：能识别出级别的行按用户勾选
-                # 的集合过滤；识别不出的行（标题/分隔线）原样写盘。
-                if levels is not None:
-                    rec = classify_line(raw)
-                    if rec is not None and rec["level"] not in levels:
-                        continue
-                f.write(raw)
-                lines += 1
-        except Exception as e:
-            err_reported = True
-            write_error = "抓取异常：%s" % e
-            self.bus.push("logcat_capture",
-                          {"serial": serial, "status": "error",
-                           "text": write_error})
+                    # 一行真日志都没解析到就 EOF：设备离线 / 序列号失效 / logd 未运行。
+                    # 此前这行被原样写进 txt，紧接着推 stopped —— 前端弹「✓ 抓取完毕：
+                    # 0 行」，一个完美的假成功。这里不再尝试重连（从来没连上过的设备
+                    # 重连也没意义），留待 finally 按「设备离线」报错。
+                    break
+                # 已经抓到过日志、却在这里 EOF：多半是设备掉线（adb logcat 在连接
+                # 存活时会一直跑，不会自己退出）。仅当 device_present 明确返回 False
+                # （确认设备已不在）才进入「等重连」；返回 True（设备还在）或 None
+                # （adb 不可达、无法确认）都按正常收尾——否则会把「设备其实没掉线」
+                # 或「adb 暂时查不到」误判成掉线、反复拉起空转（测试环境里没有真实
+                # adb 时尤其要避免进入长达重连窗口的轮询）。
+                if device_present(adb, serial) is False:
+                    # 确认设备掉了：写入缺口标记，等待重连后往同一文件续写（绝不丢已抓到的）。
+                    gap_written = True
+                    drop_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        f.write("\n--------- [logcat] 设备于 %s 断开连接，等待重连 ---------\n"
+                                % drop_ts)
+                        f.flush()
+                    except Exception:
+                        pass
+                    self.bus.push("logcat_capture",
+                                  {"serial": serial, "status": "reconnecting",
+                                   "path": path,
+                                   "text": "设备 %s 掉线，logcat 抓取等待重连"
+                                           "（最长 %d 秒，期间已抓到的日志不会丢）"
+                                           % (serial, LOGCAT_CAP_RECONNECT_MAX_S)})
+                    with self._lock:
+                        self._reconnecting.add(serial)
+                    verdict = self._wait_reconnect(serial)
+                    with self._lock:
+                        self._reconnecting.discard(serial)
+                    if verdict == "stopped":
+                        break
+                    if verdict == "timeout":
+                        # 重连窗口耗尽：抓取就此结束，但文件里留有缺口标记，绝不把缺口
+                        # 藏成一次「成功抓取」。不另推 error 事件——下面的 stopped(gap)
+                        # 已携带缺口说明，避免界面叠出两条告警。
+                        outcome_error = ("设备在重连窗口（%d 秒）内未恢复，logcat 抓取已结束。"
+                                         "文件存在时间缺口：从 %s 起的日志缺失"
+                                         "（设备断连期间产生的日志已无法从该缓冲区取回）。"
+                                         % (LOGCAT_CAP_RECONNECT_MAX_S, drop_ts))
+                        break
+                    # 重连成功：写恢复标记，继续外层循环往同一文件续写。
+                    resume_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        f.write("--------- [logcat] 设备于 %s 恢复连接，继续抓取 ---------\n"
+                                % resume_ts)
+                        f.flush()
+                    except Exception:
+                        pass
+                    self.bus.push("status",
+                                  {"type": "info",
+                                   "text": "logcat 抓取：设备 %s 已重连，继续写入 %s"
+                                           % (serial, path)})
+                    continue
+                # device_present 为 True / None：设备还在或无法确认，正常收尾（数据完整）。
+                break
         finally:
-            # 子进程收尾放在最前面：读循环正常结束（EOF）/ 写盘异常中断 / 文件根本
-            # 没打开成功，三条路径都必须确保 adb logcat 被终止——旧实现只在正常
-            # EOF 后 terminate，另两条路径都会留下一个一直挂着的 adb 进程。
-            # terminate+wait 幂等：对已退出的进程是空操作，重复调用无副作用。
-            _terminate(proc)
-            # 再关文件句柄（之后才打包/量大小）：Windows 上开着的句柄会让 zip 失败
+            # 关文件句柄（之后才打包/量大小）：Windows 上开着的句柄会让 zip 失败。
             if f is not None:
                 try:
                     f.close()
@@ -503,13 +640,13 @@ class LogcatCapture:
             with self._lock:
                 self._procs.pop(serial, None)
                 self._starting.discard(serial)
-                # 在 discard 之前取：finally 后段要靠它区分「用户点了停止」和
-                # 「adb 自己退出了」
+                # 在 discard 之前取：区分「用户点了停止」与「adb 自己退出了」。
                 stopped_by_user = serial in self._stopreq
                 self._stopreq.discard(serial)
+                self._reconnecting.discard(serial)
                 flags = self._flags.pop(serial, {"zip_on_stop": False})
             # 打包条件：仅「结束后打包 zip」——抓取过程不做任何按大小的自动
-            # 打包（旧「超 15M 自动打包」已整体移除），因此停止时是否打包
+            # 打包（旧「超 15M 自动打包」已整体移除），停止时是否打包
             # 完全由用户在界面上勾选的这一个开关决定。
             do_zip = bool(flags.get("zip_on_stop"))
             zpath = None
@@ -517,17 +654,6 @@ class LogcatCapture:
             # 去保存目录找 zip，只看到 txt（或什么都没有），而界面只报「抓取
             # 完毕」—— 分不清是没勾上、还是打包失败了。
             zip_err = ""
-            if stop_now:
-                # 启动瞬间就停止：文件根本没建、也没读到任何行。旧行为会一路
-                # 走到下面的结算，报出「0 行 / 0 B」，前端弹「✓ 抓取完毕」，
-                # 勾了打包还会再叠一条「抓取文件为空」的假告警。
-                self.bus.push("logcat_capture",
-                              {"serial": serial, "status": "stopped",
-                               "path": path, "lines": 0, "size": 0,
-                               "packaged": False, "no_file": True,
-                               "text": "已停止：还没写入任何日志就结束了，"
-                                       "本次没有生成日志文件"})
-                return
             if do_zip:
                 # 先确认是**普通文件**：open(path, "w") 失败时（保存目录被删、
                 # 路径被同名目录占位），path 可能仍 exists —— 对目录打包会产出
@@ -559,7 +685,7 @@ class LogcatCapture:
                 size_out = os.path.getsize(path)
             else:
                 size_out = 0
-            if not stopped_by_user and not logish and not err_reported:
+            if not stopped_by_user and not logish and not err_reported and not gap_written:
                 # 用户没点停止、却一行都没写进去就退出了：设备离线 / 序列号失效时
                 # adb 只往 stdout 打一行原因然后退出。此前这行被原样写进 txt，
                 # 紧接着推 stopped —— 前端弹的是「✓ 抓取完毕：0 行」，一个完美的
@@ -580,6 +706,14 @@ class LogcatCapture:
                 if write_error:
                     # 有它时前端必须以「中断 / 文件不完整」呈现，不能再报 ✓。
                     payload["error"] = write_error
+                if outcome_error:
+                    payload["error"] = outcome_error
+                if gap_written:
+                    # 文件里有缺口标记：即便用户主动停止，也要把「期间掉过线」说清楚，
+                    # 否则分析师对照视频流找日志时会误以为时间线是连续的。
+                    payload["gap"] = True
+                    note = "（注意：抓取期间设备曾掉线，文件含时间缺口标记，"
+                    payload["text"] = (note + "缺失时段见文件内 [logcat] 标记）")
                 if zip_err:
                     payload["zip_error"] = zip_err
                 self.bus.push("logcat_capture", payload)
