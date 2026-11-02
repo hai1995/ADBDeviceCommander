@@ -41,11 +41,18 @@ class ScreenshotMixin:
             self._push_status(
                 "warn", "⚠ 多设备批量截图不自动写入剪贴板（一次只能放一张），"
                         "图片已分别保存到保存目录。")
+        bstate = None
         if batch:
             # 批量汇总计数器：_do_screenshot 完成一台记一笔，到齐后弹一条 toast。
+            # 计数器**随 worker 走**（bstate 引用作为参数传下去），不是共用一张表：
+            # 上一批还没跑完就再点一次时，它的 worker 仍在记账 —— 旧实现两批共用
+            # 同一个字典，前一批的 done 把后一批提前凑满，弹出一条台数不对的汇总；
+            # 而后一批真正到齐时 _shot_batch 已置 None，连提示都没有。实测「2 台 +
+            # 2 台」连点：只弹一条「✓ 已完成 2 台设备的截图」，保存目录里却是 4 张。
+            bstate = {"total": len(serials), "ok": 0, "fail": 0,
+                      "dir": save_dir, "errs": []}
             with self._shot_batch_lock:
-                self._shot_batch = {"total": len(serials), "ok": 0, "fail": 0,
-                                    "dir": save_dir, "errs": []}
+                self._shot_batch = bstate      # 仅供外部查询「当前批次」
         for s in serials:
             # 每次截图一个独立 worker key：固定用 "screenshot_<serial>" 时，上一张
             # 还没截完就再点一次，Workers 会按同名把这次请求**静默丢弃**，而 API
@@ -55,7 +62,8 @@ class ScreenshotMixin:
             # +1/-1 同源同宿，任何执行时序（同步/异步 spawn）都自然平衡。
             self.workers.spawn(
                 "screenshot_%s_%d" % (s, next(self._shot_seq)),
-                self._do_screenshot, s, save_dir, to_clipboard and not batch, batch)
+                self._do_screenshot, s, save_dir, to_clipboard and not batch,
+                batch, bstate)
         return {"ok": True}
 
     def _shot_state_change(self, delta):
@@ -75,16 +83,20 @@ class ScreenshotMixin:
             self._shot_running = running
         self.bus.push("shot_state", {"running": running})
 
-    def _shot_batch_done(self, ok, serial, err=None):
+    def _shot_batch_done(self, ok, serial, err=None, bstate=None):
         """批量截图的一台完成：记数，全部到齐时弹一条汇总 toast。
 
         汇总而非逐台弹：多设备（本工具的主场景）一次点击会给每台设备各起一个
         worker，逐台弹 toast 会瞬间刷屏；成功/失败计数 + 保存目录一条说清。
+
+        bstate 是本 worker 所属那一批的计数器（由 screenshot() 创建并传下来）。
+        必须按批记：两批叠在一起时，若共用一张表，前一批的完成会把后一批提前
+        凑满，弹出台数不对的汇总，而真正完成的那批反倒一声不响。
         """
+        b = bstate if bstate is not None else self._shot_batch
+        if b is None:                           # 从未开启批量（单设备）
+            return
         with self._shot_batch_lock:
-            b = self._shot_batch
-            if b is None:                       # 批次已被新一轮重置/从未开启
-                return
             if ok:
                 b["ok"] += 1
             else:
@@ -93,7 +105,8 @@ class ScreenshotMixin:
             done = b["ok"] + b["fail"]
             if done < b["total"]:
                 return
-            self._shot_batch = None             # 先摘计数器，避免与下一批交叉
+            if self._shot_batch is b:
+                self._shot_batch = None         # 先摘计数器，避免与下一批交叉
         if b["fail"]:
             self._push_toast(
                 "warn",
@@ -111,30 +124,35 @@ class ScreenshotMixin:
         except Exception:
             return True
 
-    def _do_screenshot(self, serial, save_dir, to_clipboard=False, batch=False):
+    def _do_screenshot(self, serial, save_dir, to_clipboard=False, batch=False,
+                       bstate=None):
         # 在途登记放在 worker 入口：与 finally 的 -1 严格同源，成败甚至抛
         # 异常都平衡；批量 N 台也只在 0<->1 翻转时推事件（见 _shot_state_change）
         self._shot_state_change(1)
         try:
-            self._do_screenshot_locked(serial, save_dir, to_clipboard, batch)
+            self._do_screenshot_locked(serial, save_dir, to_clipboard, batch,
+                                       bstate)
         except Exception:
             if batch:
                 # 未预期的异常也要记进批次账：否则汇总 toast 永远等不齐，
                 # 下一批之前 _shot_batch 一直挂着（按钮态由 finally 保证恢复）
-                self._shot_batch_done(ok=False, serial=serial, err="内部错误")
+                self._shot_batch_done(ok=False, serial=serial, err="内部错误",
+                                      bstate=bstate)
             raise
         finally:
             # 成败甚至抛异常，在途计数都必须回落：漏一次 -1，「立即截图」
             # 会被 shot_state 永远锁在禁用态（按钮假死，只能重启程序）
             self._shot_state_change(-1)
 
-    def _do_screenshot_locked(self, serial, save_dir, to_clipboard=False, batch=False):
+    def _do_screenshot_locked(self, serial, save_dir, to_clipboard=False,
+                             batch=False, bstate=None):
         path, err = ScreenCapturer.screenshot(
             self.state.adb_path, serial, save_dir)
         if err:
             self._push_status("err", "⚠ 截图失败 %s: %s" % (serial, err))
             if batch:
-                self._shot_batch_done(ok=False, serial=serial, err=err)
+                self._shot_batch_done(ok=False, serial=serial, err=err,
+                                      bstate=bstate)
             return
         # 主反馈立刻给：图已落盘这个事实不再等剪贴板。写系统剪贴板要解 PNG
         # （1080x2400 纯 Python 约 1~2 秒），让它排在「已保存」提示之后，
@@ -160,7 +178,7 @@ class ScreenshotMixin:
                             % (path, clip_err or "未知原因"))
                 payload["clipboard"] = False
         if batch:
-            self._shot_batch_done(ok=True, serial=serial)
+            self._shot_batch_done(ok=True, serial=serial, bstate=bstate)
         else:
             # 单设备：tool 事件即时推（前端可据此刷新缩略图等）
             self.bus.push("tool", payload)

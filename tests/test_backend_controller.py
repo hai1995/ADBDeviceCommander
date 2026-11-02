@@ -3540,3 +3540,42 @@ def test_unknown_root_state_still_blocked_while_recording(monkeypatch):
     assert api.session.calls == [], "录屏中不得下发 unroot（会重启 adbd）"
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
     assert any("录屏" in t and "跳过" in t for t in texts), texts
+
+
+def test_screenshot_two_batches_do_not_mix_counts(monkeypatch):
+    """连点两次「批量截图」：两批各弹一条汇总，台数各算各的。
+
+    回归：_shot_batch 是一张**共用**的可变字典，第二次点击直接把它重置。上一批
+    还在跑的 worker 依旧往这张表记账 —— 前一批的 done 把后一批提前凑满，弹出一
+    条台数不对的汇总；后一批真正到齐时 _shot_batch 已置 None，连提示都没有。
+    实测「2 台 + 2 台」连点：只弹一条「✓ 已完成 2 台设备的截图」，保存目录里
+    却是 4 张，用户没法判断另一批到底成没成。
+    """
+    api = _make_api()
+    api.toggle_device("B2", True)
+    release = threading.Event()
+    started = []
+
+    def blocked(_adb, serial, _save_dir):
+        started.append(serial)
+        release.wait(3.0)
+        return ("D:/shots/%s.png" % serial, None)
+
+    monkeypatch.setattr(ctrl.ScreenCapturer, "screenshot", staticmethod(blocked))
+    monkeypatch.setattr(ctrl.clipboard, "copy_image", lambda p: (True, ""))
+
+    api.screenshot()
+    assert wait_until(lambda: len(started) == 2, timeout=2.0), started
+    api.screenshot()                    # 第一批尚未收尾就再点一次
+    assert wait_until(lambda: len(started) == 4, timeout=2.0), started
+    release.set()
+    assert wait_until(lambda: api._shot_inflight == 0, timeout=3.0), \
+        "四个 worker 收尾后在途数应归零"
+
+    summaries = [p for p in _events_by_kind(api).get("status", [])
+                 if p.get("toast") and "截图" in (p.get("text") or "")]
+    assert len(summaries) == 2, \
+        "两批各应有一条汇总，实际 %d 条：%r" % (len(summaries), summaries)
+    for s in summaries:
+        assert "2 台设备" in s["text"], s["text"]
+    api.workers.shutdown(timeout=2.0)

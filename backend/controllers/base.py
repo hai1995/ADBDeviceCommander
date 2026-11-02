@@ -74,6 +74,8 @@ class WebApiBase:
         # 批量截图汇总：多设备一次点击各起一个 worker，全部到齐后弹一条
         # 汇总 toast（见 screenshot / _shot_batch_done）。
         self._shot_batch_lock = threading.Lock()
+        # 「最近一批」批量截图的计数器（仅供外部查询）。计数本身按批传递，
+        # 见 screenshot.py：连点两次时两批各算各的账，互不覆盖。
         self._shot_batch = None
         # 截图在途计数：「立即截图」禁用态的事实来源——+1 广播 running=true
         # （前端禁用按钮），全部 worker 收尾回落 0 时广播 running=false（恢复）。
