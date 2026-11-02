@@ -62,7 +62,20 @@ class UpdateMixin:
                 return {"ok": False, "reason": "busy"}
             self._update_busy = True
         self.bus.push("update_state", {"running": True})
-        self.workers.spawn("update", self._do_update_check, self._update_feed(), force)
+        try:
+            self.workers.spawn("update", self._do_update_check,
+                               self._update_feed(), force)
+        except Exception as e:
+            # 线程起不来（线程数耗尽 / 内存告急）：_update_busy 已置位、
+            # update_state 已广播 running=true，不回滚的话「检查更新」按钮永久
+            # 转圈，之后的每一次点击都被上面的 busy 判断挡回「正在检查」——
+            # 而那次检查根本没有发生。与诊断包同一个坑（_do_update_check 的
+            # except 里专门保了这一点，spawn 这一层当时漏了）。
+            with self._update_lock:
+                self._update_busy = False
+            self.bus.push("update_state", {"running": False})
+            self._push_toast("err", "⚠ 无法启动检查更新：%s" % e)
+            return {"ok": False, "reason": "spawn_error", "error": str(e)}
         return {"ok": True, "status": "started"}
 
     def _do_update_check(self, feed, manual):

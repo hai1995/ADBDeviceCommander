@@ -369,3 +369,26 @@ def test_update_unskip_reports_save_failure(api, monkeypatch):
     res = api.update_unskip()
     assert res["ok"] is False, res
     assert "无法写入" in res["reason"], res["reason"]
+
+
+def test_spawn_failure_does_not_leave_busy_flag(api, monkeypatch):
+    """启动线程失败时按钮不能永久转圈。
+
+    回归：`update_check` 先置 `_update_busy`、广播 `update_state running=true`，
+    再 spawn。spawn 抛异常（线程数耗尽 / 内存告急）时没有回滚 —— 之后每次点
+    「检查更新」都被 busy 判断挡回「正在检查」，而那次检查从未发生；按钮也一直
+    停在「检查中」。`_do_update_check` 的 except 专门保了这一点，spawn 这层漏了。
+    """
+    def boom(*a, **kw):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.workers, "spawn", boom)
+    res = api.update_check(True)
+    assert res["ok"] is False and res["reason"] == "spawn_error", res
+    assert api._update_busy is False, "启动失败却没回滚：检查更新永久卡在「检查中」"
+
+    states = [e["payload"]["running"] for e in api.bus.take()
+              if e["kind"] == "update_state"]
+    assert states and states[-1] is False, states
+    # 再来一次不能是 busy（那正是锁死的表现）
+    assert api.update_check(True).get("reason") != "busy"

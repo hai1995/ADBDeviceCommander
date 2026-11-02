@@ -635,3 +635,39 @@ def test_wifi_enable_warns_when_port_not_persisted(api, monkeypatch):
     res = api.wifi_enable("A1", port=6666)
     assert res["ok"] is True
     assert any("端口没能写入" in t for t in _status_texts(api))
+
+
+def test_diag_collect_not_locked_when_spawn_fails(api, monkeypatch):
+    """线程起不来时必须回滚状态位，否则「收集诊断包」永久锁死。
+
+    回归：`diag_collect` 先置 `_diag_running = True`、广播 `diag_state
+    running=true`，然后才 spawn。spawn 抛异常（进程线程数耗尽 / 内存告急）时
+    没有任何回滚 —— 之后每一次点击都被 busy 判断挡回去，提示写的是「请等当前
+    这一批完成」，可那一批根本没开始，永远等不到；按钮也一直停在禁用态，
+    只能重启程序。apk 安装早已有这层保护，诊断包当时漏了。
+    """
+    import core.diag as diag_mod
+
+    real_spawn = api.workers.spawn
+
+    def boom(*a, **kw):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.workers, "spawn", boom)
+    api.devices.device_checked = {"A1": True}
+
+    res = api.diag_collect(None, False, 2000)
+    assert res["ok"] is False and res["reason"] == "spawn_error", res
+    assert api._diag_running is False, "启动失败却没回滚：诊断包从此永久锁死"
+    states = [e["payload"]["running"] for e in api.bus.take()
+              if e["kind"] == "diag_state"]
+    assert states and states[-1] is False, states
+
+    # 恢复后再点一次：不能再被「正在收集中」挡回去（那正是锁死的表现）
+    monkeypatch.setattr(api.workers, "spawn", real_spawn)
+    monkeypatch.setattr(diag_mod, "collect",
+                        lambda *a, **kw: (None, None, "测试跳过"))
+    api.devices.device_checked = {"A1": True}
+    res2 = api.diag_collect(None, False, 2000)
+    assert res2.get("reason") != "busy", res2
+    assert _wait(lambda: not api._diag_running)

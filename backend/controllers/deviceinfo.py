@@ -67,6 +67,17 @@ class DeviceInfoMixin:
         if not serials:
             self._push_status("err", "⚠ 收集诊断包前请先勾选至少一个设备。")
             return {"ok": False, "reason": "no_device"}
+        # 参数一律在「置位 _diag_running」**之前**算好：读偏好 / 解析目录这两步
+        # 只要抛一次异常，而 _diag_running 已经置位且没有 finally 兜着，这次
+        # 收集就没开始 —— 之后每一次点击都被下面的 busy 判断挡回去，提示写着
+        # 「请等当前这一批完成」，可那一批根本不存在，永远等不到；按钮也一直停在
+        # 禁用态，只能重启程序。
+        if with_logcat is None:
+            with_logcat = bool(get_pref("diag_with_logcat", True))
+        lines = diag.clamp_lines(
+            logcat_lines if logcat_lines is not None
+            else get_pref("diag_logcat_lines", diag.DEFAULT_LOGCAT_LINES))
+        save_dir = self._default_save_dir()
         with self._diag_lock:
             if self._diag_running:
                 # 已经在收集：直接拒绝并说明，不要排队 —— 排队会让用户以为
@@ -74,19 +85,24 @@ class DeviceInfoMixin:
                 self._push_status("info", "ℹ 诊断包正在收集中，请等当前这一批完成。")
                 return {"ok": False, "reason": "busy"}
             self._diag_running = True
-        if with_logcat is None:
-            with_logcat = bool(get_pref("diag_with_logcat", True))
-        lines = diag.clamp_lines(
-            logcat_lines if logcat_lines is not None
-            else get_pref("diag_logcat_lines", diag.DEFAULT_LOGCAT_LINES))
-        save_dir = self._default_save_dir()
-        self.bus.push("diag_state", {"running": True})
-        self._push_status(
-            "info", "开始收集诊断包：%d 台设备（%s）"
-                    % (len(serials),
-                       "含 logcat 尾部 %d 行" % lines if with_logcat else "不含 logcat"))
-        self.workers.spawn("diag", self._do_diag, serials, save_dir,
-                           bool(with_logcat), lines)
+        try:
+            self.bus.push("diag_state", {"running": True})
+            self._push_status(
+                "info", "开始收集诊断包：%d 台设备（%s）"
+                        % (len(serials),
+                           "含 logcat 尾部 %d 行" % lines
+                           if with_logcat else "不含 logcat"))
+            self.workers.spawn("diag", self._do_diag, serials, save_dir,
+                               bool(with_logcat), lines)
+        except Exception as e:
+            # 线程起不来（线程数耗尽 / 内存告急）：状态位已置、running=true 已
+            # 广播，不在这里回滚就是上面说的「永久锁死」。apk 安装早已有这层
+            # 保护，诊断包当时漏了。
+            with self._diag_lock:
+                self._diag_running = False
+            self.bus.push("diag_state", {"running": False})
+            self._push_toast("err", "⚠ 无法启动诊断包收集：%s" % e)
+            return {"ok": False, "reason": "spawn_error", "error": str(e)}
         return {"ok": True, "devices": serials}
 
     def _do_diag(self, serials, save_dir, with_logcat, lines):
