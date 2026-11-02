@@ -250,3 +250,21 @@ def test_has_explicit_port():
     assert w.has_explicit_port("192.168.1.5") is False
     assert w.has_explicit_port("adb-x._adb-tls-connect._tcp") is False
     assert w.has_explicit_port("") is False
+
+
+def test_parse_connect_output_keeps_mdns_case():
+    """mDNS 服务名里的**大写字母**必须原样保留。
+
+    Android 11+ 无线调试给的序列号形如
+    `adb-26151FDF60083B-9tP4nl._adb-tls-connect._tcp`。早期解析先把整段输出
+    lower() 再截地址，交回去的是全小写版本 —— 拿它去 `adb -s` 选设备时与
+    `adb devices` 里的名字对不上，表现是「连接成功，但设备列表里没有这台」。
+    """
+    name = "adb-26151FDF60083B-9tP4nl._adb-tls-connect._tcp"
+    res = w.parse_connect_output("connected to %s\n" % name)
+    assert res["ok"] is True
+    assert res["address"] == name, res
+
+    res = w.parse_connect_output("already connected to %s\n" % name)
+    assert res["ok"] is True
+    assert res["address"] == name, res

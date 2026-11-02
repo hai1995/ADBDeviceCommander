@@ -284,16 +284,19 @@ def parse_connect_output(text):
     adb 的成败信息走 **stderr**（`connected to 1.2.3.4:5555` /
     `failed to connect to '1.2.3.4:5555': Connection refused`），调用方必须把
     stdout + stderr 合并后再传进来。返回 `{ok, address, message}`。
+
+    **地址必须从原文里取**：早期实现是先 `low = text.lower()` 再从 low 里截地址，
+    于是 Android 11+ 的 mDNS 服务名（`adb-26151FDF60083B-9tP4nl._adb-tls-connect
+    ._tcp`，含大写字母）会被交回去一个全小写的版本。拿它去 `adb -s` 选设备时
+    与 `adb devices` 里的名字对不上，表现是「连接成功，但设备列表里找不到」。
     """
     t = (text or "").strip()
-    low = t.lower()
-    m = re.search(r"already connected to ([^\s,]+)", low)
+    m = re.search(r"already connected to ([^\s,]+)", t, re.I)
     if m:
         return {"ok": True, "address": m.group(1), "message": "已连接（无需重复连接）"}
-    if re.search(r"(?<!already )connected to ([^\s,]+)", low):
-        m = re.search(r"connected to ([^\s,]+)", low)
-        return {"ok": True, "address": m.group(1) if m else "",
-                "message": "连接成功"}
+    m = re.search(r"(?<!already )connected to ([^\s,]+)", t, re.I)
+    if m:
+        return {"ok": True, "address": m.group(1), "message": "连接成功"}
     return {"ok": False, "address": "", "message": explain_connect_failure(t)}
 
 
