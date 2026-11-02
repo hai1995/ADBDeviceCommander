@@ -1240,6 +1240,12 @@
     chip.classList.toggle("chip-menu-open", open);
     if (!open) {
       chip.classList.remove("chip-menu-up");
+      // 焦点若还留在 kebab 上，CSS 的 :focus-within 会把 popup 继续显示着，
+      // 而整卡的抬层刚刚已经撤了 —— 菜单就成了「显示着却被兄弟卡片压住」的
+      // 僵尸态（点一下 ⋯ 后层级骤降正是这条路径：hover 先开 → 点击 toggle
+      // 关闭 → 焦点留在 kebab 上维持显示）。收起时把焦点一并交还，让「显示」
+      // 与「抬层」同进同退。
+      if (menu.contains(document.activeElement)) menu.blur();
       return;
     }
     const popup = menu.querySelector(".chip-popup");
@@ -1253,6 +1259,24 @@
     const above = cr.top - boxTop;
     chip.classList.toggle("chip-menu-up", below < h + 8 && above > below);
   }
+
+  /* 同一时刻只允许一张卡的 ⋯ 菜单开着：开另一张之前把别家先收掉。
+     没有这条约束时，触摸屏上依次点两个 ⋯ 会同时开着两份菜单，各自都抬层，
+     视觉上「谁在上」取决于 DOM 顺序而不是用户的最新意图。 */
+  function closeOpenChipMenus(exceptChip) {
+    document.querySelectorAll(".cmd-chip.chip-menu-open").forEach((ch) => {
+      if (ch === exceptChip) return;
+      const kb = ch.querySelector(".chip-kebab");
+      if (kb) setChipMenu(ch, kb, false);
+    });
+  }
+  // 点空白处（任何不在 ⋯/菜单上的地方）收起所有展开中的菜单：触摸屏没有
+  // hover，「点一下开、点别处收」是唯一说得通的开合方式。
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (t && t.closest && t.closest(".chip-kebab")) return;   // ⋯ 自己管（已 stopPropagation，双保险）
+    closeOpenChipMenus(null);
+  });
 
   /* 单张指令卡。抽成函数是因为「内置」组要按二级分组渲染（见
      appendBuiltinSections）——同一套卡片逻辑不能抄两遍，否则改角标 / 菜单时
@@ -1285,11 +1309,19 @@
       menu.setAttribute("role", "button");
       menu.setAttribute("aria-label", "更多操作");
       menu.title = "更多操作（复制 / 修改 / 删除）";
-      // 点击 kebab：阻止冒泡（不触发整张卡片的「执行」命令），并切换菜单显隐（点击 / 触摸场景）
+      // 点击 kebab：阻止冒泡（不触发整张卡片的「执行」命令）。
+      // 这里只负责「打开」，不再 toggle：悬停先开的菜单被点击 toggle 关掉后，
+      // 焦点留在 kebab 上、:focus-within 继续显示 popup，而抬层已撤 —— 就是
+      // 用户报的「点一下 ⋯ 后菜单层级变低」。收起交给移开 / 点别处 / 失焦。
       menu.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        setChipMenu(chip, menu, !menu.classList.contains("is-open"));
+        closeOpenChipMenus(chip);   // 别家的先收，同一时刻只开一张
+        openMenu(true);
       });
+      // 键盘 Tab 聚焦 / 失焦同样走 setChipMenu：:focus-within 只负责显示、
+      // 不会抬整卡，不走这里就会复现「显示着却被压住」的同一坑。
+      menu.addEventListener("focus", () => openMenu(true));
+      menu.addEventListener("blur", () => openMenu(false));
 
       // 纵向三点（kebab）SVG 图标：比字符 ⋮ 更均匀、清晰
       const dots = document.createElement("span");

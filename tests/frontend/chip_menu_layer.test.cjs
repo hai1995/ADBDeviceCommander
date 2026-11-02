@@ -5,7 +5,8 @@
  * popup 的 20 只在这一小层里比较）。所以修复要点落在「整张卡片抬层」上，
  * 这个文件把三件事钉住：
  *   1) CSS：卡片级 chip-menu-open / chip-menu-up 两条规则存在且数值正确；
- *   2) 行为：点 ⋯ 给卡片加 chip-menu-open，再点 / 点菜单项都会撤掉；
+ *   2) 行为：点 ⋯ 只负责打开（toggle 关闭会留下「焦点维持显示、抬层已撤」
+ *      的僵尸菜单，层级骤降），收起靠点空白 / 点菜单项 / 移开 / 失焦；
  *   3) 方向：下方空间不足时加 chip-menu-up（否则最后一行的菜单被滚动容器裁掉）。
  */
 const fs = require("fs");
@@ -105,15 +106,22 @@ const watchdog = setTimeout(() => {
   const popup = chip && chip.querySelector(".chip-popup");
   ok(!!kebab && !!popup, "卡片上有 ⋯ 与菜单节点");
 
-  console.log("\n[B] 点 ⋯ → 卡片抬层；再点 / 点菜单项 → 撤销");
+  console.log("\n[B] 点 ⋯ → 抬层且只开不关；点别处 / 点菜单项 → 撤销");
   {
     click(window, kebab);
     ok(kebab.classList.contains("is-open"), "点一下菜单展开");
     ok(chip.classList.contains("chip-menu-open"),
       "同时给**整张卡片**加 chip-menu-open（只抬 kebab 时 popup 出不了层叠上下文）");
 
+    // 现场回归：「悬停已开 → 再点一下 ⋯」旧实现 toggle 成关闭，抬层被撤，
+    // 但焦点留在 kebab 上、:focus-within 继续显示 popup → 显示着却被
+    // 兄弟卡片压住（层级骤降）。现在 ⋯ 只负责打开，点已开的 ⋯ 不许关。
     click(window, kebab);
-    ok(!kebab.classList.contains("is-open"), "再点一下收起");
+    ok(kebab.classList.contains("is-open"), "悬停已开时再点 ⋯ 仍展开（toggle 关闭会留下僵尸菜单）");
+    ok(chip.classList.contains("chip-menu-open"), "展开期间整卡抬层始终在");
+
+    click(window, doc.body);
+    ok(!kebab.classList.contains("is-open"), "点空白处收起菜单");
     ok(!chip.classList.contains("chip-menu-open"), "收起时卡片撤掉抬层");
 
     click(window, kebab);
@@ -122,6 +130,29 @@ const watchdog = setTimeout(() => {
     click(window, item);
     ok(!chip.classList.contains("chip-menu-open"),
       "点了菜单项（复制）后卡片也要撤掉抬层，否则一直压着别人");
+  }
+
+  console.log("\n[B2] 同一时刻只允许一张卡的菜单抬层");
+  {
+    const chips = doc.querySelectorAll(".cmd-chips .cmd-chip");
+    const chip2 = chips[1], kebab2 = chip2.querySelector(".chip-kebab");
+    click(window, kebab);
+    ok(chip.classList.contains("chip-menu-open"), "卡 1 的菜单展开并抬层");
+    click(window, kebab2);
+    ok(chip2.classList.contains("chip-menu-open"), "点卡 2 的 ⋯：卡 2 展开并抬层");
+    ok(!chip.classList.contains("chip-menu-open"), "卡 1 被自动收起（不许两张同时抬层）");
+    click(window, doc.body);
+    ok(!chip2.classList.contains("chip-menu-open"), "点空白处同样收起卡 2");
+  }
+
+  console.log("\n[B3] 键盘 Tab 聚焦 ⋯ 也要抬层（:focus-within 只显示不抬层的坑）");
+  {
+    kebab.focus();
+    ok(kebab.classList.contains("is-open"), "聚焦 ⋯ 菜单展开");
+    ok(chip.classList.contains("chip-menu-open"), "聚焦展开同样抬整卡（否则焦点维持显示、层级却跌回去）");
+    kebab.blur();
+    ok(!kebab.classList.contains("is-open"), "失焦收起");
+    ok(!chip.classList.contains("chip-menu-open"), "失焦后撤掉抬层");
   }
 
   console.log("\n[C] 悬停展开同样抬层");
@@ -158,7 +189,7 @@ const watchdog = setTimeout(() => {
       "卡片贴底时改为向上弹（否则菜单被 #cmd-groups 底边裁掉）");
 
     chip.getBoundingClientRect = saved;
-    click(window, kebab);          // 收起，恢复干净状态
+    click(window, doc.body);       // 点空白收起，恢复干净状态（⋯ 本身只开不关）
   }
 
   clearTimeout(watchdog);
