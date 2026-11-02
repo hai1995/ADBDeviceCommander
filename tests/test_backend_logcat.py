@@ -44,6 +44,12 @@ class _FakeBus:
             e["kind"] == "logcat_capture" and e["payload"].get("status") == status
             for e in self.events)
 
+    def has_status(self, kind, status):
+        """任意通道的某个 status 是否出现过（监控 / 抓取共用）。"""
+        return any(
+            e["kind"] == kind and (e["payload"] or {}).get("status") == status
+            for e in self.events)
+
 
 class _FakeLogcatProc:
     """模拟 `adb logcat`。
@@ -187,6 +193,10 @@ def test_monitor_stop_immediately_after_start(tmp_path, monkeypatch):
     # 状态复位后应能立刻重新开始（旧实现会一直判 already_running）
     assert mon.start("A1", ["main"]) is True, "停止后必须能重新开始监控"
     assert mon.stop("A1") is True
+    # 「启动瞬间就停止」那一轮不该广播过 running：前端收到它会把状态切成
+    # 「采集中…」、把「开始监控」锁上，紧接着又被 stopped 拨回来。
+    assert not bus.has_status("logcat", "running"), \
+        "启动瞬间就停止不该广播「运行中」"
 
 
 def test_capture_stop_immediately_after_start(tmp_path, monkeypatch):
@@ -212,6 +222,55 @@ def test_capture_stop_immediately_after_start(tmp_path, monkeypatch):
     assert cap.stop("R", zip_on_stop=False) is True, "启动瞬间的停止必须返回 True"
     assert _wait_not_running(cap, "R"), "抓取未在停止后收尾"
     assert _wait_stopped(bus), "未推 stopped 事件"
+
+
+def _start_then_stop_at_once(tmp_path, monkeypatch):
+    """启动后立刻点停止（stop 落在 _starting 窗口内），返回 (bus, path)。"""
+    proc = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"],
+                           block_after=0)
+    holder = {}
+
+    def slow_popen(cmd, **kw):
+        time.sleep(0.15)          # 让 stop() 落在 _starting 窗口内（启动瞬间）
+        holder["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(ls.subprocess, "Popen", slow_popen)
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "logcat_X_001.txt")
+    assert cap.start("X", path, ["main"]) is True
+    assert cap.stop("X", zip_on_stop=True) is True
+    assert _wait_stopped(bus), "未推 stopped 事件"
+    return bus, path
+
+
+def test_capture_stopped_at_startup_is_not_broadcast_as_running(tmp_path, monkeypatch):
+    """启动瞬间就点停止：不该再广播「运行中」。
+
+    旧行为：worker 发现 stop_now 后照样推一条 running。前端收到它会把状态切成
+    「采集中…」、把「开始抓取」锁上，紧接着又被 stopped 拨回来 ——
+    一次从未成立的状态。
+    """
+    bus, _path = _start_then_stop_at_once(tmp_path, monkeypatch)
+    assert not bus.has_capture_status("running"), \
+        "启动瞬间就停止不该广播「运行中」"
+
+
+def test_capture_stopped_at_startup_leaves_no_empty_file(tmp_path, monkeypatch):
+    """启动瞬间就点停止：不留 0 字节 txt，也不报「✓ 抓到 0 行」。
+
+    旧行为：worker 照样 open(path, "w")，于是磁盘上多出一个 0 字节 txt；前端
+    随后弹「✓ Logcat 抓取完毕：0 行 → logcat_X_001.txt」。用户拿着这个空文件
+    去分析，只会得出「设备当时确实没有日志输出」这个错误结论。
+    """
+    bus, path = _start_then_stop_at_once(tmp_path, monkeypatch)
+    assert not os.path.exists(path), "一行都没抓到就不该留下 0 字节 txt"
+    assert not os.path.exists(path + ".zip"), "空文件不该被打包"
+    ev = bus.last_capture_event("stopped")
+    assert ev.get("no_file") is True
+    assert "没有生成" in (ev.get("text") or ""), "得说清本次没有生成文件"
+    assert not ev.get("zip_error"), "没有文件可打包时不该报「打包失败」"
 
 
 def _make_capture(bus, monkeypatch, lines, block_after=None, getsize=None):

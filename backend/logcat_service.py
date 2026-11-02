@@ -177,9 +177,13 @@ class LogcatMonitor:
         if stop_now:
             stop_ev.set()
             _terminate(proc)
-        self.bus.push("logcat",
-                      {"serial": serial, "status": "running",
-                       "buffers": buffers})
+        else:
+            # 用户已经点了停止：不要再广播 running。前端收到它会把状态切成
+            # 「采集中…」、把「开始监控」锁上，紧接着又被 stopped 拨回来 ——
+            # 一次从未成立的状态，白闪一下还多一轮无意义的置位/复位。
+            self.bus.push("logcat",
+                          {"serial": serial, "status": "running",
+                           "buffers": buffers})
         batch, last = [], time.time()
         # 未产出任何日志行时收集到的「非日志行」（adb 的报错正是这个形态：
         # `error: device 'xxx' not found` / `adb: device offline`）。平时它们只是
@@ -432,11 +436,13 @@ class LogcatCapture:
             self._starting.discard(serial)
             stop_now = serial in self._stopreq
             self._procs[serial] = proc
-        # 启动期间就被点停止：立刻收尾，不要开始写文件
+        # 启动期间就被点停止：立刻收尾，也不要开始写文件
         if stop_now:
             _terminate(proc)
-        self.bus.push("logcat_capture",
-                      {"serial": serial, "status": "running", "path": path})
+        else:
+            # 同监控：已经点了停止就不播 running（前端会把「开始」锁上再拨回来）
+            self.bus.push("logcat_capture",
+                          {"serial": serial, "status": "running", "path": path})
         # f 必须先初始化再进 try：open() 失败（保存目录被删 / 磁盘掉线 / 只读）时
         # 旧实现让 finally 里去读未绑定的 f，直接抛 UnboundLocalError —— finally 随之
         # 中断，_procs/_starting/_stopreq/_flags 全部没清理、子进程也没 terminate：
@@ -457,8 +463,12 @@ class LogcatCapture:
         # 只有半截，甚至一行都没写进去。
         write_error = ""
         try:
-            f = open(path, "w", encoding="utf-8", errors="replace")
-            for raw in proc.stdout:
+            # 启动瞬间就停止（stop_now）：不建文件、不读输出。旧行为照样
+            # open(path, "w")，磁盘上留下一个 0 字节 txt，前端随后弹「✓ 抓取
+            # 完毕：0 行」—— 一份看起来「设备当时没有日志输出」的假证据。
+            f = None if stop_now else open(path, "w", encoding="utf-8",
+                                           errors="replace")
+            for raw in (() if stop_now else proc.stdout):
                 if not logish:
                     if classify_line(raw) is not None:
                         logish = 1
@@ -507,6 +517,17 @@ class LogcatCapture:
             # 去保存目录找 zip，只看到 txt（或什么都没有），而界面只报「抓取
             # 完毕」—— 分不清是没勾上、还是打包失败了。
             zip_err = ""
+            if stop_now:
+                # 启动瞬间就停止：文件根本没建、也没读到任何行。旧行为会一路
+                # 走到下面的结算，报出「0 行 / 0 B」，前端弹「✓ 抓取完毕」，
+                # 勾了打包还会再叠一条「抓取文件为空」的假告警。
+                self.bus.push("logcat_capture",
+                              {"serial": serial, "status": "stopped",
+                               "path": path, "lines": 0, "size": 0,
+                               "packaged": False, "no_file": True,
+                               "text": "已停止：还没开始抓取就点了停止，"
+                                       "本次没有生成日志文件"})
+                return
             if do_zip:
                 # 先确认是**普通文件**：open(path, "w") 失败时（保存目录被删、
                 # 路径被同名目录占位），path 可能仍 exists —— 对目录打包会产出
