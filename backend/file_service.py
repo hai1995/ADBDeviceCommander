@@ -27,6 +27,17 @@ def shq(text) -> str:
     return "'" + str(text).replace("'", "'\\''") + "'"
 
 
+def _ls_says_empty(text):
+    """`ls -la` 的输出是否明确表示「空目录」（只有 `total 0` 这类汇总行）。
+
+    完全没输出（""）**不算**空目录：那更像命令异常 / 输出被吞，该继续兜底。
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    return all(ln.lower().startswith("total ") for ln in lines)
+
+
 def _err_text(r, fallback="adb 返回失败（没有给出原因）"):
     """从 CompletedProcess 里取一句**非空**的失败原因。
 
@@ -65,11 +76,20 @@ class FileService:
         if r.returncode != 0:
             return None, _err_text(r, "ls 失败")
         items = parse_ls_output(r.stdout or "")
-        # 极少数设备 ls -la 输出被截断或异常导致解析为空：兜底 ls -l 再试一次
-        if not items:
+        # 极少数设备 ls -la 输出被截断或异常导致解析为空：兜底 ls -l 再试一次。
+        # 但**明确是空目录**（只打了 `total 0`）时不兜底：文件页每次进入空目录
+        # 都要多等一个 adb 往返（100~300ms），而结果必然是空。
+        if not items and not _ls_says_empty(r.stdout):
             r2 = self._shell(serial, ["ls", "-l", shq(posix_join(path, "."))], timeout=20)
             if r2.returncode == 0:
                 items = parse_ls_output(r2.stdout or "")
+            # 两次都解析不出、且输出明显不是「空目录」的格式：这时的空列表会
+            # 被界面画成「空目录」，而目录里其实有东西（该 ROM 的列布局不同 /
+            # 输出被截断）。宁可报一句原因，也不要让用户以为文件没了。
+            if not items and not _ls_says_empty(r2.stdout):
+                lines = [ln for ln in (r2.stdout or "").splitlines() if ln.strip()]
+                return None, ("无法解析目录输出（共 %d 行），未列出任何条目；"
+                              "该设备的 ls 格式可能与预期不同" % len(lines))
         # 排掉 . 和 ..
         items = [i for i in items if i["name"] not in (".", "..")]
         items.sort(key=lambda i: (not i["is_dir"], i["name"].lower()))

@@ -418,3 +418,35 @@ def test_view_explains_directory_target_instead_of_returning_empty_reason(monkey
     res, err = svc.view("SERIAL", "/sdcard/somedir", max_inline_bytes=8)
     assert res is None
     assert err and "目录" in err, err
+
+def test_list_dir_empty_dir_does_not_retry(monkeypatch):
+    """空目录不该再跑一次 ls -l：那是每次进入空目录都白等一个 adb 往返。
+
+    只有 `total 0` 一行时，结果必然是空，兜底没有信息增量（100~300ms 的
+    可感延迟换一个空列表）。旧实现无条件兜底。
+    """
+    records = []
+    monkeypatch.setattr(fs_mod.subprocess, "run",
+                        _make_fake_run(records, "total 0\n"))
+    svc = FileService()
+    items, err = svc.list_dir("SERIAL", "/empty")
+    assert err is None
+    assert items == []
+    assert len(records) == 1, "空目录不该重试，实际调用了 %d 次" % len(records)
+
+
+def test_list_dir_reports_unparsable_output_instead_of_empty(monkeypatch):
+    """有内容却解析不出来时必须报原因，不能画成「空目录」。
+
+    回归：两次 ls 都解析为空时直接返回 ([], None)，前端据此渲染「此目录为空」——
+    而目录里其实有文件（该 ROM 的列布局不同 / 输出被截断）。用户以为文件没了。
+    """
+    weird = ("drwxr-xr-x 2 root root 4096 data\n"
+             "-rw-r--r-- 1 root root 12 f\n")   # 缺日期列 -> 逐行都解析失败
+    records = []
+    monkeypatch.setattr(fs_mod.subprocess, "run",
+                        _make_fake_run(records, weird))
+    svc = FileService()
+    items, err = svc.list_dir("SERIAL", "/weird")
+    assert items is None, "解析失败不能当作空目录返回"
+    assert err and "无法解析" in err, err
