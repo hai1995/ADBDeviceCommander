@@ -721,8 +721,9 @@ def test_capture_write_failure_is_not_reported_as_success(tmp_path, monkeypatch)
 
     cap = ls.LogcatCapture(bus, adb_path="adb")
     assert cap.start("W", str(path), ["main"], level_filter=None) is True
-    assert _wait_running(cap, "W")
-    assert cap.stop("W", zip_on_stop=False) is True
+    # 不调 stop()：open() 就在这里立刻失败，worker 随即自己收尾。旧写法先等
+    # `is_running` 再 stop —— 那是一个毫秒级的窗口（CI 上因调度错过就直接
+    # 断言失败），测的其实不是「失败后怎么报」。
     assert _wait_stopped(bus)
 
     assert bus.has_capture_status("error")
@@ -776,3 +777,55 @@ def test_capture_zip_skipped_for_empty_file_says_why(tmp_path, monkeypatch):
     assert st is not None
     assert "为空" in (st.get("zip_error") or ""), st
     assert st["packaged"] is False
+
+# ---------------------------------------------------------------------------
+# 控制器层的「点了没反应」：前端不看返回值，后端不播报就是彻底静默
+# ---------------------------------------------------------------------------
+def _status_texts(api):
+    return [e["payload"].get("text") or "" for e in api.bus.take()
+            if e["kind"] == "status"]
+
+
+def test_capture_start_reports_unwritable_save_dir(tmp_path, monkeypatch):
+    """保存目录建不出来时必须播报，否则「开始抓取」点了完全没反应。
+
+    回归：`logcat_capture_start` 在 makedirs 失败时只把原因塞进返回值，
+    而前端是事件驱动的（callApi 结果不看不提示）——只读盘 / 盘符不存在 /
+    路径被同名文件占位时，用户点完按钮界面上一个字都没有。
+    """
+    api = WebApi()
+    api.state.adb_path = "adb"
+    blocker = tmp_path / "notdir"
+    blocker.write_text("x", encoding="utf-8")     # 父路径被普通文件占位
+
+    res = api.logcat_capture_start("X", str(blocker / "sub"), ["main"])
+    assert res["ok"] is False and res["reason"] == "mkdir", res
+    texts = _status_texts(api)
+    assert any("无法创建保存目录" in t for t in texts), texts
+
+
+def test_capture_start_reports_already_running(monkeypatch):
+    """同一台设备重复开始抓取要被明确拒绝，不能静默丢弃。"""
+    api = WebApi()
+    api.state.adb_path = "adb"
+    monkeypatch.setattr(api.logcat_capture, "start", lambda *a, **kw: False)
+    res = api.logcat_capture_start("X", ".", ["main"])
+    assert res["ok"] is False and res["reason"] == "already_running"
+    assert any("已有 logcat 抓取在进行" in t for t in _status_texts(api))
+
+
+def test_capture_stop_reports_when_nothing_running():
+    """没在抓取时点「停止」也要说一句，而不是一个没有反馈的死按钮。"""
+    api = WebApi()
+    res = api.logcat_capture_stop("A1", zip_on_stop=False)
+    assert res["ok"] is False and res["reason"] == "not_running", res
+    assert any("没有进行中的 logcat 抓取" in t for t in _status_texts(api))
+
+
+def test_logcat_start_reports_already_running(monkeypatch):
+    """实时监控重复开始同样要有提示。"""
+    api = WebApi()
+    monkeypatch.setattr(api.logcat_monitor, "start", lambda *a, **kw: False)
+    res = api.logcat_start("A1", ["main"])
+    assert res["ok"] is False and res["reason"] == "already_running"
+    assert any("已在 logcat 监控中" in t for t in _status_texts(api))

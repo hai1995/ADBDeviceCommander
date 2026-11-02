@@ -18,6 +18,11 @@ class LogcatMixin:
             serial, buffers, level_filter=level_filter,
             keyword=keyword or "", only_exc=bool(only_exc))
         if not ok:
+            # 前端是事件驱动、不看返回值的（callApi 结果只作兜底）：这里不播报，
+            # 用户点「开始监控」看到的就是彻底的静默 —— 分不清是设备在忙、
+            # 还是按钮没点上。
+            self._push_status(
+                "warn", "⚠ 设备 %s 已在 logcat 监控中，不用重复开始" % serial)
             return {"ok": False, "reason": "already_running"}
         self._push_status("info", "开始监控 logcat: %s" % serial)
         return {"ok": True}
@@ -41,6 +46,10 @@ class LogcatMixin:
         try:
             os.makedirs(save_dir, exist_ok=True)
         except Exception as e:
+            # 同上：返回前端也不看。保存目录不可写（只读盘 / 盘符不存在 /
+            # 路径被同名文件占位）时，用户点「开始抓取」后什么都不发生。
+            self._push_status(
+                "err", "⚠ 无法创建保存目录 %s：%s" % (save_dir, e))
             return {"ok": False, "reason": "mkdir", "text": str(e)}
         ts = time.strftime("%Y%m%d_%H%M%S")
         # safe_name：无线 ADB 序列号（IP:端口）含冒号，Windows 下文件名非法
@@ -50,6 +59,9 @@ class LogcatMixin:
         ok = self.logcat_capture.start(serial, path, buffers,
                                        level_filter=level_filter)
         if not ok:
+            self._push_status(
+                "warn", "⚠ 设备 %s 已有 logcat 抓取在进行，请先停止再开始"
+                        % serial)
             return {"ok": False, "reason": "already_running"}
         self._push_status("info", "开始抓取 logcat: %s -> %s%s"
                           % (serial, path, self._level_filter_desc(level_filter)))
@@ -71,7 +83,12 @@ class LogcatMixin:
     def logcat_capture_stop(self, serial, zip_on_stop=True):
         if not serial:
             return {"ok": False, "reason": "no_device"}
-        self.logcat_capture.stop(serial, zip_on_stop=zip_on_stop)
+        if not self.logcat_capture.stop(serial, zip_on_stop=zip_on_stop):
+            # 没在抓取（设备刚被移除 / 上一轮已经停了）：说一句，而不是让用户
+            # 对着一个"点了没反应"的按钮反复点。
+            self._push_status(
+                "info", "ℹ 设备 %s 当前没有进行中的 logcat 抓取" % serial)
+            return {"ok": False, "reason": "not_running"}
         return {"ok": True}
 
     def _default_save_dir(self):
