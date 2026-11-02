@@ -3494,3 +3494,21 @@ def test_screen_record_devaudio_failure_reports_reason(monkeypatch, tmp_path):
     assert api._rec_session["devaudio"] == {}
     api._rec_session = {}
     api.workers.shutdown(timeout=2.0)
+
+
+def test_open_save_dir_reports_real_reason(tmp_path):
+    """目录打不开时要说真原因（没权限 / 同名文件占位），不能一律「目录不存在」。
+
+    回归：open_save_dir 把 makedirs 的 OSError 整个吞掉，转头发一句「目录不存在」。
+    用户照着这句去查，目录明明在 —— 真正的问题是那个路径被一个同名文件占着。
+    """
+    api = _make_api()
+    target = tmp_path / "notadir"
+    target.write_text("x", encoding="utf-8")        # 同名的普通文件
+
+    res = api.open_save_dir(str(target))
+    assert res["ok"] is False
+    assert res.get("text"), res                     # 带上底层原因
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("无法创建" in t for t in texts), texts
+    assert not any("目录不存在" in t for t in texts), texts

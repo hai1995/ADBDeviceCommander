@@ -18,13 +18,18 @@ class FileMixin:
     def open_save_dir(self, dir_path=None):
         """在系统文件管理器打开保存目录（Windows 用 explorer / startfile）。"""
         d = (dir_path or "").strip() or self._default_save_dir()
+        # 保留建目录的真实原因：路径落在只读位置 / 父目录不存在时，旧实现把
+        # OSError 整个吞掉，转头发一句「目录不存在」——用户照着这句话去查，
+        # 目录明明在，真正的问题是没权限。
+        mkdir_err = ""
         try:
             os.makedirs(d, exist_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            mkdir_err = str(e)
         if not os.path.isdir(d):
-            self._push_status("err", "⚠ 目录不存在：%s" % d)
-            return {"ok": False}
+            why = mkdir_err or "路径不存在"
+            self._push_status("err", "⚠ 无法创建 / 打开目录 %s：%s" % (d, why))
+            return {"ok": False, "text": why}
         try:
             if sys.platform.startswith("win"):
                 os.startfile(d)
