@@ -525,7 +525,7 @@ class LogcatCapture:
                               {"serial": serial, "status": "stopped",
                                "path": path, "lines": 0, "size": 0,
                                "packaged": False, "no_file": True,
-                               "text": "已停止：还没开始抓取就点了停止，"
+                               "text": "已停止：还没写入任何日志就结束了，"
                                        "本次没有生成日志文件"})
                 return
             if do_zip:
