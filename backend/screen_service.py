@@ -390,17 +390,25 @@ class VideoRecorder:
                            or "settings 返回 %d" % r.returncode)
         return True, ""
 
-    def _stop_device_screenrecord(self, adb, serial):
+    def _stop_device_screenrecord(self, adb, serial, remote=None):
         """精准结束设备端 screenrecord：用 SIGINT 让其优雅收尾（写回 moov 头），这是录出
         可播放 MP4 的关键——screenrecord 只在 SIGINT（Ctrl-C）下收尾，仅 SIGTERM 会直接被杀、
         文件没收尾（无 moov 头、没有时长、播放不了）。
 
         收尾顺序统一收口到 backend.device_proc.kill_device_process（录屏 / 录音共用）：
-        按 PID `kill -INT` → **等它把 moov 写完** → 确认仍存活才补 `-TERM`（拿不到 PID 时
-        同序退化为 pkill）。早期这里把 `-INT` 与 `-TERM` 背靠背发出去，进程很可能死在
-        写 moov 的中途——等于白优雅一次，产物依旧是坏文件。
+        按 PID `kill -INT` → **等它把 moov 写完** → 确认仍存活才补 `-TERM`。早期这里把
+        `-INT` 与 `-TERM` 背靠背发出去，进程很可能死在写 moov 的中途——等于白优雅一次，
+        产物依旧是坏文件。
+
+        **绝不能按进程名 pkill screenrecord**：投屏（`screenrecord --output-format=h264 -`）
+        是同名进程，停止录屏时一刀按名字切下去，会把用户眼前正在看的投屏一起掐断，而设备
+        明明好好的。因此只认「命令行里带本次录屏文件名」的那一条（remote 形如
+        /data/local/tmp/adb_rec_<serial>_<ts>_<seq>.mp4，每次录制唯一）；精确取不到 PID 时
+        退化为 `pkill -f <该文件名>`，仍然只命中自己那条。
         """
-        kill_device_process(adb, serial, "screenrecord")
+        match = os.path.basename(remote) if remote else None
+        kill_device_process(adb, serial, "screenrecord", match=match,
+                            fallback_name_kill=False)
 
     def stop(self, serial):
         """停止录屏并拉回本地。返回 (ok, local_path, err)。"""
@@ -423,7 +431,7 @@ class VideoRecorder:
             except Exception:
                 pass
         # 2) 设备端按 PID 精准结束 screenrecord（比 pkill 更通用）；并给一点时间收尾。
-        self._stop_device_screenrecord(self.adb, serial)
+        self._stop_device_screenrecord(self.adb, serial, sess.get("remote"))
         try:
             if proc is not None:
                 proc.wait(timeout=10)

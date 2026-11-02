@@ -61,10 +61,12 @@ def test_stop_signals_device_side_screenrecord_first(monkeypatch, tmp_path):
 
     vr.stop("A1")
 
-    # 设备端收尾（pkill screenrecord）必须发生
+    # 设备端收尾必须发生，但只能按本次录屏文件名（-f）精确匹配：
+    # 按进程名 `pkill screenrecord` 会连投屏那条同名进程一起杀掉。
     pkills = [c for c in captured if "pkill" in c]
     assert pkills, "stop() 未对设备端 screenrecord 做收尾（会留下孤儿进程）"
-    assert "screenrecord" in pkills[0]
+    assert "-f" in pkills[0] and "adb_rec_A1.mp4" in pkills[0], pkills[0]
+    assert "screenrecord" not in pkills[0], pkills[0]
     # 会话被清空，避免重复 stop
     assert vr.is_recording("A1") is False
 
@@ -374,21 +376,32 @@ def test_stop_unknown_serial_is_rejected(tmp_path):
 
 def test_stop_device_screenrecord_uses_pid_kill(monkeypatch):
     """停止应优先按 PID 精准结束设备端 screenrecord（比 pkill 更通用），
-    确保文件 moov 收尾、录出可播放的 MP4。"""
+    确保文件 moov 收尾、录出可播放的 MP4。
+
+    设备上同时可能有投屏那条同名 screenrecord，因此只认「命令行里带本次
+    录屏文件名」的那一行。
+    """
     captured = []
+    remote = "/data/local/tmp/adb_rec_A1_20261102_1.mp4"
 
     def fake_run(cmd, **kw):
         captured.append(list(cmd))
-        if "pidof" in cmd and cmd[-1] == "screenrecord":
-            return type("R", (), {"returncode": 0, "stdout": "4321\n", "stderr": ""})()
+        if "ps" in cmd:
+            return type("R", (), {"returncode": 0, "stdout": (
+                "  PID ARGS\n"
+                " 4321 /system/bin/screenrecord --output-format=h264 -\n"
+                " 4322 /system/bin/screenrecord %s\n" % remote), "stderr": ""})()
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
     vr = ss.VideoRecorder(_Bus(), "adb")
-    vr._stop_device_screenrecord("adb", "A1")
+    vr._stop_device_screenrecord("adb", "A1", remote)
     kills = [c for c in captured if "kill" in c and "shell" in c]
-    assert kills and kills[0][-3:] == ["kill", "-INT", "4321"], "应按 PID kill -INT 4321（实际 %r）" % kills
-    assert not any("pkill" in c for c in captured), "pidof 命中时不应回退 pkill"
+    assert kills and kills[0][-3:] == ["kill", "-INT", "4322"], \
+        "应按 PID kill -INT 4322（本次录屏），实际 %r" % (kills,)
+    assert not any("4321" in c for c in kills), \
+        "绝不能杀掉投屏那条（4321）：%r" % (kills,)
+    assert not any("pkill" in c for c in captured), "精准命中时不应回退 pkill"
 
 
 def test_mp4_has_moov(tmp_path):
@@ -402,19 +415,26 @@ def test_mp4_has_moov(tmp_path):
 
 
 def test_stop_device_screenrecord_pid_kill_fallback_to_pkill(monkeypatch):
-    """pidof / ps 都拿不到 PID 时，应回退到 pkill screenrecord。"""
+    """pidof / ps 都拿不到 PID 时，只能按命令行特征 `pkill -f`，绝不按进程名杀。
+
+    回归：按名字 `pkill screenrecord` 会把投屏那条同名进程一起掐断 —— 设备
+    完全正常，用户正看着的投屏却黑了。
+    """
     captured = []
+    remote = "/data/local/tmp/adb_rec_A1_20261102_1.mp4"
 
     def fake_run(cmd, **kw):
         captured.append(list(cmd))
-        if "pidof" in cmd or "ps" in cmd:
-            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
     vr = ss.VideoRecorder(_Bus(), "adb")
-    vr._stop_device_screenrecord("adb", "A1")
-    assert any("pkill" in c and "screenrecord" in c for c in captured), "无 PID 时应回退 pkill screenrecord"
+    vr._stop_device_screenrecord("adb", "A1", remote)
+    pkills = [c for c in captured if "pkill" in c]
+    assert pkills, "无 PID 时应回退 pkill 清理自己的残留"
+    for c in pkills:
+        assert "-f" in c and "adb_rec_A1_20261102_1.mp4" in c, c
+        assert "screenrecord" not in c, "不得按进程名杀同名进程：%r" % (c,)
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +563,8 @@ def test_active_stop_is_not_reported_as_death(tmp_path, monkeypatch):
     vr, proc = _recorder(tmp_path)
     # 跳过 9 秒级的 pull 重试：本用例只关心 stopping 标记的语义
     monkeypatch.setattr(vr, "_pull_and_finish", lambda s: (True, "x.mp4", None))
-    monkeypatch.setattr(vr, "_stop_device_screenrecord", lambda adb, s: None)
+    monkeypatch.setattr(vr, "_stop_device_screenrecord",
+                        lambda adb, s, remote=None: None)
 
     vr.stop("A1")                        # 主动停止：内部先置 stopping
     vr._watch_exit("A1", proc)           # 停止后的退出不算意外
@@ -894,3 +915,28 @@ def test_pull_gives_up_at_once_on_permission_denied(monkeypatch, tmp_path):
     assert "Permission denied" in err, err
     assert len(pulls) == 1, "不可恢复的错误只该尝试一次：%d" % len(pulls)
     assert not sleeps, "已知拿不到，就不该再退避等待：%r" % sleeps
+
+
+def test_stop_recording_never_kills_mirror_by_process_name(monkeypatch, tmp_path):
+    """停止录屏绝不能 `pkill screenrecord` —— 投屏用的是同名进程。
+
+    回归：设备端 ps 拿不到完整命令行（老 ROM 只打印 comm）时会退化为按名字
+    pkill，把用户眼前正在看的投屏一起掐断。设备一切正常，画面却黑了，用户
+    根本想不到是「停止录屏」干的。
+    """
+    captured = []
+
+    def fake_run(cmd, **kw):
+        captured.append(list(cmd))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    monkeypatch.setattr(vr, "_pull_and_finish", lambda s: (True, "x.mp4", None))
+    vr.stop("A1")
+
+    pkills = [c for c in captured if "pkill" in c]
+    assert pkills, "自己的残留仍应被清理（不能什么都不做）"
+    for c in pkills:
+        assert "-f" in c, "兜底清理必须按命令行特征（-f）：%r" % (c,)
+        assert "screenrecord" not in c, "不得按进程名杀同名进程：%r" % (c,)

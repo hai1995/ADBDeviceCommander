@@ -70,9 +70,19 @@ def device_pid(adb, serial, name, match=None):
                 return pids[0]
         except Exception:
             pass
-    try:
-        r = subprocess.run([adb, "-s", serial, "shell", "ps", "-A"],
-                           **adb_kwargs(10))
+    # 给了命令行特征时，先要「带完整命令行」的 ps：默认的 `ps -A` 只打印
+    # 进程名（comm），两条 screenrecord（录屏那条 + 投屏那条）在 NAME 列里
+    # 长得一模一样，据此区分不了谁是谁 —— 按它挑 PID 等于随机杀一个。
+    # 老 ROM 的 ps 不支持 -o 时会把 usage 打到 stdout，解析不出东西就退回
+    # 普通 `ps -A`（至少别把流程断在这里）。
+    variants = (["-A", "-o", "PID,ARGS"], ["-A"]) if match is not None \
+        else (["-A"],)
+    for extra in variants:
+        try:
+            r = subprocess.run([adb, "-s", serial, "shell", "ps"] + extra,
+                               **adb_kwargs(10))
+        except Exception:
+            continue
         for line in (r.stdout or "").splitlines():
             if name not in line:
                 continue
@@ -81,8 +91,6 @@ def device_pid(adb, serial, name, match=None):
             pid = _pick_pid(line)
             if pid:
                 return pid
-    except Exception:
-        pass
     return None
 
 
@@ -97,7 +105,9 @@ def kill_device_process(adb, serial, name, wait=0.6, match=None,
     fallback_name_kill：精确匹配不到时，是否允许退回「按进程名 pkill」。按名字
     杀会连**同名的其它进程**一起杀掉 —— 用户正在录屏的那条 screenrecord 就是
     同名进程，一次投屏收尾就能把正常录屏弄断。因此调用方在「可能有别人的同名
-    进程」时必须传 False：宁可不清理，也绝不误杀。
+    进程」时必须传 False：宁可不清理，也绝不误杀。传 False 且给了 match 时，
+    仍会退化为 `pkill -f <match>`（按命令行特征，不是按名字），既清得掉自己的
+    残留，也不会误伤同名进程。
 
     返回 True 表示走的是「按 PID 精准结束」分支（便于调用方/测试区分）。
     """
@@ -111,8 +121,16 @@ def kill_device_process(adb, serial, name, wait=0.6, match=None,
             _run([adb, "-s", serial, "shell", "kill", "-TERM", pid])
         return True
     if not fallback_name_kill:
-        # 精确没找到、也不允许按名字兜底：什么都不做（设备上可能有另一条同名
-        # 进程正被用户使用着，按名字一刀下去就是误杀）。
+        # 精确没找到、也不允许按名字兜底：设备上可能有另一条同名进程正被用户
+        # 使用着，按名字一刀下去就是误杀。但若给了命令行特征，还能用
+        # `pkill -f <特征>` 清理 —— 它同样只匹配「命令行含该特征」的那一条，
+        # 不会波及同名的别的进程。没有特征就真的什么都不做：宁可留一个最多
+        # 活到系统时长上限（默认 180s）的孤儿，也不误杀用户正在用的那条。
+        if match:
+            _run([adb, "-s", serial, "shell", "pkill", "-INT", "-f", match])
+            if wait:
+                time.sleep(wait)
+            _run([adb, "-s", serial, "shell", "pkill", "-TERM", "-f", match])
         return False
     # 拿不到 PID（老 ROM 无 pidof / ps 输出异常）：退化为 pkill，顺序同上
     _run([adb, "-s", serial, "shell", "pkill", "-INT", name])

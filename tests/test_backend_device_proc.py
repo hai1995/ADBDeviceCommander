@@ -183,10 +183,11 @@ def test_device_pid_with_match_ignores_same_named_process(monkeypatch):
 
 
 def test_no_name_fallback_when_precise_match_misses(monkeypatch):
-    """精确匹配不到时，禁止退回按名字 pkill。
+    """精确匹配不到时，禁止退回**按名字** pkill，但仍可按命令行特征清理。
 
     `pkill -INT screenrecord` 是**按名字**匹配：设备上正在录屏的那条同样会被
-    杀掉。宁可不清理这条残留进程，也不能误杀用户的录屏。
+    杀掉。改成 `pkill -f <特征>` 后只命中「命令行含该特征」的那一条 —— 既清得掉
+    自己的残留，也不会误伤同名进程。
     """
     calls = []
 
@@ -200,5 +201,27 @@ def test_no_name_fallback_when_precise_match_misses(monkeypatch):
                                 match="--output-format",
                                 fallback_name_kill=False)
     assert ok is False
-    assert not [c for c in calls if "pkill" in c], (
-        "不允许按名字兜底时不能发 pkill：%r" % (calls,))
+    pkills = [c for c in calls if "pkill" in c]
+    assert pkills, "给了 match 时应按命令行特征清掉自己的残留：%r" % (calls,)
+    for c in pkills:
+        assert "-f" in c and c[-1] == "--output-format", c
+        assert "screenrecord" not in c, "不得按名字兜底：%r" % (c,)
+
+
+def test_no_match_no_name_fallback_does_nothing(monkeypatch):
+    """既没有命令行特征、又不许按名字杀：一条 pkill / kill 都不能发。
+
+    这种情况只能放弃清理：设备上可能有另一条同名进程正被用户使用，
+    「什么都没做」远好于「杀错一个」。
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return type("R", (), {"stdout": "", "returncode": 0})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(dp.time, "sleep", lambda s: None)
+    dp.kill_device_process("adb", "A1", "screenrecord", wait=0,
+                           fallback_name_kill=False)
+    assert not [c for c in calls if "pkill" in c or "kill" in c], calls

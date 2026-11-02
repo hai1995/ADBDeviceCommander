@@ -513,11 +513,16 @@ class PipeMirror:
         # 不清理会一直占着编码器、下次录屏也起不来。
         # 但**绝不能按进程名一把杀**：用户此刻可能正在录屏，设备端那条也叫
         # screenrecord，一刀下去就把正常录屏弄断了（设备明明好好的）。
-        # 所以先按管道投屏独有的命令行特征（--output-format）精确定位自己的那条；
-        # 精确找不到时，只有确认「没有录屏在跑」才允许按名字兜底清理。
+        # 所以先按管道投屏独有的命令行特征（output-format）定位自己的那条；
+        # 精确找不到时先退化为 `pkill -f output-format`（只命中带该参数的那条）；
+        # 只有确认「没有录屏在跑」才允许再退一步按名字兜底清理。
+        #
+        # 这里刻意不写前导 `--`：`pkill -f --output-format` 会被设备端 pkill 当成
+        # 未知长选项直接报错，清理就静默失效了（残留进程继续占编码器，下次投屏
+        # 起不来）。去掉前导横线后仍是子串匹配，`--output-format=h264` 照样命中。
         try:
             kill_device_process(self.adb, self.serial, "screenrecord",
-                                match="--output-format",
+                                match="output-format",
                                 fallback_name_kill=not self._rec_active())
         except Exception:
             pass

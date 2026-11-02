@@ -282,7 +282,9 @@ def test_pipe_stop_kills_and_clears_device(monkeypatch):
     # 用「最后一轮」判断：180s 续流可能已经换了新的 adb 进程
     assert any(p.killed for p in factory.adb_procs)
     assert calls.get("name") == "screenrecord"
-    assert calls.get("match") == "--output-format", calls
+    assert calls.get("match") == "output-format", calls
+    assert not calls.get("match", "").startswith("-"), (
+        "pkill -f 会把带前导横线的特征当成选项，清理会静默失效：%r" % (calls,))
     assert calls.get("fallback_name_kill") is True, (
         "没有录屏在跑时才允许按名字兜底：%r" % (calls,))
 
