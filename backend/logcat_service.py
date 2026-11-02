@@ -524,6 +524,10 @@ class LogcatCapture:
         # 只有半截，甚至一行都没写进去。
         write_error = ""
         gap_written = False        # 文件里是否写过「设备掉线」缺口标记
+        # 设备仍在线、adb logcat 却自己退出了：文件在此处截断。收尾时必须
+        # 说明，否则就是一次「✓ 抓取完毕」的假成功（见 finally）。
+        eof_unexpected = False
+        eof_ts = ""
         # 已写盘的最后一条 threadtime 时间戳：重连时新起的 adb 会把缓冲区从头
         # 重放一遍，据此跳过断点之前的部分（否则整段日志会重复出现）。
         # 注意别用 resume_ts 这个名字：下面写「恢复连接」标记时它装的是墙上
@@ -576,7 +580,15 @@ class LogcatCapture:
                         return
                     # 首会话：开文件 + 播 running（重连的后续会话复用同一文件句柄）
                     try:
-                        f = open(path, "w", encoding="utf-8", errors="replace")
+                        # buffering=1：文本模式行缓冲，**每写一行就落盘**。
+                        # 满缓冲全级别 logcat 一秒能吐上万行，攒在用户态缓冲里
+                        # 等「满 1000 行 / 满 0.5s」再 flush 时，程序被强杀或崩溃
+                        # 就会丢掉最后那一小段 —— 而「照视频时间戳回查日志」最
+                        # 需要的往往正是断点前那几十行。每行 flush 的代价只是一次
+                        # write 系统调用（本机写盘速率远高于 adb 输出速率，不会
+                        # 反压到设备端 logcat 缓冲）。
+                        f = open(path, "w", encoding="utf-8", errors="replace",
+                                 buffering=1)
                     except Exception as e:
                         err_reported = True
                         write_error = "抓取异常：%s" % e
@@ -623,10 +635,8 @@ class LogcatCapture:
                         lines += 1
                         if ts:
                             last_log_ts = ts
-                        # 周期性 flush：进程崩溃时也能保住已落盘的日志（而非全卡在
-                        # OS 写缓冲里随进程一起丢）。
-                        if lines % 1000 == 0:
-                            f.flush()
+                        # 落盘由文件对象的行缓冲负责（见上面的 buffering=1）：
+                        # 这里不再做「攒够多少行再 flush」，否则尾部落盘不及时。
                 except Exception as e:
                     err_reported = True
                     write_error = "抓取异常：%s" % e
@@ -712,7 +722,16 @@ class LogcatCapture:
                                               if skipped else "")})
                     skipped = 0
                     continue
-                # device_present 为 True / None：设备还在或无法确认，正常收尾（数据完整）。
+                # device_present 为 True / None：设备还在，或 adb 查不出结论。
+                # 但连接存活时 `adb logcat` 不会自己退出 —— 它在这里 EOF，
+                # 说明这次抓取是被外力打断的（logd 重启 / adb 内部错误 /
+                # 别的工具 kill-server）。文件已在断点处截断，之后产生的日志
+                # 不会再进来，因此**不能报「✓ 抓取完毕」**：分析师拿着这份
+                # 文件对照视频回查，会以为时间线是连续的。
+                # （过滤后一行都没写时不必提示：文件本来就是空的，那不是截断。）
+                if lines > 0:
+                    eof_unexpected = True
+                    eof_ts = time.strftime("%H:%M:%S")
                 break
         finally:
             # 关文件句柄（之后才打包/量大小）：Windows 上开着的句柄会让 zip 失败。
@@ -794,6 +813,13 @@ class LogcatCapture:
                     payload["error"] = write_error
                 if outcome_error:
                     payload["error"] = outcome_error
+                if (eof_unexpected and not payload.get("error")
+                        and not write_error and not outcome_error):
+                    # 比「设备掉线」更隐蔽的一档：设备明明还在，抓取却停了。
+                    # 前端见到 error 就不再弹「✓ 抓取完毕」，改为告警呈现。
+                    payload["error"] = (
+                        "adb logcat 在设备仍在线时意外退出（%s），文件在此处截断，" 
+                        "之后的日志没有抓到" % eof_ts)
                 if gap_written:
                     # 文件里有缺口标记：即便用户主动停止，也要把「期间掉过线」说清楚，
                     # 否则分析师对照视频流找日志时会误以为时间线是连续的。

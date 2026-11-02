@@ -1209,3 +1209,61 @@ def test_stop_during_reconnect_takes_effect_immediately(tmp_path, monkeypatch):
     assert stopped is not None, (
         "停止没有立刻生效（等满一个轮询间隔才会收尾）：%r" % (_statuses(bus, "logcat_capture"),))
     assert dt < 1.0, "等重连期间的停止耗时 %.2fs，说明还在 sleep 而不是被唤醒" % dt
+
+
+def test_capture_flushes_below_1000_lines(tmp_path, monkeypatch):
+    """日志必须及时落盘：不能攒满 1000 行才 flush。
+
+    回归：只按「每 1000 行」flush 时，末尾不足 1000 行的日志一直留在用户态
+    缓冲里。程序被强杀 / 崩溃时这一段就没了 —— 而「照视频时间戳回查日志」
+    最需要的往往正是断点前那几十行。
+    """
+    bus = _FakeBus()
+    lines = ["08-29 10:00:00.%03d  1  1 I Tag: line %d\n" % (i, i)
+             for i in range(5)]
+    cap, holder = _make_capture(bus, monkeypatch, lines, block_after=5)
+    path = str(tmp_path / "logcat_F_001.txt")
+    assert cap.start("F", path, ["main"]) is True
+    assert holder["proc"].parked(), "假进程未停在循环内"
+
+    end = time.time() + 5
+    got = ""
+    while time.time() < end:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                got = fh.read()
+            if got.count("Tag: line") >= 5:
+                break
+        time.sleep(0.02)
+    try:
+        assert got.count("Tag: line") >= 5, (
+            "不足 1000 行也必须已落盘（否则崩溃即丢这段日志）：%r" % got)
+    finally:
+        cap.stop("F", zip_on_stop=False)
+        assert _wait_not_running(cap, "F")
+
+
+def test_eof_while_device_still_present_is_not_clean_success(tmp_path, monkeypatch):
+    """设备还在、adb logcat 却自己退了：必须报「已截断」，不能报「✓ 抓取完毕」。
+
+    回归：连接存活时 `adb logcat` 不会自己退出，此时文件在断点处截断，之后产生
+    的日志再也不会进来。旧逻辑只区分「设备掉线 / 用户停止」，这一档落到「正常
+    收尾」，前端弹「✓ 抓取完毕：N 行」—— 分析师照着视频回查时会以为时间线是
+    连续的，缺的那一段永远发现不了。
+    """
+    lines = ["08-29 10:00:00.%03d  1  1 I Tag: line %d\n" % (i, i)
+             for i in range(3)]
+    proc = _EofProc(lines)
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "logcat_E_001.txt")
+    assert cap.start("E", path, ["main"]) is True
+
+    payload = _wait_payload(bus, "logcat_capture", "stopped")
+    assert payload is not None, _statuses(bus, "logcat_capture")
+    err = payload.get("error") or ""
+    assert "意外退出" in err and "截断" in err, (
+        "设备在线时 logcat 自己退出必须报截断，而不是干净成功：%r" % (payload,))
