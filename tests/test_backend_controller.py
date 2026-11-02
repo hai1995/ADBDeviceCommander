@@ -1183,8 +1183,11 @@ def test_screenshot_batch_worker_exception_still_summarizes(monkeypatch):
     monkeypatch.setattr(ctrl.ScreenCapturer, "screenshot",
                         staticmethod(half_boom))
 
-    with pytest.raises(RuntimeError):
-        api.screenshot()
+    # 这里的 spawn 替身是**同步**执行（见 _install_screenshot_fakes），worker
+    # 内的异常会直接冒到调用方；真实环境里它在后台线程里，异常由 _do_screenshot
+    # 转成批次账。api.screenshot() 现在对 spawn 抛出的异常也做兜底（线程起不来
+    # 时按失败记账），所以这里不再断言外抛 —— 断言的是「批次账照样结清」。
+    api.screenshot()
 
     statuses = _events_by_kind(api).get("status", [])
     summary = [p for p in statuses if p.get("toast") and "批量截图" in p["text"]]
@@ -3723,3 +3726,60 @@ def test_screen_record_stop_without_session_is_not_an_error():
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
     assert any("当前没有进行中的录屏" in t for t in texts), texts
     api.workers.shutdown(timeout=2.0)
+
+
+def test_screenshot_spawn_failure_is_reported(monkeypatch):
+    """线程起不来时「立即截图」必须回 ok:false 并说清原因。
+
+    回归：spawn 抛异常（线程数耗尽 / 内存告急）时没有 worker 被登记，也就没有
+    任何 shot_state 事件；而 API 照旧返回 {"ok": True} —— 前端的禁用态只能等
+    下一次 devices 事件才解开，用户对着一个灰掉的按钮不知道发生了什么。
+    """
+    api = _make_api()
+
+    def boom(key, fn, *a, **kw):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.workers, "spawn", boom)
+
+    res = api.screenshot()
+
+    assert res["ok"] is False and res["reason"] == "spawn_error", res
+    assert res["failed"] == ["A1"], res
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("无法启动截图线程" in t and "can't start new thread" in t
+               for t in texts), texts
+
+
+def test_screenshot_batch_completes_when_one_spawn_fails(monkeypatch):
+    """批量截图里有一台线程起不来：汇总仍要弹出来，且如实说「1 成功 1 失败」。
+
+    回归：那台没有 worker 记账，批次账永远 done < total —— 汇总 toast 再也弹不
+    出来，界面也一直以为「还在截」。
+    """
+    api = _make_api()
+    api.toggle_device("B2", True)
+    monkeypatch.setattr(
+        ctrl.ScreenCapturer, "screenshot",
+        staticmethod(lambda adb, s, d: ("D:/shots/%s.png" % s, None)))
+    monkeypatch.setattr(ctrl.clipboard, "copy_image", lambda p: (True, ""))
+    calls = {"n": 0}
+
+    def spawn(key, fn, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:                 # 第二台起不来（A1 先跑）
+            raise RuntimeError("can't start new thread")
+        return fn(*a, **kw)
+
+    monkeypatch.setattr(api.workers, "spawn", spawn)
+
+    res = api.screenshot()
+
+    assert res["ok"] is True, "有一台跑起来了，整体不算失败：%r" % (res,)
+    assert res["failed"] == ["B2"], res
+    summaries = [p for p in _events_by_kind(api).get("status", [])
+                 if p.get("toast") and "截图" in (p.get("text") or "")]
+    assert len(summaries) == 1, "汇总必须弹出来：%r" % (summaries,)
+    assert "1 成功" in summaries[0]["text"] and "1 失败" in summaries[0]["text"], \
+        summaries[0]["text"]
+    assert api._shot_batch is None, "批次结束后计数器必须摘掉"

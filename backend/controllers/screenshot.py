@@ -53,6 +53,7 @@ class ScreenshotMixin:
                       "dir": save_dir, "errs": []}
             with self._shot_batch_lock:
                 self._shot_batch = bstate      # 仅供外部查询「当前批次」
+        failed = []
         for s in serials:
             # 每次截图一个独立 worker key：固定用 "screenshot_<serial>" 时，上一张
             # 还没截完就再点一次，Workers 会按同名把这次请求**静默丢弃**，而 API
@@ -60,10 +61,31 @@ class ScreenshotMixin:
             # 文件名带序号（ScreenCapturer._seq），并行两次也不会互相覆盖。
             # 在途登记放在 worker 入口（_do_screenshot），这里不碰计数器：
             # +1/-1 同源同宿，任何执行时序（同步/异步 spawn）都自然平衡。
-            self.workers.spawn(
-                "screenshot_%s_%d" % (s, next(self._shot_seq)),
-                self._do_screenshot, s, save_dir, to_clipboard and not batch,
-                batch, bstate)
+            try:
+                self.workers.spawn(
+                    "screenshot_%s_%d" % (s, next(self._shot_seq)),
+                    self._do_screenshot, s, save_dir, to_clipboard and not batch,
+                    batch, bstate)
+            except Exception as e:
+                # 线程起不来（线程数耗尽 / 内存告急）：这台没有 worker，也就不会
+                # 有任何人来记账 —— 批量汇总永远凑不齐（那条 toast 再也弹不出来），
+                # 而 API 仍回 ok=True，前端的禁用态只能等下一次 devices 事件才解。
+                # 与安装 / 诊断包同样处理：当场记一笔失败。
+                failed.append(s)
+                if batch:
+                    self._shot_batch_done(
+                        ok=False, serial=s, err="无法启动截图线程：%s" % e,
+                        bstate=bstate)
+                else:
+                    self._push_status(
+                        "err", "⚠ 无法启动截图线程 %s：%s" % (s, e))
+        if failed and len(failed) == len(serials):
+            # 一台都没跑起来：明确告诉调用方失败，前端据此立刻恢复按钮
+            # （没有 worker 就没有 shot_state 事件，等不到那次「已完成」）。
+            return {"ok": False, "reason": "spawn_error", "failed": failed}
+        if failed:
+            # 部分失败：把名单带上，调用方/日志据此知道哪几台没截到。
+            return {"ok": True, "failed": failed}
         return {"ok": True}
 
     def _shot_state_change(self, delta):
@@ -97,6 +119,11 @@ class ScreenshotMixin:
         if b is None:                           # 从未开启批量（单设备）
             return
         with self._shot_batch_lock:
+            if b.get("closed"):
+                # 这一批已经结算过了：同一台被重复记账（worker 内部异常由
+                # _do_screenshot 记了一笔，spawn 那一层又兜了一次）时，若这里
+                # 再记，就会在 summarize 之后又弹一条台数不对的汇总。
+                return
             if ok:
                 b["ok"] += 1
             else:
@@ -105,6 +132,7 @@ class ScreenshotMixin:
             done = b["ok"] + b["fail"]
             if done < b["total"]:
                 return
+            b["closed"] = True
             if self._shot_batch is b:
                 self._shot_batch = None         # 先摘计数器，避免与下一批交叉
         if b["fail"]:
