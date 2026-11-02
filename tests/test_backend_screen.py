@@ -829,7 +829,17 @@ def test_pull_gives_up_at_once_on_permission_denied(monkeypatch, tmp_path):
     用户面对的就是「点停止后程序卡了十几秒，然后说了一句没头没尾的失败」。
     """
     sleeps = []
-    monkeypatch.setattr(ss.time, "sleep", lambda s: sleeps.append(s))
+    armed = threading.Event()
+
+    def fake_sleep(s):
+        # 只统计 _pull_and_finish **执行期间**的 sleep：`ss.time` 是共享模块，
+        # 其它线程（上一条用例遗留的收尾、后台 watcher）的 sleep 也会打进来。
+        # CI 上调度慢一点就会被误判成「这条路径在退避」—— 本地快、CI 慢，
+        # 正是这类 flaky 的典型形态。
+        if armed.is_set():
+            sleeps.append(s)
+
+    monkeypatch.setattr(ss.time, "sleep", fake_sleep)
     pulls = []
 
     def fake_run(cmd, **kw):
@@ -845,7 +855,11 @@ def test_pull_gives_up_at_once_on_permission_denied(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
     vr, _proc = _recorder(tmp_path)
-    ok, lp, err = vr._pull_and_finish("A1")
+    armed.set()
+    try:
+        ok, lp, err = vr._pull_and_finish("A1")
+    finally:
+        armed.clear()
 
     assert ok is False
     assert "Permission denied" in err, err
