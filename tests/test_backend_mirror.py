@@ -9,6 +9,7 @@
     是纯标准库、无外部依赖，值得真验一次「前端 <img> 真能拉到 PNG」。
 """
 import os
+import time
 import urllib.request
 
 import pytest
@@ -358,6 +359,46 @@ def test_snap_interval_clamps_fps():
     assert svc.SnapMirror("adb", "S1", srv, 100).interval == pytest.approx(0.1)
     assert svc.SnapMirror("adb", "S1", srv, 4).interval == pytest.approx(0.25)
     assert svc.SnapMirror("adb", "S1", srv, 0).interval == pytest.approx(0.5)
+
+
+def test_snap_gives_up_after_consecutive_grab_failures(monkeypatch):
+    """设备拔线后低帧率预览必须收手并说明，而不是空转 + 留一张冻图。
+
+    旧行为：`_loop` 抓不到帧只记下第一句错误就继续循环 —— 每 interval 起一个
+    必然失败的 adb 进程（2fps 下每秒两个），帧服务里一直是最后一帧。界面看起来
+    「画面没变」，点「投屏」又被判「已在投屏」跳过，用户只能重启程序。
+    """
+    calls = {"n": 0}
+    good = b"\x89PNG\r\n\x1a\nframe"
+
+    def fake_popen(cmd, **kw):
+        calls["n"] += 1
+        # 首帧必须成功（否则 start() 直接失败，走不到后台循环）
+        return _FakeProc(out=[good] if calls["n"] == 1 else [b""])
+
+    monkeypatch.setattr(svc.subprocess, "Popen", fake_popen)
+    srv = svc.FrameServer()
+    statuses = []
+    m = svc.SnapMirror("adb", "S1", srv, 10,
+                       on_status=lambda s, e: statuses.append((s, e)))
+    try:
+        ok, err = m.start()
+        assert ok is True and not err
+
+        t0 = time.time()
+        while time.time() - t0 < 5 and m.alive():
+            time.sleep(0.02)
+
+        assert m.alive() is False, "连续抓帧失败后必须停掉后台循环"
+        assert statuses, "必须回调一次，否则界面上什么都没变"
+        assert "抓不到画面" in statuses[0][1], statuses
+        assert "设备未返回图像" in statuses[0][1], (
+            "得带上 adb 原话，不然用户不知道是拔线还是没授权：%r" % (statuses,))
+        assert calls["n"] <= 1 + svc.SNAP_MAX_FAILS + 1, (
+            "放弃之后不该再起 adb 进程（实际起了 %d 次）" % calls["n"])
+    finally:
+        m.stop()
+        srv.stop()
 
 
 def test_snap_stop_drops_frame():

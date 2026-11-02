@@ -61,6 +61,10 @@ MAX_RESTARTS = 500
 CHUNK = 65536
 # 低帧率预览的抓帧超时（设备卡顿 / adb 被抢锁时不能把线程永久挂住）
 SNAP_TIMEOUT_S = 15
+# 低帧率预览「连续抓不到帧」多少次就判定链路已断（拔线 / 设备离线 / adb 挂了）。
+# 旧实现永不放弃：每 interval 起一个必然失败的 adb 进程，帧服务里一直留着
+# 最后一帧 —— 界面是一张不动的画面，用户以为设备屏幕没变。
+SNAP_MAX_FAILS = 5
 # 等「第一帧画面」的时限。screenrecord 若不可用（ROM 删了该命令 / 参数不支持）
 # 会在 1~2s 内秒退；而编码器初始化慢的设备可能要 3~4s 才吐首帧。取 6s 兼顾
 # 两者——这段等待是**同步**的，正是「管道投屏失败 → 自动降级到低帧率预览」
@@ -710,16 +714,30 @@ class SnapMirror:
             return None, str(e)[:200]
 
     def _loop(self):
+        fails = 0          # 连续抓帧失败次数（成功一帧就清零）
         while not self._stop.is_set():
             # 按「距上一帧的间隔」补睡眠，抓帧本身耗的时间也算进去，
             # 避免慢设备上sleep + 抓帧叠加成远超预期的帧间隔
             t0 = time.time()
             data, err = self._grab()
             if data:
+                fails = 0
                 self.server.set_frame(self.serial, data)
                 self.frames += 1
-            elif err and not self.error:
-                self.error = err
+            else:
+                fails += 1
+                if err:
+                    # 留最新的那句：最后报出去的必须是「这次为什么抓不到」
+                    self.error = err
+                if fails >= SNAP_MAX_FAILS:
+                    # 连续抓不到帧 = 链路已经断了（拔线 / 设备离线 / adb 服务
+                    # 挂掉）。旧实现在这里继续 while 循环：每 interval 起一个
+                    # 必然失败的 adb 进程（2fps 就是每秒两个），帧服务里留着的
+                    # 还是最后一帧 —— 用户看到的是一张不动的画面，以为设备屏幕
+                    # 本来就没变；点「投屏」还会被 alive() 判成「已在投屏」跳过。
+                    self.error = ("连续 %d 次抓不到画面，投屏已停止（%s）"
+                                  % (fails, self.error or "设备无响应"))
+                    break
             wait = self.interval - (time.time() - t0)
             if wait > 0:
                 self._stop.wait(wait)      # stop() 会提前唤醒
@@ -739,4 +757,12 @@ class SnapMirror:
             pass
 
     def alive(self):
-        return not self._stop.is_set()
+        """线程真的还活着才算在投屏。
+
+        旧实现只看 `_stop`：抓帧循环自己 break 退出后 `_stop` 仍是 False，
+        `alive()` 恒为 True —— controller 的查重会一直判「已在投屏中」，
+        用户再也开不起这台设备的预览，除非重启程序。
+        """
+        return (not self._stop.is_set()
+                and self._thread is not None
+                and self._thread.is_alive())
