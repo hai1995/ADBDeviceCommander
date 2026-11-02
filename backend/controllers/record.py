@@ -464,17 +464,28 @@ class RecordMixin:
                     ok, lp, err = self.video.stop(s)
                     if ok:
                         local_v = lp
-                    elif s in dead:
-                        # 进程意外死亡（adb root 等）：文案说清「视频不完整」，
-                        # 与普通收尾失败区分开（用户据此知道该重录，而不是怀疑程序坏了）。
-                        self._push_toast(
-                            "warn",
-                            "⚠ %s 录屏被意外中断，视频不完整（%s）。残片已保留在"
-                            "保存目录，音频未合成；请完整重录。"
-                            % (s, err or "设备端进程已提前退出"))
                     else:
-                        self._push_toast(
-                            "warn", "⚠ 录屏收尾失败 %s：%s" % (s, err or "未知原因"))
+                        # 收尾失败时 stop() 仍可能带回一个**残片**路径（缺 moov 头
+                        # 的半截 MP4 / 打包失败的落盘文件）。只报「收尾失败」时，
+                        # 用户在保存目录里看到 record_*.mp4 既不知道是哪一段、
+                        # 也不知道它为什么没进 zip，更不知道能不能用 —— 把路径
+                        # 直接给出来，他立刻就能去确认要不要重录。
+                        partial = lp if (lp and os.path.exists(lp)) else ""
+                        where = "（残片：%s）" % partial if partial else ""
+                        if s in dead:
+                            # 进程意外死亡（adb root 等）：文案说清「视频不完整」，
+                            # 与普通收尾失败区分开（用户据此知道该重录，而不是怀疑
+                            # 程序坏了）。
+                            self._push_toast(
+                                "warn",
+                                "⚠ %s 录屏被意外中断，视频不完整（%s）。%s"
+                                "音频未合成；请完整重录。"
+                                % (s, err or "设备端进程已提前退出",
+                                   where or "残片已保留在保存目录，"))
+                        else:
+                            self._push_toast(
+                                "warn", "⚠ 录屏收尾失败 %s：%s%s"
+                                        % (s, err or "未知原因", where))
                 else:
                     # 会话已被其他路径收尾弹出（stop_all / 异常清理等）时，
                     # 这里再用 stop() 只会得到「该设备未在录制」。必须用启动时记录的

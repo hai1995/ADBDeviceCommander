@@ -3783,3 +3783,67 @@ def test_screenshot_batch_completes_when_one_spawn_fails(monkeypatch):
     assert "1 成功" in summaries[0]["text"] and "1 失败" in summaries[0]["text"], \
         summaries[0]["text"]
     assert api._shot_batch is None, "批次结束后计数器必须摘掉"
+
+
+def _frag_session(tmp_path, serial="A1"):
+    """一个最小录屏会话：videos 里有一条已落盘的（残）文件。"""
+    frag = tmp_path / ("record_%s.mp4" % serial)
+    frag.write_bytes(b"\x00" * 128)
+    return {
+        "ts": "20240101_000000", "dir": str(tmp_path),
+        "videos": {serial: str(frag)}, "devaudio": {}, "logcat_captures": {},
+        "pointer_location_prev": {}, "show_touches_prev": {},
+    }, frag
+
+
+def test_record_teardown_failure_reports_partial_path(tmp_path):
+    """收尾失败时要把**残片路径**说出来。
+
+    回归：stop() 在「缺 moov 头」「落到本地但打包失败」时仍会回一个残片路径，
+    旧实现把它丢掉，只播一句「录屏收尾失败」——用户在保存目录里看到
+    record_xxx.mp4，既不知道是不是这次的，也不知道它为什么没进 zip、
+    还能不能用。
+    """
+    api = _make_api()
+    sess, frag = _frag_session(tmp_path)
+    api._rec_session = sess
+
+    class FakeVideo:
+        def is_recording(self, s):
+            return True
+
+        def stop(self, s):
+            return False, str(frag), "MP4 缺 moov 头，无法播放"
+
+    api.video = FakeVideo()
+
+    res = api.screen_record_stop()
+
+    assert res["ok"] is True, res
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("录屏收尾失败" in t and str(frag) in t for t in texts), texts
+    assert any("缺 moov 头" in t for t in texts), texts
+
+
+def test_record_dead_teardown_reports_partial_path(tmp_path):
+    """进程意外中断时同理：文案里给出残片的具体路径，而不是笼统的「保存目录」。"""
+    api = _make_api()
+    sess, frag = _frag_session(tmp_path)
+    sess["dead"] = {"A1"}
+    api._rec_session = sess
+
+    class FakeVideo:
+        def is_recording(self, s):
+            return True
+
+        def stop(self, s):
+            return False, str(frag), "设备端进程已提前退出"
+
+    api.video = FakeVideo()
+
+    api.screen_record_stop()
+
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    hit = [t for t in texts if "视频不完整" in t]
+    assert hit, texts
+    assert str(frag) in hit[0], hit[0]
