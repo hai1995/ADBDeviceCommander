@@ -376,11 +376,24 @@ def test_snap_gives_up_after_consecutive_grab_failures(monkeypatch):
         # 首帧必须成功（否则 start() 直接失败，走不到后台循环）
         return _FakeProc(out=[good] if calls["n"] == 1 else [b""])
 
+    # 计数必须只算「本实例自己的抓帧」，不能拿全局 Popen 的调用次数充数：
+    # monkeypatch 改的是 **subprocess 模块** 的 Popen（进程内全局），全量跑时
+    # 其它测试遗留的后台线程（logcat 抓取 / 自动刷新 / 录屏收尾）在这个窗口里
+    # 起的 adb 进程同样会被计进去，断言就变成看运气（CI 上出现过 8 > 7）。
+    class _CountingSnap(svc.SnapMirror):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.grabs = 0
+
+        def _grab(self):
+            self.grabs += 1
+            return super()._grab()
+
     monkeypatch.setattr(svc.subprocess, "Popen", fake_popen)
     srv = svc.FrameServer()
     statuses = []
-    m = svc.SnapMirror("adb", "S1", srv, 10,
-                       on_status=lambda s, e: statuses.append((s, e)))
+    m = _CountingSnap("adb", "S1", srv, 10,
+                      on_status=lambda s, e: statuses.append((s, e)))
     try:
         ok, err = m.start()
         assert ok is True and not err
@@ -394,8 +407,9 @@ def test_snap_gives_up_after_consecutive_grab_failures(monkeypatch):
         assert "抓不到画面" in statuses[0][1], statuses
         assert "设备未返回图像" in statuses[0][1], (
             "得带上 adb 原话，不然用户不知道是拔线还是没授权：%r" % (statuses,))
-        assert calls["n"] <= 1 + svc.SNAP_MAX_FAILS + 1, (
-            "放弃之后不该再起 adb 进程（实际起了 %d 次）" % calls["n"])
+        assert m.grabs == 1 + svc.SNAP_MAX_FAILS, (
+            "放弃之后不该再抓帧：首帧 1 次 + 连续失败 %d 次就该收手（实际 %d 次）"
+            % (svc.SNAP_MAX_FAILS, m.grabs))
     finally:
         m.stop()
         srv.stop()
