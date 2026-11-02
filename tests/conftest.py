@@ -49,6 +49,9 @@ def patch_ctrl(monkeypatch, name, val):
         if hasattr(mod, name):
             monkeypatch.setattr(mod, name, val)
             hit = True
-    # controller 自身也打一份：部分名字只在其顶层被读取（如常量导出）
-    monkeypatch.setattr(ctrl, name, val)
+    # controller 自身也打一份：部分名字只在其顶层被读取（如常量导出）。
+    # raising=False：把「该名字在旧实现里根本不存在」的情形也放过去 —— 这样
+    # 用旧代码跑新测试时，失败落在**行为断言**上，而不是一句 patch 期的
+    # AttributeError（后者只能说明测试没打上桩，看不出旧实现到底错在哪）。
+    monkeypatch.setattr(ctrl, name, val, raising=False)
     return hit

@@ -2,7 +2,7 @@
 """backend.controllers.commands —— 指令执行 / 保存 / 导入导出 / 自定义"""
 
 from backend.controller import (
-    SHELL_INTERACTIVE_RE, _EXIT_RE, datetime, device_is_root,
+    SHELL_INTERACTIVE_RE, _EXIT_RE, datetime, root_state,
     get_pref, is_subshell_command, json, merge_adb_shell_commands_detailed,
     merge_builtins, needs_device, os, program_dir,
     root_intent, save_user_commands, tempfile, time,
@@ -511,11 +511,22 @@ class CommandMixin:
             return False
         adb = self.state.adb_path or "adb"
         try:
-            rooted = device_is_root(adb, serial)
+            rooted = root_state(adb, serial)
         except Exception:
-            rooted = False   # 探测失败按「需要切换」：交给下面的任务检查兜底
+            rooted = None
+        # 无法确认（adb 瞬断 / 设备忙 / 该 ROM 没有 id 与 whoami）时**不能猜**：
+        # 猜成「未 root」会让 `adb unroot` 被判成「已在目标状态」直接跳过 ——
+        # 用户明明 root 了却 unroot 不掉，界面还告诉他「已未 root」，方向反了。
+        # 这时放行指令并说明，是否切换交给用户判断；「有进行中任务则拦」的
+        # 保护照常生效（状态未知不代表可以打断录屏）。
+        if rooted is None:
+            self._push_status(
+                "warn",
+                "⚠ 无法确认设备 %s 当前是否 root（adb 未返回 id/whoami 输出），"
+                "已按指令下发 `%s`；若它已在目标状态，这次切换只会重启 adbd。"
+                % (serial, cmd.strip()))
         # 已在目标状态：切换是零收益的无谓重启
-        if (intent == "root") == bool(rooted):
+        elif (intent == "root") == bool(rooted):
             self._push_status(
                 "info",
                 "ℹ 设备 %s 已%s，跳过 `%s`（重复切换只会重启 adbd，"

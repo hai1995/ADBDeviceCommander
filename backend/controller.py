@@ -39,7 +39,7 @@ from core.prefs import (load_prefs, load_prefs_checked, save_prefs,
                          resolve_save_dir)
 from core import clipboard
 from core import tmpfiles
-from core.rootguard import root_intent, device_is_root
+from core.rootguard import root_intent, device_is_root, root_state
 from core.shell import ShellSession
 from core import wireless as wifi
 from core import apk as apkinfo
@@ -153,6 +153,7 @@ __all__ = [
     "clipboard",
     "datetime",
     "device_is_root",
+    "root_state",
     "devinfo",
     "diag",
     "ffmpeg_mux",

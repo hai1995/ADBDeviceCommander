@@ -93,3 +93,30 @@ def test_device_is_root_false_on_probe_failure(monkeypatch):
 
     monkeypatch.setattr(rg.subprocess, "run", boom)
     assert rg.device_is_root("adb", "A1") is False
+
+def test_root_state_none_on_probe_failure(monkeypatch):
+    """探测失败必须返回 None（无法确认），不能与「确认未 root」混为一谈。
+
+    回归：`device_is_root` 把探测失败当成 False，而 `_skip_root_switch` 把
+    False 当作「已在目标状态」—— 设备明明 root 了、用户要 `adb unroot` 时
+    会被静默跳过，界面还说「设备已未 root」，结论与事实相反。
+    """
+    def boom(cmd, **kw):
+        raise OSError("adb server 没了")
+
+    monkeypatch.setattr(rg.subprocess, "run", boom)
+    assert rg.root_state("adb", "A1") is None
+    # 布尔接口语义不变（旧调用方仍按「需要切换」处理）
+    assert rg.device_is_root("adb", "A1") is False
+
+
+def test_root_state_none_when_both_probes_return_nothing(monkeypatch):
+    """id 与 whoami 都拿不到输出（老 ROM / 设备忙）同样算无法确认。"""
+    _fake_run(monkeypatch, {"id": (127, ""), "whoami": (127, "")})
+    assert rg.root_state("adb", "A1") is None
+
+
+def test_root_state_false_when_id_reports_shell_user(monkeypatch):
+    """`id -u` 明确给出非 0（shell 用户）时是「确认未 root」，不是 None。"""
+    _fake_run(monkeypatch, {"id": (0, "2000\n")})
+    assert rg.root_state("adb", "A1") is False

@@ -42,25 +42,39 @@ def root_intent(cmd):
     return m.group(1).lower() if m else None
 
 
-def device_is_root(adb, serial, timeout=8):
-    """设备当前是否已处于 root 状态。
+def root_state(adb, serial, timeout=8):
+    """设备当前 root 状态：True / False / **None（无法确认）**。
 
     判定：`adb shell id -u` 输出 0 即 root（shell 用户是 2000 之类）；
     个别 ROM 的 toybox 没有 id 时退化为 `whoami` 含 root。
-    探测失败（adb 不在 / 设备瞬断）返回 False——按「需要切换」处理，
-    是否还有别的理由跳过（如进行中的录屏）由调用方继续判断。
+
+    None 与 False 必须分开：探测失败（adb 瞬断 / 设备忙 / 两个命令都没有）
+    **不等于**「设备没有 root」。调用方把 None 当 False 时，`adb unroot` 会被
+    判成「已在目标状态」而跳过 —— 用户明明 root 了却 unroot 不掉，界面还给
+    一句「设备已未 root」，方向完全相反。无法确认时应放行指令（并说明），
+    由用户自己决定要不要切换。
     """
     for args in (["id", "-u"], ["whoami"]):
         try:
             r = subprocess.run([adb, "-s", serial, "shell"] + args,
                                **adb_kwargs(timeout))
         except Exception:
-            return False
+            return None
         out = (r.stdout or "").strip()
         if r.returncode != 0 or not out:
             continue
         first = out.splitlines()[0].strip().lower()
         if args[0] == "id":
+            # 输出非空但没有数字段（个别 ROM 的 id 被替换成别名）也算认不出
             return first.split()[0] == "0" if first else False
         return "root" in first
-    return False
+    return None
+
+
+def device_is_root(adb, serial, timeout=8):
+    """设备当前是否已处于 root 状态（布尔版，保留给旧调用方）。
+
+    探测失败按 False 处理。**需要区分「确认未 root」与「无法确认」的调用方
+    请直接用 `root_state`** —— 布尔版会把两者混成一个 False。
+    """
+    return bool(root_state(adb, serial, timeout))

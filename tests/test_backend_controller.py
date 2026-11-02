@@ -343,7 +343,7 @@ def test_get_manual_returns_bundled_text():
 # （关键回归：原先透传到单 adb 会话，多设备下会报 "more than one device"）
 # ---------------------------------------------------------------------------
 def test_run_custom_injects_serial_for_single_device(monkeypatch):
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     assert api.run_custom("adb root") == {"ok": True}
     assert wait_until(lambda: len(api.session.calls) >= 1)
@@ -373,7 +373,7 @@ def _run_and_settle(api):
 
 def test_root_skipped_when_already_root(monkeypatch):
     """设备已 root：重复 `adb root` 只是无谓重启 adbd，直接跳过。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: True)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: True)
     api = _make_api()
     assert api.run_custom("adb root") == {"ok": True}
     _run_and_settle(api)
@@ -385,7 +385,7 @@ def test_root_skipped_when_already_root(monkeypatch):
 
 def test_unroot_skipped_when_not_root(monkeypatch):
     """设备未 root：`adb unroot` 同样是无谓重启，跳过（方向对称）。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     assert api.run_custom("adb unroot") == {"ok": True}
     _run_and_settle(api)
@@ -397,7 +397,7 @@ def test_unroot_skipped_when_not_root(monkeypatch):
 
 def test_root_executes_when_needed_and_idle(monkeypatch):
     """未 root、无进行中任务：正常下发（保护不能把正常需求挡死）。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     assert api.run_custom("adb root") == {"ok": True}
     assert wait_until(lambda: len(api.session.calls) >= 1)
@@ -407,7 +407,7 @@ def test_root_executes_when_needed_and_idle(monkeypatch):
 def test_root_skipped_while_recording(monkeypatch):
     """未 root 但正在录屏：跳过并说明——执行会重启 adbd 杀掉 screenrecord，
     视频缺 moov 头、不完整（使用说明「录屏被中断」条就是这个坑）。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     api.video = _FakeVideoRec(recording={"A1"})
     assert api.run_custom("adb root") == {"ok": True}
@@ -423,7 +423,7 @@ def test_root_skipped_while_recording(monkeypatch):
 
 def test_root_skipped_while_logcat_capturing(monkeypatch):
     """logcat 抓取同样会随 adbd 重启断掉：也要拦。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     api.logcat_capture.is_running = lambda s: True
     assert api.run_custom("adb root") == {"ok": True}
@@ -436,7 +436,7 @@ def test_root_skipped_while_logcat_capturing(monkeypatch):
 
 def test_root_guard_is_per_device(monkeypatch):
     """多设备：只拦「有进行中任务」的那台，其余正常下发。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     api.devices.device_checked = {"A1": True, "B2": True, "C3": False}
     api.video = _FakeVideoRec(recording={"A1"})     # 只有 A1 在录屏
@@ -449,7 +449,7 @@ def test_root_guard_is_per_device(monkeypatch):
 
 def test_compound_root_command_skipped_while_recording(monkeypatch):
     """复合命令（adb root && adb shell xx）无法只跳过其中一段：整条跳过。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: False)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
     api = _make_api()
     api.video = _FakeVideoRec(recording={"A1"})
     assert api.run_custom("adb root && adb shell id") == {"ok": True}
@@ -459,7 +459,7 @@ def test_compound_root_command_skipped_while_recording(monkeypatch):
 
 def test_root_mention_in_quotes_is_not_guarded(monkeypatch):
     """引号内仅「提到」adb root（提交信息 / 回显）不下发，不应被拦。"""
-    patch_ctrl(monkeypatch, "device_is_root", lambda adb, serial: True)
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: True)
     api = _make_api()
     assert api.run_custom('git commit -m "adb root 修复"') == {"ok": True}
     assert wait_until(lambda: len(api.session.calls) >= 1)
@@ -3512,3 +3512,31 @@ def test_open_save_dir_reports_real_reason(tmp_path):
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
     assert any("无法创建" in t for t in texts), texts
     assert not any("目录不存在" in t for t in texts), texts
+
+def test_unroot_executes_when_root_state_unknown(monkeypatch):
+    """无法确认 root 状态时不能猜成「未 root」：`adb unroot` 会被静默跳过。
+
+    回归：`device_is_root` 探测失败返回 False，与「确认未 root」混成一个值。
+    用户明明 root 了要 unroot，却被判成「已在目标状态」直接跳过，界面还说
+    「设备已未 root」—— 指令没执行，结论还是反的。现在无法确认时放行并说明。
+    """
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: None)
+    api = _make_api()
+    assert api.run_custom("adb unroot") == {"ok": True}
+    assert wait_until(lambda: len(api.session.calls) >= 1)
+    assert api.session.calls[0]["script"] == "adb -s A1 unroot"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("无法确认" in t for t in texts), texts
+    _run_and_settle(api)
+
+
+def test_unknown_root_state_still_blocked_while_recording(monkeypatch):
+    """状态未知不代表可以打断录屏：有进行中任务时仍要拦。"""
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: None)
+    api = _make_api()
+    api.video = _FakeVideoRec(recording={"A1"})
+    assert api.run_custom("adb unroot") == {"ok": True}
+    _run_and_settle(api)
+    assert api.session.calls == [], "录屏中不得下发 unroot（会重启 adbd）"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("录屏" in t and "跳过" in t for t in texts), texts
