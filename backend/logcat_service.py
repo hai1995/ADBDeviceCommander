@@ -451,6 +451,11 @@ class LogcatCapture:
         # 「读到了」。只在前几行判断一次，拿到日志行后不再产生开销。
         logish = 0
         err_reported = False      # 已在 except 里报过错，末段不要再报一次
+        # 写盘中途失败的原因（磁盘满 / 目录被删 / 权限）。末段的 stopped 必须
+        # 把它带上：只推一条 error 紧接着又推 stopped「抓取完毕」，前端后到的
+        # 成功 toast 会把前一条错误盖掉 —— 用户看到的是「✓ 抓取完毕」，而文件
+        # 只有半截，甚至一行都没写进去。
+        write_error = ""
         try:
             f = open(path, "w", encoding="utf-8", errors="replace")
             for raw in proc.stdout:
@@ -469,9 +474,10 @@ class LogcatCapture:
                 lines += 1
         except Exception as e:
             err_reported = True
+            write_error = "抓取异常：%s" % e
             self.bus.push("logcat_capture",
                           {"serial": serial, "status": "error",
-                           "text": "抓取异常：%s" % e})
+                           "text": write_error})
         finally:
             # 子进程收尾放在最前面：读循环正常结束（EOF）/ 写盘异常中断 / 文件根本
             # 没打开成功，三条路径都必须确保 adb logcat 被终止——旧实现只在正常
@@ -497,17 +503,38 @@ class LogcatCapture:
             # 完全由用户在界面上勾选的这一个开关决定。
             do_zip = bool(flags.get("zip_on_stop"))
             zpath = None
-            if do_zip and os.path.exists(path) and os.path.getsize(path) > 0:
-                zpath = self._zip_one(path)
-                if zpath:
-                    self.bus.push("logcat_capture",
-                                  {"serial": serial, "status": "zipped",
-                                   "path": zpath, "src": path,
-                                   "text": "已打包：%s" % zpath})
+            # 勾了「结束后打包」却没打成时，必须留一句原因：用户按开关的承诺
+            # 去保存目录找 zip，只看到 txt（或什么都没有），而界面只报「抓取
+            # 完毕」—— 分不清是没勾上、还是打包失败了。
+            zip_err = ""
+            if do_zip:
+                # 先确认是**普通文件**：open(path, "w") 失败时（保存目录被删、
+                # 路径被同名目录占位），path 可能仍 exists —— 对目录打包会产出
+                # 一个只有空目录条目的 zip，看起来「打包成功」却什么都没有。
+                try:
+                    is_file = os.path.isfile(path)
+                    size_now = os.path.getsize(path) if is_file else 0
+                except OSError:
+                    is_file, size_now = False, 0
+                if not is_file:
+                    zip_err = ("抓取文件不存在或不是普通文件（保存目录被删 / "
+                               "被同名目录占位？）")
+                elif size_now <= 0:
+                    zip_err = "抓取文件为空，没有可打包的内容"
+                else:
+                    zpath = self._zip_one(path)
+                    if not zpath:
+                        zip_err = ("打包失败（文件被占用 / 磁盘空间不足？），"
+                                   "已保留 txt 文件")
+            if zpath:
+                self.bus.push("logcat_capture",
+                              {"serial": serial, "status": "zipped",
+                               "path": zpath, "src": path,
+                               "text": "已打包：%s" % zpath})
             # size 语义：打了包就报 zip 的大小（源 txt 已清理），否则报 txt 大小
             if zpath and os.path.exists(zpath):
                 size_out = os.path.getsize(zpath)
-            elif os.path.exists(path):
+            elif os.path.isfile(path):
                 size_out = os.path.getsize(path)
             else:
                 size_out = 0
@@ -524,12 +551,17 @@ class LogcatCapture:
                                        "设备可能已断开 / 离线，或 logd 未运行"
                                        % ("：" + detail if detail else "")})
             else:
-                self.bus.push("logcat_capture",
-                              {"serial": serial, "status": "stopped",
-                               "path": path, "lines": lines, "size": size_out,
-                               # 打了包：zipped 事件已另行通知「已打包」，
-                               # stopped 不再重复弹完成 toast（前端据此二选一）。
-                               "packaged": bool(zpath)})
+                payload = {"serial": serial, "status": "stopped",
+                           "path": path, "lines": lines, "size": size_out,
+                           # 打了包：zipped 事件已另行通知「已打包」，
+                           # stopped 不再重复弹完成 toast（前端据此二选一）。
+                           "packaged": bool(zpath)}
+                if write_error:
+                    # 有它时前端必须以「中断 / 文件不完整」呈现，不能再报 ✓。
+                    payload["error"] = write_error
+                if zip_err:
+                    payload["zip_error"] = zip_err
+                self.bus.push("logcat_capture", payload)
 
     @staticmethod
     def _zip_one(path):

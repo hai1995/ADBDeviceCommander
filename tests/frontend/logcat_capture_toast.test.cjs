@@ -106,6 +106,47 @@ const toastTexts = (doc) =>
     window.close();
   }
 
+  console.log("\n[3] 写盘中断的 stopped：必须报「中断」，不能再报「抓取完毕」");
+  {
+    const batches = [
+      [{ kind: "booted", payload: { version: "v-test", warnings: [], commands: [] } },
+       { kind: "devices", payload: { items: dev(true) } }],
+      [{ kind: "logcat_capture", payload: { status: "running" } }],
+      [{ kind: "logcat_capture",
+         payload: { status: "stopped", path: "/log/logcat_A1_x.txt",
+                    lines: 12, size: 0, packaged: false,
+                    error: "抓取异常：[Errno 28] No space left on device" } }],
+    ];
+    const window = await bootBatched(batches);
+    const doc = window.document;
+    ok(await waitFor(() => toastTexts(doc).some((t) => t.includes("中断")), 4000, "interrupt toast"),
+       "写盘中断弹出「中断」toast");
+    const texts = toastTexts(doc);
+    ok(!texts.some((t) => t.includes("抓取完毕")),
+       "中断时绝不能再弹「抓取完毕」：" + JSON.stringify(texts));
+    window.close();
+  }
+
+  console.log("\n[4] 打包失败的 stopped：必须说明没打成，别让用户去找不存在的 zip");
+  {
+    const batches = [
+      [{ kind: "booted", payload: { version: "v-test", warnings: [], commands: [] } },
+       { kind: "devices", payload: { items: dev(true) } }],
+      [{ kind: "logcat_capture", payload: { status: "running" } }],
+      [{ kind: "logcat_capture",
+         payload: { status: "stopped", path: "/log/logcat_A1_x.txt",
+                    lines: 88, size: 4096, packaged: false,
+                    zip_error: "打包失败（文件被占用 / 磁盘空间不足？），已保留 txt 文件" } }],
+    ];
+    const window = await bootBatched(batches);
+    const doc = window.document;
+    ok(await waitFor(() => toastTexts(doc).some((t) => t.includes("打包失败")), 4000, "zip fail toast"),
+       "打包失败弹出提示 toast");
+    ok(toastTexts(doc).some((t) => t.includes("抓取完毕")),
+       "抓取本身仍报完成（只是没打包）");
+    window.close();
+  }
+
   console.log("\n" + "=".repeat(46));
   console.log(`结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);

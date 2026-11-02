@@ -2016,12 +2016,24 @@
       lcCapRunning = false; lcCapSerial = null; els.lcCapStatus.textContent = "空闲"; els.lcCapStop.disabled = true; els.lcCapStart.disabled = !checkedDevices().length;
       // 抓取完毕强提醒（用户可能已切去别的页签，只看得到 toast）。
       // 已打包的场景由下面的 zipped 分支弹「已打包」，这里不重复。
-      if (!p.packaged) {
-        const name = String(p.path || "").split(/[\\/]/).pop() || "";
+      const name = String(p.path || "").split(/[\\/]/).pop() || "";
+      if (p.error) {
+        // 写盘中途失败（磁盘满 / 目录被删 / 权限）：文件只有半截，甚至一行
+        // 都没进去。后端在 stopped 上带了 error，这里绝不能再报「✓ 抓取完毕」——
+        // 那会把前一条 err 提示盖掉，用户拿着半截文件去分析问题。
+        const bad = "⚠ Logcat 抓取已中断：" + p.error + (name ? " → " + name : "");
+        pushStatus("err", bad);
+        showToast("err", "⚠ Logcat 抓取中断，导出的文件不完整");
+      } else if (!p.packaged) {
         const done = "✓ Logcat 抓取完毕：" + (p.lines || 0) + " 行"
           + (p.size ? " · " + fmtSize(p.size) : "") + (name ? " → " + name : "");
         pushStatus("ok", done);
         showToast("ok", done);
+      }
+      if (p.zip_error) {
+        // 勾了「结束后打包」却没打成：用户会按承诺去目录里找 zip，得说清为什么没有。
+        pushStatus("warn", "⚠ Logcat " + p.zip_error);
+        showToast("warn", "⚠ Logcat 打包失败，文件未压缩");
       }
     }
     if (p.status === "zipped") {

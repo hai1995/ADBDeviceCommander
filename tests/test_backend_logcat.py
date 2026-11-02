@@ -701,3 +701,78 @@ def test_monitor_keyword_miss_is_not_an_offline_error(monkeypatch):
     payload = _wait_payload(bus, "logcat", "stopped")
     assert payload is not None, _statuses(bus, "logcat")
     assert "error" not in _statuses(bus, "logcat")
+
+# ---------------------------------------------------------------------------
+# 抓取收尾的三种「没说出口」：写盘中断 / 打包失败 / 空文件
+# ---------------------------------------------------------------------------
+def test_capture_write_failure_is_not_reported_as_success(tmp_path, monkeypatch):
+    """写盘失败后不能再报「抓取完毕」，stopped 必须带上中断原因。
+
+    回归：`f.write` 抛异常（磁盘满 / 目录被删 / 权限）时，worker 先推一条
+    error，紧接着 finally 又推 stopped（只带行数与大小）。前端两条 toast 里
+    后到的「✓ 抓取完毕」把前一条错误盖掉 —— 用户看到的是成功，拿去分析的
+    文件却只有半截。现在 stopped 带 error，前端据此改成「已中断」。
+    """
+    bus = _FakeBus()
+    path = tmp_path / "cap_as_dir"
+    path.mkdir()                       # 同名目录占位 -> open(path, "w") 直接失败
+    proc = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I x: hi\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **kw: proc)
+
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("W", str(path), ["main"], level_filter=None) is True
+    assert _wait_running(cap, "W")
+    assert cap.stop("W", zip_on_stop=False) is True
+    assert _wait_stopped(bus)
+
+    assert bus.has_capture_status("error")
+    st = bus.last_capture_event("stopped")
+    assert st is not None
+    assert st.get("error"), "写盘失败却在 stopped 上留了空原因：%r" % st
+
+
+def test_capture_zip_failure_says_why(tmp_path, monkeypatch):
+    """勾了「结束后打包」却没打成时，stopped 必须说明原因，源 txt 保留。
+
+    回归：`_zip_one` 返回 None（文件被占用 / 磁盘满）后，事件只带
+    packaged=False，前端也只报「抓取完毕」。用户按开关的承诺去目录里找 zip，
+    找不到，也无从知道是打包失败了。
+    """
+    bus = _FakeBus()
+    path = tmp_path / "cap.txt"
+    proc = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I x: hi\n"],
+                           block_after=1)
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **kw: proc)
+    monkeypatch.setattr(ls.LogcatCapture, "_zip_one",
+                        staticmethod(lambda p: None))
+
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("Z", str(path), ["main"]) is True
+    assert proc.parked(5.0)
+    cap.stop("Z", zip_on_stop=True)
+    assert _wait_stopped(bus)
+
+    st = bus.last_capture_event("stopped")
+    assert st is not None
+    assert st["packaged"] is False
+    assert "打包失败" in (st.get("zip_error") or ""), st
+    assert path.exists() and path.stat().st_size > 0, "打包失败时源文件必须保留"
+
+
+def test_capture_zip_skipped_for_empty_file_says_why(tmp_path, monkeypatch):
+    """文件为空时不会打包，但也要说一句，而不是让用户以为 zip 丢了。"""
+    bus = _FakeBus()
+    path = tmp_path / "empty.txt"
+    proc = _FakeLogcatProc(["x\n"], block_after=0)   # 一行都不产出就停住
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **kw: proc)
+
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("E", str(path), ["main"]) is True
+    assert proc.parked(5.0)
+    cap.stop("E", zip_on_stop=True)
+    assert _wait_stopped(bus)
+
+    st = bus.last_capture_event("stopped")
+    assert st is not None
+    assert "为空" in (st.get("zip_error") or ""), st
+    assert st["packaged"] is False
