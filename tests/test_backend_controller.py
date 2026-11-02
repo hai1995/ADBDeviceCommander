@@ -2277,9 +2277,13 @@ def test_mirror_start_uses_player_when_available(monkeypatch):
     patch_ctrl(monkeypatch, "plan_size", lambda adb, serial: "720x1280")
     seen = {}
 
+    wired = {}
+
     class _Pipe:
-        def __init__(self, adb, serial, kind, exe, size, br, fps, on_status=None):
+        def __init__(self, adb, serial, kind, exe, size, br, fps, on_status=None,
+                     rec_guard=None):
             seen.update(serial=serial, kind=kind, exe=exe, size=size, br=br)
+            wired["rec_guard"] = rec_guard
             self.stopped = False
 
         def start(self):
@@ -2297,6 +2301,10 @@ def test_mirror_start_uses_player_when_available(monkeypatch):
     assert res["started"][0]["mode"] == "pipe"
     assert seen == {"serial": "A1", "kind": "ffplay", "exe": "/bin/ffplay",
                     "size": "720x1280", "br": 8}
+    # 投屏必须拿到「是否正在录屏」的查询入口：收尾清理设备端残留时据此决定
+    # 能不能按进程名兜底（设备端可能有一条同名 screenrecord 正在为用户录屏）
+    assert callable(wired.get("rec_guard")), wired
+    assert wired["rec_guard"]() is False, "当前没有录屏，守卫应报 False"
     api.mirror_stop(None)
 
 

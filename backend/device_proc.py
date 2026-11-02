@@ -46,54 +46,74 @@ def _pick_pid(line):
     return next((t for t in toks[1:] if t.isdigit()), None)
 
 
-def device_pid(adb, serial, name):
+def device_pid(adb, serial, name, match=None):
     """取设备端同名进程的 PID：`pidof` 优先，退化 `ps -A` 逐行找。
 
     取不到（进程已退出 / 老 ROM 无 pidof 且 ps 输出异常）返回 None。
+
+    match：命令行特征（如管道投屏独有的 `--output-format`）。**设备上可能同时
+    有两条同名 screenrecord**（用户正在录屏的那条 + 投屏用的那条），`pidof` 只认
+    进程名、取到的可能是别人的 PID；给了 match 就只认整行同时包含 name 与 match
+    的那一条，绝不按名字取第一个。
     """
-    try:
-        r = subprocess.run([adb, "-s", serial, "shell", "pidof", name],
-                           **adb_kwargs(10))
-        # 只认纯数字：adb shell 会把设备端的报错并进 **stdout**
-        # （`/system/bin/sh: pidof: not found`），按空白切分后第一个 token 是
-        # "pidof:"。拿它去 kill 杀不掉任何东西，更糟的是 kill_device_process
-        # 会据此认为「已按 PID 精准结束」，连 pkill 兜底都不走 —— 设备端
-        # screenrecord / tinycap 就成了孤儿，继续写卡、继续占着麦克风。
-        pids = [t for t in (r.stdout or "").split() if t.isdigit()]
-        if pids:
-            return pids[0]
-    except Exception:
-        pass
+    if match is None:
+        try:
+            r = subprocess.run([adb, "-s", serial, "shell", "pidof", name],
+                               **adb_kwargs(10))
+            # 只认纯数字：adb shell 会把设备端的报错并进 **stdout**
+            # （`/system/bin/sh: pidof: not found`），按空白切分后第一个 token 是
+            # "pidof:"。拿它去 kill 杀不掉任何东西，更糟的是 kill_device_process
+            # 会据此认为「已按 PID 精准结束」，连 pkill 兜底都不走 —— 设备端
+            # screenrecord / tinycap 就成了孤儿，继续写卡、继续占着麦克风。
+            pids = [t for t in (r.stdout or "").split() if t.isdigit()]
+            if pids:
+                return pids[0]
+        except Exception:
+            pass
     try:
         r = subprocess.run([adb, "-s", serial, "shell", "ps", "-A"],
                            **adb_kwargs(10))
         for line in (r.stdout or "").splitlines():
-            if name in line:
-                pid = _pick_pid(line)
-                if pid:
-                    return pid
+            if name not in line:
+                continue
+            if match is not None and match not in line:
+                continue
+            pid = _pick_pid(line)
+            if pid:
+                return pid
     except Exception:
         pass
     return None
 
 
-def kill_device_process(adb, serial, name, wait=0.6):
+def kill_device_process(adb, serial, name, wait=0.6, match=None,
+                        fallback_name_kill=True):
     """尽力让设备端进程优雅退出（写回 moov / RIFF 收尾信息）。
 
     策略：按 PID `kill -INT`（比 pkill 通用，部分 ROM 无 pkill）→ 等 `wait` 秒收尾 →
     仍活着才补 `kill -TERM`；拿不到 PID 时同序退化为 `pkill`。
 
+    match：按命令行特征精确定位（见 device_pid）。
+    fallback_name_kill：精确匹配不到时，是否允许退回「按进程名 pkill」。按名字
+    杀会连**同名的其它进程**一起杀掉 —— 用户正在录屏的那条 screenrecord 就是
+    同名进程，一次投屏收尾就能把正常录屏弄断。因此调用方在「可能有别人的同名
+    进程」时必须传 False：宁可不清理，也绝不误杀。
+
     返回 True 表示走的是「按 PID 精准结束」分支（便于调用方/测试区分）。
     """
-    pid = device_pid(adb, serial, name)
+    pid = device_pid(adb, serial, name, match)
     if pid:
         _run([adb, "-s", serial, "shell", "kill", "-INT", pid])
         if wait:
             time.sleep(wait)          # 等它把收尾信息写完并自行退出
         # 只在确实还活着时补 -TERM；已退出就别再补刀（补了反而可能砍在收尾中途）
-        if device_pid(adb, serial, name):
+        if device_pid(adb, serial, name, match):
             _run([adb, "-s", serial, "shell", "kill", "-TERM", pid])
         return True
+    if not fallback_name_kill:
+        # 精确没找到、也不允许按名字兜底：什么都不做（设备上可能有另一条同名
+        # 进程正被用户使用着，按名字一刀下去就是误杀）。
+        return False
     # 拿不到 PID（老 ROM 无 pidof / ps 输出异常）：退化为 pkill，顺序同上
     _run([adb, "-s", serial, "shell", "pkill", "-INT", name])
     if wait:

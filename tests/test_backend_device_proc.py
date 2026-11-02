@@ -155,3 +155,50 @@ def test_kill_falls_back_to_pkill_when_pidof_unavailable(monkeypatch):
     assert dp.kill_device_process("adb", "A1", "screenrecord", wait=0.6) is False
     assert any(c[-3:] == ["pkill", "-INT", "screenrecord"] for c in calls), calls
     assert any(c[-3:] == ["pkill", "-TERM", "screenrecord"] for c in calls), calls
+
+
+# ---------------------------------------------------------------------------
+# 设备上可能同时跑着两条同名 screenrecord：用户录屏的 + 投屏用的
+# ---------------------------------------------------------------------------
+_PS_TWO_SCREENRECORDS = (
+    "10123  4321 1 0:00 screenrecord /data/local/tmp/adb_rec_A1_1.mp4\n"
+    "10123  4322 1 0:00 screenrecord --output-format=h264 -\n")
+
+
+def test_device_pid_with_match_ignores_same_named_process(monkeypatch):
+    """按命令行特征只能命中投屏那条，绝不能按名字取第一个。
+
+    设备端此刻可能有一条**同名**的 screenrecord 正在为用户录屏。`pidof` 只认
+    进程名，取到的可能是那条录屏进程，随后 kill 下去就把正常录屏弄断了 ——
+    设备明明好好的，是程序自己杀的。
+    """
+    def fake_run(cmd, **kw):
+        assert "pidof" not in cmd, "给了 match 就不该走 pidof（它只看进程名）"
+        return type("R", (), {"stdout": _PS_TWO_SCREENRECORDS,
+                              "returncode": 0})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    pid = dp.device_pid("adb", "A1", "screenrecord", match="--output-format")
+    assert pid == "4322", "必须命中投屏那条（4322），而不是录屏那条（4321）"
+
+
+def test_no_name_fallback_when_precise_match_misses(monkeypatch):
+    """精确匹配不到时，禁止退回按名字 pkill。
+
+    `pkill -INT screenrecord` 是**按名字**匹配：设备上正在录屏的那条同样会被
+    杀掉。宁可不清理这条残留进程，也不能误杀用户的录屏。
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return type("R", (), {"stdout": "", "returncode": 0})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(dp.time, "sleep", lambda s: None)
+    ok = dp.kill_device_process("adb", "A1", "screenrecord", wait=0,
+                                match="--output-format",
+                                fallback_name_kill=False)
+    assert ok is False
+    assert not [c for c in calls if "pkill" in c], (
+        "不允许按名字兜底时不能发 pkill：%r" % (calls,))

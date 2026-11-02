@@ -275,7 +275,8 @@ class PipeMirror:
     """
 
     def __init__(self, adb, serial, player_kind, player_exe,
-                 size="", bitrate_mbps=8, fps=60, on_status=None):
+                 size="", bitrate_mbps=8, fps=60, on_status=None,
+                 rec_guard=None):
         self.adb = adb
         self.serial = serial
         self.player_kind = player_kind
@@ -284,6 +285,10 @@ class PipeMirror:
         self.bitrate_mbps = bitrate_mbps
         self.fps = fps
         self.on_status = on_status
+        # 返回 True 表示「此刻有设备正在录屏」。投屏收尾清理设备端残留时据此决定
+        # 能不能按进程名兜底 —— 设备端此刻可能有一条**同名**的 screenrecord 正在
+        # 为用户录屏，按名字一刀下去就把正常录屏弄断了。
+        self.rec_guard = rec_guard
         self._stop = threading.Event()
         self._first_data = threading.Event()   # 已收到首帧 = 链路可用
         self._done = threading.Event()         # 结论就绪（收到首帧 或 已判定失败）
@@ -505,12 +510,31 @@ class PipeMirror:
             except Exception:
                 pass
         # 设备端 screenrecord 可能还活着（adb 客户端被杀不会带走它），
-        # 不清理会一直占着编码器、下次录屏也起不来
+        # 不清理会一直占着编码器、下次录屏也起不来。
+        # 但**绝不能按进程名一把杀**：用户此刻可能正在录屏，设备端那条也叫
+        # screenrecord，一刀下去就把正常录屏弄断了（设备明明好好的）。
+        # 所以先按管道投屏独有的命令行特征（--output-format）精确定位自己的那条；
+        # 精确找不到时，只有确认「没有录屏在跑」才允许按名字兜底清理。
         try:
-            kill_device_process(self.adb, self.serial, "screenrecord")
+            kill_device_process(self.adb, self.serial, "screenrecord",
+                                match="--output-format",
+                                fallback_name_kill=not self._rec_active())
         except Exception:
             pass
         self._close_player()
+
+    def _rec_active(self):
+        """这台设备（严格说：任意设备）是否正在录屏。
+
+        查询异常时按「正在录屏」处理（返回 True）：宁可少清理一次残留进程，
+        也不能冒把用户正常录屏杀掉的险。
+        """
+        if self.rec_guard is None:
+            return False
+        try:
+            return bool(self.rec_guard())
+        except Exception:
+            return True
 
     def alive(self):
         return (not self._stop.is_set()

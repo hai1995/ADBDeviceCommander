@@ -684,7 +684,8 @@ class RecordMixin:
                 size = pref["size"] or plan_size(self.state.adb_path, serial)
                 m = PipeMirror(self.state.adb_path, serial, kind, exe, size,
                                pref["bitrate"], 60,
-                               on_status=self._on_mirror_error)
+                               on_status=self._on_mirror_error,
+                               rec_guard=self.video.any_recording)
                 ok, err = m.start()
                 if ok:
                     self._mirror_pipes[serial] = m

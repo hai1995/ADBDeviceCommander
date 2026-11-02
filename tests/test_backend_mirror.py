@@ -264,16 +264,27 @@ def test_pipe_restarts_after_screenrecord_limit(monkeypatch):
 
 def test_pipe_stop_kills_and_clears_device(monkeypatch):
     """停止时既要杀本地 adb，也要清设备端 screenrecord —— 后者会一直占着
-    编码器，残留着下次连录屏都起不来。"""
-    killed = {}
+    编码器，残留着下次连录屏都起不来。
+
+    清理必须带**命令行特征**（--output-format）：设备端此刻可能还有一条同名
+    的 screenrecord 正在为用户录屏，按进程名杀会把它一起杀掉。
+    """
+    calls = {}
+
+    def hook(adb, serial, name, **kw):
+        calls["name"] = name
+        calls.update(kw)
+
     factory = _PopenFactory([[b"x"]])
-    m = _pipe(monkeypatch, factory,
-              kill_hook=lambda adb, serial, name: killed.setdefault("name", name))
+    m = _pipe(monkeypatch, factory, kill_hook=hook, rec_guard=lambda: False)
     assert m.start()[0] is True
     m.stop()
     # 用「最后一轮」判断：180s 续流可能已经换了新的 adb 进程
     assert any(p.killed for p in factory.adb_procs)
-    assert killed.get("name") == "screenrecord"
+    assert calls.get("name") == "screenrecord"
+    assert calls.get("match") == "--output-format", calls
+    assert calls.get("fallback_name_kill") is True, (
+        "没有录屏在跑时才允许按名字兜底：%r" % (calls,))
 
 
 def test_pipe_alive_reflects_stop(monkeypatch):
@@ -602,3 +613,34 @@ def test_snap_grab_strips_leading_junk_before_png(monkeypatch):
     data, err = _grab_with(monkeypatch, junk + png, rc=0)
     assert data == png, (data, err)
     assert err is None
+
+
+def test_pipe_stop_never_kills_recording_screenrecord(monkeypatch):
+    """管道投屏收尾不得按进程名杀掉用户正在录屏的那条 screenrecord。
+
+    设备端两条 screenrecord 同名：录屏是 `screenrecord /data/local/tmp/...`，
+    投屏是 `screenrecord --output-format=h264 -`。按名字 kill 会把录屏那条一起
+    杀掉 —— 设备明明正常，用户的录屏却断了，界面上还提示「screenrecord 意外结束」。
+    这里要求：按命令行特征只结束投屏那条，且绝不发 pkill。
+    """
+    import backend.device_proc as dp
+    ps = ("10123  4321 1 0:00 screenrecord /data/local/tmp/adb_rec_A1_1.mp4\n"
+          "10123  4322 1 0:00 screenrecord --output-format=h264 -\n")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return type("R", (), {"stdout": ps, "returncode": 0})()
+
+    monkeypatch.setattr(dp.subprocess, "run", fake_run)
+    monkeypatch.setattr(dp.time, "sleep", lambda s: None)
+    m = svc.PipeMirror("adb", "A1", "mpv", "/nonexistent/mpv",
+                       rec_guard=lambda: True)
+    m.stop()
+
+    assert not [c for c in calls if "pkill" in c], (
+        "录屏在跑时绝不能按名字 pkill：%r" % (calls,))
+    kills = [c for c in calls if "kill" in c]
+    assert kills, "应精确结束投屏自己那条 screenrecord"
+    assert all(c[-1] == "4322" for c in kills), (
+        "只能结束投屏进程（4322），不能碰录屏进程（4321）：%r" % (kills,))
