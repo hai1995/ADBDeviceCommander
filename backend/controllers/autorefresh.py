@@ -115,16 +115,21 @@ class AutoRefreshMixin:
                 "adbd 重启也会触发此情况。" % names)
 
     def _reap_gone_tools(self):
-        """设备被移除（gone）后，停掉它正在进行的 logcat 监控 / 抓取，以及录屏会话里
+        """设备被移除（gone）后，收拾它正在进行的 logcat 监控 / 抓取，以及录屏会话里
         该设备的视频 / 设备音频。
 
         设备突然断开时 `adb logcat` 通常会退出（stdout EOF，worker 自行收尾推送
         stopped），但无线 / 网络 ADB 或 adb 卡顿时它可能迟迟不退出，留下孤儿 adb
         进程且界面卡在「监控中」。录屏同理：设备端 `screenrecord` / `tinycap` 在 adb
         断开后未必随退出，会残留进程、占用音频输入，且界面停留「录制中」直到用户手动
-        点停止（那时 pull 必然失败）。这里以设备快照为权威：凡正在监控 / 抓取 / 录制、
-        却已不在设备列表里的 serial 一律强停。处于宽限（短暂失联、仍保留勾选）的设备
-        不会被误杀——它们仍留在 device_state 中。
+        点停止（那时 pull 必然失败）。这里以设备快照为权威处理「正在跑、却已不在设备
+        列表里」的 serial。处于宽限（短暂失联、仍保留勾选）的设备不会被误处理——它们
+        仍留在 device_state 中。
+
+        但**抓取与监控处理方式不同**：监控直接 stop（实时画面断了就是断了，没有可挽回
+        的东西）；抓取必须走 notice_device_gone —— stop 会被 worker 当成「用户主动
+        停止」，收尾时报 stopped 且没有 gap，于是拔线导致的截断被报成「✓ 抓取完毕」。
+        抓取应当转入掉线通道（缺口标记 + 等重连续写），因为落盘日志是用来事后分析的。
         """
         try:
             known = {d["serial"] for d in self.devices.get_items()}
