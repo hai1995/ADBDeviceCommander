@@ -759,6 +759,35 @@ def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
     assert not sleeps, "已知设备不在，就不该再退避等待（白等 9 秒）：%r" % sleeps
 
 
+def test_pull_gives_up_at_once_when_ls_is_permission_denied(monkeypatch, tmp_path):
+    """`ls` 报权限不足：不该白等 9 秒，更不能说成「未生成录屏文件」。
+
+    保存目录落在 /sdcard/Android/data/... 这类受限路径、或设备策略收紧时，
+    `ls` 会返回 `Permission denied`。文件其实**存在**，只是读不到。旧实现把它
+    与「还没写好」一视同仁：6 次退避约 9 秒，最后报「设备端未生成录屏文件
+    （screenrecord 可能未启动/提前退出）」—— 用户于是去查 screenrecord，而真正
+    要处理的是路径权限。
+    """
+    sleeps = []
+    monkeypatch.setattr(ss.time, "sleep", lambda s: sleeps.append(s))
+
+    def fake_run(cmd, **kw):
+        if "ls" in cmd:
+            return type("R", (), {"returncode": 1, "stdout":
+                                  "ls: /sdcard/x.mp4: Permission denied\n",
+                                  "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    ok, lp, err = vr._pull_and_finish("A1")
+
+    assert ok is False
+    assert "Permission denied" in err, "必须带上 adb 的原话：%r" % err
+    assert "未生成" not in err, "文件可能存在只是读不到，不能报成「未生成」：%r" % err
+    assert not sleeps, "权限不足不会自愈，不该再退避等待：%r" % sleeps
+
+
 def test_pull_still_waits_when_file_is_simply_not_written_yet(monkeypatch, tmp_path):
     """文件还没写好（No such file or directory）必须继续等，不能误判成设备掉线。
 

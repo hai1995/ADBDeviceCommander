@@ -546,6 +546,12 @@ class VideoRecorder:
                 if why:
                     # 带上 adb 原话：`ls` 报的是「文件不存在」还是别的，只有它说得清
                     last_err += "；%s" % why
+                # `ls` 报权限不足 / 只读时，文件往往**是存在的**，只是读不到：
+                # 再退避 9 秒也还是同一句话，而且最终那句「未生成录屏文件
+                # （screenrecord 可能未启动/提前退出）」会把用户引向 screenrecord，
+                # 真正该处理的是保存路径的权限。
+                if why and any(h in why.lower() for h in _FATAL_PULL_HINTS):
+                    return False, None, "无法读取设备端录屏文件：%s" % why
             if attempt < 5:
                 time.sleep(0.6 * (attempt + 1))
         return False, None, last_err
