@@ -361,6 +361,10 @@ class LogcatCapture:
         # 正处于「设备掉线、等待重连」的 serial：供孤儿回收（_reap_gone_tools）
         # 豁免——这类抓取是有意存活的，不能被当成「设备已移除」而强停。
         self._reconnecting = set()
+        # 已被孤儿回收线程告知「设备已从设备列表消失」的 serial。用于在
+        # device_present 查不出结论（adb 不可达 / 返回 None）时仍能判定这是一次
+        # 掉线：否则会把被截断的文件当成「✓ 抓取完毕」报给用户。
+        self._gone = set()
 
     def is_running(self, serial):
         with self._lock:
@@ -380,6 +384,34 @@ class LogcatCapture:
         """
         with self._lock:
             return serial in self._reconnecting
+
+    def notice_device_gone(self, serial):
+        """告知抓取：这台设备已从设备列表里消失（孤儿回收线程调用）。
+
+        与 stop() 的区别是**不设停止请求**：抓取不该就此结束，而应转入「掉线、
+        等重连」状态（写缺口标记 → 推 reconnecting → 窗口内续写同一文件）。
+
+        旧行为是回收线程直接 stop()：worker 把 `_stopreq` 当作「用户主动停止」，
+        收尾时报 `stopped` 且没有 gap —— 设备拔线、文件在掉线处截断，界面却弹
+        「✓ 抓取完毕：N 行」。分析时拿视频流对日志才发现中间少了一段，属于最
+        典型的「假成功 + 结果错」。而 Windows 上 `adb logcat` 在设备拔掉后常常
+        迟迟不退出，回收线程反而是这条路的**主干道**，必须走同一个掉线通道。
+
+        这里只做两件事：
+          * 记下「设备确实没了」这一事实（device_present 查不出结论时据此仍能
+            判定掉线，不至于把截断报成成功）；
+          * 终止当前 adb 进程，让读循环立刻解开阻塞并进入判定分支。
+
+        返回 True 表示确有进行中的抓取被通知到。
+        """
+        with self._lock:
+            if serial not in self._procs and serial not in self._starting:
+                return False
+            self._gone.add(serial)
+            proc = self._procs.get(serial)
+        if proc is not None:
+            _terminate(proc)
+        return True
 
     def start(self, serial, path, buffers, level_filter=None):
         """启动抓取，写入 path（txt，单文件）。返回 True 表示新启动。
@@ -504,6 +536,7 @@ class LogcatCapture:
                             self._stopreq.discard(serial)
                             self._flags.pop(serial, None)
                             self._reconnecting.discard(serial)
+                            self._gone.discard(serial)
                         self.bus.push("logcat_capture",
                                       {"serial": serial, "status": "stopped",
                                        "path": path, "lines": 0, "size": 0,
@@ -526,6 +559,7 @@ class LogcatCapture:
                             self._stopreq.discard(serial)
                             self._flags.pop(serial, None)
                             self._reconnecting.discard(serial)
+                            self._gone.discard(serial)
                         break
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "running",
@@ -578,12 +612,16 @@ class LogcatCapture:
                     # 重连也没意义），留待 finally 按「设备离线」报错。
                     break
                 # 已经抓到过日志、却在这里 EOF：多半是设备掉线（adb logcat 在连接
-                # 存活时会一直跑，不会自己退出）。仅当 device_present 明确返回 False
-                # （确认设备已不在）才进入「等重连」；返回 True（设备还在）或 None
-                # （adb 不可达、无法确认）都按正常收尾——否则会把「设备其实没掉线」
-                # 或「adb 暂时查不到」误判成掉线、反复拉起空转（测试环境里没有真实
-                # adb 时尤其要避免进入长达重连窗口的轮询）。
-                if device_present(adb, serial) is False:
+                # 存活时会一直跑，不会自己退出）。判定依据两条：
+                #   * device_present 明确返回 False（确认设备已不在）；
+                #   * 孤儿回收线程已告知「这台设备从设备列表消失了」（_gone）——
+                #     设备拔掉后 adb 可能查不出结论（返回 None），此时不能因为
+                #     「查不到」就当成功收尾，那样文件在掉线处截断却报「✓ 抓取完毕」。
+                # 返回 True（设备还在）才按正常收尾——否则会把「设备其实没掉线」
+                # 误判成掉线、反复拉起空转。
+                with self._lock:
+                    gone_hint = serial in self._gone
+                if gone_hint or device_present(adb, serial) is False:
                     # 确认设备掉了：写入缺口标记，等待重连后往同一文件续写（绝不丢已抓到的）。
                     gap_written = True
                     drop_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -604,6 +642,9 @@ class LogcatCapture:
                     verdict = self._wait_reconnect(serial)
                     with self._lock:
                         self._reconnecting.discard(serial)
+                        # 重连成功 / 超时都清掉「已消失」提示：它只用于这次判定，
+                        # 留着会让下次「设备其实还在、logcat 自己退了」被误判成掉线。
+                        self._gone.discard(serial)
                     if verdict == "stopped":
                         break
                     if verdict == "timeout":
@@ -644,6 +685,7 @@ class LogcatCapture:
                 stopped_by_user = serial in self._stopreq
                 self._stopreq.discard(serial)
                 self._reconnecting.discard(serial)
+                self._gone.discard(serial)
                 flags = self._flags.pop(serial, {"zip_on_stop": False})
             # 打包条件：仅「结束后打包 zip」——抓取过程不做任何按大小的自动
             # 打包（旧「超 15M 自动打包」已整体移除），停止时是否打包

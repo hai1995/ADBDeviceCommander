@@ -628,19 +628,24 @@ def test_batch_download_spawns_one_thread_per_file(monkeypatch):
 # 设备移除后强停孤儿 logcat 监控 / 抓取
 # ---------------------------------------------------------------------------
 def test_reap_gone_tools_stops_only_removed_devices():
-    """设备被移除（gone）后，_reap_gone_tools 应强停其遗留的 logcat 监控 / 抓取，
+    """设备被移除（gone）后，_reap_gone_tools 应收拾其遗留的 logcat 监控 / 抓取，
     但不误杀仍在设备列表里（含宽限期内短暂失联）的设备。
 
     回归点：无线 / 网络 ADB 或 adb 卡顿时 `adb logcat` 可能迟迟不退，光靠 worker 的
     stdout-EOF 自收尾不可靠，会留下孤儿 adb 进程且界面卡在「监控中」。以设备快照为
     权威可补这一缺口。
+
+    抓取与监控的处理**刻意不同**：监控直接 stop 即可，抓取必须走
+    notice_device_gone —— stop 会被 worker 当成「用户主动停止」，收尾时报
+    stopped 且没有 gap，设备拔线导致文件截断却弹「✓ 抓取完毕」（假成功）。
+    见 test_reap_gone_capture_reports_gap_not_clean_success。
     """
     api = _make_api()
     # 当前设备快照只剩 A1、B2（C3 已彻底移除，D4 处于宽限仍保留）
     api.devices.device_state = {"A1": "device", "B2": "device", "D4": "offline"}
     api.devices.device_checked = {"A1": True, "B2": True, "D4": True}
 
-    stopped_mon, stopped_cap = [], []
+    stopped_mon, stopped_cap, noticed_cap = [], [], []
 
     class FakeMon:
         def __init__(self, running): self._r = list(running)
@@ -652,14 +657,18 @@ def test_reap_gone_tools_stops_only_removed_devices():
         def running_serials(self): return list(self._r)
         def is_reconnecting(self, s): return False
         def stop(self, s, zip_on_stop=False): stopped_cap.append(s)
+        def notice_device_gone(self, s): noticed_cap.append(s)
 
-    # 监控 / 抓取正在 A1、B2、C3、D4 上进行；C3 已从快照移除应被杀，其余不应
+    # 监控 / 抓取正在 A1、B2、C3、D4 上进行；C3 已从快照移除应被收拾，其余不应
     api.logcat_monitor = FakeMon(["A1", "B2", "C3", "D4"])
     api.logcat_capture = FakeCap(["A1", "C3"])
     api._reap_gone_tools()
 
     assert stopped_mon == ["C3"], stopped_mon
-    assert stopped_cap == ["C3"], stopped_cap
+    assert noticed_cap == ["C3"], noticed_cap
+    assert stopped_cap == [], (
+        "设备消失时不能 stop 抓取：那会把它当成「用户主动停止」，"
+        "截断的文件被报成「✓ 抓取完毕」：%r" % (stopped_cap,))
 
 
 def test_reap_gone_tools_noop_when_all_present():

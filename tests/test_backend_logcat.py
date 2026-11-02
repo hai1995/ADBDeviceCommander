@@ -1029,3 +1029,106 @@ def test_rec_death_keeps_logcat_capture_alive(monkeypatch):
     assert "D1" not in stopped, "死亡设备的 logcat 抓取绝不能被 stop"
     # 也不应被加进本次录屏产物（它已脱离会话，稍后单独成包）
     assert all("logcat_D1" not in f for f in files)
+
+
+# ---------------------------------------------------------------------------
+# 设备被拔掉（从设备列表消失）→ 孤儿回收不得把截断报成「✓ 抓取完毕」
+# ---------------------------------------------------------------------------
+class _HungProc:
+    """产出给定行后就一直卡住（模拟设备拔掉后 `adb logcat` 迟迟不退出）。
+
+    这类进程在 Windows 上很常见：光靠 stdout EOF 收尾不可靠，孤儿回收线程会
+    先一步发现设备不见了，所以它必须走「掉线」通道而不是「停止」通道。
+    """
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+        self._i = 0
+        self.returncode = None
+        self._released = threading.Event()
+
+    @property
+    def stdout(self):
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._i < len(self._lines):
+            line = self._lines[self._i]
+            self._i += 1
+            return line
+        self._released.wait()          # 没被 terminate 就一直卡着
+        raise StopIteration
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self._released.set()
+
+    def kill(self):
+        self._released.set()
+
+    def wait(self, timeout=None):
+        self._released.set()
+        return 0
+
+
+def _drain_until(bus, kind, status, timeout=6.0):
+    """把事件取走并累积，直到出现指定 kind/status；返回 (payload, 全部事件)。"""
+    end = time.time() + timeout
+    seen = []
+    while time.time() < end:
+        seen.extend(bus.take())
+        for e in seen:
+            if (e.get("kind") == kind
+                    and (e.get("payload") or {}).get("status") == status):
+                return e["payload"], seen
+        time.sleep(0.02)
+    return None, seen
+
+
+def test_reap_gone_capture_reports_gap_not_clean_success(tmp_path, monkeypatch):
+    """设备拔掉、由孤儿回收收拾抓取时，必须留缺口标记，不能报「抓取完毕」。
+
+    真实链路（Windows 上最常见）：同时录屏 + 满缓冲 logcat，USB 抖动 / 拔线后
+    `adb logcat` 迟迟不退出，autorefresh 的 _reap_gone_tools 先一步发现设备不在
+    列表里。旧实现直接 stop()，worker 把 `_stopreq` 当成「用户主动停止」，收尾推
+    stopped 且没有 gap —— 界面弹「✓ 抓取完毕：N 行」，文件却在掉线处截断；拿
+    视频流对日志时才发现中间少一段，这个功能就等于废了。
+
+    这里连 device_present 都返回 None（adb 查不出结论）模拟「查不到」：只有回收
+    线程的「设备已消失」提示能救，仍须判定为掉线而不是正常结束。
+    """
+    proc = _HungProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: None)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_MAX_S", 0)      # 立即超时
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 0.01)
+
+    api = WebApi()
+    path = str(tmp_path / "gone.txt")
+    assert api.logcat_capture.start("A1", path, ["main"]) is True
+    running, _seen0 = _drain_until(api.bus, "logcat_capture", "running")
+    assert running is not None, "worker 没起来"
+
+    # 设备从设备列表里消失：孤儿回收线程通知抓取（旧实现是 stop()）
+    api.devices.device_state = {}
+    api._reap_gone_tools()
+
+    stopped, seen = _drain_until(api.bus, "logcat_capture", "stopped")
+    assert stopped is not None, [e.get("payload") for e in seen]
+    assert stopped.get("gap") is True, (
+        "设备掉线导致的截断必须带 gap，否则前端弹「✓ 抓取完毕」：%r" % (stopped,))
+    assert "缺口" in (stopped.get("error") or ""), stopped
+    statuses = [(e.get("payload") or {}).get("status") for e in seen
+                if e.get("kind") == "logcat_capture"]
+    assert "reconnecting" in statuses, (
+        "设备消失时应转入等重连，而不是直接结束：%r" % (statuses,))
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    assert "断开连接" in text, (
+        "文件里必须留下掉线标记，否则时间线看着是连续的：%r" % (text,))

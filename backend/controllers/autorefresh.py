@@ -140,7 +140,12 @@ class AutoRefreshMixin:
                 # 那会把刚建立的掉线保护立刻掐断，logcat 照样丢数据。
                 if self.logcat_capture.is_reconnecting(s):
                     continue
-                self.logcat_capture.stop(s, zip_on_stop=False)
+                # 不能 stop()：stop 会被 worker 当成「用户主动停止」，收尾时报
+                # stopped 且没有 gap —— 设备拔线、文件在掉线处截断，界面却弹
+                # 「✓ 抓取完毕」。改走 notice_device_gone：终止遗留的 adb 进程
+                # （不留孤儿、界面不卡「采集中」），同时让抓取转入掉线通道
+                # （写缺口标记 + 等重连续写），保住已抓到的日志。
+                self.logcat_capture.notice_device_gone(s)
         # 录屏会话（多设备聚合）：只强停「已移除」的那几台，绝不替用户结束整个会话
         # （其余设备可能仍在正常录制）。停止涉及 adb 调用，设备离线时可能短暂阻塞，
         # 故放到后台 worker，不堵自动轮询线程。
