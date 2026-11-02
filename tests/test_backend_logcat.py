@@ -993,25 +993,34 @@ def test_capture_gap_on_reconnect_timeout(tmp_path, monkeypatch):
     assert "[logcat] 设备于" in content, "文件必须含缺口标记"
 
 
-def test_rec_death_keeps_logcat_capture_alive(monkeypatch):
-    """录屏意外死亡（设备掉线）时，配套的 logcat 抓取必须保留继续跑，
-    不能跟着录屏会话一起被 stop（否则日志在掉线处被截断，录屏+logcat 联动分析废掉）。
+def test_rec_death_stops_logcat_capture_in_sync(tmp_path, monkeypatch):
+    """录屏意外中断（设备掉线）时，配套 logcat 必须**同步停**并进同一个包。
 
-    回归：旧实现在 _session_teardown 里无条件 stop 所有 logcat_captures，
-    录屏一死就把日志也掐了。新实现对「死设备」的抓取改为脱离会话、独立续跑。
+    日志的唯一用途是事后按时间轴对照视频找问题。录像已经停了、日志还在往下
+    写，两边就对不齐；所以这里不做任何例外：录屏怎么结束，日志就怎么结束。
+    断点位置由抓取侧写入的「设备断开连接」缺口标记标明。
+
+    回归：曾一度把「死亡设备」的抓取改成脱离会话继续跑（视频断、日志不断），
+    那是错的——时间轴对不上的日志没法用来定位画面问题。
     """
     api = WebApi()
-    # 假装这台设备的 logcat 抓取正在跑，并观察 stop 是否被调用
     stopped = {}
-    monkeypatch.setattr(api.logcat_capture, "stop",
-                        lambda s, zip_on_stop=False: stopped.setdefault(s, 0))
-    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: True)
+
+    def fake_stop(s, zip_on_stop=False):
+        stopped[s] = zip_on_stop
+        return True
+
+    monkeypatch.setattr(api.logcat_capture, "stop", fake_stop)
+    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: s not in stopped)
+    log_path = str(tmp_path / "logcat_D1_20260101_000000.txt")
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write("08-29 10:00:01.000  1  1 I Tag: hi\n")
 
     api._rec_session = {
-        "ts": "20260101_000000", "dir": "/tmp", "with_devaudio": False,
+        "ts": "20260101_000000", "dir": str(tmp_path), "with_devaudio": False,
         "with_mic": False, "with_zip": False, "mic_path": None,
         "mic_started": False, "videos": {}, "devaudio": {},
-        "logcat_captures": {"D1": "/tmp/logcat_D1_20260101_000000.txt"},
+        "logcat_captures": {"D1": log_path},
         "pointer_location_prev": {}, "show_touches_prev": {},
         "dead": {"D1"},
     }
@@ -1025,10 +1034,8 @@ def test_rec_death_keeps_logcat_capture_alive(monkeypatch):
     monkeypatch.setattr(api, "_zip_paths", lambda *a, **k: None)
 
     files, _zpath = api._session_teardown(api._rec_session)
-    # 关键断言：死亡设备的 logcat 抓取没有被 stop，保留继续跑
-    assert "D1" not in stopped, "死亡设备的 logcat 抓取绝不能被 stop"
-    # 也不应被加进本次录屏产物（它已脱离会话，稍后单独成包）
-    assert all("logcat_D1" not in f for f in files)
+    assert "D1" in stopped, "录屏中断时必须同步停掉 logcat 抓取（时间轴要对齐）"
+    assert log_path in files, "日志要跟着录屏进同一个产物包：%r" % (files,)
 
 
 # ---------------------------------------------------------------------------
@@ -1176,3 +1183,29 @@ def test_capture_resume_skips_replayed_backlog(tmp_path, monkeypatch):
     assert text.count("Tag: c") <= 2, text
     assert "恢复连接" in text, "缺少恢复标记，看不出断点在哪：%r" % (text,)
     assert payload["lines"] in (4, 5), payload
+
+
+def test_stop_during_reconnect_takes_effect_immediately(tmp_path, monkeypatch):
+    """等重连期间点停止必须立刻收尾，不能等满一个轮询间隔。
+
+    「录屏停 → 日志同步停」靠的就是这一点：等待循环若用 sleep(轮询间隔) 睡死，
+    停止最多被拖后一个间隔，日志就比视频多出这几秒，两边对不齐。
+    """
+    proc = _EofProc(["08-29 10:00:01.000  1  1 I Tag: a\n"])
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: False)  # 一直没回来
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_MAX_S", 60)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 5)       # 一个间隔 5 秒
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("A1", str(tmp_path / "wake.txt"), ["main"]) is True
+    assert _wait_payload(bus, "logcat_capture", "reconnecting") is not None
+
+    t0 = time.time()
+    assert cap.stop("A1", zip_on_stop=False) is True
+    stopped = _wait_payload(bus, "logcat_capture", "stopped", timeout=2.0)
+    dt = time.time() - t0
+    assert stopped is not None, (
+        "停止没有立刻生效（等满一个轮询间隔才会收尾）：%r" % (_statuses(bus, "logcat_capture"),))
+    assert dt < 1.0, "等重连期间的停止耗时 %.2fs，说明还在 sleep 而不是被唤醒" % dt

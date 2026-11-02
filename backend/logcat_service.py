@@ -376,6 +376,10 @@ class LogcatCapture:
         # device_present 查不出结论（adb 不可达 / 返回 None）时仍能判定这是一次
         # 掉线：否则会把被截断的文件当成「✓ 抓取完毕」报给用户。
         self._gone = set()
+        # 等重连期间供 stop() 立刻唤醒（serial -> Event）。没有它，停抓取最多要
+        # 等一个轮询间隔（3s）才生效——「录屏停、日志同步停」就会被拖成两条对不齐
+        # 的时间线，正是日志与视频要按时间轴对照时最忌讳的。
+        self._reconn_wake = {}
 
     def is_running(self, serial):
         with self._lock:
@@ -462,8 +466,13 @@ class LogcatCapture:
                 # 关键：把「停止时是否打包」写进 flags，让 worker 的 finally 据此决策。
                 # 旧实现把该参数读到 local 变量后丢弃，导致「结束后打包 zip」完全失效。
                 self._flags[serial]["zip_on_stop"] = bool(zip_on_stop)
+            # 正在等设备重连时，立刻叫醒等待循环：停抓取必须马上生效，
+            # 否则最多拖一个轮询间隔（3s），日志就比视频多出这几秒。
+            wake = self._reconn_wake.get(serial)
         if proc is not None:
             _terminate(proc)
+        if wake is not None:
+            wake.set()
         # 收尾由 _worker finally 统一处理（决定是否打包末段）
         return True
 
@@ -478,6 +487,8 @@ class LogcatCapture:
     # 返回 "ok"（设备回来了）/ "stopped"（用户中途点了停止）/ "timeout"（窗口耗尽）。
     def _wait_reconnect(self, serial):
         deadline = time.time() + LOGCAT_CAP_RECONNECT_MAX_S
+        with self._lock:
+            wake = self._reconn_wake.setdefault(serial, threading.Event())
         while True:
             with self._lock:
                 if serial in self._stopreq:
@@ -491,7 +502,9 @@ class LogcatCapture:
                 pass
             if time.time() >= deadline:
                 return "timeout"
-            time.sleep(LOGCAT_CAP_RECONNECT_POLL_S)
+            # 用 Event 而不是 sleep：stop() 会立刻 set，停抓取不必等满一个轮询间隔。
+            wake.clear()
+            wake.wait(LOGCAT_CAP_RECONNECT_POLL_S)
 
     def _worker(self, serial, path, buffers, levels=None):
         adb = self.adb_path
@@ -716,6 +729,7 @@ class LogcatCapture:
                 self._stopreq.discard(serial)
                 self._reconnecting.discard(serial)
                 self._gone.discard(serial)
+                self._reconn_wake.pop(serial, None)
                 flags = self._flags.pop(serial, {"zip_on_stop": False})
             # 打包条件：仅「结束后打包 zip」——抓取过程不做任何按大小的自动
             # 打包（旧「超 15M 自动打包」已整体移除），停止时是否打包
