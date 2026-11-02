@@ -1392,6 +1392,41 @@ def test_logcat_still_running_is_not_zipped(tmp_path, monkeypatch):
     assert any("仍在收尾" in t for t in texts), texts
 
 
+def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
+    """日志必须与视频「同时」停：视频收尾要拉文件（数秒），日志多跑这几秒就错位。
+
+    回归：收尾顺序是「先拉视频（几台设备并行也要数秒）→ 再停 logcat」。视频在
+    拉之前就停了，日志却一直写到所有设备 pull 完 —— 事后按时间轴对照视频找
+    日志，两边差出的正是案发现场那一段。
+    """
+    api = _make_api()
+    video = tmp_path / "record_A1_ts1.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    log = tmp_path / "logcat_A1_ts1.txt"
+    log.write_text("08-29 10:00:00.000  1  1 I Tag: hi\n", encoding="utf-8")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "videos": {"A1": str(video)}, "devaudio": {},
+        "logcat_captures": {"A1": str(log)},
+    }
+    order = []
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    monkeypatch.setattr(
+        api.video, "stop",
+        lambda s: (order.append("video"), (True, str(video), None))[1])
+    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: False)
+    monkeypatch.setattr(
+        api.logcat_capture, "stop",
+        lambda s, **k: (order.append("logcat"), True)[1])
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    assert "logcat" in order and "video" in order, order
+    assert order.index("logcat") < order.index("video"), (
+        "日志必须在视频收尾之前就下发停止，否则会比视频多跑数秒：%r" % (order,))
+
+
 def test_devaudio_remote_path_safe_for_wireless_serial(monkeypatch, tmp_path):
     """含设备音频录屏时，设备端 wav 路径必须过 safe_name。
 

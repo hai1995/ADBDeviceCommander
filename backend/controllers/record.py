@@ -372,6 +372,16 @@ class RecordMixin:
         # 可视化 overlay 必须**先于**视频收尾恢复：它们是设备系统设置，
         # 早一点恢复，用户设备就少一瞬处于「开着准星/圆点」的意外状态。
         self._restore_overlays(sess)
+        # 同步 logcat 必须**先于视频收尾**下发停止（stop 本身是异步的：置停止
+        # 标记 + 终止 adb，立刻返回）。视频 stop 要走「kill 设备端 → 等本地 adb
+        # 退出 → 轮询设备端文件就绪 → pull」，几台设备并行也要数秒；日志若等
+        # 它拉完再停，就会比视频多跑这几秒 —— 事后按时间轴对照视频找日志时，
+        # 两边差出的正是案发现场那一段。
+        for s in list(sess.get("logcat_captures", {}).keys()):
+            try:
+                self.logcat_capture.stop(s, zip_on_stop=False)
+            except Exception:
+                pass
         videos_map = sess.get("videos", {}) or {}
         devaudio_map = sess.get("devaudio", {}) or {}
         dead = sess.get("dead") or set()
@@ -441,12 +451,9 @@ class RecordMixin:
         # 一并打包（视频 + 日志一体包）。意外中断的断点由抓取侧写入的
         # 「设备断开连接」缺口标记标明，分析时一眼能看出哪里缺了。
         for s, p in list(sess.get("logcat_captures", {}).items()):
-            try:
-                self.logcat_capture.stop(s, zip_on_stop=False)
-            except Exception:
-                pass
-            # 等它把缓冲区写完再取文件（最多 2 秒）。抓取正在等设备重连时，
-            # stop 会立刻打断等待，不会把这段时间拖进收尾流程。
+            # 停止已在收尾开头下发（与视频同步），这里只等它把缓冲区写完再取
+            # 文件（最多 2 秒）。抓取正在等设备重连时，stop 会立刻打断等待，
+            # 不会把这段时间拖进收尾流程。
             for _ in range(20):
                 if not self.logcat_capture.is_running(s):
                     break
