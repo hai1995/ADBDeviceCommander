@@ -51,6 +51,27 @@ _FATAL_PULL_HINTS = (
     "is a directory",
 )
 
+
+def device_present(adb, serial, timeout=5):
+    """探测设备此刻是否仍可连（adb -s <serial> get-state）。
+
+    仅当 get-state 干净返回 ``device`` 才算在；offline / unknown / 超时 /
+    异常都视为「不可用 / 已掉线」。用来把「录屏进程死亡」区分为
+    「设备真的掉线了（USB 断开）」还是「screenrecord 自己崩了但设备还在」，
+    避免把 USB 掉线误判成本工具写死的「录屏期间执行了 adb root」——而录屏路径
+    里本工具根本不会重启 adbd（overlay 用 settings put，不碰 adbd）。
+    """
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "get-state"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            **adb_kwargs(timeout))
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    return (r.stdout or b"").strip().lower() == b"device"
+
 # `settings put` 被系统拒绝时，报错文本里必然出现的片段（见 set_system_setting_ex）。
 # 只收明确表示「被拒」的措辞：正常写入时这两路都是空的，不会误报。
 _SETTING_REJECT_HINTS = (

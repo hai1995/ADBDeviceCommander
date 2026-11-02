@@ -9,7 +9,9 @@ import pytest
 
 import backend.controller as ctrl
 import backend.device_service as ds
+import backend.screen_service as screen_service
 from backend.controller import WebApi
+from backend.screen_service import device_present
 
 # patch_ctrl 见 tests/conftest.py：把名字同时打到所有 controllers 子模块
 # （方法实现所在的命名空间），避免物理拆分后 patch 落空。
@@ -747,6 +749,10 @@ def test_reap_dead_recordings_tears_down_and_resets_ui(monkeypatch, tmp_path):
     """
     api = _make_api()
     api._rec_session = _dead_rec_session(tmp_path)
+    # 死亡诊断要探设备是否真的掉线：替掉真实 adb，避免测试去 spawn 进程
+    monkeypatch.setattr(
+        "backend.controllers.autorefresh.device_present",
+        lambda adb, s, timeout=5: False)
     stopped = []
 
     class FakeVideo:
@@ -821,6 +827,49 @@ def test_reap_dead_recordings_skips_unknown_serial(monkeypatch, tmp_path):
     api._teardown_dead_recordings(["GHOST"])
     assert calls == [], "陌生序列号不得触发整会话收尾"
     assert api._rec_session["videos"] == {"A1": "v_a.mp4"}
+
+
+def test_device_present_true_only_when_get_state_device(monkeypatch):
+    """get-state 决定可达性：device→在线；offline / 非零退出 / 异常→视为掉线。"""
+    class _FakeRun:
+        def __init__(self, stdout, rc):
+            self.stdout = stdout
+            self.returncode = rc
+            self.stderr = b""
+
+    def fake_run(stdout=b"device\n", rc=0):
+        def _run(*a, **k):
+            return _FakeRun(stdout, rc)
+        return _run
+    monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"device\n", 0))
+    assert device_present("adb", "A1") is True
+    monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"offline\n", 0))
+    assert device_present("adb", "A1") is False
+    monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"", 1))
+    assert device_present("adb", "A1") is False
+    # adb 本身不可达（不存在 / 超时抛异常）→ 视为掉线，且不得向上抛
+    def boom(*a, **k):
+        raise FileNotFoundError("adb")
+    monkeypatch.setattr(screen_service.subprocess, "run", boom)
+    assert device_present("adb", "A1") is False
+
+
+def test_death_message_says_connection_lost_when_device_gone(monkeypatch):
+    """设备真的掉线时：提示必须是连接问题，且不得把锅甩给 adb root（那是误导）。"""
+    api = _make_api()
+    msg = api._build_death_message(["A1"], probe=lambda adb, s, timeout=5: False)
+    assert "设备连接已断开" in msg, msg
+    assert "USB 掉线" in msg, msg
+    assert "adb root" not in msg, "掉线场景不应暗示 adb root（录屏路径本就不会重启 adbd）"
+
+
+def test_death_message_says_process_exited_when_device_present(monkeypatch):
+    """设备还在时：提示是 screenrecord 自身异常，并点出 adb root 是一种可能。"""
+    api = _make_api()
+    msg = api._build_death_message(["A1"], probe=lambda adb, s, timeout=5: True)
+    assert "设备仍在连接" in msg, msg
+    assert "screenrecord 自身异常终止" in msg, msg
+    assert "adb root" in msg, msg
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 from backend.controller import (
     AUTO_REFRESH_MS, REC_DEATH_CHECK_S, time
 )
+from backend.screen_service import device_present
 
 class AutoRefreshMixin:
     """自动轮询与孤儿回收（录屏/工具/录制）。"""
@@ -79,16 +80,39 @@ class AutoRefreshMixin:
             # 记下死亡设备，供 _session_teardown 把失败文案从「收尾失败」
             # 换成更准确的「被意外中断（视频不完整）」。
             sess["dead"] = set(sess.get("dead") or set()) | set(dead)
-        self._push_toast(
-            "warn",
-            "⚠ 检测到录屏进程意外结束（%s）——常见原因是录屏期间执行了 adb root "
-            "或设备重启了 adbd。正在自动收尾并复位界面…" % "、".join(sorted(dead)))
+        self._push_toast("warn", self._build_death_message(sorted(dead)))
         # 完整收尾：停掉其余设备 / 麦 / 设备音频、恢复指针位置/触摸圆点、合成与打包
         # 照常进行（异常由 _screen_record_stop_locked 兜底并清会话）。
         self.screen_record_stop()
         # 前端复位：会话已结束，把「停止」按钮切回「开始录制」。没有这条广播，
         # 界面会一直显示「录制中」（后端停了、前端不知道）。
         self.bus.push("rec_state", {"running": False, "reason": "died"})
+
+    def _build_death_message(self, dead, probe=None):
+        """根据设备是否真的掉线，给出准确的录屏中断原因。
+
+        不再写死「常见原因是 adb root」——录屏路径里本工具不会重启 adbd
+        （指针位置 / 触摸圆点用的是 settings put，不碰 adbd），那句猜测在多数
+        掉线场景里是错的，会把用户引去查一个不存在的原因。真正该做的是区分：
+          * 设备确实掉了（USB 断开 / adb 失去连接）→ 提示连接问题，点出硬件 /
+            USB 诱因，以及「录屏同时叠加满缓冲全级别 logcat 拉满 USB 带宽」这一
+            最常见的放大器；
+          * 设备还在但 screenrecord 自己退出 → 才是进程异常，此时才提 adb root /
+            切无线调试（重启 adbd）作为其中一种可能。
+        probe 可注入，便于测试（默认走真实的 device_present 探测）。
+        """
+        probe = probe or device_present
+        names = "、".join(dead)
+        gone = [s for s in dead if not probe(self.state.adb_path, s)]
+        if gone:
+            return ("⚠ 检测到录屏中断（%s）：设备连接已断开（USB 掉线 / adb 失去连接），"
+                    "已保留已录片段。常见诱因是 USB 接触不良、系统 USB 省电"
+                    "（选择性暂停），或在录屏同时叠加满缓冲全级别 logcat 拉满 USB 带宽"
+                    "——可换后置 USB 口 / 短线缆 / 关闭 USB 选择性暂停，"
+                    "或只抓需要的 logcat 缓冲区。" % names)
+        return ("⚠ 检测到录屏进程意外结束（%s）：设备仍在连接，screenrecord 自身异常终止，"
+                "已保留已录片段。若你曾在录屏时执行 adb root / 切无线调试，"
+                "adbd 重启也会触发此情况。" % names)
 
     def _reap_gone_tools(self):
         """设备被移除（gone）后，停掉它正在进行的 logcat 监控 / 抓取，以及录屏会话里
