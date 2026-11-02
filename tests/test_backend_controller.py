@@ -1353,6 +1353,45 @@ def test_mic_recording_silence_still_reports_reason(tmp_path):
     assert any("未录到电脑麦克风声音" in t for t in texts), texts
 
 
+def test_logcat_still_running_is_not_zipped(tmp_path, monkeypatch):
+    """日志抓取 2 秒内没停下：宁可不打包，也不能打一份缺尾的包再把源文件删掉。
+
+    回归：打包成功后 `_zip_paths` 会删除源 txt。抓取若还在往同一个路径写，
+    尾部就落进了已删除的 inode —— zip 里少一段、磁盘上也没有，日志彻底消失，
+    而界面上只说「已打包」。
+    """
+    import backend.controllers.record as rec_mod
+
+    api = _make_api()
+    video = tmp_path / "record_A1_ts1.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    log = tmp_path / "logcat_A1_ts1.txt"
+    log.write_text("08-29 10:00:00.000  1  1 I Tag: hi\n", encoding="utf-8")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": True,
+        "videos": {"A1": str(video)}, "devaudio": {},
+        "logcat_captures": {"A1": str(log)},
+    }
+    monkeypatch.setattr(api.logcat_capture, "stop", lambda *a, **k: True)
+    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: True)
+    monkeypatch.setattr(rec_mod.time, "sleep", lambda s: None)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    zpath = tmp_path / "rec_ts1.zip"
+    assert zpath.exists(), "视频本身仍应正常打包"
+    with zipfile.ZipFile(str(zpath)) as z:
+        names = z.namelist()
+    assert not any("logcat" in n for n in names), (
+        "抓取未收尾时不得把它塞进包（打包后删源文件会连仍在写的数据一起丢掉）：%r"
+        % (names,))
+    assert log.exists(), "源日志必须保留"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("仍在收尾" in t for t in texts), texts
+
+
 def test_devaudio_remote_path_safe_for_wireless_serial(monkeypatch, tmp_path):
     """含设备音频录屏时，设备端 wav 路径必须过 safe_name。
 

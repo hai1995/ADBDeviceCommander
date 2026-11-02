@@ -440,6 +440,16 @@ class RecordMixin:
                 if not self.logcat_capture.is_running(s):
                     break
                 time.sleep(0.1)
+            if self.logcat_capture.is_running(s):
+                # 2 秒还没收尾（磁盘很慢 / 写盘阻塞）：绝不能把它塞进包里。
+                # 打包完会删源文件，而抓取还在往这个路径写 —— 尾部会落进已删除的
+                # inode：zip 里少一段、磁盘上也没有，日志就此彻底消失，且看不出来。
+                # 宁可不打包，保留原 txt 并说清位置。
+                self._push_toast(
+                    "warn",
+                    "⚠ %s 的 logcat 日志仍在收尾，未放入本次压缩包，"
+                    "原文件已保留：%s" % (s, p))
+                continue
             if os.path.exists(p):
                 rec_files.append(p)
         # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
