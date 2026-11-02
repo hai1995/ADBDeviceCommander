@@ -189,8 +189,8 @@
   /* ---------------- 按钮图标（统一内联 SVG，跟随 currentColor 适配主题） ----------------
      图标集中在此一处定义，HTML 上只需给按钮加 data-icon="名字"，脚本启动时注入；
      好处：几十个按钮不必各写一大段内联 SVG，线条风格（24 网格 / 2px 描边 / 圆角端点）
-     统一，也方便随时增删。目录 / 文件表格里动态生成的按钮走 mkAct(text, fn, icon)
-     复用同一套图标。SVG 无文本，注入后按钮 textContent 仍是原标签文字，不影响既有断言。 */
+     统一，也方便随时增删。目录 / 文件表格里动态生成的按钮走 mkAct(text, act, icon)
+     复用同一套图标（点击由 #file-body 的事件委托统一处理，不再逐行挂监听）。 */
   const BTN_ICONS = {
     "select-all": '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
     "refresh": '<path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
@@ -4075,70 +4075,121 @@
     els.filePath.value = p.path || "/";
     filePath = p.path || "/";
     fileAnchor = null;            // 新目录 = 新的选择上下文，避免 Shift 区间跨目录串选
-    const body = els.fileBody; body.innerHTML = "";
-    (p.entries || []).forEach((e) => {
+    renderFileEntries(p.entries || []);
+    els.fileSelAll.checked = false;
+    updateFileSel();
+  }
+
+  /* 渲染目录条目。
+     两处性能取舍（/sdcard 常见几百到两千项，每次刷新都会重来一遍）：
+       · DocumentFragment 批量插入：逐行 appendChild 是 N 次布局，改用片段只在
+         最后触发一次；
+       · 不给每行挂监听器（旧实现每行 5~6 个：勾选框 change、名称 click、三个
+         操作按钮 click），2000 行就是上万个闭包常驻内存。改为在 #file-body 上
+         各挂一个（见 bindFileBodyEvents），按行上的 data-* 定位。 */
+  function renderFileEntries(entries) {
+    const body = els.fileBody;
+    body.textContent = "";
+    const frag = document.createDocumentFragment();
+    entries.forEach((e) => {
       const tr = document.createElement("tr");
       if (e.is_dir) tr.className = "dir";
+      tr.dataset.name = e.name;
+      tr.dataset.path = fullPath(e.name);
       // 选择列：每行一个复选框（父目录「..」不参与批量选择）
       const sel = document.createElement("td"); sel.className = "col-sel";
-      let cb = null;
       if (e.name !== "..") {
-        cb = document.createElement("input");
+        const cb = document.createElement("input");
         cb.type = "checkbox"; cb.className = "file-check";
         cb.value = fullPath(e.name);
-        cb.addEventListener("change", () => { fileAnchor = cb.value; updateFileSel(); });
         sel.appendChild(cb);
       }
       const name = document.createElement("td"); name.className = "name";
       name.textContent = (e.is_dir ? "📁 " : "📄 ") + e.name;
       name.style.cursor = "pointer";
       name.title = e.is_dir && e.name !== ".." ? "单击进入目录" : "单击切换选择（支持 Ctrl / Shift）";
-      // 单击：文件夹进入下级目录；文件切换选中（Ctrl 加选 / Shift 区间选）；「..」回到上级
-      name.addEventListener("click", (ev) => {
-        if (e.name === "..") { els.filePath.value = dirOf(filePath); gotoPath(); return; }
-        if (e.is_dir) {
-          els.filePath.value = filePath.replace(/\/$/, "") + "/" + e.name;
-          gotoPath();
-          return;
-        }
-        if (!cb) return;
-        if (ev.shiftKey && fileAnchor) {
-          shiftSelectFiles(cb.value);
-        } else {
-          cb.checked = !cb.checked;
-          fileAnchor = cb.value;
-        }
-        updateFileSel();
-      });
       const size = document.createElement("td"); size.textContent = fmtSize(e.size);
       const date = document.createElement("td"); date.textContent = e.date || "";
       const perm = document.createElement("td"); perm.textContent = e.perm || "";
       const act = document.createElement("td"); act.className = "act";
       if (!e.is_dir) {
-        act.appendChild(mkAct("下载", () => callApi(api.file_download(fileSerial, fullPath(e.name), null)), "download"));
-        act.appendChild(mkAct("查看", () => callApi(api.file_view(fileSerial, fullPath(e.name))), "eye"));
+        act.appendChild(mkAct("下载", "download", "download"));
+        act.appendChild(mkAct("查看", "view", "eye"));
       }
-      act.appendChild(mkAct("重命名", () => {
-        // 目标必须是「当前目录 + 新名」：早前用 dirOf(filePath)（当前目录的
-        // **父目录**）拼接，在 /sdcard/Download 里改名会把文件搬到 /sdcard，
-        // 根目录还会拼出 "//d.txt"。
-        const n = prompt("新名称：", e.name);
-        if (n) callApi(api.file_rename(fileSerial, fullPath(e.name), fullPath(n)));
-      }, "edit"));
-      act.appendChild(mkAct("删除", () => {
-        if (confirm("确定删除 " + e.name + "？")) callApi(api.file_remove(fileSerial, [fullPath(e.name)]));
-      }, "trash"));
+      act.appendChild(mkAct("重命名", "rename", "edit"));
+      act.appendChild(mkAct("删除", "delete", "trash"));
       tr.appendChild(sel); tr.appendChild(name); tr.appendChild(size); tr.appendChild(date); tr.appendChild(perm); tr.appendChild(act);
-      body.appendChild(tr);
+      frag.appendChild(tr);
     });
-    els.fileSelAll.checked = false;
-    updateFileSel();
+    body.appendChild(frag);
   }
-  function mkAct(text, fn, icon) {
+
+  /* #file-body 的事件委托：一次绑定，服务所有行（行内容随刷新整体重建）。 */
+  function bindFileBodyEvents() {
+    const body = els.fileBody;
+    if (!body) return;
+    body.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!t || !t.closest) return;
+      const tr = t.closest("tr");
+      if (!tr || !tr.dataset) return;
+      const actBtn = t.closest("[data-act]");
+      if (actBtn) {
+        fileRunAction(actBtn.dataset.act, tr.dataset.path || "",
+                      tr.dataset.name || "");
+        return;
+      }
+      if (!t.closest("td.name")) return;        // 只认「名称」列
+      const nm = tr.dataset.name || "";
+      if (nm === "..") { els.filePath.value = dirOf(filePath); gotoPath(); return; }
+      if (tr.classList.contains("dir")) {
+        els.filePath.value = filePath.replace(/\/$/, "") + "/" + nm;
+        gotoPath();
+        return;
+      }
+      const cb = tr.querySelector(".file-check");
+      if (!cb) return;
+      if (ev.shiftKey && fileAnchor) {
+        shiftSelectFiles(cb.value);
+      } else {
+        cb.checked = !cb.checked;
+        fileAnchor = cb.value;
+      }
+      updateFileSel();
+    });
+    body.addEventListener("change", (ev) => {
+      const cb = ev.target;
+      if (!cb || !cb.classList || !cb.classList.contains("file-check")) return;
+      fileAnchor = cb.value;
+      updateFileSel();
+    }, true);   // 捕获阶段：真实 change 会冒泡，但捕获不依赖构造方是否传 bubbles
+  }
+
+  /* 行内操作按钮（委托到 #file-body，见 bindFileBodyEvents）。 */
+  function fileRunAction(act, path, name) {
+    if (!path) return;
+    if (act === "download") {
+      callApi(api.file_download(fileSerial, path, null));
+    } else if (act === "view") {
+      callApi(api.file_view(fileSerial, path));
+    } else if (act === "rename") {
+      // 目标必须是「当前目录 + 新名」：早前用 dirOf(filePath)（当前目录的
+      // **父目录**）拼接，在 /sdcard/Download 里改名会把文件搬到 /sdcard，
+      // 根目录还会拼出 "//d.txt"。
+      const n = prompt("新名称：", name);
+      if (n) callApi(api.file_rename(fileSerial, path, fullPath(n)));
+    } else if (act === "delete") {
+      if (confirm("确定删除 " + name + "？")) {
+        callApi(api.file_remove(fileSerial, [path]));
+      }
+    }
+  }
+
+  function mkAct(text, act, icon) {
     const b = document.createElement("button"); b.className = "btn tiny";
+    b.dataset.act = act;
     if (icon) { const svg = makeIcon(icon); if (svg) b.appendChild(svg); }
-    b.appendChild(document.createTextNode(text));
-    b.addEventListener("click", fn); return b;
+    b.appendChild(document.createTextNode(text)); return b;
   }
   /* 文件批量操作：勾选态直接读 DOM（刷新后自然清空，无需维护额外状态）。 */
   function fileCheckedPaths() {
@@ -5082,6 +5133,9 @@
       document.querySelectorAll("#file-body .file-check").forEach((c) => { c.checked = els.fileSelAll.checked; });
       updateFileSel();
     });
+    // 行级交互（进目录 / 切换选中 / 行内按钮）全部委托在 #file-body 上，
+    // 一次绑定服务所有行 —— 见 renderFileEntries 的说明。
+    bindFileBodyEvents();
     // 文件区拖拽上传：拖入显示遮罩，松手把文件上传到当前目录（与「上传」按钮共用 uploadFiles）
     const dz = els.fileTableWrap;
     if (dz) {
