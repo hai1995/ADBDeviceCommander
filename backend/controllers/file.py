@@ -181,6 +181,14 @@ class FileMixin:
         # 导致其中一个线程上传的是别人的内容（或中途被删而上传失败）。
         # 前端传来的 name 一律先取 basename 并净化：它若含路径分隔符，会把临时文件
         # 写到 %TEMP% 之外（甚至覆盖任意可写文件）。
+        # 内容为空就直接失败：以前会照常写出一个 0 字节中转文件、push 上去，
+        # 然后报「✓ 上传完成」—— 设备上多出一个空文件，用户以为传成功了。
+        # 前端那一侧也已拦住，这里再兜一层（桥接直调 / 自动化脚本同样受保护）。
+        if not (b64 or "").strip():
+            self._push_status(
+                "err", "⚠ 上传失败 %s：没有收到文件内容（读取结果为空）"
+                        % (os.path.basename(name or "") or remote))
+            return
         tmp = os.path.join(
             tempfile.gettempdir(),
             "adb_up_%s_%s" % (uuid.uuid4().hex[:8],

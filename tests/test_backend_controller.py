@@ -3579,3 +3579,25 @@ def test_screenshot_two_batches_do_not_mix_counts(monkeypatch):
     for s in summaries:
         assert "2 台设备" in s["text"], s["text"]
     api.workers.shutdown(timeout=2.0)
+
+
+def test_file_upload_rejects_empty_content(monkeypatch):
+    """内容为空时不能真去上传：设备上会多一个 0 字节文件，界面还报「✓ 上传完成」。
+
+    回归：前端把 readAsDataURL 的结果切掉前缀后直接下发，读到空内容时传的是空串。
+    后端 `base64.b64decode("")` 得到 b""，照常落地中转文件、push、然后成功 ——
+    用户在设备上拿到一个空文件，以为传好了，回头排查「文件怎么是空的」时无从下手。
+    """
+    api = _make_api()
+    uploaded = []
+    monkeypatch.setattr(api.file_svc, "upload",
+                        lambda *a, **kw: uploaded.append(a) or (True, ""))
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: fn(*a, **kw))
+
+    api.file_upload_data("A1", "empty.txt", "", "/sdcard/empty.txt")
+
+    assert uploaded == [], "空内容不该真的上传"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("没有收到文件内容" in t for t in texts), texts
+    assert not any("上传完成" in t for t in texts), texts

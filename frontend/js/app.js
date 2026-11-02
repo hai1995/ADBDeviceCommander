@@ -4198,7 +4198,20 @@
       const reader = new FileReader();
       reader.onload = () => {
         const b64 = (reader.result || "").split(",").pop() || "";
+        if (!b64) {
+          /* 读到的内容为空（文件在读取瞬间被删 / 被独占锁住 / 磁盘掉线）：
+             空串传到后端会写成一个 0 字节文件，然后照常报「✓ 上传完成」——
+             用户在设备上拿到一个空文件，还以为传成功了。 */
+          pushStatus("err", "⚠ 上传失败 " + f.name + "：读到的内容为空（文件被占用或已删除）");
+          return;
+        }
         callApi(api.file_upload_data(fileSerial, f.name, b64, fullPath(f.name)));
+      };
+      /* 读取失败（被占用 / 无权限 / 文件已不在）时既不触发 onload 也不报错：
+         旧实现下用户只看到「⬆ 已提交上传 N 个文件」，之后什么都不会发生。 */
+      reader.onerror = () => {
+        const why = (reader.error && reader.error.message) || "读取失败";
+        pushStatus("err", "⚠ 无法读取 " + f.name + "：" + why);
       };
       reader.readAsDataURL(f);
       n++;
