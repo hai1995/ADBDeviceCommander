@@ -24,6 +24,10 @@ class WebApiBase:
         self._auto_update = bool(auto_update)
         self.devices = devices or DeviceManager(self.bus)
         self.devices.bus = self.bus          # 确保设备服务事件指向同一总线
+        # 录屏 / 落盘抓取期间禁止自动重启 adb server（见 DeviceManager._poll_devices）：
+        # start-server 遇到「活着但不应答」的 server 会先 kill 再拉起，把在途的
+        # `adb shell screenrecord` 一起掐断 —— 设备正常，录屏却被程序自己搞断。
+        self.devices.inflight_guard = self._has_inflight_adb_sessions
         self.session = None                  # boot() 后创建（依赖 adb 环境）
         self._session_factory = session_factory
         self._auto_started = False           # 自动轮询只启动一次
@@ -116,6 +120,34 @@ class WebApiBase:
         self._update_last = None
         # 上次检查完成的时间戳（节流依据）。0 = 本会话还没查过。
         self._update_last_ts = 0.0
+
+    def _has_inflight_adb_sessions(self):
+        """是否有「长连接」adb 会话在跑：录屏 / 落盘抓取 / 实时监控。
+
+        这些会话靠一条常驻的 `adb shell` 连接活着。自动重启 adb server 会把
+        在途连接全部掐断：正在录的 screenrecord 直接死掉、正在写盘的 logcat
+        EOF。设备明明正常，却是程序自己的自愈动作把录屏搞断的 —— 所以录屏 /
+        抓取期间暂缓自愈（见 DeviceManager._poll_devices）。
+
+        查询异常时返回 False：宁可让它照旧自愈，也不要想当然地永久压住自愈。
+        """
+        video = getattr(self, "video", None)
+        if video is not None:
+            try:
+                if video.any_recording():
+                    return True
+            except Exception:
+                pass
+        for name in ("logcat_capture", "logcat_monitor"):
+            svc = getattr(self, name, None)
+            if svc is None:
+                continue
+            try:
+                if svc.running_serials():
+                    return True
+            except Exception:
+                pass
+        return False
 
     def boot(self):
         """前端加载完成后调用：加载命令、建立会话、启动自动轮询、首刷设备。"""

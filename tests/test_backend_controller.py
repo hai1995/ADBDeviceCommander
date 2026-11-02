@@ -671,6 +671,33 @@ def test_reap_gone_tools_stops_only_removed_devices():
         "截断的文件被报成「✓ 抓取完毕」：%r" % (stopped_cap,))
 
 
+def test_inflight_guard_blocks_server_heal_while_recording(monkeypatch):
+    """守卫必须真的接到 DeviceManager 上：录屏 / 抓取在跑时暂缓 adb server 自愈。
+
+    没接上就等于没修：自愈照样跑，`adb start-server` 把在途的 screenrecord
+    连接掐断，设备正常却录屏中断。
+    """
+    api = _make_api()
+    # 绑定方法每次访问都是新对象，比 __func__
+    assert (api.devices.inflight_guard.__func__
+            is api._has_inflight_adb_sessions.__func__), (
+        "DeviceManager 必须接上 WebApi 的在途会话守卫")
+    monkeypatch.setattr(api.video, "any_recording", lambda: False)
+    monkeypatch.setattr(api.logcat_capture, "running_serials", lambda: [])
+    monkeypatch.setattr(api.logcat_monitor, "running_serials", lambda: [])
+    assert api.devices.inflight_guard() is False
+    assert api.devices._inflight_blocks_heal() is False
+
+    monkeypatch.setattr(api.video, "any_recording", lambda: True)
+    assert api.devices.inflight_guard() is True
+    assert api.devices._inflight_blocks_heal() is True
+
+    monkeypatch.setattr(api.video, "any_recording", lambda: False)
+    monkeypatch.setattr(api.logcat_capture, "running_serials", lambda: ["A1"])
+    assert api.devices._inflight_blocks_heal() is True, (
+        "落盘抓取也是长连接，同样不能被自愈掐断")
+
+
 def test_reap_gone_tools_noop_when_all_present():
     """所有正在监控的设备都仍在列表中时，_reap_gone_tools 不应停止任何设备。"""
     api = _make_api()

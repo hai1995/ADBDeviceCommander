@@ -269,6 +269,15 @@ class VideoRecorder:
         with self._lock:
             return serial in self._sessions
 
+    def any_recording(self):
+        """是否有设备正在录屏（会话未收尾都算）。
+
+        供「adb server 自愈」判断：重启 server 会掐断在途的 `adb shell`，把正在
+        录的 screenrecord 一起弄死，所以录屏期间必须暂缓自愈。
+        """
+        with self._lock:
+            return bool(self._sessions)
+
     def _spawn_and_confirm(self, cmd):
         """拉起 screenrecord 并短暂确认它真的活着。
 

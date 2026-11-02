@@ -77,6 +77,9 @@ class DeviceManager:
         self._fail_streak = 0      # 连续刷新失败次数（驱动 start-server 自愈）
         self._heal_pending = False # 本次连续失败是否已尝试过自愈（只试一次）
         self._last_fail_notice = 0.0   # 上次失败播报时间戳（限频用）
+        # 长连接会话守卫：返回 True 表示此刻有录屏 / 落盘抓取等长连接在跑，
+        # 不允许自动重启 adb server（见 _poll_devices）。默认无守卫。
+        self.inflight_guard = None
 
     # ------------------------------------------------------------------
     # 内部
@@ -226,9 +229,20 @@ class DeviceManager:
         with self._lock:
             heal_now = (self._fail_streak >= DEVICE_SERVER_HEAL_AFTER
                         and not self._heal_pending)
-            if heal_now:
-                self._heal_pending = True
+        if heal_now and self._inflight_blocks_heal():
+            # 有录屏 / 落盘抓取在跑时**绝不**自动重启 adb server。
+            # `adb start-server` 在 server 活着但忙得不应答时会先把它 kill 再拉起
+            # （客户端那句 "adb server didn't ACK; killing"），所有在途的
+            # `adb shell` 连接随之断开 —— 设备明明好好的，我们的自愈却把正在录的
+            # screenrecord 掐死了，用户只会看到「录屏意外中断」。
+            # 这类连续失败多半只是 USB 带宽被满缓冲 logcat 占满导致的超时，等它
+            # 过去即可；若 server 真死了，录屏客户端本来也会一起退出并走收尾，
+            # 那时会话已结束，下一轮失败就能正常自愈。
+            # 注意这里不置 _heal_pending：等会话结束后仍要允许补上这次自愈。
+            heal_now = False
         if heal_now:
+            with self._lock:
+                self._heal_pending = True
             self._start_server(adb)
 
         had = self._had_devices
@@ -297,6 +311,21 @@ class DeviceManager:
             subprocess.run([adb, "start-server"], **adb_kwargs(8))
         except Exception:
             pass
+
+    def _inflight_blocks_heal(self):
+        """是否有长连接会话在跑，从而必须暂缓 adb server 自愈。
+
+        守卫由上层（WebApi）注入：它知道有没有设备正在录屏 / 抓取日志。取不到
+        结论时报 False（保持旧行为：该自愈就自愈），避免因为查询异常而让卡死的
+        adb server 永远得不到恢复。
+        """
+        guard = self.inflight_guard
+        if guard is None:
+            return False
+        try:
+            return bool(guard())
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # 勾选操作（全部加锁，与自动轮询的 refresh 并发安全）

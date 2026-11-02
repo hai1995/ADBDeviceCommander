@@ -445,6 +445,62 @@ def test_start_server_self_heals_after_consecutive_failures(monkeypatch):
     assert mgr.get_items()[0]["ok"] is True
 
 
+def test_no_server_restart_while_recording(monkeypatch):
+    """录屏 / 抓取期间不得自动重启 adb server。
+
+    `adb start-server` 撞上「活着但忙得不应答」的 server 时会先 kill 再拉起
+    （客户端那句 "adb server didn't ACK; killing"），所有在途 `adb shell` 连接
+    随之断开 —— 正在录的 screenrecord 当场死掉。设备明明是好的，是我们的自愈
+    把录屏搞断的。这类连续失败通常只是 USB 带宽被满缓冲 logcat 占满，等它过去
+    就好。
+    """
+    bus, mgr = _fresh(monkeypatch, [("A1", "device", "Pixel")])
+    mgr.refresh(verbose=False)
+    bus.take()
+    run = _SeqRun([("exc", subprocess.TimeoutExpired(cmd="adb", timeout=10))])
+    monkeypatch.setattr(ds.subprocess, "run", run)
+    monkeypatch.setattr(ds.time, "sleep", lambda s: None)
+    mgr.inflight_guard = lambda: True          # 正在录屏
+
+    for _ in range(4):                          # 失败次数远超自愈阈值
+        assert mgr.refresh(verbose=False) is False
+    assert not [c for c in run.calls if len(c) > 1 and c[1] == "start-server"], (
+        "录屏期间绝不能重启 adb server：%r" % (run.calls,))
+    # 不置 _heal_pending：等录屏结束后仍要允许补上这次自愈
+    assert mgr._heal_pending is False
+
+
+def test_server_restart_resumes_after_recording_ends(monkeypatch):
+    """录屏结束后，被压住的自愈必须补上（不能因为压过一次就永远不自愈）。"""
+    bus, mgr = _fresh(monkeypatch, [("A1", "device", "Pixel")])
+    mgr.refresh(verbose=False)
+    bus.take()
+    ok_lines = _adb_lines([("A1", "device", "Pixel")])
+    busy = {"rec": True}
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if len(cmd) > 1 and cmd[1] == "start-server":
+            return type("R", (), {"stdout": "", "stderr": ""})()
+        if busy["rec"]:                    # 录屏中：adb 一直无响应
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+        return type("R", (), {"stdout": ok_lines, "stderr": ""})()
+
+    monkeypatch.setattr(ds.subprocess, "run", fake_run)
+    monkeypatch.setattr(ds.time, "sleep", lambda s: None)
+    mgr.inflight_guard = lambda: busy["rec"]
+
+    for _ in range(3):
+        mgr.refresh(verbose=False)
+    assert not [c for c in calls if len(c) > 1 and c[1] == "start-server"], (
+        "录屏期间不该自愈：%r" % (calls,))
+    busy["rec"] = False                    # 录屏结束
+    mgr.refresh(verbose=False)
+    assert [c for c in calls if len(c) > 1 and c[1] == "start-server"], (
+        "录屏结束后应恢复自愈：%r" % (calls,))
+
+
 def test_model_backfill_does_not_announce_state_change(monkeypatch):
     """型号补全不该播「状态变为」：设备一直可用，变的只是型号。
 
