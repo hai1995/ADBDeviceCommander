@@ -1132,3 +1132,47 @@ def test_reap_gone_capture_reports_gap_not_clean_success(tmp_path, monkeypatch):
         text = f.read()
     assert "断开连接" in text, (
         "文件里必须留下掉线标记，否则时间线看着是连续的：%r" % (text,))
+
+
+def test_capture_resume_skips_replayed_backlog(tmp_path, monkeypatch):
+    """重连后 adb 会从缓冲区开头重放：已写过的行不能再写一遍。
+
+    新起的 `adb logcat` 没有 -T 就从头打印整个缓冲区。同时录屏 + 满缓冲 logcat
+    时缓冲区可以到几十 MB，一次 USB 抖动就会把断点之前的日志**整段**再写进
+    同一个文件：时间线上出现两份相同记录，文件白白翻倍，对照视频找日志时根本
+    分不清哪一段才是对应的。这里按行首 threadtime 时间戳跳过断点之前的部分。
+    """
+    ses1 = ["08-29 10:00:01.000  1  1 I Tag: a\n",
+            "08-29 10:00:02.000  1  1 I Tag: b\n",
+            "08-29 10:00:03.000  1  1 I Tag: c\n"]
+    # 重连后的会话：先重放缓冲区里的三行，再接着输出新的一行
+    ses2 = ses1 + ["08-29 10:00:09.000  1  1 I Tag: d\n"]
+    procs = [_EofProc(ses1), _EofProc(ses2)]
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: procs.pop(0))
+    calls = {"n": 0}
+
+    def fake_present(adb, serial):
+        calls["n"] += 1
+        return False if calls["n"] == 1 else True    # 第一次：设备确实掉了
+
+    monkeypatch.setattr(ls, "device_present", fake_present)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 0.01)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "dup.txt")
+    assert cap.start("A1", path, ["main"]) is True
+
+    payload = _wait_payload(bus, "logcat_capture", "stopped")
+    assert payload is not None, _statuses(bus, "logcat_capture")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for tag in ("a", "b", "d"):
+        assert text.count("Tag: " + tag) == 1, (
+            "重放的行被重复写进文件（Tag: %s）：\n%s" % (tag, text))
+    # 边界行（时间戳正好等于断点那条）允许重复一次：判定用 `<` 而不是 `<=`，
+    # 宁可多一行，也绝不把「同一毫秒内新产生的那条」误删——丢日志比重复严重
+    # 得多。真实缓冲区重放时这点重复是可以接受的锚点。
+    assert text.count("Tag: c") <= 2, text
+    assert "恢复连接" in text, "缺少恢复标记，看不出断点在哪：%r" % (text,)
+    assert payload["lines"] in (4, 5), payload

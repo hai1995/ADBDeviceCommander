@@ -52,6 +52,17 @@ _BATCH_MAX = 400          # 单次 append 事件最多携带行数
 _FLUSH_MS = 0.05          # 批量刷新间隔（秒）
 
 
+def _ts_prefix(raw):
+    """取 threadtime 行首的「MM-DD HH:MM:SS.mmm」，不像日志行则返回 ""。
+
+    只做切片 + 两个字符位判断，不跑正则：抓取是全量落盘的，满缓冲场景每秒
+    可上万行，每行再匹配一次正则没有意义。
+    """
+    if len(raw) < 18 or raw[2] != "-" or raw[5] != " ":
+        return ""
+    return raw[:18]
+
+
 def _logcat_cmd(adb, serial, buffers):
     """构造 `adb -s <serial> logcat -v threadtime [-b <buf>]...` 命令。
 
@@ -500,6 +511,12 @@ class LogcatCapture:
         # 只有半截，甚至一行都没写进去。
         write_error = ""
         gap_written = False        # 文件里是否写过「设备掉线」缺口标记
+        # 已写盘的最后一条 threadtime 时间戳：重连时新起的 adb 会把缓冲区从头
+        # 重放一遍，据此跳过断点之前的部分（否则整段日志会重复出现）。
+        # 注意别用 resume_ts 这个名字：下面写「恢复连接」标记时它装的是墙上
+        # 时间字符串，撞在一起会把续写会话的每一行都误判成重放而全部跳过。
+        last_log_ts = ""
+        skipped = 0                # 本次会话跳过的重放行数（仅用于提示）
         f = None
 
         session = 0
@@ -581,8 +598,18 @@ class LogcatCapture:
                             rec = classify_line(raw)
                             if rec is not None and rec["level"] not in levels:
                                 continue
+                        ts = _ts_prefix(raw)
+                        if session > 1 and last_log_ts and ts and ts < last_log_ts:
+                            # 重连后新起的 `adb logcat` 会**从缓冲区开头重放**：这些
+                            # 行早就写进文件了，再写一遍会让时间线上出现整段重复
+                            # （对照视频找日志时以为同一段发生了两次），文件也白白
+                            # 翻倍。按行首 threadtime 时间戳跳过断点之前的部分。
+                            skipped += 1
+                            continue
                         f.write(raw)
                         lines += 1
+                        if ts:
+                            last_log_ts = ts
                         # 周期性 flush：进程崩溃时也能保住已落盘的日志（而非全卡在
                         # OS 写缓冲里随进程一起丢）。
                         if lines % 1000 == 0:
@@ -667,7 +694,10 @@ class LogcatCapture:
                     self.bus.push("status",
                                   {"type": "info",
                                    "text": "logcat 抓取：设备 %s 已重连，继续写入 %s"
-                                           % (serial, path)})
+                                           % (serial, path)
+                                           + ("（已跳过重放的 %d 行）" % skipped
+                                              if skipped else "")})
+                    skipped = 0
                     continue
                 # device_present 为 True / None：设备还在或无法确认，正常收尾（数据完整）。
                 break
