@@ -266,8 +266,8 @@
                  默认就是 180 秒，到点自行收尾退出。这句话必须写在按钮旁边 ——
                  用户往往录到一半才发现自己需要的是一段 8 分钟的长视频。 -->
             <div class="rec-limit" role="note">
-              <span class="rec-limit-t">⏱ 建议单次录制不超过 3 分钟</span>
-              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，到点设备端会自动收尾：程序照常保存视频并明确提示，但那一刻之后的画面不再录制。需要更长时间请分多段录制（每段都会带上自己的 logcat）。</span>
+              <span class="rec-limit-t">⏱ 每 3 分钟自动分段续录，无需手动操作</span>
+              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>（设备端硬限制）。程序按 <b>170 秒</b>一段录制，到点自动收尾并<b>立刻接上下一段</b>，视频放在同一目录、依次命名为 <code>_p2</code>、<code>_p3</code>……，logcat 全程连续抓取，产物仍归同一个包。段与段切换有<b>约 1 秒</b>间隙，那一瞬的画面录不到——这是设备端限制，不是录制中断。</span>
             </div>
             <div class="tool-row">
               <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
