@@ -598,7 +598,7 @@
         const ws = wsOf(p.ws || "w1");
         if (!ws || !ws.consoleEl) break;
         if (p.kind === "clear") clearOut(ws.consoleEl);
-        else pushLine(ws.consoleEl, p.text || "", CONSOLE_KINDS[p.kind] || "", true);
+        else pushConsole(p.kind, p.text || "", ws.id);
         break;
       }
       case "status":
