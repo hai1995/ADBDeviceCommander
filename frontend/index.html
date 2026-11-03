@@ -262,6 +262,13 @@
           </div>
           <div class="tool-body" id="rec-body">
             <div class="tool-desc">对受控设备各录一段 MP4（adb screenrecord）。需要复盘时勾上「同步录制 logcat」——日志按<b>全量</b>抓取，不截断也不过滤。</div>
+            <!-- 录制时长上限提示（常驻）：Android 的 screenrecord 不传 --time-limit 时
+                 默认就是 180 秒，到点自行收尾退出。这句话必须写在按钮旁边 ——
+                 用户往往录到一半才发现自己需要的是一段 8 分钟的长视频。 -->
+            <div class="rec-limit" role="note">
+              <span class="rec-limit-t">⏱ 建议单次录制不超过 3 分钟</span>
+              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，到点设备端会自动收尾：程序照常保存视频并明确提示，但那一刻之后的画面不再录制。需要更长时间请分多段录制（每段都会带上自己的 logcat）。</span>
+            </div>
             <div class="tool-row">
               <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
               <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止</button>

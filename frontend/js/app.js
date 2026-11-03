@@ -5029,6 +5029,10 @@
       // false / null：音频采集链路没做完已从界面上撤掉，logcat 一律全量抓取。
       setRecInFlight(true);
       if (els.toolRec) els.toolRec.title = "正在启动录屏，请稍候…";
+      /* 多台设备要各自拉起 screenrecord 并确认它真的活着（每台约 1.5 秒，
+         已并行化），这段时间界面除了按钮变灰没有任何动静，用户很容易以为
+         点空了又去点第二次。先落一条状态，说明正在进行什么。 */
+      pushStatus("info", "▶ 正在启动录屏…");
       let res = null;
       try {
         res = await callApi(api.screen_record_start(
@@ -5057,6 +5061,9 @@
       if (recInFlight) return;      // 停止在途：收尾（转码 / 打包）要十几秒，防连点
       setRecInFlight(true);
       if (els.toolRecStop) els.toolRecStop.title = "正在停止录屏并收尾，请稍候…";
+      /* 收尾是「停设备端 → 等 moov 写完 → 拉视频 → 合成 → 打包」，几秒起步；
+         这期间调用还没返回，按钮已禁用，界面若一句话都没有，用户会以为点空了。 */
+      pushStatus("info", "⏹ 正在停止录屏并收尾（停止设备端 → 拉取视频 → 打包），请稍候…");
       let res = null;
       try {
         res = await callApi(api.screen_record_stop());
