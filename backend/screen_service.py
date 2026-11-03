@@ -89,15 +89,84 @@ _SETTING_REJECT_HINTS = (
 )
 
 
+# 车机 adb shell 需要「授权密码」时，终端会停在 Password: 等处输入。本工具
+# 没有终端可输入，子进程要么立刻 EOF、要么一直等到超时 —— 两种都只表现为
+# 「没有输出」。下面三组特征词用来把这种情况与「权限被拒」「设备掉线」分开，
+# 否则用户只会看到一句「截图失败」，并把它误认成「车机没 root」。
+_SHELL_PASSWORD_HINTS = (
+    "password", "passwd", "enter password", "login:", "密码", "授权码",
+)
+_SHELL_DENIED_HINTS = (
+    "permission denied", "operation not permitted", "not allowed",
+    "securityexception", "security exception", "selinux", "permission denial",
+)
+_SHELL_UNAUTH_HINTS = (
+    "unauthorized", "authentication required", "not authenticated",
+)
+
+
+def _shell_blocked_text(state, detail, serial):
+    """把「adb shell 这个通道不可用」翻译成用户能照着做的说明。
+
+    截图失败时用户能看到的只有一句「截图失败」，而真实原因（要输密码 /
+    权限被收紧 / 设备掉线）往往只藏在 adb 的一句半截输出里。这里把几种
+    最常被混淆的情况分别说清，尤其是「需要密码」—— 它最容易被误读成
+    「车机没 root，所以截不了图」，而 screencap 本身并不需要 root。
+    """
+    # 折叠空白：adb 的报错常带换行，塞进状态栏会把整行撑乱
+    detail = " ".join((detail or "").split())
+    tail = ("（adb 原话：%s）" % detail[:160]) if detail else ""
+    if state == "password":
+        return ("车机的 adb shell 需要先输入授权密码才能执行命令 —— 在系统命令行里"
+                "手工执行 adb -s %s shell echo hi 会停在 Password: 等待输入，"
+                "本工具没有终端可以代为输入，所以任何命令（包括截图）都只会"
+                "「没有输出」。请先在车机上完成调试授权（部分车型需在开发者选项里"
+                "重新允许 USB 调试并输入授权码 / 密码），再重试截图。%s"
+                % (serial, tail))
+    if state == "timeout":
+        return ("adb shell 8 秒内没有任何响应：最常见的原因是车机要求 adb shell 输入"
+                "授权密码（会一直停在 Password:，本工具无法代为输入），其次是该车型"
+                "收紧了 shell 执行权限。请用系统命令行执行 adb -s %s shell echo hi "
+                "确认：停在 Password: 就是密码校验，回 Permission denied 就是权限被限。"
+                % serial)
+    if state == "denied":
+        return ("车机拒绝了 adb shell 执行命令%s。screencap 不需要 root，这通常是该"
+                "车型的定制系统收紧了 shell 权限（SELinux / 调试策略），不是本工具"
+                "缺少 root 权限；换成别的 adb 命令同样会被拒。" % tail)
+    if state == "unauthorized":
+        return ("这台设备的 USB 调试尚未授权：请在车机弹出的「允许 USB 调试吗」"
+                "对话框里点允许（建议勾选「一律允许」）后重试。%s" % tail)
+    if state == "gone":
+        return ("设备当前不可用%s。请检查数据线 / 无线 ADB 连接后重试。" % tail)
+    return ("adb shell 无法执行命令，且 adb 没有给出明确原因%s。截图依赖 shell "
+            "通道，请先用系统命令行执行 adb -s %s shell echo hi 确认这台车机是否"
+            "允许 shell 执行（若停在 Password: 则是需要授权密码）。"
+            % (tail, serial))
+
+
 class ScreenCapturer:
     # 文件名序号：时间戳只精确到秒，同一秒内的两次截图会算出**同一个路径** ——
     # 轻则后来的覆盖先前的（用户少了一张图），重则两个线程同时往同一文件写
     # （PNG 内容交错、文件损坏）。录屏远端文件名早有同样处理（见 VideoRecorder._seq）。
     _seq = itertools.count(1)
 
+    # ---- 取图的三条通路 ---------------------------------------------
+    # 1) exec-out：最快，不在设备上留文件，绝大多数设备可用；
+    # 2) 设备端落盘 + adb pull：exec-out 的字节被换行转换改坏、或被截断时
+    #    的兜底 —— pull 走 sync 协议，二进制原样传输；
+    # 3) 都不行：给出**能照着做**的原因，而不是笼统的「截图失败」。
+    #
+    # 车机上还有一类失败最容易被误读：adb shell 本身要求输入授权密码，
+    # adbd 起不了子进程，exec-out 与 shell 都只是「没有输出」。_probe_shell
+    # 专门把这一类分辨出来，免得用户把它当成「车机没 root」。
+
     @staticmethod
     def screenshot(adb, serial, save_dir):
-        """对单台设备截图，返回本地 png 路径或 (None, 错误文本)。"""
+        """对单台设备截图，返回本地 png 路径或 (None, 错误文本)。
+
+        先走 exec-out；坏了自动降级为「设备端落盘 + pull」；两条都不通时
+        分别报出原因（能判定是 shell 通道被密码 / 权限拦住时给准确提示）。
+        """
         try:
             os.makedirs(save_dir, exist_ok=True)
         except Exception as e:
@@ -108,6 +177,32 @@ class ScreenCapturer:
         out = os.path.join(
             save_dir, "screenshot_%s_%s_%d.png" % (
                 safe_name(serial), ts, next(ScreenCapturer._seq)))
+
+        data, why = ScreenCapturer._exec_out(adb, serial)
+        if data:
+            clean, kind, err = ScreenCapturer._validate(data)
+            if not err:
+                return ScreenCapturer._save(out, clean, kind), None
+            why = err          # 坏图的原因要留住，最后原样告诉用户
+
+        # 先确认 shell 通道本身可用：车机要密码时，再试任何 adb 命令都只是
+        # 「没有输出」，反而把真正的原因（要授权）淹没在一串重试里。
+        state, detail = ScreenCapturer._probe_shell(adb, serial)
+        if state != "ok":
+            return None, _shell_blocked_text(state, detail or why, serial)
+
+        data, pull_why = ScreenCapturer._pull_capture(adb, serial, out)
+        if data:
+            clean, kind, err = ScreenCapturer._validate(data)
+            if not err:
+                return ScreenCapturer._save(out, clean, kind), None
+            pull_why = err
+        return None, ("两条取图通道都没成功：exec-out 报「%s」；"
+                      "设备端落盘再 pull 报「%s」" % (why, pull_why))
+
+    @staticmethod
+    def _exec_out(adb, serial, timeout=30):
+        """exec-out 直取 PNG 字节；返回 (data, 原因)，data 为空即失败。"""
         proc = None
         try:
             # 二进制管道：不能加 text/encoding（会破坏 PNG 字节），只补窗口隐藏
@@ -115,47 +210,16 @@ class ScreenCapturer:
                 [adb, "-s", serial, "exec-out", "screencap", "-p"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 creationflags=no_window_flags())
-            data, err = proc.communicate(timeout=30)
-            if proc.returncode != 0 or not data:
-                # adb 的报错几乎都落在 **stdout**（`error: device 'xxx' not found`
-                # 就是典型），只解 stderr 会得到空串，界面于是显示「截图失败：空
-                # 数据」—— 用户完全看不出是设备没连上。两路都收，优先给带内容的
-                # 那一句。
-                both = ((err or b"") + b"\n" + (data or b"")).strip()
-                text = both.decode("utf-8", "ignore").strip()[:200]
-                return None, text or "设备未返回图像（adb 没有给出原因）"
-            # 归一化再落盘：部分车机 / 定制 ROM 的 screencap 会在 PNG 前先吐几行
-            # 自己的东西，字节流因此「开头不是图片签名」——写下来是一张打不开的
-            # 图，复制到剪贴板也会连累到 GDI+ 报「参数无效」。这里按签名切出有效
-            # 段，保证磁盘上的文件就是一张能打开的图（详见 core.imgbytes）。
-            data, kind, note = imgbytes.normalize(data)
-            if not data:
-                return None, "设备返回的图像无法识别（%s）" % note
-            if kind == "png" and imgbytes.png_size(data) is None:
-                # 头部校验不过的 PNG 就算落盘也打不开 —— 看图软件只会说一句
-                # 「分辨率 / 格式有问题」，用户完全不知道是传输环节出了事。
-                # 与其留一张坏图，不如当场说清原因，并给出车机上更可靠的
-                # 那条路：设备端先落盘，再用 binary-safe 的 pull 取回。
-                return None, (
-                    "设备返回的 PNG 头已损坏（共 %d 字节，头部 %s）——"
-                    "通常是 adb 传输把换行转换掉了或截图被截断；"
-                    "改用 `adb shell screencap -p /sdcard/s.png` 再 `adb pull` 可重取"
-                    % (len(data), " ".join("%02x" % b for b in data[:16])))
-            if kind == "png" and not imgbytes.png_complete(data):
-                return None, (
-                    "设备返回的 PNG 不完整（共 %d 字节，缺少 IEND 块）——"
-                    "通常是传输超时或中断，截图被截断；"
-                    "重试一次，或改用 `adb shell screencap -p /sdcard/s.png` 再 `adb pull`"
-                    % len(data))
-            if kind and kind != "png":
-                # 极少见：screencap 输出了 JPEG 等其它格式，扩展名跟着改，
-                # 免得用户双击时被看图软件按 PNG 解析报错。
-                ext = ".jpg" if kind == "jpg" else "." + kind
-                out = os.path.splitext(out)[0] + ext
-            # exec-out 输出为原始 PNG 二进制，禁止做任何换行翻译，原样写入
-            with open(out, "wb") as f:
-                f.write(data)
-            return out, None
+            data, err = proc.communicate(timeout=timeout)
+            if proc.returncode == 0 and data:
+                return data, ""
+            # adb 的报错几乎都落在 **stdout**（`error: device 'xxx' not found`
+            # 就是典型），只解 stderr 会得到空串，界面于是显示「截图失败：空
+            # 数据」—— 用户完全看不出是设备没连上。两路都收，优先给带内容的
+            # 那一句。
+            both = ((err or b"") + b"\n" + (data or b"")).strip()
+            text = both.decode("utf-8", "ignore").strip()[:200]
+            return b"", text or "设备未返回图像（adb 没有给出原因）"
         except Exception as e:
             # 超时（设备无响应 / 被别的 adb 客户端抢锁）时 communicate() 只是抛错、
             # **不会**终止子进程：卡住的 adb exec-out 会变成孤儿进程一直挂着，
@@ -166,7 +230,135 @@ class ScreenCapturer:
                     proc.communicate(timeout=5)
                 except Exception:
                     pass
-            return None, str(e)
+            return b"", str(e)
+
+    @staticmethod
+    def _probe_shell(adb, serial, timeout=8):
+        """探测 `adb shell` 能否执行命令：返回 (state, 原始输出)。
+
+        state ∈ ok / password / denied / unauthorized / gone / timeout / error。
+        只在 exec-out 已经失败后调用 —— 正常路径不多付这一次往返。
+
+        `echo` 是最小、最不可能被车机策略单独拦下的命令：它能通，说明 shell
+        通道没问题，故障只出在 screencap 或字节传输上；它不通，那么任何
+        「落盘 + pull」的补救都不会有效，没必要再白试一遍。
+        """
+        marker = "__ADB_SHELL_OK__"
+        try:
+            r = subprocess.run(
+                [adb, "-s", serial, "shell", "echo", marker],
+                stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
+        except subprocess.TimeoutExpired:
+            # 需要密码时 adbd 会停在 Password: 等输入；本工具没有终端，
+            # 子进程就一直等到超时 —— 这正是要分辨出来的那一类。
+            return "timeout", ""
+        except Exception as e:
+            return "error", str(e)
+        text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+        if marker in (r.stdout or ""):
+            return "ok", text
+        low = text.lower()
+        for hint in _SHELL_PASSWORD_HINTS:
+            if hint in low:
+                return "password", text
+        for hint in _SHELL_DENIED_HINTS:
+            if hint in low:
+                return "denied", text
+        for hint in _SHELL_UNAUTH_HINTS:
+            if hint in low:
+                return "unauthorized", text
+        for hint in _DEVICE_GONE_HINTS:
+            if hint in low:
+                return "gone", text
+        return "unknown", text[:200]
+
+    @staticmethod
+    def _pull_capture(adb, serial, local_hint, timeout=60):
+        """设备端落盘 + `adb pull` 取图；返回 (data, 原因)。
+
+        存在的意义是绕开 exec-out 的文本通道：个别 Windows adb 与车机会在
+        那条管道上做换行转换（0x0A → 0x0D 0x0A），把 PNG 内部字节改坏；
+        `adb pull` 走 sync 协议，二进制原样传输。
+        """
+        # 远端文件名带本进程序号：同一台设备连点截图也不会互相覆盖
+        remote = "/sdcard/adbdc_shot_%s_%d.png" % (
+            safe_name(serial), next(ScreenCapturer._seq))
+        try:
+            r = subprocess.run(
+                [adb, "-s", serial, "shell", "screencap", "-p", remote],
+                stdin=subprocess.DEVNULL, **adb_kwargs(30))
+        except subprocess.TimeoutExpired:
+            return b"", "设备端 screencap 超时（30 秒）"
+        except Exception as e:
+            return b"", "设备端 screencap 未能执行：%s" % e
+        text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            return b"", ("设备端 screencap 失败：%s"
+                         % (text[:200] or "退出码 %d" % r.returncode))
+        part = local_hint + ".part"
+        try:
+            r2 = subprocess.run(
+                [adb, "-s", serial, "pull", remote, part],
+                stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
+            text2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
+            if r2.returncode != 0 or not os.path.exists(part):
+                return b"", ("adb pull 没有取回截图：%s"
+                             % (text2[-200:] or "退出码 %d" % r2.returncode))
+            with open(part, "rb") as f:
+                return f.read(), ""
+        except subprocess.TimeoutExpired:
+            return b"", "adb pull 超时（%d 秒）" % timeout
+        except Exception as e:
+            return b"", "adb pull 失败：%s" % e
+        finally:
+            # .part 只是中间产物：校验由调用方做，这里负责不留垃圾
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except Exception:
+                pass
+            # 设备端临时文件无论成败都清掉；清不掉（例如传输中途掉线）不该
+            # 覆盖本次的真正结果，所以异常一律吞掉。
+            try:
+                subprocess.run(
+                    [adb, "-s", serial, "shell", "rm", "-f", remote],
+                    stdin=subprocess.DEVNULL, **adb_kwargs(10))
+            except Exception:
+                pass
+
+    @staticmethod
+    def _validate(data):
+        """落盘前校验：返回 (clean_bytes, kind, 错误文本)；错误非空即不许落盘。"""
+        # 归一化再落盘：部分车机 / 定制 ROM 的 screencap 会在 PNG 前先吐几行
+        # 自己的东西，字节流因此「开头不是图片签名」——写下来是一张打不开的
+        # 图，复制到剪贴板也会连累到 GDI+ 报「参数无效」。这里按签名切出有效
+        # 段，保证磁盘上的文件就是一张能打开的图（详见 core.imgbytes）。
+        clean, kind, note = imgbytes.normalize(data)
+        if not clean:
+            return b"", None, "设备返回的图像无法识别（%s）" % note
+        if kind == "png" and imgbytes.png_size(clean) is None:
+            # 头部校验不过的 PNG 就算落盘也打不开 —— 看图软件只会说一句
+            # 「分辨率 / 格式有问题」，用户完全不知道是传输环节出了事。
+            return b"", None, (
+                "设备返回的 PNG 头已损坏（共 %d 字节，头部 %s）——"
+                "通常是 adb 传输把换行转换掉了或截图被截断"
+                % (len(clean), " ".join("%02x" % b for b in clean[:16])))
+        if kind == "png" and not imgbytes.png_complete(clean):
+            return b"", None, (
+                "设备返回的 PNG 不完整（共 %d 字节，缺少 IEND 块）——"
+                "通常是传输超时或中断，截图被截断" % len(clean))
+        return clean, kind, ""
+
+    @staticmethod
+    def _save(out, data, kind):
+        """写盘并返回最终路径；非 PNG 时扩展名跟着改，免得双击打不开。"""
+        if kind and kind != "png":
+            ext = ".jpg" if kind == "jpg" else "." + kind
+            out = os.path.splitext(out)[0] + ext
+        # exec-out 输出为原始 PNG 二进制，禁止做任何换行翻译，原样写入
+        with open(out, "wb") as f:
+            f.write(data)
+        return out
 
 
 # 设备端可视化 overlay 的 Settings.System 键名（录屏「指针位置 / 触摸圆点」用）。

@@ -25,6 +25,7 @@
 - **第二十七轮**（本文末「第二十七轮」一节）：性能报告的七张曲线从自绘 SVG 换成**内联 ECharts**（十字准星 + 读数框 tooltip / 点图例隐藏 / 滚轮缩放）；**库内联进报告**以保断网双击可用（不走 CDN，断网空白属最坏静默失败）；曲线数据抽稀使 8000 点报告仍 < 1.2MB；缺库自动回退 SVG + 明示横幅。
 - **第二十八轮**（本文末「第二十八轮」一节）：主动复查上一轮 —— 修**抽稀后时间戳乱序**（ECharts time 轴按数组顺序连线，乱序让曲线在每个桶里折返：图能出、形状错）；修**对比图超标红点超 400 时直接切片**（长会话后半段一个红点都没有，读者会得出「后半段全达标」的假结论）；**ECharts 初始化失败改为明示原因**（原来只剩 7 个空白块）；补 3 条回归用例。
 - **第二十九轮**（本文末「第二十九轮」一节）：车机截图报「分辨率有问题」——**不是没 root**（`screencap` 普通 shell 权限即可）。真因是 `adb exec-out` 的 PNG 字节在个别 Windows adb / 车机上被换行转换，签名还认得、IHDR 的宽高与 CRC 已坏，旧实现照旧落盘成坏图。现在落盘前校验 PNG 头，坏头当场拒绝并给出 `adb shell screencap -p` + `adb pull` 的替代路径。
+- **第三十轮**（本文末「第三十轮」一节）：把上一轮的「建议你手敲 adb pull」升级为**自动降级重试**（exec-out 坏 → 设备端落盘 + pull → 清理远端与 `.part`）；并新增 `adb shell echo` 探测，把**车机 shell 需要授权密码**（adbd 停在 `Password:`，所有命令都只是「没有输出」）与**定制系统收紧 shell 权限**、**USB 调试未授权**、**设备掉线**分开报——四种情况各有各的提示语，都不再说「截图失败」了事，也不再让人误以为是「没 root」。
 
 ---
 
@@ -2910,3 +2911,94 @@ adb pull /sdcard/s.png
 
 - `pytest tests/test_core_imgbytes.py tests/test_backend_screen.py`：**71 passed**。
 - 全量 `pytest` 与 `pyflakes` 见提交说明。
+
+# 第三十轮：截图自动降级 + 分辨「adb shell 要密码」与「权限被拒」
+
+## 现象
+
+用户反馈车机截图失败，提示与分辨率有关；补充说明**该车机的 `adb shell` 本身要
+校验密码**。上一轮只做到「识别坏图 → 拒绝落盘 → 建议改用 `adb shell screencap
+-p` + `adb pull`」，有两个问题：
+
+1. **把补救推给了人**。既然坏图有确定可行的第二条通道，就该程序自己走，而不是
+   让用户复制粘贴两条命令；
+2. **建议可能根本执行不了**。shell 要密码时，用户手工 `adb shell` 也进不去，
+   这条建议等于空话；而程序此时只会说「设备未返回图像（adb 没有给出原因）」，
+   用户完全无从判断是密码、权限、还是线松了。
+
+## 修复一：两条取图通道，坏了自动换
+
+```
+exec-out screencap -p          ← 快、不在设备留文件；坏了（头坏 / 截断 / 空）
+        ↓ 自动
+shell screencap -p /sdcard/x   ← 设备端先落盘
+adb pull /sdcard/x  <local>    ← sync 协议，二进制原样传输
+adb shell rm -f /sdcard/x      ← 成败都清
+```
+
+* 降级拿到的字节同样过 `_validate`（头 + IEND），坏图仍然不落盘；
+* pull 先写 `<目标>.part`，读入内存后立刻删掉，最终由 `_save` 统一写一次；
+* 设备端临时文件名带本进程序号（`adbdc_shot_<序列号>_<n>.png`），连点不覆盖；
+* 只有两条通道都失败才报错，且**两条通道的原因分别列出**——不再丢第一条的原因。
+
+## 修复二：先探 `adb shell`，再决定要不要试 pull
+
+`_probe_shell` 执行 `adb shell echo __ADB_SHELL_OK__`（8 秒超时），把结果分成
+`ok / password / denied / unauthorized / gone / timeout / unknown`：
+
+| 状态 | 判定依据 | 为什么必须先判 |
+| --- | --- | --- |
+| `password` | 输出含 `password` / `Passwd` / `login:` 等 | 车机 adbd 停在 `Password:` 等输入，任何命令都只是「没有输出」 |
+| `timeout` | 8 秒内无任何响应 | 同上，且本工具没有终端可输入 |
+| `denied` | `permission denied` / SELinux / `not allowed` | 定制系统收紧了 shell，pull 必然同样失败 |
+| `unauthorized` | `unauthorized` / `authentication required` | USB 调试没点允许 |
+| `gone` | `device not found` / `offline` | 线断了，重试无意义 |
+| `ok` | 输出里带回 marker | shell 通道正常，故障只在 screencap 或传输 |
+
+先在 `echo` 上判一次，有两个好处：**不白等**（密码 / 权限问题下 pull 会一直卡到
+60 秒超时）、**不淹没原因**（一长串重试之后只剩最后一句无关报错）。
+
+## 提示语：四种情况分开说
+
+`_shell_blocked_text()` 按状态给不同文案，核心是**别再让人误以为是「没 root」**
+（`screencap` 本来就不需要 root）：
+
+* 密码：说明「手工执行 `adb -s <序列号> shell echo hi` 会停在 Password:」，本工具
+  没有终端可代为输入，需先在车机上完成调试授权；附 adb 原话。
+* 权限：明确写「screencap 不需要 root，是定制系统收紧了 shell 权限，换别的 adb
+  命令同样会被拒」。
+* 未授权 / 掉线 / 超时：各自给出可照做的下一步，超时时把「密码」列为第一嫌疑。
+
+## 回归测试（全部做过回退验证）
+
+| 用例 | 锁死的行为 | 回退后 |
+| --- | --- | --- |
+| `test_screenshot_falls_back_to_pull_when_exec_out_is_corrupted` | 坏头自动改走 pull，落盘与原图逐字节一致，无 `.part` 残留 | 关闭降级 → 失败 |
+| `test_screenshot_stops_and_explains_when_shell_needs_password` | 提示含「授权密码」「Password:」「echo hi」 | 关闭诊断 → 失败 |
+| `test_screenshot_shell_timeout_points_at_password_first` | 超时文案把密码列为首要嫌疑 | 关闭诊断 → 失败 |
+| `test_screenshot_does_not_blame_root_when_shell_is_denied` | 权限被拒时点明「不需要 root」 | 关闭诊断 → 失败 |
+| `test_screenshot_reports_both_channels_when_pull_also_fails` | 两条通道的原因都在 | — |
+| `test_pull_capture_cleans_remote_and_part_file` | 命令序列 = screencap → pull → rm，本地无 `.part` | — |
+| `test_exec_out_reports_adb_error_from_stdout` | adb 把报错打在 stdout 时仍能读到 | — |
+
+原有 4 条「坏图拒绝」用例改为钉住降级路径（`_stub_fallback`）：坏图断言仍然成立，
+只是错误文案从「建议你去敲 adb pull」变成「两条通道都试过之后的原因」。
+
+## 端到端验证（假 adb 模拟五种车机）
+
+| 场景 | 结果 |
+| --- | --- |
+| 正常 | exec-out 直接成功，落盘与原图一致 |
+| exec-out 把 `0x0A` 换成 `0x0D 0x0A` | **自动降级成功**，落盘字节与原图一致（不再是坏图） |
+| `shell` 回 `Password:` | 报「需要先输入授权密码」，附 adb 原话，不落任何文件 |
+| `exec-out` 回 `device not found` | 报「设备当前不可用」，0 秒返回（不做无意义降级） |
+| `shell echo` 挂起 30 秒 | 8 秒超时后报「没有任何响应」，密码列第一嫌疑 |
+
+远端 `/sdcard` 无残留、本地无 `.part`、失败时保存目录为空。
+
+## 已知取舍
+
+* 失败路径多付一次 `echo` 探测（最多 8 秒）。正常截图完全不受影响；
+* **不代输密码**：密码 / 授权码属于用户凭据，程序只提示，不尝试自动填入；
+* 若某车型每次 `adb shell` 都强制要密码且无法记住授权，本工具确实无法截图——
+  提示语会说明这一点，并建议先用系统命令行确认。

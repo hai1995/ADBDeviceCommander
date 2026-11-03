@@ -819,6 +819,19 @@ def test_screenshot_strips_leading_junk_before_saving(monkeypatch, tmp_path):
     assert saved == png, "前导杂字节不应进入文件"
 
 
+def _stub_fallback(monkeypatch, state="ok", detail="", pull=(b"", "落盘取图也失败")):
+    """钉住「shell 探测 + 落盘取图」两条降级路径。
+
+    exec-out 之外的两步都要走 adb，单测里不能真的调用；替身化之后，测试
+    才能只针对被测的那一层做断言（坏图拒绝 / 降级成功 / 提示文案）。
+    """
+    monkeypatch.setattr(
+        ss.ScreenCapturer, "_probe_shell",
+        staticmethod(lambda adb, serial, timeout=8: (state, detail)))
+    monkeypatch.setattr(
+        ss.ScreenCapturer, "_pull_capture",
+        staticmethod(lambda adb, serial, local_hint, timeout=60: pull))
+
 def test_screenshot_rejects_non_image_payload(monkeypatch, tmp_path):
     """连签名都找不到时给明确原因，不写一个打不开的文件。"""
     class _Proc:
@@ -828,6 +841,7 @@ def test_screenshot_rejects_non_image_payload(monkeypatch, tmp_path):
             return b"\x00\x01 garbage without any image signature", b""
 
     monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch)
     path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
 
     assert path is None
@@ -851,6 +865,7 @@ def test_screenshot_rejects_truncated_png(monkeypatch, tmp_path):
             return png, b""
 
     monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch)
     path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
 
     assert path is None
@@ -875,11 +890,12 @@ def test_screenshot_rejects_png_with_broken_ihdr(monkeypatch, tmp_path):
             return bytes(png), b""
 
     monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch)
     path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
 
     assert path is None
     assert err and "PNG" in err and "损坏" in err, err
-    assert "adb pull" in err, "要给出车机上更可靠的取图方式"
+    assert "两条取图通道都没成功" in err, "两条通道都试过之后才报失败"
     assert list(tmp_path.iterdir()) == [], "坏图不许落盘"
 
 
@@ -902,7 +918,7 @@ def test_screenshot_uses_jpg_ext_when_device_returns_jpeg(monkeypatch, tmp_path)
         assert f.read() == jpg
 
 
-def test_screenshot_failure_reports_adb_error_from_stdout(monkeypatch, tmp_path):
+def test_exec_out_reports_adb_error_from_stdout(monkeypatch):
     """截图失败时要说清原因：adb 的报错在 stdout，只读 stderr 就会变成「空数据」。
 
     设备未连接时 `adb exec-out screencap -p` 把 `error: device 'A1' not found`
@@ -919,10 +935,136 @@ def test_screenshot_failure_reports_adb_error_from_stdout(monkeypatch, tmp_path)
             pass
 
     monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
-    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
-    assert path is None
-    assert "not found" in err, err
+    data, why = ss.ScreenCapturer._exec_out("adb", "A1")
+    assert data == b""
+    assert "not found" in why, why
 
+
+def test_screenshot_falls_back_to_pull_when_exec_out_is_corrupted(monkeypatch, tmp_path):
+    """exec-out 的字节被换行转换改坏时，自动改走「落盘 + pull」，用户无感。
+
+    回归：个别 Windows adb / 车机在 exec-out 管道上做 0x0A → 0x0D 0x0A 的
+    转换，PNG 头因此读不出宽高。旧实现直接报错、让用户自己去敲 adb pull；
+    现在应当换一条二进制安全的通道再取一次，而不是把补救推给人。
+    """
+    broken = bytearray(_tiny_png())
+    broken[16:20] = b"\x00\x00\x00\x00"      # 宽被改坏（CRC 同时失效）
+    good = _tiny_png()
+
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return bytes(broken), b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch, pull=(good, ""))
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert err is None, err
+    with open(path, "rb") as f:
+        assert f.read() == good, "降级取回的原图必须原样落盘"
+    assert len(list(tmp_path.iterdir())) == 1, "不能留下 .part 之类的中间文件"
+
+
+def test_screenshot_stops_and_explains_when_shell_needs_password(monkeypatch, tmp_path):
+    """车机 adb shell 要授权密码：必须说清是「要密码」，而不是让人怀疑 root。
+
+    这类失败在 adb 侧往往只是「没有输出」—— adbd 停在 Password: 等输入，
+    而本工具没有终端可输入。不单独探测的话，界面只会显示「设备未返回图像」，
+    用户根本无法从这句话推出「要先去车机上输密码」。
+    """
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return b"", b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch, state="password", detail="Password:")
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert path is None
+    assert "授权密码" in err, err
+    assert "Password:" in err, "要把 adb 原话带出来，便于用户对照"
+    assert "shell echo hi" in err, "要给出可照抄的自查命令"
+    assert list(tmp_path.iterdir()) == [], "取不到图时不许留下任何文件"
+
+
+def test_screenshot_shell_timeout_points_at_password_first(monkeypatch, tmp_path):
+    """shell 无响应（超时）：首要怀疑密码校验，并说明另一种可能。"""
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return b"", b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch, state="timeout", detail="")
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert path is None
+    assert "8 秒" in err and "Password" in err, err
+    assert "echo hi" in err, "要给出可照抄的自查命令"
+
+
+def test_screenshot_does_not_blame_root_when_shell_is_denied(monkeypatch, tmp_path):
+    """shell 被车机拒绝时，别再让人以为是「没 root」。"""
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return b"", b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch, state="denied", detail="Permission denied")
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert path is None
+    assert "Permission denied" in err, err
+    assert "不需要 root" in err, "screencap 不需要 root，这句话必须点明"
+
+
+def test_screenshot_reports_both_channels_when_pull_also_fails(monkeypatch, tmp_path):
+    """两条通道都失败时，两条原因都要给出来（否则用户只看到半截）。"""
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return b"", b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    _stub_fallback(monkeypatch, pull=(b"", "adb pull 没有取回截图：Permission denied"))
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert path is None
+    assert "两条取图通道都没成功" in err, err
+    assert "exec-out" in err, "第一条通道的原因不能丢"
+    assert "Permission denied" in err, "第二条通道的原因也不能丢"
+
+
+def test_pull_capture_cleans_remote_and_part_file(monkeypatch, tmp_path):
+    """落盘 + pull 必须按「截图 → 拉回 → 删远端」走，本地不留 .part。"""
+    png = _tiny_png()
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "pull" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(png)
+        return ss.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    local = str(tmp_path / "shot.png")
+    data, why = ss.ScreenCapturer._pull_capture("adb", "A1", local)
+
+    assert why == "" and data == png
+    assert not (tmp_path / "shot.png.part").exists(), "中间文件必须清掉"
+    assert calls[0][3:5] == ["shell", "screencap"], calls
+    assert calls[1][3] == "pull", calls
+    assert calls[2][3:5] == ["shell", "rm"], "设备端临时文件要删掉"
+    assert calls[2][-1].startswith("/sdcard/"), calls
 
 def test_early_exit_reports_device_side_error_from_stdout(monkeypatch, tmp_path):
     """screenrecord 提前退出时，原因在 stdout（设备端输出），不能只读 stderr。
