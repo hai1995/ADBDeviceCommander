@@ -133,6 +133,8 @@
     cmdEditSave: $("cmd-edit-save"), cmdEditCancel: $("cmd-edit-cancel"),
     cmdEditClose: $("cmd-edit-close"), cmdEditDelete: $("cmd-edit-delete"),
     cmdNew: $("btn-cmd-new"),
+    // 指令台工作区（子 tab）：tab 条 / 新建按钮 / 提示语
+    wsTabs: $("ws-tabs"), btnWsAdd: $("btn-ws-add"), wsHint: $("ws-hint"),
     cmdImport: $("btn-cmd-import"), cmdImportFile: $("cmd-import-file"),
     cmdExport: $("btn-cmd-export"),
     cmdExportModal: $("cmd-export-modal"), cmdExportText: $("cmd-export-text"),
@@ -182,9 +184,37 @@
   let fileAnchor = null;            // 批量选择的锚点（Shift 区间选择的起点，值为复选框 value）
   let modalLocalPath = null;        // 查看弹窗里已拉取到本地的文件路径（「查看」按钮用）
   let allCommands = [];             // 全量快捷命令（供筛选/标签过滤使用）
-  let selectedTags = new Set();     // 当前已选中的标签（多选 OR）
   let mirrorFrameUrl = "";          // 低帧率预览的帧地址（非空 = 预览在跑）
   let mirrorTimer = null;           // 低帧率预览的刷新定时器
+
+  /* ---------------- 指令台工作区（子 tab / 多开） ----------------
+     每个工作区是一套完整的「指令台 + 指令输出」，后端各自一条独立会话，
+     所以能真的同时跑；指令库（命令本身）仍全局共享一份 —— 多开是为了并行
+     做事，不是养多份互相不知道对方存在的命令表。
+
+     实现要点：默认工作区（w1）的元素就是 index.html 里原有的那批（id 不变，
+     既有页面与测试全都按 id 找它）。新建的工作区靠**克隆 w1 的面板**得到，
+     克隆体把每个 [id] 改成 data-role —— 同一份文档里不能有重复 id，而
+     CSS/查询又需要认得出「这里是输出区」。取元素统一走 wsRole()，两边的
+     写法因此一致。 */
+  const WS_MAX = 8;                 // 工作区上限（后端 WS_MAX 同值，双保险）
+  const wsMap = new Map();          // id -> 工作区对象
+  let wsActive = "w1";              // 当前显示的工作区
+  let wsSeq = 1;                    // 新建时用的序号（w2、w3…），不复用已关闭的
+
+  function wsRole(root, role) {
+    if (!root) return null;
+    return root.querySelector('[data-role="' + role + '"]')
+      || root.querySelector("#" + role);
+  }
+
+  function wsOf(id) {
+    return wsMap.get(id) || wsMap.get("w1") || null;
+  }
+
+  function curWs() {
+    return wsOf(wsActive);
+  }
 
   /* ---------------- 按钮图标（统一内联 SVG，跟随 currentColor 适配主题） ----------------
      图标集中在此一处定义，HTML 上只需给按钮加 data-icon="名字"，脚本启动时注入；
@@ -420,8 +450,13 @@
   // kind 决定配色：cmd 是用户下的命令（accent），err 是报错，info 是程序在命令流
   // 里的说明（比如「已进入交互式子 shell」）。除这三种以外统统按普通输出渲染。
   const CONSOLE_KINDS = { cmd: "cmd", err: "err", info: "info", ok: "ok", warn: "warn" };
-  const pushConsole = (kind, text) =>
-    pushLine(els.console, text, CONSOLE_KINDS[kind] || "", true);
+  // 输出按工作区分流：事件的 ws 指向哪块面板就写哪块。默认工作区不带 ws 字段
+  // （后端单工作区时代的载荷一字不差），故 p.ws || "w1"。
+  const pushConsole = (kind, text, wsId) => {
+    const ws = wsOf(wsId);
+    if (!ws || !ws.consoleEl) return;
+    pushLine(ws.consoleEl, text, CONSOLE_KINDS[kind] || "", true);
+  };
 
   /* ---------------- Toast（高优先级提示弹窗） ----------------
      触发规则（在 pushStatus 中统一判定）：
@@ -559,10 +594,13 @@
         // 否则用户刚连上却看到「当前没有无线设备」，会以为没成功。
         if (els.wifiModal && !els.wifiModal.classList.contains("hidden")) refreshWifi();
         break;
-      case "console":
-        if (p.kind === "clear") clearOut(els.console);
-        else pushConsole(p.kind, p.text || "");
+      case "console": {
+        const ws = wsOf(p.ws || "w1");
+        if (!ws || !ws.consoleEl) break;
+        if (p.kind === "clear") clearOut(ws.consoleEl);
+        else pushLine(ws.consoleEl, p.text || "", CONSOLE_KINDS[p.kind] || "", true);
         break;
+      }
       case "status":
         if (p.type === "clear") clearStatus();
         else pushStatus(p.type, p.text || "", p.toast ? { toast: true } : undefined);
@@ -581,7 +619,17 @@
           }
         }
         break;
-      case "stop_state": els.btnStop.disabled = !p.running; break;
+      case "stop_state": {
+        // 停止按钮态按工作区同步：一个 tab 里点停止只该熄掉它自己那颗按钮。
+        // 顺带把「该 tab 正在执行」的指示点一起同步 —— 用户切走后仍能看出
+        // 哪个工作区有活在跑。
+        const ws = wsOf(p.ws || "w1");
+        if (!ws) break;
+        if (ws.stopBtn) ws.stopBtn.disabled = !p.running;
+        ws.busy = !!p.running;
+        markWsBusy(ws);
+        break;
+      }
       case "rec_state": setRecRunning(!!p.running); break;
       case "shot_state": setShotRunning(!!p.running); break;
       case "apk_state": setApkRunning(!!p.running); break;
@@ -747,13 +795,18 @@
     if (els.shotClipboard && typeof s.shot_to_clipboard === "boolean") {
       els.shotClipboard.checked = s.shot_to_clipboard;
     }
-    if (els.keepInput && typeof s.keep_input === "boolean") {
-      els.keepInput.checked = s.keep_input;
+    if (typeof s.keep_input === "boolean") {
+      // 「保留输入内容」是全局设置：所有工作区一起回填
+      wsMap.forEach((ws) => { if (ws.keepEl) ws.keepEl.checked = s.keep_input; });
     }
+    // 指令台工作区布局（上次开了几个 tab、各叫什么）：必须在 renderCommands
+    // 之前恢复，否则首屏只渲染默认工作区，切到新开的 tab 会是空的。
+    if (typeof s.cmd_workspaces === "string") restoreWorkspaces(s.cmd_workspaces);
     // 指令台搜索关键字：恢复后立即重跑一次过滤，界面与实际过滤结果一致
-    if (els.cmdFilter && typeof s.cmd_filter === "string" && s.cmd_filter) {
-      els.cmdFilter.value = s.cmd_filter;
-      applyCmdFilter();
+    const ws1 = wsOf("w1");
+    if (ws1 && ws1.filterEl && typeof s.cmd_filter === "string" && s.cmd_filter) {
+      ws1.filterEl.value = s.cmd_filter;
+      applyCmdFilter(ws1);
     }
     // 指令卡手动排序（拖动后落盘）：必须在 renderCommands 之前读进来，
     // 否则首屏按点击频次排完、再被重排一次，用户会看到卡片跳一下。
@@ -1025,12 +1078,26 @@
     if (res && res.ok === false) pushStatus("warn", "⚠ 设备不可操作：" + serial);
   }
 
-  /* ---------------- 指令区（含筛选 + 标签过滤） ---------------- */
+  /* ---------------- 指令区（含筛选 + 标签过滤） ----------------
+     命令库全局一份，但**每个工作区各有自己的筛选词与标签选择**：在工作区 2
+     里筛「网络」不该把工作区 1 的列表一起筛掉（那两块面板本来就在看不同的
+     东西）。因此 renderCmdTags / applyCmdFilter 都按工作区走。 */
   function renderCommands(list) {
     allCommands = list || [];
-    selectedTags.clear();
-    renderCmdTags();
-    applyCmdFilter();
+    wsMap.forEach((ws) => {
+      if (ws.tags) ws.tags.clear();
+      renderCmdTags(ws);
+      applyCmdFilter(ws);
+    });
+  }
+
+  /* 命令库变更（增删改 / 导入）后刷新**所有**工作区：各 tab 看的是同一份库，
+     只刷当前那块会让切回去的 tab 停在旧列表上（用户以为命令丢了）。 */
+  function renderAllWs() {
+    wsMap.forEach((ws) => {
+      renderCmdTags(ws);
+      applyCmdFilter(ws);
+    });
   }
 
   /* 标签/分组排序：用户自己的命令永远在上方，「通用」居首，「内置」恒置最底。
@@ -1055,31 +1122,35 @@
   let builtinFolded = new Set();       // 已折叠的二级分组名（落 config.json 的 builtin_folded）
 
   // 标签过滤条：根据全部命令的 labels 生成可点选标签（多选 OR）
-  function renderCmdTags() {
+  function renderCmdTags(ws) {
+    ws = ws || curWs();
+    if (!ws || !ws.tagsEl) return;
     const tags = new Set();
     allCommands.forEach((c) => (c.labels || []).forEach((l) => tags.add(l)));
     const arr = Array.from(tags).sort(byTagOrder);
-    els.cmdTags.innerHTML = "";
+    ws.tagsEl.innerHTML = "";
     arr.forEach((t) => {
       const chip = document.createElement("button");
-      chip.className = "cmd-tag" + (selectedTags.has(t) ? " active" : "");
+      chip.className = "cmd-tag" + (ws.tags.has(t) ? " active" : "");
       chip.textContent = t;
       chip.addEventListener("click", () => {
-        if (selectedTags.has(t)) selectedTags.delete(t); else selectedTags.add(t);
+        if (ws.tags.has(t)) ws.tags.delete(t); else ws.tags.add(t);
         chip.classList.toggle("active");
-        applyCmdFilter();
+        applyCmdFilter(ws);
       });
-      els.cmdTags.appendChild(chip);
+      ws.tagsEl.appendChild(chip);
     });
   }
 
   // 实时筛选：文字（命令名 + 命令内容）AND 已选标签（命中任一标签即保留）
-  function applyCmdFilter() {
-    const kw = (els.cmdFilter.value || "").toLowerCase().trim();
+  function applyCmdFilter(ws) {
+    ws = ws || curWs();
+    if (!ws) return;
+    const kw = ((ws.filterEl && ws.filterEl.value) || "").toLowerCase().trim();
     const filtered = allCommands.filter((c) => {
-      if (selectedTags.size > 0) {
+      if (ws.tags.size > 0) {
         const labels = c.labels || [];
-        if (!labels.some((l) => selectedTags.has(l))) return false;
+        if (!labels.some((l) => ws.tags.has(l))) return false;
       }
       if (kw) {
         // 搜索域含 section（二级分组名）：想找「网络」相关的一批命令时，
@@ -1092,28 +1163,34 @@
       return true;
     });
     // 筛选中时内置二级分组一律展开：命中项藏在折叠块里等于告诉用户「没找到」
-    renderCmdGroups(filtered, !!kw || selectedTags.size > 0);
-    els.cmdCount.textContent = "命中 " + filtered.length + " / " + allCommands.length + " 条";
+    renderCmdGroups(filtered, !!kw || ws.tags.size > 0, ws);
+    if (ws.countEl) {
+      ws.countEl.textContent = "命中 " + filtered.length + " / " + allCommands.length + " 条";
+    }
   }
 
   // 文字筛选防抖：大指令集（从 electerm 导入可能数百条）下，每次按键全量重渲卡片会
   // 卡顿。标签点选 / 清空是离散操作，保持即时（直接调用 applyCmdFilter）。
-  let _cmdFilterTimer = null;
-  function onCmdFilterInput() {
-    if (_cmdFilterTimer !== null) clearTimeout(_cmdFilterTimer);
-    _cmdFilterTimer = setTimeout(applyCmdFilter, 120);
+  function onCmdFilterInput(ws) {
+    ws = ws || curWs();
+    if (!ws) return;
+    if (ws.filterTimer !== null) clearTimeout(ws.filterTimer);
+    ws.filterTimer = setTimeout(() => { ws.filterTimer = null; applyCmdFilter(ws); }, 120);
   }
 
-  function renderCmdGroups(list, filtering) {
+  function renderCmdGroups(list, filtering, ws) {
+    ws = ws || curWs();
+    if (!ws || !ws.groupsEl) return;
+    const host = ws.groupsEl;
     const groups = {};
     list.forEach((c) => {
       const label = (c.labels && c.labels.length ? c.labels[0] : "其他") || "其他";
       (groups[label] = groups[label] || []).push(c);
     });
-    clearOut(els.cmdGroups);
+    clearOut(host);
     const keys = Object.keys(groups).sort(byTagOrder);
     if (!keys.length) {
-      pushLine(els.cmdGroups, "（无匹配命令）", "dim");
+      pushLine(host, "（无匹配命令）", "dim");
       return;
     }
     for (const label of keys) {
@@ -1127,14 +1204,14 @@
       if (label === "内置") {
         const secs = builtinSectionsOf(items);
         // 段数 ≥2 才给「一键全折 / 全展」：只有一段时这个按钮没有意义
-        if (secs.length > 1) title.appendChild(mkFoldAllBtn(secs));
-        appendBuiltinSections(box, items, !!filtering);
+        if (secs.length > 1) title.appendChild(mkFoldAllBtn(secs, ws));
+        appendBuiltinSections(box, items, !!filtering, ws);
       } else {
         const chips = document.createElement("div"); chips.className = "cmd-chips";
-        items.forEach((c) => chips.appendChild(mkCmdChip(c)));
+        items.forEach((c) => chips.appendChild(mkCmdChip(c, ws.id)));
         box.appendChild(chips);
       }
-      els.cmdGroups.appendChild(box);
+      host.appendChild(box);
     }
   }
 
@@ -1152,7 +1229,7 @@
   }
 
   // 「全部折叠 / 全部展开」：六段逐个点太费事，而真正想干的事通常只有一个
-  function mkFoldAllBtn(secs) {
+  function mkFoldAllBtn(secs, ws) {
     const allFolded = secs.every((s) => builtinFolded.has(s));
     const btn = document.createElement("button");
     btn.type = "button";
@@ -1162,13 +1239,13 @@
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       secs.forEach((s) => (allFolded ? builtinFolded.delete(s) : builtinFolded.add(s)));
-      applyCmdFilter();
+      applyCmdFilter(ws);
       persistPref("builtin_folded", Array.from(builtinFolded).join(","));
     });
     return btn;
   }
 
-  function appendBuiltinSections(box, items, filtering) {
+  function appendBuiltinSections(box, items, filtering, ws) {
     const buckets = new Map();
     items.forEach((c) => {
       const sec = sectionNameOf(c);
@@ -1197,11 +1274,11 @@
         if (filtering) return;
         if (builtinFolded.has(sec)) builtinFolded.delete(sec);
         else builtinFolded.add(sec);
-        applyCmdFilter();
+        applyCmdFilter(ws);
         persistPref("builtin_folded", Array.from(builtinFolded).join(","));
       });
       const chips = document.createElement("div"); chips.className = "cmd-chips";
-      list.forEach((c) => chips.appendChild(mkCmdChip(c)));
+      list.forEach((c) => chips.appendChild(mkCmdChip(c, ws && ws.id)));
       secBox.appendChild(head); secBox.appendChild(chips);
       wrap.appendChild(secBox);
     });
@@ -1281,7 +1358,7 @@
   /* 单张指令卡。抽成函数是因为「内置」组要按二级分组渲染（见
      appendBuiltinSections）——同一套卡片逻辑不能抄两遍，否则改角标 / 菜单时
      必然漏掉一边。 */
-  function mkCmdChip(c) {
+  function mkCmdChip(c, wsId) {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "cmd-chip"; chip.title = c.name;
@@ -1374,7 +1451,7 @@
     // 否则「只是排个序」会顺手把那条命令真的执行一遍。
     chip.addEventListener("click", (ev) => {
       if (Date.now() < cmdClickGuard) { ev.stopPropagation(); return; }
-      runQuickCommand(c);
+      runQuickCommand(c, wsId);
     });
     return chip;
   }
@@ -1492,11 +1569,15 @@
     pushStatus("info", "✓ 指令顺序已保存（长按卡片可再次调整）");
   }
 
-  function bindCmdDrag() {
-    if (!els.cmdGroups) return;
-    els.cmdGroups.addEventListener("pointerdown", onCmdPointerDown);
-    // move / up 挂 window：拖动中指针很可能已经移出卡片甚至移出容器，
-    // 挂在卡片上会收不到 update 而卡在「拖住不放」的状态。
+  /* 长按拖动排序：pointerdown 绑在**每个工作区**的命令列表上（各 tab 都能拖），
+     move / up 只往 window 上绑一次 —— 拖动中指针很可能已经移出卡片甚至移出容器，
+     挂在卡片上会收不到 update 而卡在「拖住不放」。 */
+  let _cmdDragWindowBound = false;
+  function bindCmdDrag(host) {
+    if (!host) return;
+    host.addEventListener("pointerdown", onCmdPointerDown);
+    if (_cmdDragWindowBound) return;
+    _cmdDragWindowBound = true;
     window.addEventListener("pointermove", onCmdPointerMove, { passive: false });
     window.addEventListener("pointerup", onCmdPointerUp);
     window.addEventListener("pointercancel", () => endCmdDrag(true));
@@ -1579,7 +1660,7 @@
       return;
     }
     closeCmdEdit();
-    renderCmdTags(); applyCmdFilter();
+    renderAllWs();
   }
 
   // 删除命令（同步回写文件）
@@ -1596,7 +1677,7 @@
       pushStatus("err", "⚠ 删除失败（可重试）");
       return;
     }
-    renderCmdTags(); applyCmdFilter();
+    renderAllWs();
   }
 
   // 复制（克隆）命令：用现有数据预填编辑弹窗，另起新 id，保存即成一条新命令
@@ -1706,7 +1787,7 @@
     const data = await callApi(api.load_commands());
     if (data && data.ok && Array.isArray(data.commands)) {
       allCommands = data.commands;
-      renderCmdTags(); applyCmdFilter();
+      renderAllWs();
     }
   }
 
@@ -1714,43 +1795,51 @@
       * inputOnly（electerm 仅输入模式）—— 只把命令文本填进指令输入框，
         由用户确认后手动「执行」，不直接下发（防手滑直接跑危险/长命令）；
       * 其余 —— 直接下发，不再对命令内容做二次确认。 */
-  function runQuickCommand(c) {
-    if (c && c.inputOnly) { fillCmdInput(c); return; }
-    callApi(api.run_command(c.id));
+  function runQuickCommand(c, wsId) {
+    if (c && c.inputOnly) { fillCmdInput(c, wsId); return; }
+    callApi(api.run_command(c.id, (wsOf(wsId) || curWs()).id));
   }
 
   /* 仅输入模式：把命令文本并入输入框（多条子命令用 "; " 连接，PowerShell
      语句分隔符），聚焦输入框等用户确认。保留「保留输入内容」开关的语义——
      这里是用户主动点击填入，不受该开关影响。 */
-  function fillCmdInput(c) {
+  function fillCmdInput(c, wsId) {
+    const ws = wsOf(wsId) || curWs();
     const text = (c.commands || []).map((e) => e.command).filter(Boolean).join("; ");
     if (!text) { pushStatus("warn", "⚠ 该命令没有可填入的文本"); return; }
-    els.cmdInput.value = text;
-    els.btnCmdInputClear.hidden = !els.cmdInput.value;
-    els.cmdInput.focus();
+    if (!ws || !ws.inputEl) return;
+    ws.inputEl.value = text;
+    if (ws.inputClearEl) ws.inputClearEl.hidden = !ws.inputEl.value;
+    ws.inputEl.focus();
     pushStatus("info", "⌨ 已填入输入框（仅输入模式，确认后点「执行」）：" + c.name);
   }
 
-  function clearCmdFilter() {
-    els.cmdFilter.value = "";
-    selectedTags.clear();
-    renderCmdTags();
-    applyCmdFilter();
-    // 清空也要落盘，否则下次启动过滤词又冒出来（用户会以为没清掉）
-    persistPref("cmd_filter", "");
+  function clearCmdFilter(ws) {
+    ws = ws || curWs();
+    if (!ws) return;
+    if (ws.filterEl) ws.filterEl.value = "";
+    ws.tags.clear();
+    renderCmdTags(ws);
+    applyCmdFilter(ws);
+    // 清空也要落盘，否则下次启动过滤词又冒出来（用户会以为没清掉）。
+    // 只记默认工作区的那一份：多个 tab 各存一个过滤词进 config.json 交叉覆盖，
+    // 重启后谁也恢复不成自己原本的样子，不如只保定一个。
+    if (ws.id === "w1") persistPref("cmd_filter", "");
   }
 
-  function runInput() {
-    const text = els.cmdInput.value.trim();
+  function runInput(ws) {
+    ws = ws || curWs();
+    if (!ws || !ws.inputEl) return;
+    const text = ws.inputEl.value.trim();
     if (!text) return;
-    callApi(api.run_custom(text));
+    callApi(api.run_custom(text, ws.id));
     // 「保留输入内容」勾选项（默认开启）：
     //  * 开启 —— 执行后保留输入框内容，方便改几个字再重发（长命令尤其顺手）；
     //  * 关闭 —— 每次执行后清空输入框，适合连发一条条不同的命令。
     // 命令文本已在上面捕获并下发，此时清空不影响本次执行。
-    if (els.keepInput && !els.keepInput.checked) {
-      els.cmdInput.value = "";
-      els.btnCmdInputClear.hidden = true;
+    if (ws.keepEl && !ws.keepEl.checked) {
+      ws.inputEl.value = "";
+      if (ws.inputClearEl) ws.inputClearEl.hidden = true;
     }
   }
 
@@ -4491,8 +4580,11 @@
     }
   }
   function bindSplitter(splitter, leftPanel, min, reserveRight) {
-    if (!splitter || !leftPanel) return;
-    _splitters.push({ panel: leftPanel, min: min, reserve: reserveRight });
+    if (!splitter || !leftPanel) return null;
+    // 返回记录本身：关闭工作区时要把它从 _splitters 里摘掉，否则那块面板
+    // 已经不在文档里了，窗口缩放还在对它的内联宽度做钳制（白算，且越攒越多）。
+    const rec = { panel: leftPanel, min: min, reserve: reserveRight };
+    _splitters.push(rec);
     let dragging = false, startX = 0, startW = 0;
     splitter.addEventListener("pointerdown", (e) => {
       if (e.button !== undefined && e.button !== 0) return;   // 只响应左键
@@ -4528,6 +4620,7 @@
     splitter.addEventListener("pointercancel", end);
     // 双击重置为默认宽度（清掉内联样式即回到 CSS 里的 280px，窄屏 232px）
     splitter.addEventListener("dblclick", () => { leftPanel.style.width = ""; });
+    return rec;
   }
 
   /* ---------------- 设备栏收起 / 展开（侧边栏折叠） ----------------
@@ -4603,6 +4696,308 @@
     if (els.aboutManual) els.aboutManual.textContent = res.text || "（内容为空）";
   }
 
+  /* ---------------- 指令台工作区：注册 / 克隆 / 切换 / 关闭 ----------------
+     默认工作区就是 index.html 里那套面板（id 全部保留，既有页面与测试按 id
+     找它）。新增工作区靠克隆它得到：克隆体剥掉全部 id、改留 data-role ——
+     同一份文档里不能有两个 #console，而查询又要认得出「这里是输出区」，所以
+     取元素统一走 wsRole()，两条路径共用一套查法。 */
+  function wsHarvest(root) {
+    return {
+      root: root,
+      consoleEl: wsRole(root, "console"),
+      inputEl: wsRole(root, "cmd-input"),
+      inputClearEl: wsRole(root, "btn-cmd-input-clear"),
+      runBtn: wsRole(root, "btn-run"),
+      stopBtn: wsRole(root, "btn-stop"),
+      clearConsoleBtn: wsRole(root, "btn-clear-console"),
+      groupsEl: wsRole(root, "cmd-groups"),
+      filterEl: wsRole(root, "cmd-filter"),
+      tagsEl: wsRole(root, "cmd-tags"),
+      countEl: wsRole(root, "cmd-count"),
+      clearFilterBtn: wsRole(root, "btn-cmd-clear"),
+      keepEl: wsRole(root, "keep-input"),
+      splitterEl: wsRole(root, "cmd-splitter"),
+      leftPanelEl: wsRole(root, "cmd-panel-left"),
+      newBtn: wsRole(root, "btn-cmd-new"),
+      importBtn: wsRole(root, "btn-cmd-import"),
+      importFileEl: wsRole(root, "cmd-import-file"),
+      exportBtn: wsRole(root, "btn-cmd-export"),
+    };
+  }
+
+  function registerWs(id, name, root) {
+    // 默认工作区沿用 HTML 里的 id（测试 / 样式都认它），克隆体只有 data-role。
+    // 这里统一补上 data-role，wsRole() 因此两边共用一套查法。
+    root.querySelectorAll("[id]").forEach((el) => {
+      if (!el.dataset.role) el.dataset.role = el.id;
+    });
+    root.dataset.ws = id;
+    const ws = Object.assign({
+      id: id, name: name || id, busy: false,
+      tags: new Set(), filterTimer: null, saveTimer: null, splitterRec: null,
+    }, wsHarvest(root));
+    wsMap.set(id, ws);
+    bindWorkspace(ws);
+    renderWsTabs();      // 注册即刷新 tab 条：新工作区的 tab 立刻可点
+    return ws;
+  }
+
+  /* 一个工作区里所有交互都在这儿绑一次（默认工作区与克隆体共用同一套代码，
+     不会出现「第 2 个 tab 的按钮点了没反应」这种分叉 bug）。 */
+  function bindWorkspace(ws) {
+    if (ws.runBtn) ws.runBtn.addEventListener("click", () => runInput(ws));
+    if (ws.inputEl) {
+      ws.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") runInput(ws);
+      });
+      ws.inputEl.addEventListener("input", () => {
+        if (ws.inputClearEl) ws.inputClearEl.hidden = !ws.inputEl.value;
+      });
+      if (ws.inputClearEl) ws.inputClearEl.hidden = !ws.inputEl.value;
+    }
+    if (ws.inputClearEl) {
+      ws.inputClearEl.addEventListener("click", () => {
+        if (ws.inputEl) ws.inputEl.value = "";
+        ws.inputClearEl.hidden = true;
+        if (ws.inputEl) ws.inputEl.focus();
+      });
+    }
+    if (ws.keepEl) {
+      // 「保留输入内容」是一项**设置**，不是某个 tab 的私有状态：改一处，
+      // 所有工作区跟着变。各 tab 各自记的话，用户会以为别的 tab 坏了。
+      ws.keepEl.checked = els.keepInput ? els.keepInput.checked : ws.keepEl.checked;
+      ws.keepEl.addEventListener("change", () => {
+        const on = !!ws.keepEl.checked;
+        wsMap.forEach((w) => { if (w.keepEl) w.keepEl.checked = on; });
+        persistPref("keep_input", on);
+      });
+    }
+    if (ws.stopBtn) {
+      ws.stopBtn.addEventListener("click", () => callApi(api.stop_run(ws.id)));
+    }
+    if (ws.clearConsoleBtn) {
+      ws.clearConsoleBtn.addEventListener("click", () => callApi(api.clear_output(ws.id)));
+    }
+    if (ws.filterEl) {
+      ws.filterEl.addEventListener("input", () => {
+        onCmdFilterInput(ws);
+        // 过滤词落盘（只记默认工作区那份）：多个 tab 各存一个进 config.json，
+        // 读回来必然互相覆盖，谁也恢复不成自己原本的样子，不如只保定一个。
+        if (ws.id !== "w1") return;
+        if (ws.saveTimer) clearTimeout(ws.saveTimer);
+        ws.saveTimer = setTimeout(() => {
+          ws.saveTimer = null;
+          persistPref("cmd_filter", (ws.filterEl.value || "").trim());
+        }, 400);
+      });
+    }
+    if (ws.clearFilterBtn) {
+      ws.clearFilterBtn.addEventListener("click", () => clearCmdFilter(ws));
+    }
+    // 命令库的增删改：弹窗是全局的，每个工作区面板上的按钮都开到同一处
+    if (ws.newBtn) ws.newBtn.addEventListener("click", () => openCmdEdit(null));
+    if (ws.importBtn) ws.importBtn.addEventListener("click", importCmdFromDialog);
+    if (ws.importFileEl) {
+      ws.importFileEl.addEventListener("change", (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (f) importCmdFromFile(f);
+        e.target.value = "";   // 允许重复导入同一文件
+      });
+    }
+    if (ws.exportBtn) ws.exportBtn.addEventListener("click", exportCmd);
+    // 长按拖动排序：绑在本工作区的列表上（每个 tab 都能拖）
+    bindCmdDrag(ws.groupsEl);
+    // 左右分栏：每个工作区各自一条分隔条、各自记宽度
+    if (ws.splitterEl && ws.leftPanelEl) {
+      ws.splitterRec = bindSplitter(ws.splitterEl, ws.leftPanelEl, 280, 320);
+    }
+  }
+
+  /* 克隆默认工作区的面板。必须剥 id：留着就是一份文档里两个 #console。 */
+  function cloneWsPanel(id) {
+    const src = $("cmd-ws-w1");
+    if (!src) return null;
+    const node = src.cloneNode(true);
+    node.removeAttribute("id");
+    node.classList.remove("active");
+    node.removeAttribute("data-ws");
+    node.querySelectorAll("[id]").forEach((el) => {
+      if (!el.dataset.role) el.dataset.role = el.id;
+      el.removeAttribute("id");
+    });
+    // 新工作区从空白开始：克隆会把默认工作区现有的输出、命令卡片、筛选词
+    // 一起带过来 —— 那是「复制粘贴」而不是「开一个新的」。
+    ["console", "cmd-groups", "cmd-tags"].forEach((role) => {
+      const el = wsRole(node, role);
+      if (el) el.innerHTML = "";
+    });
+    const cnt = wsRole(node, "cmd-count");
+    if (cnt) cnt.textContent = "";
+    const flt = wsRole(node, "cmd-filter");
+    if (flt) flt.value = "";
+    const inp = wsRole(node, "cmd-input");
+    if (inp) inp.value = "";
+    const ic = wsRole(node, "btn-cmd-input-clear");
+    if (ic) ic.hidden = true;
+    const st = wsRole(node, "btn-stop");
+    if (st) st.disabled = true;
+    // 左栏宽度是内联 px（默认工作区可能被拖过），不该带进新工作区
+    const left = wsRole(node, "cmd-panel-left");
+    if (left) left.style.width = "";
+    return node;
+  }
+
+  function nextWsId() {
+    wsSeq += 1;
+    while (wsMap.has("w" + wsSeq)) wsSeq += 1;
+    return "w" + wsSeq;
+  }
+
+  function addWorkspace(persist = true, silent = false) {
+    if (wsMap.size >= WS_MAX) {
+      if (!silent) {
+        pushStatus("warn", "⚠ 最多同时开 " + WS_MAX + " 个工作区"
+          + "（每个工作区都是一条独立的常驻会话，再开只会互相抢屏幕和进程）");
+      }
+      return null;
+    }
+    const host = document.querySelector('.tab[data-tab="cmd"]');
+    const id = nextWsId();
+    const name = "工作区 " + (wsMap.size + 1);
+    const node = cloneWsPanel(id);
+    if (!host || !node) return null;
+    host.appendChild(node);
+    const ws = registerWs(id, name, node);
+    renderCmdTags(ws);
+    applyCmdFilter(ws);
+    activateWs(id);
+    if (persist) persistWs();
+    if (api && api.ws_open) {
+      callApi(api.ws_open(id, name)).then((res) => {
+        if (res && res.ok === false) {
+          pushStatus("warn", "⚠ " + (res.reason || "工作区创建失败"));
+        }
+      });
+    }
+    return ws;
+  }
+
+  async function closeWorkspace(id) {
+    const ws = wsMap.get(id);
+    if (!ws) return;
+    if (id === "w1") {
+      pushStatus("warn", "默认工作区不能关闭（启动时的那一套面板就是它）");
+      return;
+    }
+    if (ws.busy) {
+      // 还有命令在跑：先停再关。直接关会留下一个「界面上已经没有了、却还在
+      // 往这块面板写输出」的会话 —— 用户看不到任何东西，也停不掉它。
+      await callApi(api.stop_run(id));
+      pushStatus("info", "已停止「" + ws.name + "」里正在执行的命令");
+    }
+    if (api && api.ws_close) await callApi(api.ws_close(id));
+    if (ws.splitterRec) {
+      const i = _splitters.indexOf(ws.splitterRec);
+      if (i >= 0) _splitters.splice(i, 1);
+    }
+    if (ws.filterTimer) clearTimeout(ws.filterTimer);
+    if (ws.saveTimer) clearTimeout(ws.saveTimer);
+    if (ws.root && ws.root.parentNode) ws.root.parentNode.removeChild(ws.root);
+    wsMap.delete(id);
+    if (wsActive === id) {
+      const first = wsMap.keys().next().value;
+      if (first) activateWs(first);
+    }
+    renderWsTabs();
+    persistWs();
+    pushStatus("info", "已关闭「" + ws.name + "」（其中的输出一并丢弃）");
+  }
+
+  function activateWs(id) {
+    const ws = wsMap.get(id);
+    if (!ws) return;
+    wsActive = id;
+    wsMap.forEach((w) => w.root.classList.toggle("active", w.id === id));
+    renderWsTabs();
+    // 切回来补一次重绘：隐藏期间窗口可能缩过，左栏的内联宽度已被钳制过
+    if (ws.filterEl) applyCmdFilter(ws);
+  }
+
+  function markWsBusy(ws) {
+    if (!els.wsTabs || !ws) return;
+    const tab = els.wsTabs.querySelector('.ws-tab[data-ws="' + ws.id + '"]');
+    if (tab) tab.classList.toggle("is-busy", !!ws.busy);
+  }
+
+  function renderWsTabs() {
+    if (!els.wsTabs) return;
+    els.wsTabs.innerHTML = "";
+    wsMap.forEach((ws) => {
+      const active = ws.id === wsActive;
+      const tab = document.createElement("div");
+      tab.className = "ws-tab" + (active ? " active" : "") + (ws.busy ? " is-busy" : "");
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+      tab.tabIndex = 0;
+      tab.dataset.ws = ws.id;
+      tab.title = ws.name + "（点击切换；各工作区独立执行、输出互不串台）";
+      const dot = document.createElement("span");
+      dot.className = "ws-dot";
+      dot.setAttribute("aria-hidden", "true");
+      tab.appendChild(dot);
+      const label = document.createElement("span");
+      label.textContent = ws.name;
+      tab.appendChild(label);
+      tab.addEventListener("click", () => activateWs(ws.id));
+      tab.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateWs(ws.id); }
+      });
+      if (ws.id !== "w1") {
+        // 关闭键用 span 而非 button：button 里嵌 button 是非法结构，浏览器
+        // 会把内层按钮拆到外边，点关闭变成点切换。
+        const x = document.createElement("span");
+        x.className = "ws-x";
+        x.textContent = "×";
+        x.setAttribute("role", "button");
+        x.dataset.role = "ws-close";
+        x.title = "关闭「" + ws.name + "」（其中的输出一并丢弃）";
+        x.setAttribute("aria-label", "关闭 " + ws.name);
+        x.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          closeWorkspace(ws.id);
+        });
+        tab.appendChild(x);
+      }
+      els.wsTabs.appendChild(tab);
+    });
+    if (els.wsHint) {
+      els.wsHint.textContent = wsMap.size > 1
+        ? "共 " + wsMap.size + " 个工作区，各自独立执行；指令库共用一份"
+        : "每个工作区各有一条独立会话，可同时执行；指令库共用一份";
+    }
+  }
+
+  function persistWs() {
+    const names = [];
+    wsMap.forEach((ws) => names.push(String(ws.name || "").replace(/,/g, " ")));
+    persistPref("cmd_workspaces", names.join(","));
+  }
+
+  /* 恢复上次的工作区布局（config.json 的 cmd_workspaces，逗号分隔的名字）。
+     第一个名字对应默认工作区（它总是存在），其余按顺序补开。 */
+  function restoreWorkspaces(raw) {
+    const names = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (names.length <= 1) return;
+    const w1 = wsMap.get("w1");
+    if (w1 && names[0]) w1.name = names[0];
+    for (let i = 1; i < names.length && wsMap.size < WS_MAX; i += 1) {
+      const ws = addWorkspace(false, true);
+      if (ws && names[i]) ws.name = names[i];
+    }
+    activateWs("w1");
+    renderWsTabs();
+  }
+
   /* ---------------- UI 绑定 ---------------- */
   function bindUI() {
     // 采用原生标题栏（含 min/max/close），不再自绘窗口按钮与 Win32 拖拽。
@@ -4624,44 +5019,14 @@
     // 设备指令
     els.btnRefresh.addEventListener("click", () => callApi(api.refresh_devices()));
     els.btnAll.addEventListener("click", () => callApi(api.toggle_all()));
-    els.btnRun.addEventListener("click", runInput);
-    els.cmdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runInput(); });
-    // 「保留输入内容」开关：与截图粘贴板开关同款语义——即时生效 + 落盘
-    // settings.json（keep_input），下次启动由 applyBootSettings 回填。
-    if (els.keepInput) {
-      els.keepInput.addEventListener("change", () => {
-        persistPref("keep_input", !!els.keepInput.checked);
-      });
-    }
-    els.btnStop.addEventListener("click", () => callApi(api.stop_run()));
-    // 命令输入框 clearable：输入时显示 ×，点击清空并重新聚焦（独立按钮，不干扰指令台筛选清空）
-    els.btnCmdInputClear.addEventListener("click", () => {
-      els.cmdInput.value = "";
-      els.btnCmdInputClear.hidden = true;
-      els.cmdInput.focus();
-    });
-    els.cmdInput.addEventListener("input", () => {
-      els.btnCmdInputClear.hidden = !els.cmdInput.value;
-    });
-    // 启动即按当前输入内容同步 × 显隐，避免依赖 hidden 属性反射差异
-    els.btnCmdInputClear.hidden = !els.cmdInput.value;
+    // ---------- 指令台工作区（子 tab）----------
+    // 默认工作区就是 HTML 里那套面板：注册后由 bindWorkspace 统一绑事件，
+    // 与后来克隆出来的工作区走完全相同的代码路径（不留「第 1 个 tab 和别的
+    // tab 行为不一致」这种分叉）。原先散在这里的指令台绑定因此整体移了过去。
+    registerWs("w1", "工作区 1", $("cmd-ws-w1"));
+    if (els.btnWsAdd) els.btnWsAdd.addEventListener("click", () => addWorkspace());
     els.btnClearStatus.addEventListener("click", () => callApi(api.clear_status()));
-    els.btnClearConsole.addEventListener("click", () => callApi(api.clear_output()));
-    // 指令台筛选 / 标签过滤
-    els.cmdFilter.addEventListener("input", onCmdFilterInput);
-    // 搜索关键字落盘到 config.json：过滤条件属于「设置」，换台电脑继续用
-    // 同一个关键字才有意义。防抖 400ms——逐键输入不该每敲一下就写一次盘。
-    let _cmdFilterSaveTimer = null;
-    els.cmdFilter.addEventListener("input", () => {
-      if (_cmdFilterSaveTimer !== null) clearTimeout(_cmdFilterSaveTimer);
-      _cmdFilterSaveTimer = setTimeout(() => {
-        _cmdFilterSaveTimer = null;
-        persistPref("cmd_filter", (els.cmdFilter.value || "").trim());
-      }, 400);
-    });
-    els.btnCmdClear.addEventListener("click", clearCmdFilter);
     // 命令增删改：新建 / 保存 / 取消 / 删除 / 快捷键
-    els.cmdNew.addEventListener("click", () => openCmdEdit(null));
     els.cmdEditSave.addEventListener("click", saveCmdEdit);
     els.cmdEditCancel.addEventListener("click", closeCmdEdit);
     els.cmdEditClose.addEventListener("click", closeCmdEdit);
@@ -5015,7 +5380,6 @@
         persistPref("perf_interval_ms", ms);
       });
     }
-    bindCmdDrag();
     bindPerfPkgPicker();
     bindPerfHover();
     renderPerfDev();

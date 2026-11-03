@@ -18,6 +18,7 @@
 - **第二十轮**（本文末「第二十轮」一节）：主动复查——APK 连点「假开始」、设备信息连点串台、BMP 弱签名误判、剩余空间显示 0.0 GB 等 9 处。
 - **第二十一轮**（本文末「第二十一轮」一节）：接入 GitHub 源码推送（`tools/push_github.py`，token 不进版本库/不回显）；修「token 明文被打进源码包」；修两条恒真的打包测试断言。
 - **第二十二轮**（本文末「第二十二轮」一节）：录屏自动分段续录 + 收尾**合并为一个完整 mp4**（`ffmpeg -f concat -c copy`，不重编码）；界面写明三个特殊点（拼接点约 1 秒画面缺失 / 依赖 ffmpeg / 上限 20 段）。
+- **第二十三轮**（本文末「第二十三轮」一节）：设备指令页支持**多工作区**（子 tab，最多 8 个）——每套「指令台 + 指令输出」各有一条独立会话，可同时跑、输出互不串台；停止 / 清空 / 筛选都按工作区生效。
 
 ---
 
@@ -2323,3 +2324,85 @@ error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数�
   新用例分别失败在行为断言上（旧代码的 toast 是「（2 段视频）」而非「已合并为 1 个
   完整视频」；旧界面没有「合并 / ffmpeg / 57 分钟 / N-1」四项），不是 patch 期的
   AttributeError —— 用 `monkeypatch.setattr(..., raising=False)` 保证这一点。
+
+---
+
+# 第二十三轮：设备指令页多工作区（子 tab）
+
+## 你的要求
+
+> 设备指令需要增加一个新需求：支持再多开 N 个出来，其界面可以在下方增加子 tab，
+> 每个子 tab 都包含有 指令台、指令输出，将这两个块儿当成一个子 tab，
+> 可进行 N 个的独立工作区。
+
+## 关键判断：「独立」的界线在哪
+
+「多几块面板」是最省事的做法，但那是**假的多开**：后端只有一条持久 shell 会话，
+在新 tab 里点「执行」只是排到别人的命令后面等着 —— 面板半天没有一行输出，用户
+会以为命令没发出去。所以这次动的是会话层，不是 DOM 层：
+
+| 层次 | 做法 |
+| --- | --- |
+| 后端会话 | 每个工作区一套 `ShellSession` + 一把执行锁 + 一份 busy 态（默认工作区沿用历史字段，故单工作区路径零变化） |
+| 事件路由 | `console` / `stop_state` 载荷带 `ws` 字段；默认工作区**不带**，与旧载荷一字不差 |
+| 前端面板 | 克隆默认工作区的 DOM，剥掉全部 `id` 改留 `data-role` —— 同一份文档里不能有两个 `#console` |
+| 指令库 | 全局共享一份（多开是为了并行做事，不是养多份互相不知道对方存在的命令表） |
+| 筛选 | 搜索词 / 标签选择**按工作区独立**（两块面板本来就在看不同的东西）；「保留输入内容」是全局设置 |
+| 停止 | `stop_run(ws)` 只 kill 那个工作区的会话，不会顺手掐掉另一个 tab 的活 |
+
+会话**懒创建**：开 8 个 tab 不会拉起 8 个 powershell，只有真的在某个工作区执行
+命令时才建那一条。会话创建放在后台 worker 里，不在 `run_command` 的调用线程里
+建 —— 否则点完命令界面会卡 0.5~1.5 秒（powershell 冷启）。
+
+克隆 DOM 后 `_splitters`（窗口缩放重钳列表）会留下死引用，关闭工作区时一并摘除；
+同理 `#cmd-groups` 的 CSS 规则改成了 `.cmd-groups`（class）—— 克隆体没有 id，
+按 id 写的布局规则从第 2 个工作区起全部失效，表现为「命令一多就把输出区顶出屏幕」。
+
+## 顺带修掉的两处
+
+1. **`test_full_segment_rolls_to_next_part` 的竞态**（既有问题，被本轮负载放大）：
+   续段会为新的一段再起一个 watcher，而测试里 `Popen` 是假的、`_Proc.wait()`
+   立刻返回 0 —— 那条 watcher 随即判定「远未到点就退出」并标 `died`，与用例的
+   断言抢跑。现在把类上的 `_watch_exit` 换成只记调用的假函数，再由用例直接调用
+   原函数对象跑一次真实判定，并顺带断言「新段也起了 watcher」。
+2. **`#cmd-groups` 的 id 选择器**（见上）：改成 class，并给 `ui_layout_fixes`
+   加一条「不许再用 `#cmd-groups` 写布局」的断言。
+
+## 界面
+
+顶部一排子 tab（比主 tab 矮一级、无边框，避免抢注意力）：`工作区 1 / 工作区 2 / …`
+＋「＋ 新建工作区」＋ 右侧一句说明。正在执行的工作区 tab 上有呼吸式小圆点 ——
+用户切走后它还在跑，「哪个 tab 有活在跑」必须一眼可辨，否则他会在两个 tab 之间
+反复点着找。其余 tab 上的 `×` 关闭工作区：**先停掉里面正在跑的命令、再杀掉会话**
+再移除面板，避免留下「界面上已经没有了、却还在往里写输出」的幽灵会话。
+默认工作区不给关闭键（它就是启动时那套面板）。
+
+工作区数量与名字记入 `config.json` 的 `cmd_workspaces`（逗号分隔的名字串，与
+`cmd_order` / `builtin_folded` 同一套约定），下次启动照旧恢复。
+
+## 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/controllers/base.py` | 新增工作区基础设施：`_ws_session`（懒创建 + 加锁防重复建）/ `_ws_lock` / `_ws_begin` / `_ws_end` / `_ws_publish_stop` / `_ws_status`（多工作区时状态文案带 `[工作区 N]` 前缀）/ `ws_open` / `ws_close`；`_push_console` / `_push_cmd` / `_sync_stop_state` 按线程局部的工作区定位；`shutdown` 收掉全部会话 |
+| `backend/controllers/commands.py` | `run_command` / `run_custom` / `stop_run` / `_execute` / `_run_entries` / `_interruptible_sleep` 支持 `ws`；执行流程的播报改走 `_ws_status`（默认工作区不加前缀，文案零变化） |
+| `backend/controllers/autorefresh.py` | `clear_output(ws)`：清空只清自己那块 |
+| `core/prefs.py` | 新增 `cmd_workspaces` |
+| `frontend/index.html` | 子 tab 栏 `#ws-bar`；默认工作区的 `.cmd-layout` 加 `ws-panel` / `id` / `data-ws` |
+| `frontend/js/app.js` | 工作区注册表 + 克隆 + 切换 + 关闭 + 持久化；`console` / `stop_state` 按 `ws` 路由；指令台渲染 / 筛选 / 点击 / 拖拽全部按工作区 |
+| `frontend/css/app.css` | `.ws-bar` / `.ws-tab` / `.ws-dot`（呼吸点）/ `.ws-x` / `.ws-hint` / `.ws-panel`；`#cmd-groups` → `.cmd-groups` |
+| `tests/test_backend_workspace.py` | **新增** 12 条：独立会话 / 输出路由 / 真并行（Barrier 式硬证据）/ 只停自己 / 停止态按 ws / 关闭杀会话 / 默认工作区不可关 / 上限 / 状态前缀 / 清空作用域 / 关窗收全部 |
+| `tests/frontend/ws_tabs.test.cjs` | **新增** 38 条断言：入口存在 / 新建后无重复 id / 执行带 ws / 输出不串台 / 停止态独立 / 清空带 ws / 关闭调 `ws_close` / 上限提示 / 重启恢复布局 |
+| `README.md` / `使用说明.txt` | 补多工作区说明（会话隔离、指令库共用、停止按 tab、上限 8、恢复布局） |
+
+## 验证
+
+- `pytest`：1249 passed / 1 skipped（新增 12 条）。
+- `pyflakes backend core tools tests`：0。
+- 前端 jsdom：**70** 个文件 0 失败（`ws_tabs` 38 条全过）。
+- **回退验证**：`git stash` 掉全部生产代码后，`ws_tabs` 在第一条断言就失败
+  （旧界面没有 `#ws-tabs` / `#btn-ws-add` / `.ws-panel`），不是踩 undefined 崩掉。
+- **「半吊子实现」验证**：临时把 `_ws_session` 改成「永远返回默认会话」（即只有
+  面板、没有隔离），`test_backend_workspace.py` 立刻失败 6 条 —— 独立会话 / 输出
+  路由 / 并行 / 只停自己 / 关闭杀会话 / 关窗收全部。这正是本功能最怕退化成的那种
+  「看起来多开了，其实共用一条命令通道」。

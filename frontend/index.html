@@ -74,7 +74,26 @@
     <div class="tab-area">
         <!-- 设备指令 -->
         <section class="tab active" data-tab="cmd">
-          <div class="cmd-layout">
+          <!-- 子 tab 栏：指令台工作区（可多开）。
+               每个工作区是一套**完整的**「指令台 + 指令输出」，各自一条独立的
+               adb/powershell 会话，因此可以真的同时跑：在工作区 2 里挂一条
+               十几分钟的抓取时，工作区 1 照样能立刻执行别的命令，两边的输出
+               各进各的面板。只给多块面板而不分会话是不够的——那样后开的 tab
+               点「执行」只是排在别人后面等着，面板半天没有一行输出，用户会
+               以为命令没发出去。
+               指令库（命令本身）仍然全局共享一份：多开是为了并行做事，不是
+               为了养多份互相不知道对方存在的命令表。 -->
+          <div class="ws-bar">
+            <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="指令台工作区"></div>
+            <button id="btn-ws-add" class="btn tiny" type="button"
+                    title="再开一个独立工作区：各有一套指令台与指令输出，可同时执行、互不串台">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+              新建工作区
+            </button>
+            <span class="ws-hint" id="ws-hint">每个工作区各有一条独立会话，可同时执行；指令库共用一份</span>
+          </div>
+          <div class="cmd-layout ws-panel active" id="cmd-ws-w1" data-ws="w1">
             <aside class="panel panel-left" id="cmd-panel-left">
               <div class="panel-title hint">指令台<span class="panel-sub">COMMANDS</span>
                 <!-- 三个操作按钮统一装进 .panel-actions 右靠齐（容器整体 margin-left:auto），

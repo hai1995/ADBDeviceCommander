@@ -41,10 +41,14 @@ ok(/flex:\s*1/.test(pr), "指令输出栏 flex:1 吃剩余宽度");
 ok(/min-width:\s*0/.test(pr), "指令输出栏 min-width:0（长输出不撑破布局）");
 
 // ---- 3) 左栏命令分组区独立滚动 ----
-const cg = cssBlock(".cmd-layout .panel-left #cmd-groups");
-ok(!!cg && /overflow:\s*auto/.test(cg), "#cmd-groups 独立滚动（命令再多不挤没输出区）");
+// 选择器必须是 **class**（.cmd-groups）而不是 #cmd-groups：多工作区里除默认
+// 工作区外的面板都是克隆出来的，克隆体被剥掉了 id 只留 data-role —— 按 id
+// 写的规则从第 2 个工作区起全部失效，命令一多照样把输出区顶出屏幕。
+const cg = cssBlock(".cmd-layout .panel-left .cmd-groups");
+ok(!!cg && /overflow:\s*auto/.test(cg), "命令分组区独立滚动（命令再多不挤没输出区）");
 ok(!!cg && /flex:\s*1/.test(cg) && /min-height:\s*0/.test(cg),
-   "#cmd-groups flex:1 + min-height:0（正确参与左栏 flex 列）");
+   "命令分组区 flex:1 + min-height:0（正确参与左栏 flex 列）");
+ok(!/#cmd-groups\s*\{/.test(css), "不许再用 #cmd-groups 写布局（克隆面板没有 id）");
 
 // ---- 4) 设备栏头部换行 ----
 const sh = cssBlock(".sidebar-head");

@@ -709,6 +709,60 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .panel-sub, .status-tag { font-family: var(--font-mono); }
 .panel-sub { font: 400 9px/1 var(--font-mono); letter-spacing: .22em; color: var(--faint); }
 
+/* ---------------- 指令台工作区（子 tab / 多开） ----------------
+   主 tab（设备指令 / 工具 / …）是页面级导航，这里的是**页面内**的工作区切换，
+   视觉上必须明显低一级：矮一行、无边框、选中态只加底色，免得和主 tab 抢注意力。
+
+   为什么要多开：一条长命令（抓 logcat / 刷机 / 压测）会把整个指令台占住，
+   用户想顺手敲一条 adb 就得先停掉它。每个工作区各自一条独立会话，因此两边
+   可以真的同时跑，输出各进各的面板。 */
+.ws-bar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 6px 10px; margin-bottom: 8px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, .03);
+  min-width: 0;
+}
+.ws-tabs {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+  overflow-x: auto; scrollbar-width: thin;
+}
+.ws-tab {
+  position: relative; display: inline-flex; align-items: center; gap: 6px; flex: none;
+  height: 26px; padding: 0 5px 0 9px;
+  background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  font: 600 var(--fs-sm)/1 var(--font-mono); letter-spacing: .04em;
+  cursor: pointer;
+  transition: color .12s ease, background .12s ease, border-color .12s ease;
+}
+.ws-tab:hover { color: var(--text); border-color: var(--line-strong); }
+.ws-tab.active {
+  color: var(--accent); background: rgba(52, 224, 234, .10);
+  border-color: var(--line-strong); box-shadow: inset 0 0 0 1px rgba(52, 224, 234, .18);
+}
+/* 正在执行的工作区即使没被选中也要能看出来：用户切走后它还在跑，
+   「哪个 tab 有活在跑」必须一眼可辨，否则他会在两个 tab 之间反复点着找。 */
+.ws-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .35; flex: none; }
+.ws-tab.is-busy .ws-dot {
+  background: var(--accent); opacity: 1; box-shadow: 0 0 7px var(--accent-glow);
+  animation: ws-pulse 1.1s ease-in-out infinite;
+}
+@keyframes ws-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.ws-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; padding: 0; border: none; border-radius: 4px;
+  background: transparent; color: var(--faint);
+  font: 600 12px/1 var(--font-mono); cursor: pointer;
+}
+.ws-x:hover { background: var(--err-soft); color: var(--err); }
+.ws-hint {
+  margin-left: auto; min-width: 0; color: var(--faint);
+  font: 400 var(--fs-xs)/1.3 var(--font-mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* ---------------- 指令台 ↔ 指令输出：左右分栏 ----------------
    这里曾缺一整块基础布局规则：.cmd-layout 没有 display:flex，退化成 block
    堆叠 —— 左侧指令台把 73 条命令全部竖着铺开，直接把「指令输出」挤成屏幕
@@ -720,8 +774,18 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .cmd-layout { display: flex; flex: 1; min-height: 0; min-width: 0; }
 .cmd-layout .panel-left { width: 50%; flex: none; overflow: hidden; }
 .cmd-layout .panel-right { flex: 1; min-width: 0; }
-/* 左栏内只有命令分组区滚动：标题 / 筛选 / 标签 / 计数固定可见 */
-.cmd-layout .panel-left #cmd-groups { flex: 1; min-height: 0; overflow: auto; }
+/* 左栏内只有命令分组区滚动：标题 / 筛选 / 标签 / 计数固定可见。
+   用 class 而非 #cmd-groups：多工作区里除默认工作区外的面板是克隆出来的，
+   克隆体会被剥掉 id（避免重复 id），只留 data-role —— 按 id 写的规则在
+   第 2 个工作区起全部失效，表现为「命令一多就把输出区顶出屏幕」。 */
+.cmd-layout .panel-left .cmd-groups { flex: 1; min-height: 0; overflow: auto; }
+
+/* 工作区面板：非活动的一律 display:none —— 只是不显示，DOM 与里面的输出
+   一行都不删（切回来内容还在，滚动位置也在）。
+   这条规则必须排在本文件 .cmd-layout 之后：两者特异性相同（0,1,0），靠顺序取胜；
+   否则 .cmd-layout 的 display:flex 会把所有工作区同时摊开。 */
+.ws-panel { display: none; }
+.ws-panel.active { display: flex; flex: 1; min-height: 0; min-width: 0; }
 
 /* 指令分组标题：菱形 tick + 拉宽字距的仪器分区标签 */
 .cmd-groups { display: flex; flex-direction: column; gap: 14px; }
