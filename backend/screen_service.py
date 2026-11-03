@@ -21,7 +21,9 @@ import time
 
 from backend.device_proc import kill_device_process
 from core import imgbytes
-from core.constants import adb_kwargs, adb_popen_kwargs, no_window_flags, safe_name
+from core.constants import (
+    REC_MAX_S, REC_MAX_TOLERANCE_S, adb_kwargs, adb_popen_kwargs,
+    no_window_flags, safe_name)
 
 # adb 明确表示「这台设备已经不在了」的报错片段（用于把「设备掉线」与
 # 「文件还没写好」区分开，见 VideoRecorder._remote_probe）。
@@ -224,6 +226,8 @@ class VideoRecorder:
             self._sessions[serial] = {
                 "remote": remote, "local": local, "proc": proc,
                 "dir": save_dir, "done": threading.Event(),
+                # 启动时刻：退出时据此区分「跑到单段上限」与「被外力打断」
+                "started": time.time(),
             }
         # 进程意外死亡监测：adb root / 设备侧重启 adbd 会在录屏中途杀掉设备端
         # screenrecord，本地 adb 客户端随之退出。不监测的话界面会一直停在
@@ -251,7 +255,17 @@ class VideoRecorder:
             sess = self._sessions.get(serial)
             if (sess is not None and sess.get("proc") is proc
                     and not sess.get("stopping")):
-                sess["died"] = True
+                # Android 的 screenrecord 不传 --time-limit 时默认就是
+                # 180 秒上限，到点自己收尾退出 —— 这在本地看起来与
+                # 「进程崩了」完全一样（adb 客户端自己退出）。不区分的话，
+                # 录满 3 分钟会被报成「被意外中断、视频不完整，请完整重录」，
+                # 用户会白白重录一段本来完好（moov 已写回）的视频。
+                elapsed = time.time() - float(sess.get("started") or 0)
+                if sess.get("started") and elapsed >= (
+                        REC_MAX_S - REC_MAX_TOLERANCE_S):
+                    sess["limit_hit"] = True
+                else:
+                    sess["died"] = True
 
     def died_serials(self):
         """取出并清除「意外退出」标记的序列号（controller 轮询调用）。
@@ -263,6 +277,20 @@ class VideoRecorder:
             out = [s for s, sess in self._sessions.items() if sess.get("died")]
             for s in out:
                 self._sessions[s].pop("died", None)
+            return out
+
+    def limit_serials(self):
+        """取出并清除「跑到单段上限（180s）后自行结束」标记（controller 轮询调用）。
+
+        与 `died_serials()` 分开：两者都走同一条收尾路径，但文案必须不同 ——
+        跑到上限是**正常结束**（screenrecord 会先写回 moov 再退出，视频完整），
+        报成「被意外中断、请完整重录」是纯误导。
+        """
+        with self._lock:
+            out = [s for s, sess in self._sessions.items()
+                   if sess.get("limit_hit")]
+            for s in out:
+                self._sessions[s].pop("limit_hit", None)
             return out
 
     def is_recording(self, serial):

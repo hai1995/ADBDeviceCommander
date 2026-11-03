@@ -5,6 +5,7 @@
 adb 调用全部用 subprocess.run 替身拦截。
 """
 import threading
+import time
 
 import backend.screen_service as ss
 
@@ -940,3 +941,29 @@ def test_stop_recording_never_kills_mirror_by_process_name(monkeypatch, tmp_path
     for c in pkills:
         assert "-f" in c, "兜底清理必须按命令行特征（-f）：%r" % (c,)
         assert "screenrecord" not in c, "不得按进程名杀同名进程：%r" % (c,)
+
+def test_screenrecord_hitting_time_limit_is_not_death(tmp_path):
+    """录满 180 秒后自行退出是**正常收尾**，不能标成「意外死亡」。
+
+    screenrecord 不传 --time-limit 时默认 180 秒，到点会先写回 moov 再退出；
+    本地看到的只是 adb 客户端自己结束，与进程崩了完全一样。标记成 died 会让
+    controller 按「意外中断、视频不完整、请完整重录」收尾 —— 用户白录一场。
+    """
+    vr, proc = _recorder(tmp_path)
+    vr._sessions["A1"]["started"] = time.time() - (ss.REC_MAX_S + 1)
+
+    vr._watch_exit("A1", proc)
+
+    assert vr.died_serials() == [], "跑到上限不能被当成意外死亡"
+    assert vr.limit_serials() == ["A1"]
+
+
+def test_early_exit_is_still_death(tmp_path):
+    """录到一半就退出（远未到 180 秒）仍按意外死亡处理，不能被上限判定吞掉。"""
+    vr, proc = _recorder(tmp_path)
+    vr._sessions["A1"]["started"] = time.time() - 30
+
+    vr._watch_exit("A1", proc)
+
+    assert vr.died_serials() == ["A1"]
+    assert vr.limit_serials() == []

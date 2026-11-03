@@ -52,19 +52,30 @@ class AutoRefreshMixin:
     def _reap_dead_recordings(self):
         """发现「无人停止却退出」的录屏进程即派后台 worker 自动收尾。
 
+        两种退出都走这条链路，但结论相反：被外力打断（died）要报「视频不完整」，
+        跑到 180 秒单段上限（limit_hit）则是正常收尾、视频完整。
+
         不处理的后果：界面永远停在「录制中」，用户以为还在录；点「停止」后
         还要经历最多约 10 秒的 pull 重试才看到「缺 moov 头」——而那一刻用户
         早就切到别的页签做别的事了。检测本身极轻（VideoRecorder 内的 watcher
         线程已标记，这里只是取标记），故可放在自动轮询线程里直接跑。
         """
         died = self.video.died_serials()
-        if not died:
+        # 「跑到单段上限后自己结束」与「被外力打断」在本地表现完全一样（adb 客户端
+        # 自己退出），但结论相反：前者视频完整、只是录到头了，后者才需要重录。
+        # 分开取标记，才能给用户不同的话。替身没有该方法时按「没有」处理。
+        fn = getattr(self.video, "limit_serials", None)
+        hit_limit = fn() if fn else []
+        if not died and not hit_limit:
             return
         self.workers.spawn(
-            "rec-reap-dead", self._teardown_dead_recordings, died)
+            "rec-reap-dead", self._teardown_dead_recordings, died, hit_limit)
 
-    def _teardown_dead_recordings(self, serials):
-        """（后台 worker）收尾意外死亡的录屏：与手动停止同一条完整路径。
+    def _teardown_dead_recordings(self, serials, hit_limit=()):
+        """（后台 worker）收尾自行退出的录屏：与手动停止同一条完整路径。
+
+        serials 是「被外力打断」的设备（文案强调视频不完整）；hit_limit 是
+        「跑到 180 秒上限」的设备（正常收尾，只说明为什么停了）。
 
         只收尾「仍在当前会话里」的设备；会话已被其他路径（用户点停止 /
         设备移除强停）结束掉时直接返回。残片视频不合成音频、源文件保留在
@@ -74,13 +85,26 @@ class AutoRefreshMixin:
             sess = self._rec_session
             if not sess:
                 return
-            dead = {s for s in serials if s in (sess.get("videos") or {})}
-            if not dead:
+            videos = sess.get("videos") or {}
+            dead = {s for s in serials if s in videos}
+            limited = {s for s in hit_limit if s in videos}
+            if not dead and not limited:
                 return
             # 记下死亡设备，供 _session_teardown 把失败文案从「收尾失败」
             # 换成更准确的「被意外中断（视频不完整）」。
-            sess["dead"] = set(sess.get("dead") or set()) | set(dead)
-        self._push_toast("warn", self._build_death_message(sorted(dead)))
+            sess["dead"] = set(sess.get("dead") or set()) | dead
+        # 以下播报放在锁外：_rec_lock 保护的是会话状态，往界面推事件不需要它，
+        # 占着锁推只会让并发的「开始/停止」多等一会儿。
+        if limited:
+            # 跑到 180s 上限是**正常结束**（screenrecord 先写回 moov 再退出）。
+            # 不单独说明的话，用户会看到和「进程崩了」一模一样的收尾流程，
+            # 以为视频坏了白录一场；而实际上它完整可用，只是录到头了。
+            self._push_status(
+                "info",
+                "⏱ %s 已达到单段录制上限（约 3 分钟），录屏已正常收尾、视频完整；"
+                "需要更长请分段录制" % "、".join(sorted(limited)))
+        if dead:
+            self._push_toast("warn", self._build_death_message(sorted(dead)))
         # 完整收尾：停掉其余设备 / 麦 / 设备音频、恢复指针位置/触摸圆点、合成与打包
         # 照常进行（异常由 _screen_record_stop_locked 兜底并清会话）。
         self.screen_record_stop()

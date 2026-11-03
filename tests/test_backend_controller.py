@@ -830,6 +830,68 @@ def test_reap_dead_recordings_tears_down_and_resets_ui(monkeypatch, tmp_path):
     assert not any("合成音视频" in t for t in texts), texts
 
 
+def test_reap_limit_hit_is_reported_as_normal_end(tmp_path):
+    """跑到 180 秒上限后自己退出：视频是完整的，不能报「意外中断、请完整重录」。
+
+    screenrecord 不传 --time-limit 时默认 180 秒，到点会**正常收尾**（写回 moov）
+    再退出。本地看到的现象与「进程崩了」完全一样（adb 客户端自己退出），旧实现
+    一律按意外中断处理，用户会白白重录一段本来完好的视频。
+    """
+    api = _make_api()
+    api._rec_session = _dead_rec_session(tmp_path)
+    stopped = []
+
+    class FakeVideo:
+        def died_serials(self):
+            return []
+
+        def limit_serials(self):
+            return ["A1"]
+
+        def is_recording(self, s):
+            return True
+
+        def stop(self, s):
+            stopped.append(s)
+            return True, "v_a.mp4", None      # 正常收尾，文件完整
+
+        def get_system_setting(self, adb, s, key):
+            return True, "null"
+
+        def set_system_setting_ex(self, adb, s, key, v):
+            return True, ""
+
+    api.video = FakeVideo()
+
+    api._teardown_dead_recordings([], ["A1"])
+
+    assert stopped == ["A1"], stopped
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    assert any("上限" in t for t in texts), texts
+    assert not any("意外" in t for t in texts), (
+        "跑到上限是正常结束，不能说成意外中断：%r" % (texts,))
+
+
+def test_reap_passes_limit_hits_alongside_dead(monkeypatch):
+    """自动轮询要把「跑到上限」也取出来交给收尾 worker，否则这类退出无人处理。"""
+    api = _make_api()
+    api._rec_session = _dead_rec_session(".")
+    spawned = []
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: spawned.append((key, fn, a, kw)))
+
+    class FakeVideo:
+        def died_serials(self):
+            return []
+
+        def limit_serials(self):
+            return ["A1"]
+
+    api.video = FakeVideo()
+    api._reap_dead_recordings()
+    assert spawned and spawned[0][2] == ([], ["A1"]), spawned
+
+
 def test_reap_dead_recordings_noop_when_nothing_died(monkeypatch):
     """没有进程死亡时不得派 worker、不得动会话（自动轮询每秒都会走到这里）。"""
     api = _make_api()
@@ -2136,24 +2198,25 @@ def test_show_touches_not_restored_when_read_fails(monkeypatch, tmp_path):
 
 
 def test_overlays_restored_on_start_failure_cancel(monkeypatch, tmp_path):
-    """启动失败撤销半启动会话时，已开启 overlay 的设备也必须恢复。
+    """启动链路中途出现真异常时，撤销必须把已开启的 overlay 恢复原值。
 
     否则用户设备会一直开着指针准星/触摸圆点——下次正常用手机时满屏干扰。
     """
     api = _make_api()
     api.devices.device_checked = {"A1": True, "B2": True, "C3": False}
-    started = {"n": 0}
 
-    def fake_start(*a, **kw):
-        started["n"] += 1
-        if started["n"] == 1:
-            return True, str(tmp_path / "r1.mp4")   # 第一台成功
-        raise OSError("模拟的意外错误")
+    def fake_start(serial, *a, **kw):
+        return True, str(tmp_path / ("r_%s.mp4" % serial))
+
+    def fake_get(adb, serial, key):
+        # 第一台正常开启 overlay；第二台读设置时 adb 瞬断（未预期异常）。
+        if serial == "B2":
+            raise OSError("模拟的意外错误")
+        return True, "1"
 
     monkeypatch.setattr(api.video, "start", fake_start)
     puts = []
-    monkeypatch.setattr(api.video, "get_system_setting",
-                        lambda adb, serial, key: (True, "1"))
+    monkeypatch.setattr(api.video, "get_system_setting", fake_get)
     _patch_set_setting(monkeypatch, api.video,
                        lambda adb, serial, key, value: puts.append(
                            (serial, key, value)) or True)
@@ -2166,6 +2229,87 @@ def test_overlays_restored_on_start_failure_cancel(monkeypatch, tmp_path):
     assert ("A1", "pointer_location", "1") in puts, puts
     assert ("A1", "show_touches", "1") in puts, puts
     api.workers.shutdown(timeout=2.0)
+
+
+def test_start_exception_keeps_other_started_devices_stoppable(
+        monkeypatch, tmp_path):
+    """并行拉起时某台抛真异常：已启动的设备必须先登记，撤销才能停掉它们。
+
+    不登记的话，那几台的 screenrecord 会成孤儿 —— 一直录到系统 180 秒上限，
+    界面却没有任何「录制中」，用户只能等它自己结束。
+    """
+    api = _make_api()
+    api.devices.device_checked = {"A1": True, "B2": True}
+
+    def fake_start(serial, *a, **kw):
+        if serial == "B2":
+            raise OSError("模拟的意外错误")
+        return True, str(tmp_path / ("r_%s.mp4" % serial))
+
+    stopped = []
+    monkeypatch.setattr(api.video, "start", fake_start)
+    monkeypatch.setattr(
+        api.video, "stop",
+        lambda s: (stopped.append(s), (True, None, None))[1])
+
+    res = api.screen_record_start(None, save_dir=str(tmp_path),
+                                  pointer_location=False, show_touches=False)
+    assert res.get("ok") is False and res["reason"] == "start_error", res
+    assert stopped == ["A1"], (
+        "已启动的设备必须被撤销流程停掉，否则录屏成孤儿：%r" % (stopped,))
+    assert api._rec_session == {}
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_multi_device_start_spawns_in_parallel(monkeypatch, tmp_path):
+    """多台设备的录屏启动必须并行：单台内部有约 1.5 秒的确认窗口。
+
+    回归：串行拉起时 N 台就按 N 倍累加（3 台 > 4.5 秒纯等待），用户点完
+    「开始录制」界面迟迟不出现「录制中」。用 Barrier 做硬证据：只有三台同时
+    在启动中，栅栏才放行 —— 串行实现永远凑不齐，会直接超时。
+    """
+    api = _make_api()
+    api.devices.device_checked = {"A1": True, "B2": True, "C3": False}
+    gate = threading.Barrier(2, timeout=3)
+
+    def fake_start(serial, *a, **kw):
+        gate.wait()          # 串行执行会卡在这里直到超时
+        time.sleep(0.3)
+        return True, str(tmp_path / ("r_%s.mp4" % serial))
+
+    monkeypatch.setattr(api.video, "start", fake_start)
+    t0 = time.time()
+    res = api.screen_record_start(None, save_dir=str(tmp_path),
+                                  pointer_location=False, show_touches=False)
+    elapsed = time.time() - t0
+
+    assert res.get("ok") is True, res
+    assert len(api._rec_session["videos"]) == 2
+    assert elapsed < 1.0, (
+        "两台设备应并行启动（串行时第一台就会撞栅栏超时）：%.2fs" % elapsed)
+    api.workers.shutdown(timeout=2.0)
+
+
+def test_zip_stores_video_and_compresses_log(tmp_path):
+    """打包时视频按原样存、日志才压缩：MP4 已被 H.264 压过，再 DEFLATE 白烧 CPU。
+
+    回归：整包统一 ZIP_DEFLATED 时，3 分钟的 1080p 录屏要白白重算一遍压缩，
+    体积几乎不变、收尾时间却多出一两秒（用户只能干等「正在收尾」）。
+    """
+    api = _make_api()
+    vid = tmp_path / "record_A1.mp4"
+    vid.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200000)
+    log = tmp_path / "logcat_A1.txt"
+    log.write_text("08-29 10:00:00.000  1  1 I Tag: hello\n" * 2000,
+                   encoding="utf-8")
+
+    out = api._zip_paths([str(vid), str(log)], str(tmp_path / "out.zip"))
+    assert out, "打包应成功"
+    with zipfile.ZipFile(out) as z:
+        assert z.getinfo("record_A1.mp4").compress_type == zipfile.ZIP_STORED, (
+            "视频不应再走 DEFLATE（纯烧 CPU）")
+        assert z.getinfo("logcat_A1.txt").compress_type == zipfile.ZIP_DEFLATED, (
+            "日志是文本，必须压缩（体积能差一个数量级）")
 
 
 # ---------------------------------------------------------------------------

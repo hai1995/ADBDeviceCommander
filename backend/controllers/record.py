@@ -141,10 +141,21 @@ class RecordMixin:
                 self._rec_session["mic_started"] = False
                 self._push_toast("warn", "⚠ 电脑麦克风启动失败：%s" % p)
         ok_any = False
-        for s in serials:
-            da = False
+
+        def _spawn(s):
+            """拉起单台设备：设备音频（可选）+ screenrecord。
+
+            放进线程池是因为 `VideoRecorder.start` 内部有约 1.5 秒的「确认设备端
+            screenrecord 真的活着」窗口 —— 串行时 3 台设备就是 4.5 秒以上的纯
+            等待，用户点完「开始录制」界面迟迟没有「录制中」。各设备的 adb 调用
+            彼此独立（服务对象内部各自加锁），并行拉起即可。会话登记 / overlay
+            备份 / 状态播报仍回到主线程串行做：那些是共享状态，不能同时改。
+            """
+            da_tried = False
+            da, da_err, remote = False, "", ""
             if with_devaudio and DeviceAudioCapture.supported(
                     self.state.adb_path, s):
+                da_tried = True
                 # safe_name：无线序列号含冒号，设备端路径同样需要净化，
                 # 保证 adb shell 命令与后续 pull 的路径完全一致。
                 remote = "/data/local/tmp/adb_rec_%s_%s_audio.wav" % (
@@ -156,15 +167,60 @@ class RecordMixin:
                     da_ok, da_err = start_ex(s, remote)
                 else:                       # 兼容只有 start() 的旧实现 / 替身
                     da_ok, da_err = bool(self.device_audio.start(s, remote)), ""
-                if da_ok:
-                    self._rec_session["devaudio"][s] = remote
-                    da = True
-                else:
-                    self._push_toast(
-                        "warn", "⚠ 设备 %s 音频采集未启动：%s"
-                                "（本次录屏不含设备声音）"
-                                % (s, da_err or "未知原因"))
+                da = bool(da_ok)
+            # 这里**不吞异常**：真正的抛出（不是各服务返回的 ok=False）会一路
+            # 冒到 screen_record_start 的兜底，把整场半启动会话撤销掉。并行化
+            # 只改「等多久」，不改这条失败语义。
             ok, local = self.video.start(s, save_dir, extra_name=sess_ts)
+            return s, {"da_tried": da_tried, "da": da, "da_err": da_err,
+                       "remote": remote, "ok": ok, "local": local}
+
+        spawned = {}
+        errors = []
+        if len(serials) <= 1:
+            for s in serials:
+                try:
+                    rs, r = _spawn(s)
+                    spawned[rs] = r
+                except Exception as ex:
+                    errors.append(ex)
+        else:
+            # 上限 4：再多设备同时拉起也挤在同一条 adb server 通道上。
+            with ThreadPoolExecutor(max_workers=min(4, len(serials))) as pool:
+                futures = [pool.submit(_spawn, s) for s in serials]
+            # 出了 with 所有任务都已结束，这里逐个取结果：先攒异常、不急着抛，
+            # 否则已启动的那几台还没来得及登记就被撤销流程漏掉（见下）。
+            for f in futures:
+                try:
+                    rs, r = f.result()
+                    spawned[rs] = r
+                except Exception as ex:
+                    errors.append(ex)
+
+        if errors:
+            # 有设备抛了真异常 → 整场会话撤销（与串行时代一致）。但异常可能发生在
+            # 「另外几台已经启动成功」之后，撤销流程只停**会话里登记过**的设备；
+            # 不先把它们登进去，那几台的 screenrecord 就成了孤儿，一直录到系统
+            # 180 秒上限，界面还看不到任何「录制中」。
+            for s in serials:
+                r = spawned.get(s) or {}
+                if r.get("da"):
+                    self._rec_session["devaudio"][s] = r["remote"]
+                if r.get("ok"):
+                    self._rec_session["videos"][s] = r["local"]
+            raise errors[0]
+
+        for s in serials:
+            r = spawned[s]
+            da = r["da"]
+            if da:
+                self._rec_session["devaudio"][s] = r["remote"]
+            elif r["da_tried"]:
+                self._push_toast(
+                    "warn", "⚠ 设备 %s 音频采集未启动：%s"
+                            "（本次录屏不含设备声音）"
+                            % (s, r["da_err"] or "未知原因"))
+            ok, local = r["ok"], r["local"]
             if ok:
                 ok_any = True
                 self._rec_session["videos"][s] = local
@@ -308,22 +364,39 @@ class RecordMixin:
         用户不会知道系统里还留着一个自己没开过的开关，而下次录制又会去读它当
         「原值」——一次失败就此固化成新默认值。
         """
+        jobs = []
         for field, key in (("pointer_location_prev", KEY_POINTER_LOCATION),
                            ("show_touches_prev", KEY_SHOW_TOUCHES)):
             for s, old in ((sess or {}).get(field) or {}).items():
-                try:
-                    # "null"/空 = 设备原本没设过这个键：恢复手段是删除而不是写 0，
-                    # 否则会在系统设置里留下一个用户从未创建过的条目。
-                    val = None if (old is None or str(old).strip().lower()
-                                   in ("null", "")) else str(old).strip()
-                    ok, err = self._set_device_setting(s, key, val)
-                except Exception as ex:
-                    ok, err = False, str(ex)[:160]
-                if not ok:
-                    self._push_status(
-                        "warn", "⚠ %s 的「%s」未能恢复原值%s，请在设备系统设置里手动关闭"
-                                % (s, self._OVERLAY_LABELS.get(key, key),
-                                   "（%s）" % err if err else ""))
+                jobs.append((s, key, old))
+        if not jobs:
+            return
+
+        def _one(job):
+            s, key, old = job
+            try:
+                # "null"/空 = 设备原本没设过这个键：恢复手段是删除而不是写 0，
+                # 否则会在系统设置里留下一个用户从未创建过的条目。
+                val = None if (old is None or str(old).strip().lower()
+                               in ("null", "")) else str(old).strip()
+                ok, err = self._set_device_setting(s, key, val)
+            except Exception as ex:
+                ok, err = False, str(ex)[:160]
+            return s, key, ok, err
+
+        # 每台设备 2 个键 = 2 次 `adb shell settings`，串行时台数一多就是成倍的
+        # 等待，而这里每一条都是彼此独立的设备写操作，直接并行。播报仍回主线程。
+        if len(jobs) == 1:
+            results = [_one(jobs[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+                results = list(pool.map(_one, jobs))
+        for s, key, ok, err in results:
+            if not ok:
+                self._push_status(
+                    "warn", "⚠ %s 的「%s」未能恢复原值%s，请在设备系统设置里手动关闭"
+                            % (s, self._OVERLAY_LABELS.get(key, key),
+                               "（%s）" % err if err else ""))
 
     def screen_record_stop(self):
         """停止录屏：收尾合成 / 打包 / 清理会话（与 start / shutdown 串行）。"""
@@ -544,6 +617,22 @@ class RecordMixin:
         with ThreadPoolExecutor(max_workers=min(4, len(serials))) as pool:
             return dict(pool.map(one, serials))
 
+    # 已经压缩过的容器格式：再走 DEFLATE 只烧 CPU，几乎不减小体积。
+    _PRECOMPRESSED_EXT = {
+        ".mp4", ".m4a", ".m4v", ".mov", ".mkv", ".webm",
+        ".mp3", ".aac", ".wav", ".ogg",
+        ".jpg", ".jpeg", ".png", ".webp", ".gif",
+        ".zip", ".gz", ".xz", ".7z",
+    }
+
+    @staticmethod
+    def _zip_method_for(path):
+        """按文件类型选 zip 压缩方式：已压缩的存（STORED），文本类才压。"""
+        ext = os.path.splitext(path or "")[1].lower()
+        if ext in RecordMixin._PRECOMPRESSED_EXT:
+            return zipfile.ZIP_STORED
+        return zipfile.ZIP_DEFLATED
+
     @staticmethod
     def _zip_paths(paths, zip_path):
         """把若干文件打包为一个 zip（以文件名作条目）。失败返回 None。
@@ -556,11 +645,16 @@ class RecordMixin:
         try:
             if os.path.exists(zip_path):
                 os.remove(zip_path)
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            with zipfile.ZipFile(zip_path, "w") as z:
                 for p in paths:
                     if (p and p != zip_path and os.path.exists(p)
                             and os.path.isfile(p)):
-                        z.write(p, os.path.basename(p))
+                        # 视频/音频/图片本来就已经压缩过（H.264/AAC/PNG），
+                        # 再走 DEFLATE 只是把整个文件白算一遍：3 分钟的 1080p
+                        # 录屏能白白多花一两秒 CPU，体积却几乎不变。体积真正
+                        # 能压下来的是 logcat 的 txt，那类仍用 DEFLATE。
+                        z.write(p, os.path.basename(p),
+                                compress_type=RecordMixin._zip_method_for(p))
                         written.append(p)
             if not os.path.exists(zip_path):
                 return None
