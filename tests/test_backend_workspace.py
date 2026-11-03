@@ -267,6 +267,45 @@ def test_ws_open_registers_name_and_enforces_limit():
     assert over["ok"] is False and "上限" in over["reason"]
 
 
+def test_ws_open_rename_updates_status_prefix():
+    """同一个 id 再登记一次 = 改名，状态栏前缀跟着变。
+
+    这是前端「双击 tab 改名后要通知后端」那一步的存在理由：不通知，tab 上写着
+    「刷机」、状态栏还是「[工作区 2] ✓ 完成」，用户以为是别人跑完了。
+    """
+    api = _make_api()
+    api.ws_open("w2", "工作区 2")
+    assert api._ws_label("w2") == "工作区 2"
+
+    res = api.ws_open("w2", "刷机")
+    assert res == {"ok": True, "ws": "w2", "name": "刷机"}, res
+    assert api._ws_label("w2") == "刷机"
+    # 改名不是「又开了一个」：登记表里仍然只有它自己
+    assert list(api._ws_names) == ["w2"], api._ws_names
+
+
+def test_ws_open_rename_allowed_at_capacity():
+    """已开满 8 个时仍能改名 —— 上限只挡新建。
+
+    若把改名当新建走同一个判断，用户开满工作区之后就再也改不了名（点回车
+    毫无反应），而这恰恰是最需要靠名字区分的时候。
+    """
+    api = _make_api()
+    for i in range(2, 2 + WebApi.WS_MAX):
+        assert api.ws_open("w%d" % i)["ok"] is True
+    assert api.ws_open("w99")["ok"] is False, "新建该被上限挡住"
+    res = api.ws_open("w2", "刷机")
+    assert res["ok"] is True and res["name"] == "刷机", res
+
+
+def test_ws_open_blank_name_keeps_previous():
+    """空名字不改动已有名字：前端拒绝空名，后端也不能被空串抹成「无名字」。"""
+    api = _make_api()
+    api.ws_open("w2", "抓日志")
+    api.ws_open("w2", "   ")
+    assert api._ws_label("w2") == "抓日志"
+
+
 def test_workspace_name_prefixes_status_in_multi_workspace():
     """多工作区时状态播报带工作区名：不然「✓ 完成」根本分不清是谁的。
 

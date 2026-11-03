@@ -199,9 +199,12 @@
      CSS/查询又需要认得出「这里是输出区」。取元素统一走 wsRole()，两边的
      写法因此一致。 */
   const WS_MAX = 8;                 // 工作区上限（后端 WS_MAX 同值，双保险）
+  const WS_NAME_MAX = 24;           // 工作区名长度上限（与后端 ws_open 的截断一致）
   const wsMap = new Map();          // id -> 工作区对象
   let wsActive = "w1";              // 当前显示的工作区
   let wsSeq = 1;                    // 新建时用的序号（w2、w3…），不复用已关闭的
+  let wsRenaming = null;            // 正在重命名的工作区 id（渲染让路，见 renderWsTabs）
+  let wsRenameReplay = false;       // 重命名期间被跳过的渲染，结束后补一次
 
   function wsRole(root, role) {
     if (!root) return null;
@@ -4860,7 +4863,19 @@
     return "w" + wsSeq;
   }
 
-  function addWorkspace(persist = true, silent = false) {
+  /* 新工作区的默认名字。不能直接用 "工作区 " + (size+1)：用户把「工作区 1」
+     改名成「抓日志」之后，再新建就又是「工作区 2」，而 tab 条上已经有一个叫
+     「工作区 2」的了 —— 两个同名 tab，分不出来。所以跳过已占用的名字。 */
+  function nextWsName() {
+    const used = new Set();
+    wsMap.forEach((w) => used.add(w.name));
+    for (let n = wsMap.size + 1; ; n += 1) {
+      const cand = "工作区 " + n;
+      if (!used.has(cand)) return cand;
+    }
+  }
+
+  function addWorkspace(persist = true, silent = false, wanted = "") {
     if (wsMap.size >= WS_MAX) {
       if (!silent) {
         pushStatus("warn", "⚠ 最多同时开 " + WS_MAX + " 个工作区"
@@ -4870,7 +4885,9 @@
     }
     const host = document.querySelector('.tab[data-tab="cmd"]');
     const id = nextWsId();
-    const name = "工作区 " + (wsMap.size + 1);
+    // 名字从创建的那一刻就定下来：重启恢复时按 cmd_workspaces 里的自定义名开，
+    // 顺手交给 ws_open —— 否则后端只记着「工作区 3」，改名后的状态栏前缀对不上。
+    const name = sanitizeWsName(wanted) || nextWsName();
     const node = cloneWsPanel(id);
     if (!host || !node) return null;
     host.appendChild(node);
@@ -4925,7 +4942,9 @@
     if (!ws) return;
     wsActive = id;
     wsMap.forEach((w) => w.root.classList.toggle("active", w.id === id));
-    renderWsTabs();
+    // 这里**不重建** tab 条：innerHTML 一清，双击的第二下就落在了一个刚创建
+    // 的新节点上，浏览器因此不补发 dblclick —— 双击改名的入口会时灵时不灵。
+    renderWsTabState();
     // 切回来补一次重绘：隐藏期间窗口可能缩过，左栏的内联宽度已被钳制过
     if (ws.filterEl) applyCmdFilter(ws);
   }
@@ -4936,8 +4955,157 @@
     if (tab) tab.classList.toggle("is-busy", !!ws.busy);
   }
 
+  /* ---------------- 工作区重命名 ----------------
+     多开之后「工作区 2 / 工作区 3」谁是谁全靠记：一个在抓 logcat、一个在刷机、
+     一个临时敲 adb 查东西。名字就是 config.json 里 cmd_workspaces 那一串，后端
+     ws_open 也拿它做状态栏前缀，所以改名要做三件事：改本地名字、落盘、通知后端。
+     少最后一步，tab 上写着「刷机」，状态栏却还是「[工作区 3] ✓ 完成」—— 两边
+     对不上，用户会以为是别人在跑。 */
+  function wsTabEl(id) {
+    return els.wsTabs
+      ? els.wsTabs.querySelector('.ws-tab[data-ws="' + id + '"]') : null;
+  }
+
+  function sanitizeWsName(raw) {
+    // 逗号是 cmd_workspaces 的分隔符：名字里带上它，重启后这个工作区会被拆成
+    // 两个（多出来那个是空面板），而用户根本想不到是自己名字里那个逗号干的。
+    return String(raw == null ? "" : raw)
+      .replace(/[,，]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, WS_NAME_MAX);
+  }
+
+  function wsTabTitle(ws) {
+    return ws.name + "（点击切换，双击或 F2 重命名；各工作区独立执行、输出互不串台）";
+  }
+
+  function wsCloseTitle(ws) {
+    return "关闭「" + ws.name + "」（其中的输出一并丢弃）";
+  }
+
+  /* 把新名字同步到 tab 上的三处文字：名字、悬停提示、关闭键的提示。
+     这一步刻意就地改而不重建 tab（原因见 activateWs）：重建会把用户「刚点下去
+     的那一下」连同节点一起丢掉，那一击就白点了。 */
+  function syncWsTabText(ws) {
+    const tab = wsTabEl(ws.id);
+    if (!tab || !ws) return;
+    const lab = tab.querySelector(".ws-label");
+    if (lab) lab.textContent = ws.name;
+    tab.title = wsTabTitle(ws);
+    const x = tab.querySelector(".ws-x");
+    if (x) {
+      x.title = wsCloseTitle(ws);
+      x.setAttribute("aria-label", "关闭 " + ws.name);
+    }
+  }
+
+  /* 输入框宽度跟着字数走（等宽字体下 1ch = 1 个字符的宽度）。 */
+  function fitWsRename(input) {
+    const n = Math.max(6, Math.min(WS_NAME_MAX, input.value.length + 1));
+    input.style.width = n + "ch";
+  }
+
+  function beginWsRename(id) {
+    const ws = wsMap.get(id);
+    const tab = wsTabEl(id);
+    if (!ws || !tab || wsRenaming) return;
+    const label = tab.querySelector(".ws-label");
+    if (!label) return;
+    wsRenaming = id;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "ws-rename";
+    input.value = ws.name;
+    input.maxLength = WS_NAME_MAX;
+    input.setAttribute("aria-label", "工作区名称");
+    tab.classList.add("is-renaming");
+    label.replaceWith(input);
+    fitWsRename(input);
+    // 整段选中：改名十有八九是「整条换掉」，不是改一个字
+    input.focus();
+    if (input.select) input.select();
+    let cancelled = false;
+    input.addEventListener("input", () => fitWsRename(input));
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();   // 别让 Enter / 空格冒泡到 tab 的切换处理（会把焦点抢走）
+      if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancelled = true; input.blur(); }
+    });
+    // blur 是唯一的提交点：Enter 也走 blur，因此不会出现「回车提交一次、失焦
+    // 又提交一次」的双写。
+    input.addEventListener("blur", () => endWsRename(id, !cancelled));
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("dblclick", (e) => e.stopPropagation());
+  }
+
+  function endWsRename(id, commit) {
+    const ws = wsMap.get(id);
+    const tab = wsTabEl(id);
+    const input = tab ? tab.querySelector(".ws-rename") : null;
+    const raw = input ? input.value : "";
+    // 先清标记：acceptWsName 里可能触发渲染，被「重命名中不重建」挡住就白改了
+    wsRenaming = null;
+    if (input) {
+      const label = document.createElement("span");
+      label.className = "ws-label";
+      label.textContent = ws ? ws.name : "";
+      input.replaceWith(label);
+    }
+    if (tab) tab.classList.remove("is-renaming");
+    if (commit && ws) acceptWsName(ws, raw);
+    // 名字可能刚被改过：文字与提示同步成最终值（取消时就是原值）
+    if (ws) syncWsTabText(ws);
+    if (wsRenameReplay) { wsRenameReplay = false; renderWsTabs(); }
+  }
+
+  function acceptWsName(ws, raw) {
+    const nm = sanitizeWsName(raw);
+    if (!nm) {
+      // 空名字没有可落盘的意义（重启后会被 filter(Boolean) 丢掉，紧随其后的
+      // 名字会往前挪一位，工作区全错位），直接拒绝并说清楚。
+      pushStatus("warn", "⚠ 工作区名不能为空，仍叫「" + ws.name + "」");
+      return false;
+    }
+    if (nm === ws.name) return false;   // 没改：不落盘、不打扰
+    const old = ws.name;
+    ws.name = nm;
+    persistWs();
+    // 默认工作区不用通知后端：它的状态播报本来就不带前缀（单工作区时代的文案
+    // 一字不变），登记了也用不上。
+    if (ws.id !== "w1" && api && api.ws_open) callApi(api.ws_open(ws.id, nm));
+    pushStatus("info", "已重命名：「" + old + "」→「" + nm + "」");
+    return true;
+  }
+
+  /* 只刷新 tab 的「状态类」，不重建节点（见 activateWs 里的注释）。 */
+  function renderWsTabState() {
+    if (!els.wsTabs) return;
+    wsMap.forEach((ws) => {
+      const tab = wsTabEl(ws.id);
+      if (!tab) return;
+      const active = ws.id === wsActive;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+      tab.classList.toggle("is-busy", !!ws.busy);
+    });
+    updateWsHint();
+  }
+
+  function updateWsHint() {
+    if (!els.wsHint) return;
+    // 提示里带上改名这条：双击是「没人告诉你就发现不了」的交互，写在 tab 旁边
+    // 才有人用得上 —— 否则多开几个之后还是靠数序号认人。
+    els.wsHint.textContent = wsMap.size > 1
+      ? "共 " + wsMap.size + " 个工作区，各自独立执行、指令库共用；双击 tab 名可重命名"
+      : "每个工作区各有一条独立会话，可同时执行；双击 tab 名可重命名";
+  }
+
   function renderWsTabs() {
     if (!els.wsTabs) return;
+    // 重命名进行中不重建 tab：innerHTML 一清空，正在输入的那个 <input> 就没了，
+    // 用户打到一半的名字直接丢。先记账，改完（endWsRename）再补渲染一次。
+    if (wsRenaming) { wsRenameReplay = true; return; }
     els.wsTabs.innerHTML = "";
     wsMap.forEach((ws) => {
       const active = ws.id === wsActive;
@@ -4947,17 +5115,27 @@
       tab.setAttribute("aria-selected", active ? "true" : "false");
       tab.tabIndex = 0;
       tab.dataset.ws = ws.id;
-      tab.title = ws.name + "（点击切换；各工作区独立执行、输出互不串台）";
+      tab.title = wsTabTitle(ws);
       const dot = document.createElement("span");
       dot.className = "ws-dot";
       dot.setAttribute("aria-hidden", "true");
       tab.appendChild(dot);
       const label = document.createElement("span");
+      label.className = "ws-label";
       label.textContent = ws.name;
       tab.appendChild(label);
       tab.addEventListener("click", () => activateWs(ws.id));
       tab.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateWs(ws.id); }
+        // 键盘用户的改名入口（双击是鼠标习惯，纯键盘够不着）
+        else if (e.key === "F2") { e.preventDefault(); beginWsRename(ws.id); }
+      });
+      // 双击 tab 名重命名。多开之后光靠「工作区 N」根本分不清谁是谁。
+      tab.addEventListener("dblclick", (ev) => {
+        // 双击「关闭」键也会冒泡到 tab 上：用户两次点叉想关掉，结果进了输入框，
+        // 关不掉还多出一个改名框。
+        if (ev.target && ev.target.classList && ev.target.classList.contains("ws-x")) return;
+        beginWsRename(ws.id);
       });
       if (ws.id !== "w1") {
         // 关闭键用 span 而非 button：button 里嵌 button 是非法结构，浏览器
@@ -4967,7 +5145,7 @@
         x.textContent = "×";
         x.setAttribute("role", "button");
         x.dataset.role = "ws-close";
-        x.title = "关闭「" + ws.name + "」（其中的输出一并丢弃）";
+        x.title = wsCloseTitle(ws);
         x.setAttribute("aria-label", "关闭 " + ws.name);
         x.addEventListener("click", (ev) => {
           ev.stopPropagation();
@@ -4977,29 +5155,28 @@
       }
       els.wsTabs.appendChild(tab);
     });
-    if (els.wsHint) {
-      els.wsHint.textContent = wsMap.size > 1
-        ? "共 " + wsMap.size + " 个工作区，各自独立执行；指令库共用一份"
-        : "每个工作区各有一条独立会话，可同时执行；指令库共用一份";
-    }
+    updateWsHint();
   }
 
   function persistWs() {
     const names = [];
-    wsMap.forEach((ws) => names.push(String(ws.name || "").replace(/,/g, " ")));
+    // 空名会破坏「按序号还原」的对齐（重启后 filter(Boolean) 把它丢掉，后面
+    // 的名字整体前移一位，工作区全错位），所以兜底成 id。
+    wsMap.forEach((ws) => names.push(sanitizeWsName(ws.name) || ws.id));
     persistPref("cmd_workspaces", names.join(","));
   }
 
   /* 恢复上次的工作区布局（config.json 的 cmd_workspaces，逗号分隔的名字）。
-     第一个名字对应默认工作区（它总是存在），其余按顺序补开。 */
+     第一个名字对应默认工作区（它总是存在），其余按顺序补开。
+     名字必须在这一步交给 addWorkspace（它随 ws_open 一起送给后端），不能开完
+     再改 ws.name：那样后端记的还是「工作区 3」，重启后状态栏前缀与 tab 对不上。 */
   function restoreWorkspaces(raw) {
     const names = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
     if (names.length <= 1) return;
     const w1 = wsMap.get("w1");
-    if (w1 && names[0]) w1.name = names[0];
+    if (w1 && sanitizeWsName(names[0])) w1.name = sanitizeWsName(names[0]);
     for (let i = 1; i < names.length && wsMap.size < WS_MAX; i += 1) {
-      const ws = addWorkspace(false, true);
-      if (ws && names[i]) ws.name = names[i];
+      addWorkspace(false, true, names[i]);
     }
     activateWs("w1");
     renderWsTabs();

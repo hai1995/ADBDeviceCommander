@@ -13,6 +13,7 @@ const { JSDOM } = require("jsdom");
 const ROOT = path.join(__dirname, "..", "..");
 const html = fs.readFileSync(path.join(ROOT, "frontend/index.html"), "utf8");
 const js = fs.readFileSync(path.join(ROOT, "frontend/js/app.js"), "utf8");
+const css = fs.readFileSync(path.join(ROOT, "frontend/css/app.css"), "utf8");
 
 process.on("unhandledRejection", () => {});
 
@@ -96,6 +97,20 @@ watchdog.unref && watchdog.unref();
     "取消用垃圾桶图标，与「停止」的方块图标区分开");
   const row = cancel0 && cancel0.parentElement;
   ok(row && row.classList.contains("tool-row"), "取消与开始/停止同一行（操作区块）");
+  // 配色：警示色（琥珀），刻意不是 .danger —— 录制中「停止」本身就是红块呼吸，
+  // 两键同色等于没区分，用户照样点错。这条断言盯的就是「不许退回中性灰，也不
+  // 许和停止撞色」。
+  ok(cancel0 && cancel0.classList.contains("warn"),
+    "取消用警示色 .warn（与停止的中性灰 / 红区分开）");
+  ok(cancel0 && !cancel0.classList.contains("danger"),
+    "取消不能是 .danger：会与录制中的「停止」撞色");
+  ok(/\.btn\.warn\s*\{/.test(css),
+    "样式表里确实定义了 .btn.warn（否则 class 加了也是灰的）");
+  ok(/\.btn\.warn:hover\s*\{/.test(css), ".btn.warn 有 hover 态（不然像禁用）");
+  ok(/\.btn\.warn:disabled/.test(css), ".btn.warn 有禁用态（否则灰不掉，看着一直可点）");
+  const stop0 = doc0.getElementById("tool-rec-stop");
+  ok(stop0 && !stop0.classList.contains("warn"),
+    "「停止」不用警示色（保留红色 = 当前运行态的语义）");
 
   // ---------- 2) 静态：分段提示语沉到操作区块下方 ----------
   const body = doc0.getElementById("rec-body");

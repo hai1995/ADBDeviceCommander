@@ -91,7 +91,7 @@
                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
               新建工作区
             </button>
-            <span class="ws-hint" id="ws-hint">每个工作区各有一条独立会话，可同时执行；指令库共用一份</span>
+            <span class="ws-hint" id="ws-hint">每个工作区各有一条独立会话，可同时执行；双击 tab 名可重命名</span>
           </div>
           <div class="cmd-layout ws-panel active" id="cmd-ws-w1" data-ws="w1">
             <aside class="panel panel-left" id="cmd-panel-left">
@@ -286,8 +286,10 @@
               <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止</button>
               <!-- 取消：录错了（选错设备 / 场景不对 / 只是点错了开始）时的出口。
                    与「停止」的区别是**不保留**：停止并删除本次已产生的文件，不合并、
-                   不打包。紧挨着「停止」有误点风险，故点击后还要再确认一次。 -->
-              <button id="tool-rec-cancel" class="btn" disabled data-icon="trash"
+                   不打包。紧挨着「停止」有误点风险，故点击后还要再确认一次；
+                   配色用琥珀（.btn.warn）而不是红（.btn.danger）—— 录制中的「停止」
+                   本身是红块呼吸，两键同色等于没区分，用户照样点错。 -->
+              <button id="tool-rec-cancel" class="btn warn" disabled data-icon="trash"
                       title="取消本次录制：停止并删除刚录到的文件，不合并、不打包">取消</button>
             </div>
             <!-- 录屏开关：每项按内容宽度排布、随宽度自动换行。

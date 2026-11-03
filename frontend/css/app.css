@@ -306,8 +306,25 @@ html { scrollbar-width: thin; scrollbar-color: #3a4c63 transparent; }
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24),
               0 0 22px rgba(255, 95, 107, .38), var(--shadow-1);
 }
+/* 警示类（「取消」这种会丢东西、但不是运行状态的键）：琥珀描边 + 淡底。
+   刻意不用 .danger：录制中「停止」本身就是红块呼吸，两个键同色等于没区分，
+   用户还是会点错。琥珀 = 「这个动作要小心」，与红色的「这就是当前运行态」
+   分工明确。 */
+.btn.warn {
+  background: rgba(255, 180, 84, .10);
+  color: var(--warn); border-color: rgba(255, 180, 84, .55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06),
+              0 0 12px rgba(255, 180, 84, .14), var(--shadow-1);
+}
+.btn.warn:hover {
+  background: rgba(255, 180, 84, .18); color: #ffd9a0;
+  border-color: rgba(255, 180, 84, .85);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10),
+              0 0 20px rgba(255, 180, 84, .32), var(--shadow-1);
+}
+.btn.warn:active { transform: translateY(1px); }
 /* 语义色禁用态：抹平渐变与光晕，只留灰平面（否则像仍可点） */
-.btn.ok:disabled, .btn.danger:disabled, .btn.accent:disabled {
+.btn.ok:disabled, .btn.danger:disabled, .btn.accent:disabled, .btn.warn:disabled {
   background: var(--surface); color: var(--faint);
   border-color: var(--line); box-shadow: none; transform: none; cursor: default;
 }
@@ -757,6 +774,19 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   font: 600 12px/1 var(--font-mono); cursor: pointer;
 }
 .ws-x:hover { background: var(--err-soft); color: var(--err); }
+/* 重命名态：tab 里的文字换成输入框。
+   宽度由 JS 按「当前字数」给（ch 单位，字体本来就是等宽），输入时跟着长；
+   固定宽度会让「抓 logcat（长按音量键）」这类名字直接看不到后半截，而用户要
+   改的往往正是看不见的那几个字。 */
+.ws-tab.is-renaming { cursor: text; }
+.ws-rename {
+  min-width: 52px; height: 20px;
+  padding: 0 4px; margin: 0;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 3px;
+  font: 600 var(--fs-sm)/1 var(--font-mono); letter-spacing: .04em;
+  outline: none; box-shadow: 0 0 0 2px rgba(52, 224, 234, .16);
+}
 .ws-hint {
   margin-left: auto; min-width: 0; color: var(--faint);
   font: 400 var(--fs-xs)/1.3 var(--font-mono);
