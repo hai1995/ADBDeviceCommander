@@ -211,3 +211,14 @@ def test_png_size_rejects_non_png_and_truncated_head():
     assert ib.png_size(b"not a png at all") is None
     assert ib.png_size(_png_bytes()[:20]) is None    # 截在 IHDR 中间
 
+
+# ---------------------------------------------------------------------------
+# png_complete —— 传输中断（有头、缺 IEND）
+# ---------------------------------------------------------------------------
+def test_png_complete_requires_iend():
+    good = _png_bytes()
+    assert ib.png_complete(good) is True
+    assert ib.png_complete(good[:-8]) is False, "去掉 IEND 的类型+CRC 应判为不完整"
+    assert ib.png_complete(b"") is False
+
+

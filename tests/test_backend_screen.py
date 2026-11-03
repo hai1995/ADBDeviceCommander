@@ -835,6 +835,29 @@ def test_screenshot_rejects_non_image_payload(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == [], "认不出就别落盘，免得留一堆坏图"
 
 
+def test_screenshot_rejects_truncated_png(monkeypatch, tmp_path):
+    """PNG 只传了一半（有 IHDR、缺 IEND）时拒绝，不把半张图当成功。
+
+    车机 4K 截图几 MB，adb 管道偶发超时 / 断连会停在中途。这类字节能通过
+    头部校验，落盘后却打不开或只画出上半张 —— 与「分辨率有问题」同属那类
+    看不出原因的失败。
+    """
+    png = _tiny_png()[:-8]           # 去掉 IEND 块（类型 + CRC）
+
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return png, b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert path is None
+    assert err and "不完整" in err and "IEND" in err, err
+    assert list(tmp_path.iterdir()) == [], "半张图不许落盘"
+
+
 def test_screenshot_rejects_png_with_broken_ihdr(monkeypatch, tmp_path):
     """PNG 头被污染时当场拒绝，不留一张「分辨率不对」的坏图。
 

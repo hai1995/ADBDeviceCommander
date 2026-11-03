@@ -141,6 +141,12 @@ class ScreenCapturer:
                     "通常是 adb 传输把换行转换掉了或截图被截断；"
                     "改用 `adb shell screencap -p /sdcard/s.png` 再 `adb pull` 可重取"
                     % (len(data), " ".join("%02x" % b for b in data[:16])))
+            if kind == "png" and not imgbytes.png_complete(data):
+                return None, (
+                    "设备返回的 PNG 不完整（共 %d 字节，缺少 IEND 块）——"
+                    "通常是传输超时或中断，截图被截断；"
+                    "重试一次，或改用 `adb shell screencap -p /sdcard/s.png` 再 `adb pull`"
+                    % len(data))
             if kind and kind != "png":
                 # 极少见：screencap 输出了 JPEG 等其它格式，扩展名跟着改，
                 # 免得用户双击时被看图软件按 PNG 解析报错。

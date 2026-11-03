@@ -25,6 +25,7 @@ core.imgbytes —— 图片字节的「认得出、裁得干净」（零依赖�
 * `locate(data)`      —— 容忍前导垃圾，返回 (kind, offset)；找不到返回 (None, -1)
 * `normalize(data)`   —— 返回 (clean_bytes, kind, note)；认不出时 clean_bytes 为空
 * `png_size(data)`    —— 解析 IHDR 返回 (宽, 高)；头损坏 / 校验和不符返回 None
+* `png_complete(data)`—— 是否以完整 IEND 块收尾；缺 IEND 说明传输被截断
 
 `note` 是给状态栏/日志看的短句（含头部十六进制），不面向终端用户堆术语。
 """
@@ -160,6 +161,20 @@ def png_size(data):
     if not (0 < w <= _PNG_MAX_EDGE and 0 < h <= _PNG_MAX_EDGE):
         return None
     return (w, h)
+
+
+def png_complete(data):
+    """PNG 是否以完整的 IEND 块收尾。
+
+    `screencap` 的输出要经过 adb 管道，车机 4K 图动辄几 MB，偶发超时 / 断连
+    会让字节流停在中途：IHDR 完整、IDAT 缺一截、没有 IEND。这种图能通过
+    `png_size`（头是好的），却打不开或只画出上半张 —— 必须在落盘前拦住，
+    否则用户拿到的是「看起保存成功」的半张图。
+    """
+    if not data:
+        return False
+    i = data.rfind(b"IEND")
+    return i >= 0 and i + 8 <= len(data)
 
 
 def _trim_png(data):

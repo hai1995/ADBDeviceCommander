@@ -2861,24 +2861,31 @@ resolve(true)**，其余一切出口都是 `false`。
 旧实现到这里就结束了：文件写下去，界面报「已保存截图」。用户打开才发现是坏图 ——
 典型的「不报错但结果错」。
 
+除了换行污染，还有第二种更常见的损坏：**传输被截断**。车机 4K 截图动辄几 MB，
+adb 管道超时 / 断连会让字节流停在中途 —— IHDR 完整、IDAT 缺一截、没有 IEND。
+这种图能通过头部校验，落盘后却打不开或只画出上半张。
+
 ## 修复
 
-`core/imgbytes.py` 新增 `png_size(data)`：解析 IHDR 的 33 字节（长度 + 类型 +
-13 字节数据 + CRC），返回 `(宽, 高)`；结构不对、CRC 不符、边长不在 0~16384 内
-一律返回 None。只验头、不解压 IDAT，大图也不变慢。
+`core/imgbytes.py` 新增两个判断：
 
-`ScreenCapturer.screenshot` 在 `normalize()` 之后、落盘之前调用它：
+* `png_size(data)`：解析 IHDR 的 33 字节（长度 + 类型 + 13 字节数据 + CRC），
+  返回 `(宽, 高)`；结构不对、CRC 不符、边长不在 0~16384 内返回 None。
+  只验头、不解压 IDAT，大图也不变慢。
+* `png_complete(data)`：是否以完整 IEND 块收尾；缺 IEND 即传输被截断。
 
-* 头正常 → 照旧保存；
-* 头坏了 → **不落盘**（与「认不出格式就别写坏图」同一原则），错误信息写明
-  「设备返回的 PNG 头已损坏（共 N 字节，头部 …）」，并直接给出车机上更可靠的替代：
+`ScreenCapturer.screenshot` 在 `normalize()` 之后、落盘之前做两道校验，任何一道
+不过都**不落盘**（与「认不出格式就别写坏图」同一原则）：
 
-  ```
-  adb shell screencap -p /sdcard/s.png
-  adb pull /sdcard/s.png
-  ```
+1. 头坏了 → 「设备返回的 PNG 头已损坏（共 N 字节，头部 …）」；
+2. 缺 IEND → 「设备返回的 PNG 不完整（共 N 字节，缺少 IEND 块）」。
 
-  这条路径不经过 stdout 的文本转换，是车机上取原图的标准做法。
+两条错误都直接给出车机上更可靠的替代（不经过 stdout 的文本转换）：
+
+```
+adb shell screencap -p /sdcard/s.png
+adb pull /sdcard/s.png
+```
 
 ## 回归测试
 
@@ -2888,10 +2895,12 @@ resolve(true)**，其余一切出口都是 `false`。
 | `test_png_size_rejects_corrupted_ihdr` | 宽改成 0 / CRC 被改 → None |
 | `test_png_size_accepts_4k_and_rejects_absurd_edge` | 3840×2160 放行；20000 拒绝 |
 | `test_png_size_rejects_non_png_and_truncated_head` | 非 PNG、截在 IHDR 中间 → None |
+| `test_png_complete_requires_iend` | 有头无 IEND 判为不完整 |
 | `test_screenshot_rejects_png_with_broken_ihdr` | 坏头不落盘、错误里带 `adb pull` |
+| `test_screenshot_rejects_truncated_png` | 截断图不落盘，报「缺少 IEND」 |
 
-回退验证：把校验条件改成 `if False:`，坏图立刻被写入磁盘（`path` 非 None），
-新用例失败。
+回退验证：把两道校验分别改成 `if False:`，坏图 / 半张图立刻被写入磁盘
+（`path` 非 None），对应用例失败。
 
 顺带修正两条旧用例的 fixture：文件名安全 / 同秒唯一这两条原本用「PNG 签名 + 64 个
 0」的假图，只关心能不能落盘。换成真实的 1×1 PNG 后，它们仍然只测文件名，不再
@@ -2899,5 +2908,5 @@ resolve(true)**，其余一切出口都是 `false`。
 
 ## 验证
 
-- `pytest tests/test_core_imgbytes.py tests/test_backend_screen.py`：**69 passed**。
+- `pytest tests/test_core_imgbytes.py tests/test_backend_screen.py`：**71 passed**。
 - 全量 `pytest` 与 `pyflakes` 见提交说明。
