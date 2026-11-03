@@ -111,7 +111,8 @@ class AutoRefreshMixin:
             self._push_status(
                 "info",
                 "⏱ %s 已达到自动分段上限（共 %d 段，约 %d 分钟），录屏已正常"
-                "收尾、所有分段视频完整；需要更长时间请停止后重新开始录制"
+                "收尾、视频完整（收尾时合并为一个完整 mp4，无需手动拼接）；"
+                "需要更长时间请停止后重新开始录制"
                 % ("、".join(sorted(limited)), REC_MAX_SEGMENTS,
                    REC_MAX_SEGMENTS * REC_SEGMENT_S // 60))
         if dead:
@@ -156,8 +157,8 @@ class AutoRefreshMixin:
         for s in dead:
             why = (notes or {}).get(s)
             if why:
-                seg_txt += ("；%s 的分段续录中断：%s（此前已录好的分段完整保留，"
-                            "已在保存目录中）" % (s, why))
+                seg_txt += ("；%s 的分段续录中断：%s（此前已录好的部分完整保留，"
+                            "收尾时会合并成一个视频，见保存目录）" % (s, why))
         if gone:
             return ("⚠ 检测到录屏中断（%s）：设备连接已断开（USB 掉线 / adb 失去连接），"
                     "已保留已录片段。常见诱因是 USB 接触不良、系统 USB 省电"

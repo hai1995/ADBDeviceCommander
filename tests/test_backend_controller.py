@@ -2314,13 +2314,114 @@ def test_zip_stores_video_and_compresses_log(tmp_path):
             "日志是文本，必须压缩（体积能差一个数量级）")
 
 
+def _patch_join(monkeypatch, ok=True, reason=None):
+    """把真实 ffmpeg 合并替掉。
+
+    这些用例关心的是**收尾编排**（哪些段被保留、进不进包、怎么提示），
+    不是转码本身；真跑 ffmpeg 既慢又引入「本机装没装 ffmpeg」的额外变量。
+    ok=True 时按顺序把各段字节拼进 output（顺序＝段序，正是断言想要的）。
+    """
+    import backend.controllers.record as record_ctrl
+
+    def fake(paths, out_path, timeout=None):
+        if not ok:
+            return {"ok": False, "path": None, "used": list(paths),
+                    "skipped": [], "reason": reason or "未检测到 ffmpeg"}
+        with open(out_path, "wb") as f:
+            for p in paths:
+                with open(p, "rb") as src:
+                    f.write(src.read())
+        return {"ok": True, "path": out_path, "used": list(paths),
+                "skipped": [], "reason": None}
+
+    # raising=False：旧实现里根本没有 join_segments 这个名字。让它静默落空，
+    # 这样用旧代码跑新用例时，失败落在**行为断言**（包里还是两个 mp4、没有合并
+    # 提示）上，而不是一句 patch 期的 AttributeError。
+    monkeypatch.setattr(record_ctrl, "join_segments", fake, raising=False)
+
+
+def test_multi_segments_merge_into_one_complete_video(monkeypatch, tmp_path):
+    """多段录完必须拼成一个完整 mp4：目录与包里只剩一个视频文件。
+
+    回归：分段是程序为绕开 180 秒上限自己选的实现方式，用户按了一次「开始录制」
+    却拿到 3 个 `_pN` 文件 —— 得自己猜顺序、自己找工具拼。合并后回到「一个 mp4」，
+    文件名也回到不带 `_pN` 的成品名，与没分段的录制一模一样。
+    """
+    api = _make_api()
+    s1 = tmp_path / "record_A1_ts1.mp4"
+    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov" + b"A" * 100)
+    s2 = tmp_path / "record_A1_ts1_p2.mp4"
+    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov" + b"B" * 100)
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": True,
+        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    monkeypatch.setattr(
+        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
+    _patch_join(monkeypatch)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("已合并为 1 个完整视频" in t for t in texts), texts
+
+    assert not s2.exists(), "已并入成片的中间段要删掉，否则目录里有两个版本"
+    with zipfile.ZipFile(str(tmp_path / "rec_ts1.zip")) as zf:
+        names = zf.namelist()
+        mp4s = [n for n in names if n.endswith(".mp4")]
+        assert mp4s == ["record_A1_ts1.mp4"], (
+            "合并后包里只应有一个视频，且名字回到不带 _pN 的成品名：%r" % names)
+        body = zf.read("record_A1_ts1.mp4")
+    assert body.endswith(b"B" * 100), "成片必须包含第 2 段的内容（顺序＝段序）"
+
+
+def test_merge_failure_keeps_every_segment(monkeypatch, tmp_path):
+    """合并失败（没装 ffmpeg / concat 报错）时，分段一个都不能删。
+
+    这是本功能最容易造成真实损失的一步：合并要删中间文件，删完之后若打包再
+    出错，用户就什么都没有了。所以「合并失败 = 保持原样」必须是硬规则，并且
+    要明说原因与文件在哪，而不是留一句「收尾失败」。
+    """
+    api = _make_api()
+    s1 = tmp_path / "record_A1_ts1.mp4"
+    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    s2 = tmp_path / "record_A1_ts1_p2.mp4"
+    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": False,
+        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    monkeypatch.setattr(
+        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
+    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg")
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    assert s1.exists() and s2.exists(), "合并失败不得删任何分段"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("未能合并为一个视频" in t and "已保留全部分段文件" in t
+               for t in texts), texts
+    assert any("未能合并" in t for t in texts
+               if t.startswith("✓")), "完成 toast 要说明「几段未合并」"
+
+
 def test_all_segments_are_kept_and_zipped(monkeypatch, tmp_path):
     """自动分段的每一段都要落盘并进包 —— 只留最后一段等于把前几段扔掉。
 
     回归：分段后收尾只取当前（最后）一段，先前每段 170 秒的视频既不进 zip 也
     不出现在任何提示里。用户录了 8 分钟，最后只拿到一个 3 分钟的文件，还以为
     中间那 5 分钟根本没录上。
+
+    这里把合并刻意置为失败（等价于用户机器上没装 ffmpeg）：合并不可用时，
+    「每段都保留、都进包」这条兜底必须成立。
     """
+    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg（用例替身）")
     api = _make_api()
     s1 = tmp_path / "record_A1_ts1.mp4"
     s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
@@ -2422,6 +2523,9 @@ def test_gone_device_segments_survive_teardown(monkeypatch, tmp_path):
         "video_segs": {"A1": [str(s1), str(s2)]},
     }
     monkeypatch.setattr(api.video, "is_recording", lambda s: False)
+    # 合并置为不可用：本用例盯的是「拔线前录完的段有没有进包」，
+    # 合并成功会把两段并成一个文件，反而绕开了要断言的那条路径。
+    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg（用例替身）")
 
     assert api.screen_record_stop() == {"ok": True}
     api.workers.shutdown(timeout=2.0)

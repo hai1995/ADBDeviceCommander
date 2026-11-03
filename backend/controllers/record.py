@@ -8,6 +8,7 @@ from backend.controller import (
     plan_size, probe_player, safe_name, scrcpy_probe_info,
     ThreadPoolExecutor, time, zipfile
 )
+from backend.video_join import join_segments
 
 class RecordMixin:
     """录屏、投屏（scrcpy/备用）、麦克风。"""
@@ -426,10 +427,22 @@ class RecordMixin:
             # 耗时以秒计，用户很可能已切去别的页签——一条汇总 toast 说清
             # 「存在哪」，明细（逐台合成/保存/打包）留在状态栏。
             # 自动分段时文件不止一个：说清「几段」，用户才对得上「我录了 8 分钟」
-            # 和「目录里为什么有 3 个 mp4」。段数只数 mp4（包里还有 logcat 的 txt）。
-            seg_n = len([f for f in files
+            # 和「目录里到底有几个文件」。段数只数 mp4（包里还有 logcat 的 txt）。
+            #
+            # 合并成功的场次，目录里只剩 1 个 mp4 —— 只数文件的话这句提示会变成
+            # 「1 个文件」，反而掩盖了「3 段拼接」这个事实。所以按收尾时记下的
+            # merged_segs（原始段数）说话。
+            mp4_n = len([f for f in files
                          if str(f).lower().endswith(".mp4")])
-            seg_tip = "（%d 段视频）" % seg_n if seg_n > 1 else ""
+            merged_n = sum(int(n) for n in
+                           ((sess or {}).get("merged_segs") or {}).values()
+                           if n)
+            if merged_n > 1:
+                seg_tip = "（%d 段已合并为 1 个完整视频）" % merged_n
+            elif mp4_n > 1:
+                seg_tip = "（%d 段视频，未能合并）" % mp4_n
+            else:
+                seg_tip = ""
             if zpath:
                 self._push_toast(
                     "ok", "✓ 录屏已完成%s，产物已打包: %s" % (seg_tip, zpath))
@@ -476,6 +489,20 @@ class RecordMixin:
             keep = [p for p in (vs or []) if p and os.path.exists(p)]
             if keep:
                 local_videos[s] = keep
+        # 自动分段是**实现手段**，不是用户要的东西：先把多段合并成一个完整 mp4，
+        # 再走下面的音频合成 / 打包。合并失败时保持分段原样（见
+        # _merge_device_segments：宁可给 N 个能播的段，也不给一个坏成片）。
+        merged_segs = {}
+        for s in list(local_videos.keys()):
+            one, n_used, _skipped = self._merge_device_segments(
+                s, local_videos[s])
+            if one:
+                local_videos[s] = [one]
+                if n_used > 1:
+                    merged_segs[s] = n_used
+        # 完成提示要按「几段拼成的」说话：合并之后目录里只剩 1 个 mp4，
+        # 用户对不上「我录了 8 分钟」和「为什么文件只有一个」。
+        sess["merged_segs"] = merged_segs
         local_devaudio = {s: a for s, (_v, a) in teardown.items() if a}
         mic_path = None
         if self._mic is not None:
@@ -495,14 +522,26 @@ class RecordMixin:
                 audios.append(local_devaudio[s])
             if mic_path:
                 audios.append(mic_path)
-            if audios and len(vlist) > 1:
-                # 音频是**整场连续**的一条，视频却被切成了多段。按段切音频需要
-                # 每一段的起始偏移，任何一处算错都会让后几段音画错位 —— 那比
-                # 干脆没有声音更难排查。这里只把音频并进第 1 段，其余段保留为
-                # 无音轨视频，并明确说出来（不说的话用户会以为是合成失败）。
-                self._push_status(
-                    "warn", "⚠ %s 共 %d 段：音频只并入第 1 段，其余段为无音轨视频"
-                            % (s, len(vlist)))
+            # 拼接前的段数（合并后 vlist 只剩 1 个文件，看不出原本被切过几段）
+            n_seg = merged_segs.get(s) or len(vlist)
+            if audios and n_seg > 1:
+                if s in merged_segs:
+                    # 音频是**整场连续**的一条，画面却在那 N-1 处拼接点各缺了
+                    # 约 1 秒：声音不会跟着跳，于是从第 2 段起会一点点超前画面。
+                    # 不按段切音频（需要每段的精确起始偏移，算错更难排查），
+                    # 但必须说出来 —— 否则用户对着成片听半天，只会觉得「音画不同步」。
+                    self._push_status(
+                        "warn", "⚠ %s 的音频是整场连续录的，画面在 %d 处拼接点各缺"
+                                "约 1 秒，第 2 段起声音会超前画面（累计约 %d 秒）"
+                                % (s, n_seg - 1, n_seg - 1))
+                else:
+                    # 音频是**整场连续**的一条，视频却被切成了多段。按段切音频需要
+                    # 每一段的起始偏移，任何一处算错都会让后几段音画错位 —— 那比
+                    # 干脆没有声音更难排查。这里只把音频并进第 1 段，其余段保留为
+                    # 无音轨视频，并明确说出来（不说的话用户会以为是合成失败）。
+                    self._push_status(
+                        "warn", "⚠ %s 共 %d 段：音频只并入第 1 段，其余段为无音轨视频"
+                                % (s, len(vlist)))
             for idx, vlocal in enumerate(vlist):
                 if audios and idx == 0:
                     final = (vlocal[:-4] + "_final.mp4") if vlocal.endswith(
@@ -573,6 +612,95 @@ class RecordMixin:
                 zpath = z
                 self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
         return rec_files, zpath
+
+    def _merged_stem(self, vlist):
+        """多段录制的「基名」（不含扩展名）。
+
+        段文件名形如 `record_<serial>_<ts>.mp4`（第 1 段）与
+        `record_<serial>_<ts>_pN.mp4`（第 N 段），合并成功后成品要回到不带
+        `_pN` 的那个名字 —— 用户手上就只有一个 mp4，和没分段时一模一样。
+        第 1 段缺失（只拿到 `_p2` 起）时也照样能剥出基名。
+        """
+        stem = os.path.splitext(vlist[0])[0]
+        i = stem.rfind("_p")
+        if i > 0 and stem[i + 2:].isdigit():
+            return stem[:i]
+        return stem
+
+    def _merge_device_segments(self, serial, vlist):
+        """把一台设备的多段录像合并为一个完整 mp4。
+
+        返回 (成品路径或 None, 参与合并的段数, 未并进成片的残缺段列表)。
+
+        为什么必须在收尾里做（而不是留给用户手动拼）：分段是程序为了绕开
+        180 秒硬上限自己选的实现方式，用户从来没要求「几个 `_p2` 文件」。
+        把实现细节原样抛给用户，等于把「用 ffmpeg concat 还是别的方式」这种
+        内部决策变成他的作业 —— 而且 20 个分段的正确顺序、`-c copy` 的解码
+        参数一致性，都不是普通使用者该关心的事。
+
+        单段（绝大多数录制，不足 170 秒）直接返回原路径，不起 ffmpeg 进程。
+        """
+        vlist = [p for p in (vlist or []) if p]
+        if len(vlist) <= 1:
+            return (vlist[0] if vlist else None), len(vlist), []
+        stem = self._merged_stem(vlist)
+        out = stem + "_full.mp4"
+        self._push_status(
+            "info", "⏳ %s 共 %d 段，正在合并为一个完整视频…" % (serial, len(vlist)))
+        res = join_segments(vlist, out)
+        if not res.get("ok") or not res.get("path"):
+            # 合并失败 → **分段一个都不删**。用户拿到的是「N 个能播的段」，
+            # 而不是「一个播不了的成片」；宁可不合并，也不能悄悄把素材弄丢。
+            self._push_toast(
+                "warn",
+                "⚠ %s 的 %d 段未能合并为一个视频：%s。已保留全部分段文件（%s），"
+                "可直接逐个播放" % (serial, len(vlist),
+                                  res.get("reason") or "未知原因",
+                                  "、".join(os.path.basename(p) for p in vlist)))
+            return None, len(vlist), []
+        merged = res["path"]
+        used = res.get("used") or []
+        skipped = res.get("skipped") or []
+        final = merged
+        if merged != vlist[0] and len(used) > 1:
+            # 只有真的新建了合并文件（而不是退化成「只剩一段可用」）才删中间段：
+            # 目录里留 3 个分段 + 1 个成片，用户第一反应是「哪几个是最终版」，
+            # 打包时体积也白翻一倍。
+            for p in used:
+                if p and p != merged:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+            want = stem + ".mp4"
+            try:
+                os.replace(merged, want)
+                final = want
+            except Exception as e:
+                # 改不成名（目标被播放器占着等）不是失败：成片已经在 out 上，
+                # 只是名字带 `_full`。说清楚它到底叫什么，别让用户以为没合。
+                self._push_status(
+                    "warn", "⚠ %s 已合并但未能改名为 %s（%s），成片仍是 %s"
+                            % (serial, os.path.basename(want), e,
+                               os.path.basename(final)))
+        if len(used) > 1:
+            self._push_status(
+                "ok", "✓ %s 已把 %d 段合并为一个完整视频: %s"
+                      "（拼接点有约 1 秒画面缺失，见录屏卡片提示）"
+                      % (serial, len(used), os.path.basename(final)))
+        else:
+            # 多段里只有 1 段正常收尾（其余缺 moov）：它就是成片本身，
+            # 说「合并了 1 段」会让人以为拼过。
+            self._push_status(
+                "ok", "✓ %s 只有 1 段正常收尾，已作为成片保留: %s"
+                      % (serial, os.path.basename(final)))
+        if skipped:
+            self._push_toast(
+                "warn", "⚠ %s 有 %d 段视频没正常收尾（缺 moov 头），未并入成片，"
+                        "残片保留在保存目录：%s"
+                        % (serial, len(skipped),
+                           "、".join(os.path.basename(p) for p in skipped)))
+        return final, len(used), skipped
 
     def _stop_video(self, serial):
         """停止单台设备并取回**全部段**。返回 (ok, [本地路径...], err)。
