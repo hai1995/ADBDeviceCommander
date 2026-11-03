@@ -726,6 +726,37 @@ def test_compare_report_escapes_script_breakout_in_label():
     assert html.count("</script>") == 2
 
 
+def test_compare_bad_point_cap_covers_whole_span():
+    """对比图超标红点上限 400：超了要按**时间均匀抽样**，不能只留前 400 个。
+
+    回归：`bad[:400]` 直接切片 —— 长会话里超标若集中在前半段，后半段会一个
+    红点都没有，看图的人由此得出「后半段全达标」的错误结论。这不是性能
+    问题，是结论错。
+    """
+    t0 = 1793200000
+
+    def slow(n):
+        return [{"t": t0 + i, "cpu": 20.0, "mem_used": 3000.0, "pss": 300.0,
+                 "fps": 30.0, "jank": 15.0, "batt": 70.0, "temp": 40.0}
+                for i in range(n)]
+
+    entries = [
+        {"serial": "S1", "label": "A",
+         "info": {"serial": "S1", "model": "A", "pkg": "com.demo"},
+         "samples": slow(2000), "interval": 1.0},
+        {"serial": "S2", "label": "B",
+         "info": {"serial": "S2", "model": "B", "pkg": "com.demo"},
+         "samples": slow(2000), "interval": 1.0},
+    ]
+    html = svc.build_compare_html(entries, {"fps": {"min": 45.0}})
+    # 只有 fps 这一项配了阈值 → 只有它的图带 markLine，用它定位不会认错图
+    fps = [o for o in _report_opts(html) if "markLine" in o["series"][0]][0]
+    pts = fps["series"][0]["markPoint"]["data"]
+    assert len(pts) == 400, len(pts)
+    # 最后一个红点必须落在会话末尾附近，而不是第 400 个采样点
+    assert pts[-1]["coord"][0] >= (t0 + 1990) * 1000, pts[-1]["coord"][0]
+
+
 def test_compare_report_without_thresholds():
     html = svc.build_compare_html(_entries(), {})
     assert "本次采样未启用阈值告警" in html
@@ -1072,6 +1103,37 @@ def test_chart_path_is_thinned_but_spike_survives():
     assert len(coords) <= 1500 * 2, "折线点数应被压到绘图区宽度的两倍以内"
     # cap=100 → 纵轴 0..100，尖峰值 100 落在绘图区上沿 y=pad_t=12
     assert ("12.0" in {y for _x, y in coords}), "尖峰被降采样丢掉了"
+
+
+def test_echart_downsample_keeps_time_order_and_extremes():
+    """ECharts 抽稀：时间必须严格递增，极值必须留下。
+
+    回归：picks 原按「首 / 末 / 极小 / 极大」的收集顺序直接追加，输出点的
+    时间戳就成段倒错（4000 点实测 28 处逆序）。ECharts 的 time 轴按数组顺序
+    连线、不会替你排序 —— 曲线在每个桶里来回折返，图能画出来、看着也有
+    起伏，但形状是错的，lttb 采样也跟着失效。这是「不报错但结论错」。
+    """
+    t0 = 1793200000
+    pts = [(t0 * 1000 + i * 1000, 95.0 if i % 7 == 3 else 20.0)
+           for i in range(4000)]
+    out = svc._downsample(pts, cap=100)
+    ts = [p[0] for p in out]
+    assert ts == sorted(ts), "抽稀后时间轴必须严格升序"
+    assert len(out) <= 100, len(out)
+    assert any(v == 95.0 for _t, v in out), "周期性尖峰被抽稀丢掉了"
+    assert out[0] == pts[0] and out[-1] == pts[-1], "首末点必须保留"
+
+
+def test_echart_downsample_keeps_none_gaps_and_small_series():
+    """断线用 None 表示：抽稀不能把它变成 0 或补齐；点本来就少时原样返回。"""
+    t0 = 1793200000
+    pts = [(t0 + i, None if i in (0, 500, 3999) else 30.0 + i % 9)
+           for i in range(4000)]
+    out = svc._downsample(pts, cap=200)
+    assert out[0][1] is None and any(v is None for _t, v in out)
+    assert [p[0] for p in out] == sorted(p[0] for p in out)
+    small = [(1, 1.0), (2, 2.0)]
+    assert svc._downsample(small, cap=900) == small
 
 
 def test_report_html_size_stays_bounded_for_long_sessions():

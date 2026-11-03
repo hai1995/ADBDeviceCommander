@@ -1401,7 +1401,11 @@ def _downsample(pts, cap=_ECHART_MAX_POINTS):
         if good:
             picks.append(seg[min(good, key=lambda x: x[1])[0]])
             picks.append(seg[max(good, key=lambda x: x[1])[0]])
-        for p in picks:
+        # picks 是 [首, 末, 极小, 极大] 这个收集顺序，直接追加就会打乱时间轴：
+        # ECharts 的 time 轴按数组顺序连线（不会替你排序），乱序会让曲线在
+        # 每个桶里来回折返 —— 图能画出来、看上去还有起伏，但形状是错的，
+        # 而且 lttb 采样式子也失效。桶内先按时间排一次，桶与桶之间天然递增。
+        for p in sorted(picks, key=lambda q: q[0]):
             if not out or out[-1] != p:
                 out.append(p)
     if out and out[0] != pts[0]:
@@ -1563,11 +1567,17 @@ def _echart_compare_option(series, key, unit, cap=None, rule=None):
         }
         bad = [(t, v) for t, v in thin if _is_bad_v(v, th_val, th_dir)]
         if bad:
+            # 红点上限 400（再密就糊成一片）。超了必须**按时间均匀抽样**，
+            # 不能取前 400 个 —— 超标往往集中在前半段，直接切片会让后半段
+            # 一个红点都没有，看图的人会得出「后半段全达标」这个错误结论。
+            if len(bad) > 400:
+                stride = len(bad) / 400.0
+                bad = [bad[int(i * stride)] for i in range(400)]
             s["markPoint"] = {
                 "silent": True, "symbolSize": 3.4,
                 "itemStyle": {"color": "#ff5f6b"},
                 "label": {"show": False},
-                "data": [{"coord": [t, v]} for t, v in bad[:400]],
+                "data": [{"coord": [t, v]} for t, v in bad],
             }
         out.append(s)
     if th_val is not None and out:
