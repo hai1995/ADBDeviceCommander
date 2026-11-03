@@ -637,7 +637,7 @@ def test_screenshot_filename_safe_for_wireless_serial(monkeypatch, tmp_path):
         returncode = 0
 
         def communicate(self, timeout=None):
-            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 64, b""
+            return _tiny_png(), b""
 
     monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
     path, err = ss.ScreenCapturer.screenshot(
@@ -662,7 +662,7 @@ def test_screenshot_filename_unique_within_same_second(monkeypatch, tmp_path):
         returncode = 0
 
         def communicate(self, timeout=None):
-            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 64, b""
+            return _tiny_png(), b""
 
     monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
     # 固定时间戳：两次调用必定落在同一秒，才能暴露「同名互相覆盖」
@@ -833,6 +833,31 @@ def test_screenshot_rejects_non_image_payload(monkeypatch, tmp_path):
     assert path is None
     assert err and "无法识别" in err, err
     assert list(tmp_path.iterdir()) == [], "认不出就别落盘，免得留一堆坏图"
+
+
+def test_screenshot_rejects_png_with_broken_ihdr(monkeypatch, tmp_path):
+    """PNG 头被污染时当场拒绝，不留一张「分辨率不对」的坏图。
+
+    回归：个别 Windows adb / 车机把 0x0A 换成 0x0D 0x0A —— 签名照样认得出、
+    normalize 也照旧返回，但 IHDR 的宽高与 CRC 已被改坏。落盘后看图软件只报
+    「分辨率无效」，用户完全不知道是传输环节的问题，容易怀疑成「没 root」。
+    """
+    png = bytearray(_tiny_png())
+    png[16:20] = b"\x00\x00\x00\x00"          # 宽改成 0（同时破坏 IHDR 的 CRC）
+
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return bytes(png), b""
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: _Proc())
+    path, err = ss.ScreenCapturer.screenshot("adb", "A1", str(tmp_path))
+
+    assert path is None
+    assert err and "PNG" in err and "损坏" in err, err
+    assert "adb pull" in err, "要给出车机上更可靠的取图方式"
+    assert list(tmp_path.iterdir()) == [], "坏图不许落盘"
 
 
 def test_screenshot_uses_jpg_ext_when_device_returns_jpeg(monkeypatch, tmp_path):

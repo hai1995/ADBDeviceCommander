@@ -178,3 +178,36 @@ def test_normalize_still_handles_bmp_after_junk():
     assert kind == "bmp"
     assert clean.startswith(b"BM")
     assert "bmp" in note
+
+
+# ---------------------------------------------------------------------------
+# png_size —— 头部完整性（宽高 + CRC）
+# ---------------------------------------------------------------------------
+def test_png_size_reads_dimensions():
+    assert ib.png_size(_png_bytes(1080, 2400)) == (1080, 2400)
+
+
+def test_png_size_rejects_corrupted_ihdr():
+    """宽高被改坏 / CRC 不符一律 None —— 这类字节落盘就是「分辨率不对」的坏图。"""
+    good = _png_bytes(100, 200)
+
+    bad_w = bytearray(good)
+    bad_w[16:20] = struct.pack(">I", 0)          # 宽 = 0（CRC 随之不符）
+    assert ib.png_size(bytes(bad_w)) is None
+
+    bad_crc = bytearray(good)
+    bad_crc[29:33] = b"\x00\x00\x00\x00"         # 单独破坏 IHDR 的 CRC
+    assert ib.png_size(bytes(bad_crc)) is None
+
+
+def test_png_size_accepts_4k_and_rejects_absurd_edge():
+    assert ib.png_size(_png_bytes(3840, 2160)) == (3840, 2160)
+    # 边长超过 16384 只可能是头部算出来的垃圾值
+    assert ib.png_size(_png_bytes(20000, 1)) is None
+
+
+def test_png_size_rejects_non_png_and_truncated_head():
+    assert ib.png_size(b"") is None
+    assert ib.png_size(b"not a png at all") is None
+    assert ib.png_size(_png_bytes()[:20]) is None    # 截在 IHDR 中间
+

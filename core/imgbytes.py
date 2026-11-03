@@ -24,6 +24,7 @@ core.imgbytes —— 图片字节的「认得出、裁得干净」（零依赖�
 * `detect(data)`      —— 只看开头，返回 "png" / "jpg" / "gif" / "bmp" / "webp" / None
 * `locate(data)`      —— 容忍前导垃圾，返回 (kind, offset)；找不到返回 (None, -1)
 * `normalize(data)`   —— 返回 (clean_bytes, kind, note)；认不出时 clean_bytes 为空
+* `png_size(data)`    —— 解析 IHDR 返回 (宽, 高)；头损坏 / 校验和不符返回 None
 
 `note` 是给状态栏/日志看的短句（含头部十六进制），不面向终端用户堆术语。
 """
@@ -31,6 +32,7 @@ core.imgbytes —— 图片字节的「认得出、裁得干净」（零依赖�
 from __future__ import annotations
 
 import struct
+import zlib
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -125,6 +127,39 @@ def locate(data):
             break
         i = data.find(b"RIFF", i + 1, _HEAD_SCAN)
     return best
+
+
+# PNG 宽高的合理上界：车机 4K 竖屏也就 2160×3840，留足余量即可。
+# 超过它只可能是头部字节被改坏后算出来的垃圾，不是真实的屏。
+_PNG_MAX_EDGE = 16384
+
+
+def png_size(data):
+    """解析 PNG 的 IHDR，返回 (宽, 高)；结构不对或校验和不符返回 None。
+
+    为什么单独做这件事：`screencap` 的字节经 `adb exec-out` 回来时，个别
+    Windows adb 或车机侧会把 0x0A 换成 0x0D 0x0A。PNG 签名里本来就有
+    `\\r\\n`，开头照样认得出来，`normalize` 也照旧返回 —— 但 IHDR 里的宽高
+    和 CRC 已经被改掉，落盘就是一张「分辨率不对」的坏图，看图软件 / 剪贴板
+    只会报一句与真相无关的错。
+
+    只校验头 33 字节（长度 + 类型 + 13 字节数据 + CRC），不解压 IDAT：
+    足以拦住头部污染，又不会让大图校验变慢。
+    """
+    if not data or len(data) < 33 or not data.startswith(PNG_MAGIC):
+        return None
+    if data[12:16] != b"IHDR":
+        return None
+    if struct.unpack(">I", data[8:12])[0] != 13:   # IHDR 数据段恒为 13 字节
+        return None
+    body = data[16:29]
+    crc = struct.unpack(">I", data[29:33])[0]
+    if zlib.crc32(b"IHDR" + body) & 0xFFFFFFFF != crc:
+        return None
+    w, h = struct.unpack(">II", body[:8])
+    if not (0 < w <= _PNG_MAX_EDGE and 0 < h <= _PNG_MAX_EDGE):
+        return None
+    return (w, h)
 
 
 def _trim_png(data):

@@ -24,6 +24,7 @@
 - **第二十六轮**（本文末「第二十六轮」一节）：「停止 / 取消」更名为**「停止录制 / 取消录制」**；「取消录制」的二次确认从 `window.confirm` 换成**应用内自绘弹窗**（pywebview 各版本对 `confirm` 支持不一致，返回 undefined 时 `!confirm(...)` 恒真 —— 点了没反应、什么也不删，是最难自查的静默失败）；四个出口（否 / × / 遮罩 / Esc）全等于「否」，默认焦点在「否」。
 - **第二十七轮**（本文末「第二十七轮」一节）：性能报告的七张曲线从自绘 SVG 换成**内联 ECharts**（十字准星 + 读数框 tooltip / 点图例隐藏 / 滚轮缩放）；**库内联进报告**以保断网双击可用（不走 CDN，断网空白属最坏静默失败）；曲线数据抽稀使 8000 点报告仍 < 1.2MB；缺库自动回退 SVG + 明示横幅。
 - **第二十八轮**（本文末「第二十八轮」一节）：主动复查上一轮 —— 修**抽稀后时间戳乱序**（ECharts time 轴按数组顺序连线，乱序让曲线在每个桶里折返：图能出、形状错）；修**对比图超标红点超 400 时直接切片**（长会话后半段一个红点都没有，读者会得出「后半段全达标」的假结论）；**ECharts 初始化失败改为明示原因**（原来只剩 7 个空白块）；补 3 条回归用例。
+- **第二十九轮**（本文末「第二十九轮」一节）：车机截图报「分辨率有问题」——**不是没 root**（`screencap` 普通 shell 权限即可）。真因是 `adb exec-out` 的 PNG 字节在个别 Windows adb / 车机上被换行转换，签名还认得、IHDR 的宽高与 CRC 已坏，旧实现照旧落盘成坏图。现在落盘前校验 PNG 头，坏头当场拒绝并给出 `adb shell screencap -p` + `adb pull` 的替代路径。
 
 ---
 
@@ -2830,3 +2831,73 @@ resolve(true)**，其余一切出口都是 `false`。
 - 抽稀修复后 8000 点报告 **1.00MB**（< 1.2MB 守卫），时间轴严格升序，尖峰保留。
 - 无头 Chromium：正常报告仍是 **7 个 canvas**；把内联库脚本删掉再打开，**7 个容器
   全部**显示「图表初始化失败：ECharts 未加载…」，不再是空白块。
+
+# 第二十九轮：截图落盘前校验 PNG 头（「分辨率不对」的真因不是没 root）
+
+## 现象
+
+车机上截图失败，提示与「图片分辨率」有关。第一反应容易归因到「车机没有 root」，
+但这条路走不通：
+
+- `screencap` 是 Android 的系统命令，**普通 shell 用户就能执行**，截图本身不需要 root；
+- 真正受 root 影响的是 `screenrecord` 的部分参数、`/data` 下受限目录的写入等，
+  截屏不在其列；
+- 若真是权限问题，adb 会在 stderr 明确回 `Permission denied`，程序原样显示，
+  不会冒出「分辨率」字样。
+
+## 真因：`exec-out` 的字节被换行转换
+
+`screencap -p` 输出 PNG 二进制，经 `adb exec-out` 传回。个别 Windows adb 版本
+（以及少数车机侧的 adb 实现）会在这条通道上做 **LF → CRLF** 转换，把数据里的
+`0x0A` 改成 `0x0D 0x0A`。
+
+后果很隐蔽：
+
+* PNG 签名 `\x89PNG\r\n\x1a\n` 本身带 `\r\n`，开头照样认得出来；
+* `normalize()` 只切前导垃圾与尾部 IEND，看不出中间被插入的字节；
+* 但 IHDR 里的宽高字段 / CRC 已经被改掉 —— 落盘是一张**打不开或尺寸荒谬**的图，
+  看图软件 / 剪贴板只会报一句「分辨率无效」「参数无效」，与真相（传输被改写）无关。
+
+旧实现到这里就结束了：文件写下去，界面报「已保存截图」。用户打开才发现是坏图 ——
+典型的「不报错但结果错」。
+
+## 修复
+
+`core/imgbytes.py` 新增 `png_size(data)`：解析 IHDR 的 33 字节（长度 + 类型 +
+13 字节数据 + CRC），返回 `(宽, 高)`；结构不对、CRC 不符、边长不在 0~16384 内
+一律返回 None。只验头、不解压 IDAT，大图也不变慢。
+
+`ScreenCapturer.screenshot` 在 `normalize()` 之后、落盘之前调用它：
+
+* 头正常 → 照旧保存；
+* 头坏了 → **不落盘**（与「认不出格式就别写坏图」同一原则），错误信息写明
+  「设备返回的 PNG 头已损坏（共 N 字节，头部 …）」，并直接给出车机上更可靠的替代：
+
+  ```
+  adb shell screencap -p /sdcard/s.png
+  adb pull /sdcard/s.png
+  ```
+
+  这条路径不经过 stdout 的文本转换，是车机上取原图的标准做法。
+
+## 回归测试
+
+| 用例 | 锁死的行为 |
+| --- | --- |
+| `test_png_size_reads_dimensions` | 正常 PNG → (1080, 2400) |
+| `test_png_size_rejects_corrupted_ihdr` | 宽改成 0 / CRC 被改 → None |
+| `test_png_size_accepts_4k_and_rejects_absurd_edge` | 3840×2160 放行；20000 拒绝 |
+| `test_png_size_rejects_non_png_and_truncated_head` | 非 PNG、截在 IHDR 中间 → None |
+| `test_screenshot_rejects_png_with_broken_ihdr` | 坏头不落盘、错误里带 `adb pull` |
+
+回退验证：把校验条件改成 `if False:`，坏图立刻被写入磁盘（`path` 非 None），
+新用例失败。
+
+顺带修正两条旧用例的 fixture：文件名安全 / 同秒唯一这两条原本用「PNG 签名 + 64 个
+0」的假图，只关心能不能落盘。换成真实的 1×1 PNG 后，它们仍然只测文件名，不再
+依赖「坏数据也能通过」这个偶然前提。
+
+## 验证
+
+- `pytest tests/test_core_imgbytes.py tests/test_backend_screen.py`：**69 passed**。
+- 全量 `pytest` 与 `pyflakes` 见提交说明。

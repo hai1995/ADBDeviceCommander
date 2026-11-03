@@ -131,6 +131,16 @@ class ScreenCapturer:
             data, kind, note = imgbytes.normalize(data)
             if not data:
                 return None, "设备返回的图像无法识别（%s）" % note
+            if kind == "png" and imgbytes.png_size(data) is None:
+                # 头部校验不过的 PNG 就算落盘也打不开 —— 看图软件只会说一句
+                # 「分辨率 / 格式有问题」，用户完全不知道是传输环节出了事。
+                # 与其留一张坏图，不如当场说清原因，并给出车机上更可靠的
+                # 那条路：设备端先落盘，再用 binary-safe 的 pull 取回。
+                return None, (
+                    "设备返回的 PNG 头已损坏（共 %d 字节，头部 %s）——"
+                    "通常是 adb 传输把换行转换掉了或截图被截断；"
+                    "改用 `adb shell screencap -p /sdcard/s.png` 再 `adb pull` 可重取"
+                    % (len(data), " ".join("%02x" % b for b in data[:16])))
             if kind and kind != "png":
                 # 极少见：screencap 输出了 JPEG 等其它格式，扩展名跟着改，
                 # 免得用户双击时被看图软件按 PNG 解析报错。
