@@ -14,8 +14,12 @@ class CommandMixin:
 
     DEFAULT_CMD_TIMEOUT = 120
 
-    def run_command(self, cmd_id):
-        """下发一条快捷指令（可多设备循环，线程内执行）。"""
+    def run_command(self, cmd_id, ws=None):
+        """下发一条快捷指令（可多设备循环，线程内执行）。
+
+        ws：指令台工作区（子 tab）id。不同工作区各自一条会话、各自一把执行锁，
+        因此两个工作区可以真的同时在跑；省略即默认工作区（历史行为不变）。
+        """
         if self.state.shutting_down:
             return {"ok": False}
         cmd_obj = next(
@@ -23,12 +27,15 @@ class CommandMixin:
         if cmd_obj is None:
             self._push_status("err", "⚠ 未找到命令：%s" % cmd_id)
             return {"ok": False}
-        if self.session is None:
+        # 只判断「默认工作区的会话是否就绪」，不在这里**创建**会话：非默认工作区
+        # 的会话是懒创建的，在本次调用里建会阻塞 UI 线程 0.5~1.5 秒（powershell
+        # 冷启），表现为「点完命令界面卡一下」。真正的创建放在后台 worker 里。
+        if self._ws_id(ws) == self.WS_DEFAULT and self.session is None:
             self._push_status("err", "⚠ 会话尚未初始化，请稍后重试。")
             return {"ok": False}
         # 命中一次计一次使用频次（驱动「常用命令靠前」排序）
         self._bump_click(cmd_id)
-        self.workers.spawn(None, self._execute, cmd_obj)
+        self.workers.spawn(None, self._execute, cmd_obj, self._ws_id(ws))
         return {"ok": True}
 
     def save_commands(self, commands):
@@ -297,85 +304,102 @@ class CommandMixin:
             out.append(dict(d))
         return {"ok": True, "commands": out}
 
-    def run_custom(self, text):
+    def run_custom(self, text, ws=None):
         """执行自定义命令：与快捷指令同源——按受控设备逐台循环并通过
         adb_inject.transform 自动注入 `-s <serial>`，彻底告别
         "more than one device/emulator"。纯 PC 脚本（不含 adb/scrcpy）
-        走单次执行旁路。"""
+        走单次执行旁路。
+
+        ws：指令台工作区（子 tab）id，省略即默认工作区。
+        """
         text = (text or "").strip()
         if not text:
             return {"ok": False}
-        if self.session is None:
+        if self.state.shutting_down:
+            return {"ok": False}
+        if self._ws_id(ws) == self.WS_DEFAULT and self.session is None:
             self._push_status("err", "⚠ 会话尚未初始化，请稍后重试。")
             return {"ok": False}
         # 复用 _execute 的「按设备展开 + transform + shell 合并」完整链路
         self.workers.spawn(None, self._execute, {
             "id": "__custom__", "name": "自定义命令", "commands": [{"command": text}],
-        })
+        }, self._ws_id(ws))
         return {"ok": True}
 
-    def stop_run(self):
-        """终止当前命令（等价 Tk 版 ctrl+c / 停止）。"""
-        if self.session is not None:
-            self._push_status("err", "⏹ 已发送停止信号，正在终止当前命令…")
+    def stop_run(self, ws=None):
+        """终止**指定工作区**的当前命令（等价 Tk 版 ctrl+c / 停止）。
+
+        ws 是关键：工作区 1 正在跑长命令时，用户在工作区 2 点「停止」只应停掉
+        工作区 2 自己的那条 —— 一律停 self.session 会顺手掐掉另一个工作区的活。
+        """
+        wid = self._ws_id(ws)
+        sess = self._ws_session(wid, create=False)
+        if sess is not None:
+            self._ws_status("err", "⏹ 已发送停止信号，正在终止当前命令…")
             try:
-                self.session.kill()
+                sess.kill()
             except Exception:
                 pass
         else:
-            self._push_status("warn", "当前没有正在运行的命令。")
-        self._sync_stop_state(interactive=False)
+            self._ws_status("warn", "当前没有正在运行的命令。")
+        self._sync_stop_state(interactive=False, ws=wid)
         return {"ok": True}
 
-    def _execute(self, cmd_obj):
+    def _execute(self, cmd_obj, ws=None):
         """执行一条快捷指令：按需逐设备循环 + 每条命令带 delay。
 
-        用户命令「单飞」：同一时刻只允许一条命令真正执行（_user_lock 排队），
-        后续命令等上一条结束后再跑——避免连点多条时输出在指令台交错混淆；
-        也保证 stop_run 的语义是「停掉当前这一条」。shutdown 后排队任务直接
+        用户命令「单飞」：**同一工作区内**同一时刻只允许一条命令真正执行
+        （每个工作区一把 _ws_lock，排队），后续命令等上一条结束后再跑——避免
+        连点多条时输出交错混淆；也保证 stop_run 的语义是「停掉当前这一条」。
+        不同工作区之间互不排队（各自独立的会话与锁）。shutdown 后排队任务直接
         放弃，不再往已终止的会话里写命令。
 
         整体兜异常：命令下发链路（transform / 会话 / 设备快照）任何未预期错误
         都只转化为一条错误状态，绝不让 worker 线程裸抛到 threading.excepthook
         （那只会落一份崩溃日志，用户在界面上看不到任何反馈）。
         """
-        with self._user_lock:
-            if self.state.shutting_down:
-                return
-            busy, changed = self.state.begin_run()
-            if changed:
-                self.bus.push("stop_state", {"running": busy})
-            try:
-                try:
-                    entries = cmd_obj.get("commands", [])
-                    loop = needs_device(cmd_obj)
-                    name = cmd_obj.get("name", "命令")
-                    if loop:
-                        serials = self.devices.selected_serials()
-                        if not serials:
-                            self._push_status("err", self._no_device_hint(name))
-                            return
-                        for serial in serials:
-                            self._push_status("info", "──── 设备: %s ────" % serial)
-                            if not self._run_entries(entries, serial):
-                                break
-                    else:
-                        self._push_status(
-                            "info", "──── 执行「%s」（无需指定设备）────" % name)
-                        self._run_entries(entries, None)
-                except Exception as ex:
-                    self._push_status(
-                        "err", "⚠ 命令执行出现异常：%s" % ex)
-            finally:
-                # 交互式 adb shell（`adb shell` 直通）结束后会话仍是交互态：此时
-                # 「停止」按钮必须继续亮着，用户才能把这条交互会话 kill 掉。
-                # AppState 的 busy 本就包含交互态，但没人通知它——这里在 end_run
-                # 之前按会话实际状态同步一次（交互态下 busy 不变，不会重复广播；
-                # 非交互命令照常由 end_run 熄灭按钮）。
-                self._sync_stop_state()
-                busy, changed = self.state.end_run()
+        wid = self._ws_set_cur(ws)      # 线程局部：本线程内所有播报归到该工作区
+        sess = self._ws_session(wid)
+        try:
+            with self._ws_lock(wid):
+                if self.state.shutting_down or sess is None:
+                    return
+                busy, changed = self._ws_begin(wid)
                 if changed:
                     self.bus.push("stop_state", {"running": busy})
+                try:
+                    try:
+                        entries = cmd_obj.get("commands", [])
+                        loop = needs_device(cmd_obj)
+                        name = cmd_obj.get("name", "命令")
+                        if loop:
+                            serials = self.devices.selected_serials()
+                            if not serials:
+                                self._ws_status("err", self._no_device_hint(name))
+                                return
+                            for serial in serials:
+                                self._ws_status("info", "──── 设备: %s ────" % serial)
+                                if not self._run_entries(entries, serial):
+                                    break
+                        else:
+                            self._ws_status(
+                                "info", "──── 执行「%s」（无需指定设备）────" % name)
+                            self._run_entries(entries, None)
+                    except Exception as ex:
+                        self._ws_status(
+                            "err", "⚠ 命令执行出现异常：%s" % ex)
+                finally:
+                    # 交互式 adb shell（`adb shell` 直通）结束后会话仍是交互态：此时
+                    # 「停止」按钮必须继续亮着，用户才能把这条交互会话 kill 掉。
+                    # AppState 的 busy 本就包含交互态，但没人通知它——这里在 end_run
+                    # 之前按会话实际状态同步一次（交互态下 busy 不变，不会重复广播；
+                    # 非交互命令照常由 end_run 熄灭按钮）。
+                    self._sync_stop_state(ws=wid)
+                    busy, changed = self._ws_end(wid)
+                    if changed:
+                        self.bus.push("stop_state", {"running": busy})
+        finally:
+            self._ws_clear_cur()
 
     def _no_device_hint(self, name):
         """「命令需要设备，却一台都不可下发」时的提示。
@@ -399,18 +423,16 @@ class CommandMixin:
     def _run_entries(self, entries, serial):
         """逐条下发命令；adb shell 交互 / 合并 / delay 与 legacy 语义一致。
         返回 False 表示执行被中断（超时/停止），上层据此停止后续设备。"""
-        # shutdown() 会把 self.session 置空（杀完再清引用），而本方法跑在后台
-        # worker 里：不检查就会踩 None 抛 AttributeError，被 _execute 的兜底
-        # 翻译成一条「命令执行出现异常：'NoneType' object has no attribute …」——
-        # 关窗瞬间用户看到一条毫无意义的报错。这里静默放弃即可。
-        if self.session is None:
-            return False
-        # 取局部引用：shutdown() 会把 self.session 置空（kill 完再清引用），而本方法
-        # 跑在后台 worker 里。用 self.session 的话，关窗恰好发生在这条命令序列中途
-        # 时，下一条命令会踩到 None 抛 AttributeError，被 _execute 翻译成一句
+        # 取局部引用：shutdown() 会把会话置空（kill 完再清引用），而本方法跑在
+        # 后台 worker 里。用会话自身的话，关窗恰好发生在这条命令序列中途时，
+        # 下一条命令会踩到 None 抛 AttributeError，被 _execute 翻译成一句
         # 「命令执行出现异常：'NoneType' object has no attribute 'run'」—— 关窗
-        # 瞬间用户看到一条完全没有意义的报错。
-        sess = self.session
+        # 瞬间用户看到一条完全没有意义的报错。这里静默放弃即可。
+        # 会话按**当前线程所属工作区**取（见 _ws_cur）：不同工作区各跑各的，
+        # 谁也不会把命令塞进别人的 shell。
+        sess = self._ws_session(self._ws_cur(), create=False)
+        if sess is None:
+            return False
         raw_cmds = [e.get("command", "") for e in entries]
         if serial:
             raw_cmds = [transform(c, serial) for c in raw_cmds]
@@ -466,7 +488,7 @@ class CommandMixin:
                 # 带上会话给的失败原因：只写「执行中断」时，用户分不清是自己点了
                 # 停止、命令超时，还是 powershell 会话被安全软件干掉后静默重建了。
                 reason = (getattr(sess, "last_error", "") or "").strip()
-                self._push_status("info", "✗ 执行中断" + ("：%s" % reason if reason else ""))
+                self._ws_status("info", "✗ 执行中断" + ("：%s" % reason if reason else ""))
                 return False
             delay = 0
             if not interactive and 0 <= end_idx < len(entries):
@@ -476,7 +498,7 @@ class CommandMixin:
                 # run(timeout=10) 会被误判超时杀掉整个会话，且占用 shell 影响
                 # 并发命令。改为 Python 侧可打断 sleep（不占会话、可被停止）。
                 self._interruptible_sleep(delay / 1000.0)
-        self._push_status("info", "✓ 完成")
+        self._ws_status("info", "✓ 完成")
         return True
 
     def _cmd_timeout(self):
@@ -520,14 +542,14 @@ class CommandMixin:
         # 这时放行指令并说明，是否切换交给用户判断；「有进行中任务则拦」的
         # 保护照常生效（状态未知不代表可以打断录屏）。
         if rooted is None:
-            self._push_status(
+            self._ws_status(
                 "warn",
                 "⚠ 无法确认设备 %s 当前是否 root（adb 未返回 id/whoami 输出），"
                 "已按指令下发 `%s`；若它已在目标状态，这次切换只会重启 adbd。"
                 % (serial, cmd.strip()))
         # 已在目标状态：切换是零收益的无谓重启
         elif (intent == "root") == bool(rooted):
-            self._push_status(
+            self._ws_status(
                 "info",
                 "ℹ 设备 %s 已%s，跳过 `%s`（重复切换只会重启 adbd，"
                 "可能中断进行中的录屏 / 抓取）"
@@ -536,7 +558,7 @@ class CommandMixin:
         # 状态确实要变：该设备有进行中的任务则跳过（任务会随 adbd 重启全断）
         busy = self._device_busy_tasks(serial)
         if busy:
-            self._push_toast(
+            self._ws_toast(
                 "warn",
                 "⚠ 设备 %s 正在%s：`%s` 会重启 adbd 并中断这些任务"
                 "（录屏视频将不完整、日志抓取会断）。已跳过执行——"
@@ -567,7 +589,8 @@ class CommandMixin:
         以 50ms 步长轮询而非一次性 sleep：kill 会让 ShellSession.aborted 置位，
         延时中的批处理能及时感知停止，关闭时也无需等满整个 delay。
         """
-        sess = self.session
+        # 按当前线程所属工作区取会话（不创建：延时期间不该顺手拉起一个 shell）
+        sess = self._ws_session(self._ws_cur(), create=False)
         deadline = time.time() + seconds
         while time.time() < deadline:
             if self.state.shutting_down:

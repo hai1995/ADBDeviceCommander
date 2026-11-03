@@ -246,8 +246,18 @@ class AutoRefreshMixin:
             except Exception:
                 pass
 
-    def clear_output(self):
-        self.bus.push("console", {"kind": "clear"})
+    def clear_output(self, ws=None):
+        """清空**指定工作区**的指令输出。
+
+        多工作区下「清空」必须带上 ws：不带的话，用户在工作区 2 点清空会把
+        工作区 1 里正要回看的输出一起抹掉 —— 而那块面板此刻可能根本没显示在
+        屏幕上，他连「被清了」都不知道。
+        """
+        payload = {"kind": "clear"}
+        wid = self._ws_id(ws)
+        if wid != self.WS_DEFAULT:
+            payload["ws"] = wid
+        self.bus.push("console", payload)
         return {"ok": True}
 
     def clear_status(self):

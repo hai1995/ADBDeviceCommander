@@ -62,6 +62,21 @@ class WebApiBase:
         self._mic = None                      # 录制中的 MicRecorder 实例
         self._rec_session = {}                # 录屏会话：serial -> {devaudio, ...}
         self._user_lock = threading.Lock()    # 用户命令单飞锁（一次只跑一条）
+        # ---- 指令台多工作区（子 tab）----
+        # 每个工作区一套**独立的持久会话 + 执行锁 + 停止按钮态**：用户在工作区 2
+        # 里挂着一条 10 分钟的 logcat 时，工作区 1 仍能立刻执行别的命令，两边的
+        # 输出各进各的面板。只做「多个输出面板」而不分会话是不够的 —— 那样工作区
+        # 2 点「执行」只是排到工作区 1 的命令后面等着，面板半天没有一行输出，
+        # 用户会以为命令没发出去。
+        # 默认工作区（W1）沿用历史字段 self.session / _user_lock / state.busy，
+        # 故单工作区路径（含全部既有测试与全部既有事件文案）零变化。
+        self._ws_sessions = {}       # ws_id -> ShellSession（不含 W1，懒创建）
+        self._ws_locks = {}          # ws_id -> Lock（不含 W1）
+        self._ws_busy = {}           # ws_id -> bool（不含 W1）：是否有命令在跑
+        self._ws_stop_flag = {}      # ws_id -> bool（不含 W1）：上次广播的停止按钮态
+        self._ws_names = {}          # ws_id -> 用户可见名称（播报用）
+        self._ws_guard = threading.RLock()  # 保护上面几个 dict 的建/删（见 _ws_session）
+        self._ws_tls = threading.local()   # 本线程正在为哪个工作区执行
         self._rec_lock = threading.Lock()     # 录屏/录音会话独占锁（start/stop/shutdown）
         # 文件下载序列号：批量下载同一设备的多个文件时，每个文件需要独立后台线程，
         # 故 file_download 用此计数器构造唯一 worker key，避免被 Workers 按
@@ -221,6 +236,20 @@ class WebApiBase:
                 sess.kill()
             except Exception:
                 pass
+        # 多工作区的会话同样要收：每个背后都是一条常驻的 powershell / adb 子进程，
+        # 漏掉就会在关窗后残留，用户下次开会看到一堆来路不明的进程。
+        with self._ws_guard:
+            extra = list(self._ws_sessions.values())
+            self._ws_sessions.clear()
+            self._ws_locks.clear()
+            self._ws_busy.clear()
+            self._ws_stop_flag.clear()
+            self._ws_names.clear()
+        for s in extra:
+            try:
+                s.kill()
+            except Exception:
+                pass
         # 工具类后台任务一并收尾
         try:
             self.logcat_monitor.stop_all()
@@ -302,9 +331,173 @@ class WebApiBase:
     def take_events(self):
         return self.bus.take(max_n=2000, max_lines=2000)
 
-    def _on_session_output(self, text):
-        """ShellSession 标准输出回调 -> 指令台 out 事件。"""
-        self.bus.push("console", {"kind": "out", "text": text})
+    # ---------------- 指令台多工作区（子 tab） ----------------
+    # 一句话说清这个功能的边界：**会话隔离**，不是「多个输出面板」。同一时刻
+    # 每个工作区各有一条自己的 adb/powershell 会话，因此两边可以真的同时在跑；
+    # 只做面板的话，工作区 2 点「执行」只是排在别人的命令后面等着，面板半天
+    # 没有一行输出 —— 用户会以为命令没发出去（这正是最要避免的静默误导）。
+    WS_DEFAULT = "w1"      # 默认工作区（历史唯一的那一个）
+    WS_MAX = 8             # 工作区数量上限（后端兜底；界面另有一道）
+
+    def _ws_id(self, ws=None):
+        """工作区 id 归一化：空 / 非法一律回落到默认工作区。
+
+        id 由前端生成（w1、w2…）。它既会进事件载荷又当字典键用，顺手截断
+        比在下游各处防御便宜。
+        """
+        if ws is None:
+            return self.WS_DEFAULT
+        wid = str(ws).strip()[:16]
+        return wid or self.WS_DEFAULT
+
+    def _ws_cur(self):
+        """当前线程正在为哪个工作区执行命令（线程局部；无则默认工作区）。
+
+        `_push_console` / `_push_cmd` / `_sync_stop_state` 都靠它定位：命令执行
+        链路上几十处播报因此不必逐个加参数，也就不会漏掉某处而把工作区 2 的
+        输出写进工作区 1。
+        """
+        return getattr(self._ws_tls, "ws", None) or self.WS_DEFAULT
+
+    def _ws_set_cur(self, ws):
+        wid = self._ws_id(ws)
+        self._ws_tls.ws = wid
+        return wid
+
+    def _ws_clear_cur(self):
+        self._ws_tls.ws = None
+
+    def _ws_label(self, ws=None):
+        """状态栏前缀：默认工作区返回空串（单工作区时代文案完全不变）。
+
+        顶栏跑马灯是**全局唯一**的流水账：两个工作区同时跑命令时，「✓ 完成」
+        「──── 设备: A1 ────」会混成一片，用户看不出是谁的 —— 而「哪条命令
+        跑完了」正是他此刻要判断的事。
+        """
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return ""
+        return self._ws_names.get(wid) or wid
+
+    def _ws_session(self, ws=None, create=True):
+        """取某工作区的持久会话；不存在时按需创建（首次执行才拉起 shell）。"""
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return self.session
+        sess = self._ws_sessions.get(wid)
+        if sess is None and create and not self.state.shutting_down:
+            # 持锁建：用户连点两下「执行」时，两条线程会同时走到这里，不加锁
+            # 就各建一条 powershell，后写的那条把前一条从字典里挤掉 —— 泄漏一个
+            # 常驻子进程，且它的输出还在往这个工作区推（关闭工作区也杀不掉它）。
+            with self._ws_guard:
+                sess = self._ws_sessions.get(wid)
+                if sess is None and not self.state.shutting_down:
+                    # 回调里绑定建会话时的 wid：读线程不是执行线程，线程局部取不到
+                    sess = self._session_factory(
+                        output_callback=lambda text, w=wid:
+                            self._on_session_output(text, w))
+                    self._ws_sessions[wid] = sess
+        return sess
+
+    def _ws_lock(self, ws=None):
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return self._user_lock
+        lk = self._ws_locks.get(wid)
+        if lk is None:
+            lk = threading.Lock()
+            self._ws_locks[wid] = lk
+        return lk
+
+    def _ws_interactive(self, wid):
+        return bool(getattr(self._ws_sessions.get(wid), "in_interactive_shell", False))
+
+    def _ws_publish_stop(self, wid):
+        """广播某工作区的「停止」按钮态（仅在翻转时推一条）。
+
+        非默认工作区的 busy = 有命令在跑 or 处于交互式子 shell：后者下命令已经
+        跑完了，但用户必须还能点「停止」把那个子 shell 杀掉，否则会话永久卡在
+        直通态。
+        """
+        busy = bool(self._ws_busy.get(wid)) or self._ws_interactive(wid)
+        if busy != self._ws_stop_flag.get(wid, False):
+            self._ws_stop_flag[wid] = busy
+            self.bus.push("stop_state", {"running": busy, "ws": wid})
+        return busy
+
+    def _ws_begin(self, ws=None):
+        """工作区开始执行一条命令。返回 (busy, changed)。
+
+        非默认工作区返回 changed=False：广播已在本方法内完成，调用方别再推一遍
+        （重复推同值事件只会让前端多做一次无意义的按钮态刷新）。
+        """
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return self.state.begin_run()
+        self._ws_busy[wid] = True
+        return self._ws_publish_stop(wid), False
+
+    def _ws_end(self, ws=None):
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return self.state.end_run()
+        self._ws_busy[wid] = False
+        return self._ws_publish_stop(wid), False
+
+    def ws_open(self, ws, name=""):
+        """登记一个工作区（前端新建子 tab / 改名时调用）。
+
+        只登记名字与上限校验，**不预建会话**：开 8 个 tab 就拉起 8 个 powershell
+        是纯粹的浪费，多数工作区开出来只是摆着。会话在第一次真正执行时才建。
+        """
+        if self.state.shutting_down:
+            return {"ok": False, "reason": "shutting_down"}
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return {"ok": True, "ws": wid, "name": self._ws_names.get(wid, "")}
+        if wid not in self._ws_names and len(self._ws_names) >= self.WS_MAX:
+            return {"ok": False, "reason": "工作区数量已达上限（%d 个）" % self.WS_MAX}
+        nm = str(name or "").strip()[:24]
+        if nm:
+            self._ws_names[wid] = nm
+        else:
+            self._ws_names.setdefault(wid, "")
+        return {"ok": True, "ws": wid, "name": self._ws_names.get(wid, "")}
+
+    def ws_close(self, ws):
+        """关闭工作区：杀掉它的会话并清掉全部运行态。
+
+        调用方（前端）会先 stop_run(ws) 再调本方法；即便此刻还有命令在跑，kill
+        也会让它的 run() 立刻返回 False，线程随即退出 —— 不会留下一个「界面上
+        已经没有这个 tab，却还在往里写输出」的幽灵会话。
+        """
+        wid = self._ws_id(ws)
+        if wid == self.WS_DEFAULT:
+            return {"ok": False, "reason": "默认工作区不能关闭"}
+        sess = None
+        with self._ws_guard:
+            sess = self._ws_sessions.pop(wid, None)
+            for d in (self._ws_locks, self._ws_busy, self._ws_stop_flag,
+                      self._ws_names):
+                d.pop(wid, None)
+        if sess is not None:
+            try:
+                sess.kill()
+            except Exception:
+                pass
+        return {"ok": True}
+
+    def _on_session_output(self, text, ws=None):
+        """ShellSession 标准输出回调 -> 指令台 out 事件。
+
+        ws 为默认工作区时**不带**该字段：单工作区时代的载荷一字不差，前端与
+        既有测试都按 p.ws || "w1" 兜底。
+        """
+        payload = {"kind": "out", "text": text}
+        wid = self._ws_id(ws)
+        if wid != self.WS_DEFAULT:
+            payload["ws"] = wid
+        self.bus.push("console", payload)
 
     def _push_status(self, type_, text, toast=False):
         """下发一条状态。toast=True 时前端会额外弹 toast 强提醒（高优先级提示语）。
@@ -319,23 +512,44 @@ class WebApiBase:
         """高优先级提示语：状态栏照常记录，同时强制前端弹 toast。"""
         self._push_status(type_, text, toast=True)
 
-    def _push_console(self, kind, text):
-        self.bus.push("console", {"kind": kind, "text": text})
+    def _ws_status(self, type_, text, toast=False):
+        """命令执行流程里的状态播报：多工作区时带上工作区名做前缀。
 
-    def _push_cmd(self, text):
+        只用于「某条命令跑得怎么样」这类播报。工具类（截图 / 录屏 / 抓包）的
+        状态没有归属工作区，照旧走 _push_status。
+        """
+        tag = self._ws_label(self._ws_cur())
+        self._push_status(type_, ("[%s] %s" % (tag, text)) if tag else text, toast)
+
+    def _ws_toast(self, type_, text):
+        self._ws_status(type_, text, toast=True)
+
+    def _push_console(self, kind, text, ws=None):
+        wid = self._ws_id(ws if ws is not None else self._ws_cur())
+        payload = {"kind": kind, "text": text}
+        if wid != self.WS_DEFAULT:
+            payload["ws"] = wid
+        self.bus.push("console", payload)
+
+    def _push_cmd(self, text, ws=None):
         """CMD 风格命令回显：`<当前路径> 命令`。"""
-        path = (getattr(self.session, "current_dir", None) or "").strip()
-        self._push_console("cmd", "%s> %s" % (path or "PS", text))
+        wid = self._ws_id(ws if ws is not None else self._ws_cur())
+        sess = self.session if wid == self.WS_DEFAULT else self._ws_sessions.get(wid)
+        path = (getattr(sess, "current_dir", None) or "").strip()
+        self._push_console("cmd", "%s> %s" % (path or "PS", text), ws=wid)
 
-    def _sync_stop_state(self, interactive=None):
+    def _sync_stop_state(self, interactive=None, ws=None):
         """把 busy 变化广播给前端（stop 按钮态），只在翻转时推一次。"""
-        if interactive is None:
-            interactive = bool(
-                getattr(self.session, "in_interactive_shell", False))
-        busy, changed = self.state.sync_stop(interactive)
-        if changed:
-            self.bus.push("stop_state", {"running": busy})
-        return busy
+        wid = self._ws_id(ws if ws is not None else self._ws_cur())
+        if wid == self.WS_DEFAULT:
+            if interactive is None:
+                interactive = bool(
+                    getattr(self.session, "in_interactive_shell", False))
+            busy, changed = self.state.sync_stop(interactive)
+            if changed:
+                self.bus.push("stop_state", {"running": busy})
+            return busy
+        return self._ws_publish_stop(wid)
 
     def _bump_click(self, cmd_id):
         """一次快捷指令点击 -> 内存 +1，并确保存在防抖落盘 Timer。"""
