@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """backend.perf_service —— 性能采样解析 / 采样器 / 报告生成单测（全部离线）。"""
+import json
 import os
 import re
 import threading
@@ -8,6 +9,22 @@ import time
 import pytest
 
 import backend.perf_service as svc
+
+
+# 报告内联的初始化脚本带一个唯一前缀；用它把 option 列表从 662KB 的 ECharts
+# 源码里切出来 —— 断言只看图表数据，绝不拿库源码当「命中了 markArea」。
+_OPTS_MARK = "(function(){var O="
+
+
+def _report_opts(html):
+    i = html.index(_OPTS_MARK) + len(_OPTS_MARK)
+    j = html.index(",U=", i)
+    return json.loads(html[i:j])
+
+
+def _report_markup(html):
+    """去掉内联 ECharts 脚本后的正文（断言文案 / 表格时用）。"""
+    return re.sub(r"<script>.*?</script>", "", html, flags=re.S)
 
 
 # --------------------------------------------------------------------------- #
@@ -291,20 +308,26 @@ def test_build_report_html_has_charts_and_summary():
         "serial": "A1", "model": "Pixel 7", "android": "13", "size": "1080x2340",
         "pkg": "com.foo", "started_at": "2026-10-29 07:00:00", "interval": 1.0})
     assert html.startswith("<!DOCTYPE html>")
-    assert html.count("<svg") == len(svc.METRICS)      # 每个指标一张曲线
+    # 每个指标一个 ECharts 容器 + 一份 option + 内联初始化脚本
+    assert html.count('class="echart"') == len(svc.METRICS)
+    assert html.count('"trigger":"axis"') == len(svc.METRICS)
+    assert "echarts.init" in html
     assert "Pixel 7" in html and "com.foo" in html
     assert "P95" in html and "采样明细" in html
-    assert "nan" not in html.lower()
+    # 只看正文：ECharts 源码里本就有 NaN 之类的字样，不能拿整页判
+    assert "nan" not in _report_markup(html).lower()
 
 
 def test_report_charts_have_hover_tooltips():
-    """图表要能悬停看读数：SVG 原生 <title>，离线双击打开就有提示。"""
+    """图表要能悬停看读数：ECharts axis tooltip，离线双击打开就有提示。"""
     samples = _demo_samples(8)
     html = svc.build_report_html(samples, {"serial": "A1"})
-    # 热区铺满绘图区（每张图都有一排透明 rect），提示里带时间与读数
-    assert html.count("<title>") >= len(svc.METRICS)
-    assert " 20%" in html            # cpu 首个采样值 + 单位
-    assert "4000MB" in html          # mem_used 首个采样值 + 单位
+    opts = _report_opts(html)
+    assert len(opts) == len(svc.METRICS)
+    assert all(o["tooltip"]["trigger"] == "axis" for o in opts)
+    # 首采样值确实进了曲线数据（cpu=20、mem_used=4000）
+    vals = [v for o in opts for _t, v in o["series"][0]["data"]]
+    assert 20.0 in vals and 4000.0 in vals
 
 
 def test_hover_strips_cover_full_plot_area():
@@ -590,9 +613,10 @@ def _band_samples():
 
 def test_report_chart_draws_band_for_bad_range():
     html = svc.build_report_html(_band_samples(), {"serial": "A1"})
-    assert 'fill="#ff5f6b" opacity=".12"' in html      # 色带
-    assert "stroke-dasharray" in html                  # 阈值虚线
-    assert "≥ 45 FPS" in html                          # 行尾标签（min 方向用 ≥）
+    fps = next(o for o in _report_opts(html) if o["series"][0]["name"] == "帧率")
+    assert "markArea" in fps["series"][0]              # 超标色带
+    assert "markLine" in fps["series"][0]              # 阈值虚线
+    assert fps["series"][0]["markLine"]["label"]["formatter"] == "≥ 45 FPS"
 
 
 def test_report_chart_band_only_when_below_threshold():
@@ -600,23 +624,24 @@ def test_report_chart_band_only_when_below_threshold():
     t = 1793200000
     samples = [{"t": t + i, "fps": 60.0} for i in range(5)]
     html = svc.build_report_html(samples, {"serial": "A1"})
-    assert 'opacity=".12"' not in html
+    assert not any("markArea" in o["series"][0] for o in _report_opts(html))
 
 
 def test_report_accepts_custom_thresholds():
     """用户把 FPS 卡到 58：同一份 60 FPS 数据就变成「不达标」，报告口径必须跟着变。"""
     t = 1793200000
     samples = [{"t": t + i, "fps": 56.0} for i in range(5)]
-    assert 'opacity=".12"' not in svc.build_report_html(samples, {})
+    assert not any("markArea" in o["series"][0]
+                   for o in _report_opts(svc.build_report_html(samples, {})))
     html = svc.build_report_html(samples, {}, {"fps": {"min": 58.0}})
-    assert 'opacity=".12"' in html
+    assert any("markArea" in o["series"][0] for o in _report_opts(html))
     assert "帧率 FPS &lt; 58" in html
 
 
 def test_report_thresholds_off_shows_disabled_state():
     html = svc.build_report_html(_band_samples(), {}, {})
     assert "本次采样未启用阈值告警" in html
-    assert 'opacity=".12"' not in html
+    assert not any("markArea" in o["series"][0] for o in _report_opts(html))
 
 
 def test_write_report_forwards_thresholds(tmp_path):
@@ -658,9 +683,10 @@ def test_compare_report_has_devices_matrix_and_charts():
     assert "多设备对比性能报告" in html
     assert "Pixel 7 · 0001" in html and "Pixel 7 · 0002" in html
     assert "指标对比" in html and "对比设备" in html
-    # 七项指标各一张多线图 + 七条图例（两台设备 → 每图两个图例项）
-    assert html.count('class="legend"') == len(svc.METRICS)
-    assert html.count('class="lg"') == 2 * len(svc.METRICS)
+    # 七项指标各一张 ECharts 多线图；图例数据里正好两台设备
+    opts = _report_opts(html)
+    assert len(opts) == len(svc.METRICS)
+    assert all(len(o["legend"]["data"]) == 2 for o in opts)
 
 
 def test_compare_matrix_marks_worst_device():
@@ -682,17 +708,29 @@ def test_compare_alert_table_flags_bad_device():
 
 
 def test_compare_report_escapes_device_label():
-    """设备型号来自设备端，可能带尖括号；拼进 HTML 必须转义。"""
+    """设备型号来自设备端，可能带尖括号；拼进 HTML 正文必须转义。"""
     e = _entries()
     e[1]["label"] = '<img src=x onerror=alert(1)>'
     html = svc.build_compare_html(e)
-    assert "<img src=x" not in html and "&lt;img" in html
+    body = _report_markup(html)           # 只看正文，script 内的 JSON 不参与 HTML 解析
+    assert "<img src=x" not in body and "&lt;img" in body
+
+
+def test_compare_report_escapes_script_breakout_in_label():
+    """型号里若含 </script>，内联 option 必须转义成 <\\/script>，否则能提前闭合脚本注入。"""
+    e = _entries()
+    e[1]["label"] = '</script><script>alert(1)</script>'
+    html = svc.build_compare_html(e)
+    assert "<\\/script" in html
+    # 正常只有两个 script 结束标签（ECharts 库 + 初始化脚本），标签内容不得撑出新的
+    assert html.count("</script>") == 2
 
 
 def test_compare_report_without_thresholds():
     html = svc.build_compare_html(_entries(), {})
     assert "本次采样未启用阈值告警" in html
-    assert "stroke-dasharray" not in html.split("阈值告警")[0]
+    assert not any("markLine" in s
+                   for o in _report_opts(html) for s in o["series"])
 
 
 def test_write_compare_report_creates_file(tmp_path):

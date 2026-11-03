@@ -70,6 +70,13 @@ BUNDLED_DATA = [
     ("frontend", "frontend"),
 ]
 
+# 必须存在、但不在 BUNDLED_DATA 顶层列出的关键资源（随某个目录整体进包）。
+# 报告图表默认内联 ECharts；缺了它报告会降级成静态 SVG —— 属于「打包漏文件」，
+# 构建期就该拦下，而不是等用户导出报告时才发现没有交互。
+REQUIRED_ASSETS = [
+    "frontend/vendor/echarts.min.js",
+]
+
 # ⚠️ config.json（用户配置）刻意**不进** BUNDLED_DATA、也不在打包时生成：它完全是
 # 「用户使用后才产生」的个人数据（首次改动设置时由 core.prefs 落盘；启动时缺失
 # 则全部走界面默认值）。一旦打进 exe 内部，当同目录那份缺失时 resource_path() 会
@@ -225,7 +232,8 @@ def stage_dir(work_dir) -> Path:
 
 def check_sources() -> list:
     """打包前校验入口与数据文件都在；返回缺失项列表。"""
-    missing = [p for p in [ENTRY] + [src for src, _ in BUNDLED_DATA]
+    missing = [p for p in ([ENTRY] + [src for src, _ in BUNDLED_DATA]
+                           + REQUIRED_ASSETS)
                if not (ROOT / p).exists()]
     return missing
 

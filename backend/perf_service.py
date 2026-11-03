@@ -41,6 +41,7 @@ backend.perf_service —— 设备性能实时采样（CPU / 内存 / FPS / 电�
 import csv
 import datetime
 import itertools
+import json
 import os
 import re
 import subprocess
@@ -48,7 +49,7 @@ import threading
 import time
 from collections import deque
 
-from core.constants import adb_kwargs, unique_path
+from core.constants import adb_kwargs, resource_path, unique_path
 
 # 环形缓冲上限：1Hz 约 5.5 小时。够长（够挂机跑一夜），又不会把内存吃穿
 # （单样本 ~200B，20000 条约 4MB）。
@@ -1315,6 +1316,331 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
            pad_l, h - 6, _ts(t0), w - pad_r, h - 6, _ts(t1)))
 
 
+# --------------------------------------------------------------------------- #
+# ECharts 交互图表（报告默认走这条；缺失 echarts.min.js 时回退到上面的 SVG）
+#
+# 为什么内联而不是 CDN：报告是「双击即看」的离线文件，测试机 / 内网常常没有外网。
+# CDN 在断网时只会得到一张空白图 —— 这是最难排查的静默失败（用户以为数据没采到）。
+# 把 echarts.min.js（精简构建 ≈ 660KB）随报告内联，单文件、断网可用，代价是体积。
+# 为了守住「报告 < 1.2MB」的体积回归，曲线数据按桶抽稀（保留首末点与每桶极值，
+# 尖峰不丢），只影响 tooltip 的采样密度，不影响形状。
+# --------------------------------------------------------------------------- #
+_ECHARTS_CACHE = {"tried": False, "js": ""}
+_ECHART_MAX_POINTS = 900    # 每条曲线内联进报告的采样点上限（控制体积）
+
+
+def echarts_ready():
+    """报告能否用 ECharts（echarts.min.js 是否可读）。供界面提示与测试使用。"""
+    return bool(_echarts_js())
+
+
+def _echarts_js():
+    """读取内联用的 ECharts 源码（进程内只读一次）。缺失返回 ""。
+
+    优先经 resource_path() 解析（开发态取仓库 frontend/，打包态优先 exe 旁那份、
+    再回退 _MEIPASS 内置副本）——与 index.html 用的是同一套资源定位规则。
+    """
+    if _ECHARTS_CACHE["tried"]:
+        return _ECHARTS_CACHE["js"]
+    _ECHARTS_CACHE["tried"] = True
+    try:
+        path = resource_path(os.path.join("frontend", "vendor", "echarts.min.js"))
+        with open(path, "r", encoding="utf-8") as f:
+            _ECHARTS_CACHE["js"] = f.read()
+    except (OSError, UnicodeDecodeError):
+        _ECHARTS_CACHE["js"] = ""
+    return _ECHARTS_CACHE["js"]
+
+
+def _axis_range(vals, cap, th_val):
+    """纵轴量程：与 SVG 版同一套规则（cap 固定 0..cap，否则 ±12% padding，
+    并把阈值纳入量程，避免「稳定达标时阈值线被挤出画布」）。"""
+    lo, hi = min(vals), max(vals)
+    if cap is not None:
+        lo, hi = 0.0, float(cap)
+    elif hi - lo < 1e-9:
+        lo, hi = lo - 1, hi + 1
+    else:
+        pad = (hi - lo) * 0.12
+        lo, hi = max(0.0, lo - pad), hi + pad
+    if th_val is not None and cap is None:
+        span = max(1.0, hi - lo)
+        if th_val < lo:
+            lo = max(0.0, th_val - span * 0.08)
+        elif th_val > hi:
+            hi = th_val + span * 0.08
+    return lo, hi
+
+
+def _is_bad_v(v, th_val, th_dir):
+    if th_val is None or v is None:
+        return False
+    return v < th_val if th_dir == "min" else v > th_val
+
+
+def _downsample(pts, cap=_ECHART_MAX_POINTS):
+    """[(ms, 值|None)] 按桶压到 ≤ cap，保留**首末点 + 每桶极值**（尖峰不丢）。
+
+    与 SVG 版的 `_thin_seg` 同一目的：两万点的会话不能把报告撑到几 MB。区别是
+    这里按「桶」而不是「像素列」——ECharts 自己负责成图，报告只需要带上够画形状、
+    够看 tooltip 的点。None 值原样保留，配合 connectNulls:false 仍然断线。
+    """
+    n = len(pts)
+    if n <= cap:
+        return list(pts)
+    buckets = max(1, cap // 4)     # 每桶最多取 4 点（首/末/极小/极大）
+    out = []
+    size = n / float(buckets)
+    for b in range(buckets):
+        a, z = int(b * size), int((b + 1) * size)
+        seg = pts[a:z]
+        if not seg:
+            continue
+        picks = [seg[0], seg[-1]]
+        good = [(i, p[1]) for i, p in enumerate(seg) if p[1] is not None]
+        if good:
+            picks.append(seg[min(good, key=lambda x: x[1])[0]])
+            picks.append(seg[max(good, key=lambda x: x[1])[0]])
+        for p in picks:
+            if not out or out[-1] != p:
+                out.append(p)
+    if out and out[0] != pts[0]:
+        out.insert(0, pts[0])
+    if out and out[-1] != pts[-1]:
+        out.append(pts[-1])
+    return out
+
+
+def _bad_bands(pts, th_val, th_dir):
+    """连续超标区间 → ECharts markArea 的 [[{xAxis:起},{xAxis:止}], ...]。
+
+    单点超标也要能被看见：起止相同时把止点顺延一个采样间隔，否则色带宽度为 0。
+    """
+    if th_val is None:
+        return []
+    step = 1000
+    if len(pts) >= 2:
+        step = max(1, pts[1][0] - pts[0][0])
+    bands, i, n = [], 0, len(pts)
+    while i < n:
+        if not _is_bad_v(pts[i][1], th_val, th_dir):
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and _is_bad_v(pts[j + 1][1], th_val, th_dir):
+            j += 1
+        x1, x2 = pts[i][0], pts[j][0]
+        if x2 - x1 < step:
+            x2 = x1 + step
+        bands.append([{"xAxis": x1}, {"xAxis": x2}])
+        i = j + 1
+    return bands
+
+
+_AXIS_STYLE = {
+    "axisLine": {"lineStyle": {"color": "#1d2836"}},
+    "axisTick": {"show": False},
+    "axisLabel": {"color": "#6e8299", "fontSize": 9, "fontFamily": "monospace"},
+}
+_TOOLTIP_STYLE = {
+    "trigger": "axis",
+    "axisPointer": {"type": "line", "lineStyle": {"color": "#41586e", "width": 1}},
+    "backgroundColor": "rgba(16,22,31,.96)",
+    "borderColor": "rgba(126,166,204,.25)",
+    "borderWidth": 1,
+    "padding": [8, 10],
+    "textStyle": {"color": "#e9f0f8", "fontSize": 11, "fontFamily": "monospace"},
+}
+
+
+def _base_option(lo, hi):
+    return {
+        "backgroundColor": "transparent",
+        "animation": False,
+        "grid": {"left": 46, "right": 14, "top": 14, "bottom": 26},
+        "tooltip": dict(_TOOLTIP_STYLE),
+        "xAxis": dict(_AXIS_STYLE, type="time", splitLine={"show": False},
+                      axisLabel=dict(_AXIS_STYLE["axisLabel"],
+                                     formatter="{HH}:{mm}:{ss}")),
+        "yAxis": dict(_AXIS_STYLE, type="value", min=lo, max=hi,
+                      splitLine={"lineStyle": {"color": "#1d2836"}}),
+    }
+
+
+def _series_iter(samples, key):
+    """样本 → [(毫秒时间戳, 值|None)]（ECharts time 轴用毫秒）。"""
+    out = []
+    for s in samples or []:
+        t = s.get("t") or 0
+        v = s.get(key)
+        out.append((int(t * 1000),
+                    float(v) if _is_num(v) else None))
+    return out
+
+
+def _echart_option(samples, key, title, color, unit, cap=None, rule=None):
+    """单指标 → ECharts option。采样点不足 2 个返回 None（调用方渲染「无法绘制」）。"""
+    pts = _series_iter(samples, key)
+    vals = [v for _t, v in pts if v is not None]
+    if len(vals) < 2:
+        return None
+    th_val, th_dir = None, None
+    if rule:
+        for k in ("min", "max"):
+            if _is_num(rule.get(k)):
+                th_val, th_dir = float(rule[k]), k
+    lo, hi = _axis_range(vals, cap, th_val)
+    thin = _downsample(pts)
+    opt = _base_option(lo, hi)
+    series = {
+        "name": title, "type": "line",
+        "data": [[t, v] for t, v in thin],
+        "connectNulls": False, "showSymbol": False, "symbol": "none",
+        "sampling": "lttb", "smooth": False,
+        "lineStyle": {"color": color, "width": 1.8},
+        "itemStyle": {"color": color},
+        "areaStyle": {"color": color, "opacity": .14},
+        "emphasis": {"disabled": True},
+    }
+    if th_val is not None:
+        series["markLine"] = {
+            "silent": True, "symbol": "none",
+            "lineStyle": {"color": "#ff5f6b", "type": "dashed",
+                          "width": 1, "opacity": .6},
+            "label": {"show": True, "position": "insideEndTop",
+                      "color": "#ff5f6b", "fontSize": 9, "fontFamily": "monospace",
+                      "formatter": "%s %s %s"
+                                   % ("≥" if th_dir == "min" else "≤",
+                                      _fmt_tick(th_val, hi - lo), unit)},
+            "data": [{"yAxis": th_val}],
+        }
+        bands = _bad_bands(thin, th_val, th_dir)
+        if bands:
+            series["markArea"] = {
+                "silent": True,
+                "itemStyle": {"color": "#ff5f6b", "opacity": .12},
+                "data": bands,
+            }
+    opt["series"] = [series]
+    return opt
+
+
+def _echart_compare_option(series, key, unit, cap=None, rule=None):
+    """多设备同指标 → ECharts option（每台一条线 + legend + 超标红点）。
+
+    对比图不画超标色带：几条线叠在一起时色带归属不清。改成超标点打红点
+    （markPoint），红点落在哪条线上就是哪台设备在那一刻不达标。
+    """
+    prepared, all_vals, names = [], [], []
+    for label, color, samples in series:
+        pts = _series_iter(samples, key)
+        good = [v for _t, v in pts if v is not None]
+        if not good:
+            continue
+        prepared.append((label, color, pts))
+        all_vals.extend(good)
+    if not prepared or len(all_vals) < 2:
+        return None
+    th_val, th_dir = None, None
+    if rule:
+        for k in ("min", "max"):
+            if _is_num(rule.get(k)):
+                th_val, th_dir = float(rule[k]), k
+    lo, hi = _axis_range(all_vals, cap, th_val)
+    opt = _base_option(lo, hi)
+    out = []
+    for label, color, pts in prepared:
+        names.append(label)
+        thin = _downsample(pts)
+        s = {
+            "name": label, "type": "line",
+            "data": [[t, v] for t, v in thin],
+            "connectNulls": False, "showSymbol": False, "symbol": "none",
+            "sampling": "lttb", "smooth": False,
+            "lineStyle": {"color": color, "width": 1.7},
+            "itemStyle": {"color": color},
+            "emphasis": {"focus": "series"},
+        }
+        bad = [(t, v) for t, v in thin if _is_bad_v(v, th_val, th_dir)]
+        if bad:
+            s["markPoint"] = {
+                "silent": True, "symbolSize": 3.4,
+                "itemStyle": {"color": "#ff5f6b"},
+                "label": {"show": False},
+                "data": [{"coord": [t, v]} for t, v in bad[:400]],
+            }
+        out.append(s)
+    if th_val is not None and out:
+        # 阈值线单独构造：挂在第一条序列上（legend 隐藏该条时阈值线一并隐藏，
+        # 属可接受的取舍）。
+        out[0]["markLine"] = {
+            "silent": True, "symbol": "none",
+            "lineStyle": {"color": "#ff5f6b", "type": "dashed",
+                          "width": 1, "opacity": .6},
+            "label": {"show": True, "position": "insideEndTop",
+                      "color": "#ff5f6b", "fontSize": 9, "fontFamily": "monospace",
+                      "formatter": "%s %s %s"
+                                   % ("≥" if th_dir == "min" else "≤",
+                                      _fmt_tick(th_val, hi - lo), unit)},
+            "data": [{"yAxis": th_val}],
+        }
+    opt["legend"] = {
+        "data": names, "top": 0, "itemWidth": 14, "itemHeight": 8,
+        "textStyle": {"color": "#8ba1b8", "fontSize": 10,
+                      "fontFamily": "monospace"},
+        "inactiveColor": "#41586e",
+    }
+    opt["grid"]["top"] = 30
+    opt["series"] = out
+    return opt
+
+
+def _echarts_script(options, units, prefix):
+    """把 echarts.min.js + 各图 option + 初始化脚本内联成一段 HTML。
+
+    options/units 下标与容器 id（prefix+0、prefix+1…）一一对应。tooltip 的
+    formatter 在这里用 JS 函数补上（JSON 无法表达函数），时间按本地时区显示，
+    断线点显示「—」而不是 0。option 里的 `</` 已转义成 `<\\/`，避免设备型号等
+    文本里恰好含 </script> 时提前闭合标签。
+    """
+    js = _echarts_js()
+    if not js or not options:
+        return ""
+    data = json.dumps(options, ensure_ascii=False, separators=(",", ":"))
+    data = data.replace("</", "<\\/")
+    units_json = json.dumps(units, ensure_ascii=False, separators=(",", ":"))
+    js = js.replace("</script", "<\\/script").replace("</SCRIPT", "<\\/SCRIPT")
+    return (
+        '<script>%s</script>\n'
+        '<script>(function(){'
+        'var O=%s,U=%s,A=[];'
+        'function p2(n){return (n<10?"0":"")+n;}'
+        'function hm(ms){var d=new Date(ms);'
+        'return p2(d.getHours())+":"+p2(d.getMinutes())+":"+p2(d.getSeconds());}'
+        'O.forEach(function(o,i){'
+        'var el=document.getElementById("%s"+i);if(!el)return;'
+        'var u=U[i]||"";'
+        'o.tooltip.formatter=function(ps){'
+        'if(!ps||!ps.length)return "";'
+        'var s=hm(ps[0].value[0]);'
+        'ps.forEach(function(p){var v=p.value[1];'
+        's+="<br>"+p.marker+" "+p.seriesName+": "'
+        '+(v==null?"—":(+v).toFixed(1))+u;});'
+        'return s;};'
+        'var c=echarts.init(el,null,{renderer:"canvas"});c.setOption(o);A.push(c);'
+        '});'
+        'addEventListener("resize",function(){A.forEach(function(c){c.resize();});});'
+        '})();</script>' % (js, data, units_json, prefix)
+    )
+
+
+def _echart_card(title, unit, note, idx):
+    """图表的卡片外壳：标题 + 一个 ECharts 容器（高度由 CSS .echart 决定）。"""
+    return ('<div class="card"><h2>%s <em>%s</em>%s</h2>'
+            '<div class="echart" id="ec%d"></div></div>'
+            % (title, unit.upper(), note, idx))
+
+
 _REPORT_CSS = """
 * { box-sizing: border-box; }
 body { margin: 0; padding: 28px 32px 48px; background: #0b0f14; color: #e9f0f8;
@@ -1350,6 +1676,11 @@ td { font-family: "JetBrains Mono", monospace; color: #b9c8d8; }
 .card h2 .thmark { margin-left: auto; font-family: monospace; font-size: 10px;
   color: #ff8f9a; letter-spacing: .04em; opacity: .85; }
 .chart { display: block; }
+.echart { display: block; width: 100%; height: 180px; }
+.legend-echart { margin: 6px 0 0; }
+.fallback-note { margin: 10px 0 0; padding: 8px 12px; border-radius: 8px;
+  border: 1px solid rgba(255,180,84,.35); background: rgba(255,180,84,.08);
+  color: #ffb454; font-size: 11px; font-family: monospace; }
 .nochart { color: #6e8299; font-size: 12px; padding: 26px 0; text-align: center; }
 .noalert { color: #3ddc84; font-size: 12px; padding: 16px 0 2px; }
 .note { color: #6e8299; font-size: 11px; margin: 10px 0 0; font-family: monospace; }
@@ -1441,18 +1772,37 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
     colors = {"cpu": "#34e0ea", "mem_used": "#4cc3ff", "pss": "#a78bfa",
               "fps": "#3ddc84", "jank": "#f472b6", "batt": "#ffb454",
               "temp": "#ff5f6b"}
-    charts = []
+    charts, opts, units = [], [], []
+    use_ec = echarts_ready()
+    ci = 0
     for key, title, unit, cap in METRICS:
         rule = th.get(key)
-        svg = _svg_chart(samples, key, colors[key], unit, cap, rule=rule)
         note = ""
         if rule:
             # 标题旁标一行判定标准：色带与虚线都在图里，但「≥ 45」这个数字
             # 得能直接读到，不能指望每个人都会去图上找虚线标签。
             note = ('<span class="thmark">%s</span>'
                     % esc_html(threshold_rule_text(key, rule)))
-        charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>%s</div>'
-                      % (title, unit.upper(), note, svg))
+        if use_ec:
+            opt = _echart_option(samples, key, title, colors[key], unit, cap, rule)
+            if opt is None:
+                charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>'
+                              '<div class="nochart">采样点不足，无法绘制曲线</div></div>'
+                              % (title, unit.upper(), note))
+            else:
+                charts.append(_echart_card(title, unit, note, ci))
+                opts.append(opt)
+                units.append(unit)
+                ci += 1
+        else:
+            svg = _svg_chart(samples, key, colors[key], unit, cap, rule=rule)
+            charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>%s</div>'
+                          % (title, unit.upper(), note, svg))
+    chart_script = _echarts_script(opts, units, "ec") if use_ec else ""
+    fallback_note = "" if use_ec else (
+        '<div class="fallback-note">未能加载 ECharts'
+        '（frontend/vendor/echarts.min.js 缺失），图表已降级为静态 SVG ——'
+        '悬停提示仍可用，但缺少缩放与图例交互。</div>')
 
     # 明细表：样本多时只放前 2000 行，避免报告变成几十 MB
     body_rows = []
@@ -1483,6 +1833,7 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
         '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8">'
         '<title>性能监控报告 %s</title><style>%s</style></head><body>'
         '<h1>性能监控报告</h1><div class="sub">PERFORMANCE MONITOR REPORT</div>'
+        '%s'
         '<div class="meta">%s</div>'
         '<div class="card"><h2>指标统计 <em>SUMMARY</em></h2>'
         '<table><thead><tr><th>指标</th><th>最小</th><th>平均</th><th>最大</th>'
@@ -1496,10 +1847,11 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
         '</tr></thead><tbody>%s</tbody></table></div></details>'
         '<div class="foot">由「ADB 设备指令台 · 性能监控」生成于 %s。'
         '指标采集自 /proc 与 dumpsys，采样间隔 %s 秒。</div>'
+        '%s'
         '</body></html>'
-        % (generated_at, _REPORT_CSS, meta_html, "".join(rows), alert_html,
-           "".join(charts), min(n, 2000), "".join(body_rows), generated_at,
-           info.get("interval") or DEFAULT_INTERVAL))
+        % (generated_at, _REPORT_CSS, fallback_note, meta_html, "".join(rows),
+           alert_html, "".join(charts), min(n, 2000), "".join(body_rows),
+           generated_at, info.get("interval") or DEFAULT_INTERVAL, chart_script))
 
 
 CSV_HEADER = ["time", "cpu_percent", "app_cpu_percent", "mem_used_mb",
@@ -1858,15 +2210,38 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
     series_all = [(e.get("label") or e.get("serial"),
                    COMPARE_COLORS[i % len(COMPARE_COLORS)], e["samples"])
                   for i, e in enumerate(entries)]
-    charts = []
+    charts, opts, units = [], [], []
+    use_ec = echarts_ready()
+    ci = 0
     for key, title, unit, cap in METRICS:
-        svg = _svg_compare(series_all, key, unit, cap, rule=(th or {}).get(key))
-        charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>%s%s</div>'
-                      % (title, unit.upper(),
-                         ('<span class="thmark">%s</span>'
-                          % esc_html(threshold_rule_text(key, th[key])))
-                         if (th or {}).get(key) else "",
-                         _compare_legend(entries), svg))
+        rule = (th or {}).get(key)
+        note = ('<span class="thmark">%s</span>'
+                % esc_html(threshold_rule_text(key, th[key]))) if rule else ""
+        if use_ec:
+            opt = _echart_compare_option(series_all, key, unit, cap, rule=rule)
+            if opt is None:
+                charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>'
+                              '<div class="nochart">采样点不足，无法绘制曲线</div></div>'
+                              % (title, unit.upper(), note))
+            else:
+                # ECharts 自带可点击图例，不再叠一份 HTML 图例（两份色标只会让人
+                # 分不清该点哪个）。
+                charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>'
+                              '<div class="echart" id="cc%d"></div></div>'
+                              % (title, unit.upper(), note, ci))
+                opts.append(opt)
+                units.append(unit)
+                ci += 1
+        else:
+            svg = _svg_compare(series_all, key, unit, cap, rule=rule)
+            charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>%s%s</div>'
+                          % (title, unit.upper(), note,
+                             _compare_legend(entries), svg))
+    chart_script = _echarts_script(opts, units, "cc") if use_ec else ""
+    fallback_note = "" if use_ec else (
+        '<div class="fallback-note">未能加载 ECharts'
+        '（frontend/vendor/echarts.min.js 缺失），图表已降级为静态 SVG ——'
+        '悬停提示仍可用，但缺少缩放与图例交互。</div>')
 
     alert_html = _compare_alert_table(entries, th, alerts_per)
 
@@ -1884,6 +2259,7 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
         '<title>多设备对比性能报告 %s</title><style>%s</style></head><body>'
         '<h1>多设备对比性能报告</h1>'
         '<div class="sub">MULTI-DEVICE PERFORMANCE COMPARISON</div>'
+        '%s'
         '<div class="meta"><div><b>设备数</b> <span>%d</span></div>'
         '<div><b>监控应用</b> <span>%s</span></div>'
         '<div><b>时间范围</b> <span>%s</span></div>'
@@ -1892,16 +2268,18 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
         '%s%s%s%s'
         '<div class="foot">由「ADB 设备指令台 · 性能监控」生成于 %s。%s。'
         '指标采集自 /proc 与 dumpsys。每台设备的逐条原始数据见各自的 CSV。</div>'
+        '%s'
         '</body></html>'
-        % (generated_at, _REPORT_CSS + _COMPARE_CSS, len(entries),
+        % (generated_at, _REPORT_CSS + _COMPARE_CSS, fallback_note, len(entries),
            esc_html(pkg_display(entries[0].get("info") or {})),
            esc_html("%s ~ %s" % (_ts(t_first), _ts(t_last))),
            total_pts, generated_at,
            meta_table, matrix, alert_html, "".join(charts), generated_at,
-           foot_meta))
+           foot_meta, chart_script))
 
 
 _COMPARE_CSS = """
+.echart { height: 210px; }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 2px;
   margin-right: 7px; vertical-align: 1px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 8px 0 2px;

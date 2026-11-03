@@ -22,6 +22,7 @@
 - **第二十四轮**（本文末「第二十四轮」一节）：录屏增加**取消**（停止并**删除**本次产物，不合并、不打包；不 pull 当前段、只删文件不删目录、删不掉要点名）；「约每 3 分钟自动分段」提示语沉到卡片**最下方**；写明 Win11 首次运行弹 SmartScreen「发布者未知」是**没签名**、不是缺东西。
 - **第二十五轮**（本文末「第二十五轮」一节）：「取消」改用新增的**警示色** `.btn.warn`（琥珀，刻意不用红 —— 录制中的「停止」本身就是红块呼吸，同色等于没区分）；工作区 tab **双击改名**（或 F2），名字同时落 tab、`config.json`、后端登记三处；顺带修掉「重启恢复时自定义名没交给后端」与「改名后新建会撞名」。
 - **第二十六轮**（本文末「第二十六轮」一节）：「停止 / 取消」更名为**「停止录制 / 取消录制」**；「取消录制」的二次确认从 `window.confirm` 换成**应用内自绘弹窗**（pywebview 各版本对 `confirm` 支持不一致，返回 undefined 时 `!confirm(...)` 恒真 —— 点了没反应、什么也不删，是最难自查的静默失败）；四个出口（否 / × / 遮罩 / Esc）全等于「否」，默认焦点在「否」。
+- **第二十七轮**（本文末「第二十七轮」一节）：性能报告的七张曲线从自绘 SVG 换成**内联 ECharts**（十字准星 + 读数框 tooltip / 点图例隐藏 / 滚轮缩放）；**库内联进报告**以保断网双击可用（不走 CDN，断网空白属最坏静默失败）；曲线数据抽稀使 8000 点报告仍 < 1.2MB；缺库自动回退 SVG + 明示横幅。
 
 ---
 
@@ -2701,3 +2702,67 @@ resolve(true)**，其余一切出口都是 `false`。
 - **「半吊子实现」验证**：把 `askConfirm` 改成「直接 resolve(true)、不弹窗」，
   测试立刻失败 10+ 条，其中最关键的是**「点『否』时一个后端调用都不许发」** ——
   正好对应「误点一次就删掉刚录的东西」这个唯一会造成真实损失的后果。
+
+---
+
+# 第二十七轮：性能报告图表换成内联 ECharts（交互 tooltip）
+
+## 问题
+导出的性能报告里，七张曲线是**自绘 SVG**，提示靠 SVG 原生 `<title>`：浏览器那种
+单行、有延迟、要靠逗留才弹的原生气泡。用户要的是 ECharts 那种**十字准星 + 读数框**
+的交互，顺带能点图例隐藏、滚轮缩放。
+
+## 关键取舍：为什么内联、不用 CDN
+报告是「双击即看」的**离线文件**，测试机 / 内网常常没有外网。CDN 版在断网时只会
+得到**一张空白图**——这正是最该避免的静默失败：用户会以为数据没采到，而不是网络
+没连上。所以把 ECharts **内联进每一份报告**：单文件、断网可用，代价是体积。
+
+- 用 **`echarts.common.min.js`（662KB）**，不是 1MB 全量包。`simple` 包在 SSR 下缺
+  SVG renderer（实测 `Cannot read properties of null`），不可靠，不用。
+- **体积反而没爆**：旧报告 982KB 里，悬停热区（每图 760 个带 `<title>` 的透明 rect）
+  占了大头；换成 ECharts 后这些字符串整个消失，腾出的空间正好抵掉 662KB 库。再对
+  曲线做**按桶抽稀**（每桶保留首末 + 极值，≤900 点/序列，尖峰不丢），8000 采样点
+  的报告稳定在 **~1.02MB**，仍满足既有的 `< 1.2MB` 体积回归。
+
+## 语义等价（图上的信息一条都不能少）
+- 阈值虚线 → `markLine`（`type:"dashed"`，行尾 `≥/≤ 阈值 单位` 标签原样保留）；
+- 单机超标色带 → `markArea`（`#ff5f6b` 透明 .12；**单点超标也顺延一个采样间隔**，
+  否则宽度为 0 看不见「偶发掉一帧」）；
+- 对比图超标红点 → `markPoint`（落在对应设备线上，上限 400，与 SVG 版同口径）；
+- `None`（掉线 / 重启）→ `connectNulls:false`，断线不连成假直线；
+- 对比图一设备一色 + ECharts 可点击图例（点一下隐藏那台，再点恢复）；
+- 时间轴用 `type:"time"`，tooltip 按本地时区显示 `HH:MM:SS`，断点显示「—」。
+
+## 兜底与安全
+- **缺 `echarts.min.js` 不空白**：`echarts_ready()` 探测不到就自动回退到原有 SVG
+  渲染，并在报告顶部挂一条琥珀色明示横幅（「图表已降级为静态 SVG」）。SVG 实现
+  整段保留，既是兜底也让原有 SVG 单测继续有效。
+- **`</script>` 转义**：option 以 JSON 内联进 `<script>`，`json.dumps` 后把 `</`
+  转成 `<\/`。设备型号若含 `</script><script>…`，也只是脚本里的字符串，不会提前
+  闭合标签（有专门用例锁死：报告里 `</script>` 恰好 2 个）。
+- **打包自检**：`build.py` 新增 `REQUIRED_ASSETS = ["frontend/vendor/echarts.min.js"]`，
+  `check_sources()` 缺它就**构建失败**，而不是打出一个「报告没有交互」的包。
+  `frontend/` 整目录本就 `--add-data` 进 exe，新文件自动随包。
+
+## 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `frontend/vendor/echarts.min.js` | 新增，ECharts 5 精简构建（662KB），随 `frontend/` 进包 |
+| `backend/perf_service.py` | 新增 `echarts_ready` / `_echarts_js` / `_axis_range` / `_downsample` / `_bad_bands` / `_echart_option` / `_echart_compare_option` / `_echarts_script` / `_echart_card`；单机与对比报告默认走 ECharts，缺库回退 SVG + 明示；`.echart` 容器样式 |
+| `build.py` | `REQUIRED_ASSETS` + `check_sources()` 纳入校验 |
+| `tests/test_backend_perf.py` | 新增 `_report_opts` / `_report_markup`（从 662KB 库源码里切出 option，避免拿库字样当命中）；按 option 语义重写 8 条断言；新增 `</script>` 逃逸用例 |
+| `tests/test_build.py` | `check_sources` 期望值加 `REQUIRED_ASSETS`；新增 vendor 存在且随 frontend 进包 |
+| `README.md` / `使用说明.txt` | 报告改为「ECharts 交互曲线、库内联、断网可用；悬停看读数 / 点图例隐藏 / 滚轮缩放」 |
+
+## 验证
+- **SSR 校验**：把 Python 产出的真实 option 喂给 `echarts.common.min.js` 的
+  `init(null,null,{renderer:"svg",ssr:true})`，单机 / 对比均渲染出 `<path>` 与文字。
+- **真机端到端**：无头 Chromium 以 `file://` 打开生成的 745KB 报告，DOM 里出现
+  **7 个 `<canvas>`**（每图一个，ECharts 已初始化），截图确认 CPU 图有红色阈值虚线
+  「≥ 85 %」、FPS 图有红色超标色带，深色配色与卡片布局正常，无空白块。
+- `pytest`：**1265 passed / 1 skipped**（较上轮 +2，报告体积用例仍 < 1.2MB）。
+- `pyflakes backend core tools tests`：0；`node --check frontend/js/app.js`：OK。
+- 前端 jsdom：72 个文件 0 失败。
+- **回退验证**：临时移走 `frontend/vendor/echarts.min.js`，`echarts_ready()` 转 False，
+  报告改出 SVG + 降级横幅（不空白）；`build.py` 的资源自检同时报缺该文件。

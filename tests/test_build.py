@@ -104,7 +104,14 @@ def test_real_project_sources_are_complete():
 def test_check_sources_reports_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "ROOT", tmp_path)
     (tmp_path / build.ENTRY).write_text("print(1)", encoding="utf-8")
-    assert build.check_sources() == [src for src, _ in build.BUNDLED_DATA]
+    expected = [src for src, _ in build.BUNDLED_DATA] + build.REQUIRED_ASSETS
+    assert build.check_sources() == expected
+
+
+def test_echarts_vendor_present_and_bundled():
+    """报告内联的 ECharts 必须在仓库里，且随 frontend 目录整体进包。"""
+    assert (build.ROOT / "frontend/vendor/echarts.min.js").is_file()
+    assert any(src == "frontend" for src, _ in build.BUNDLED_DATA)
 
 
 def test_exe_dir_differs_by_mode():
