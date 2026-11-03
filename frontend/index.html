@@ -262,12 +262,15 @@
           </div>
           <div class="tool-body" id="rec-body">
             <div class="tool-desc">对受控设备各录一段 MP4（adb screenrecord）。需要复盘时勾上「同步录制 logcat」——日志按<b>全量</b>抓取，不截断也不过滤。</div>
-            <!-- 录制时长上限提示（常驻）：Android 的 screenrecord 不传 --time-limit 时
-                 默认就是 180 秒，到点自行收尾退出。这句话必须写在按钮旁边 ——
-                 用户往往录到一半才发现自己需要的是一段 8 分钟的长视频。 -->
+            <!-- 录制时长 / 自动分段 / 拼接说明（常驻）：Android 的 screenrecord
+                 单段硬上限就是 180 秒，不传 --time-limit 时到点是被系统掐断的。
+                 这几句必须写在按钮旁边 —— 用户往往录到一半才发现自己需要的是一段
+                 8 分钟的长视频，而「分段是怎么分的、拼完是不是完整、哪里会缺画面」
+                 直接决定他事后要不要重录。宁可字多，也不能让他录完才发现要重来。 -->
             <div class="rec-limit" role="note">
-              <span class="rec-limit-t">⏱ 每 3 分钟自动分段续录，无需手动操作</span>
-              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>（设备端硬限制）。程序按 <b>170 秒</b>一段录制，到点自动收尾并<b>立刻接上下一段</b>，视频放在同一目录、依次命名为 <code>_p2</code>、<code>_p3</code>……，logcat 全程连续抓取，产物仍归同一个包。段与段切换有<b>约 1 秒</b>间隙，那一瞬的画面录不到——这是设备端限制，不是录制中断。</span>
+              <span class="rec-limit-t">⏱ 约每 3 分钟自动分段续录，无需任何手动操作，停止后合并为一个完整 MP4</span>
+              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，这是设备端硬限制、程序绕不过去。程序因此按 <b>170 秒</b>一段录制：到点自动收尾并<b>立刻接上下一段</b>，logcat 全程连续不中断。点「停止」后自动把各段<b>无损拼接成一个</b> mp4（只搬码流、不重新编码，画质与分段时完全一致），文件名仍是 <code>record_设备_时间.mp4</code>，不需要你自己拼。</span>
+              <span><b>三个必须知道的特殊点：①</b> 每处拼接点有<b>约 1 秒间隙</b>，那一瞬的画面确实录不到（设备端重启 screenrecord 的耗时，软件无法消除）——<b>N 段就有 N-1 处、累计约 N-1 秒</b>，回放到那里画面会一跳，<b>不是录制中断、也不是丢文件</b>；<b>②</b> 合并依赖本机 <code>ffmpeg</code>，没装时程序不会硬来：保留 <code>_p2</code>、<code>_p3</code>… 分段文件（每个都能单独播放），并在状态栏说明原因；<b>③</b> 单场最多 <b>20 段（约 57 分钟）</b>，到上限按<b>正常收尾</b>处理并明确提示，已录部分完整可播。</span>
             </div>
             <div class="tool-row">
               <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
