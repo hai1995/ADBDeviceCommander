@@ -4390,3 +4390,221 @@ def test_record_dead_teardown_reports_partial_path(tmp_path):
     hit = [t for t in texts if "视频不完整" in t]
     assert hit, texts
     assert str(frag) in hit[0], hit[0]
+
+
+# ---------------------------------------------------------------------------
+# 录屏取消：停止并删除本次产物（不合并、不打包）
+# ---------------------------------------------------------------------------
+def _cancel_session(tmp_path):
+    """一个「已经录了一会儿」的会话：1 段视频 + 1 份 logcat + 1 个麦克风 wav。"""
+    video = tmp_path / "record_A1_20240101_000000.mp4"
+    video.write_bytes(b"\x00" * 256)
+    log = tmp_path / "logcat_A1_20240101_000000.txt"
+    log.write_text("01-01 log line\n", encoding="utf-8")
+    mic = tmp_path / "mic_20240101_000000.wav"
+    mic.write_bytes(b"RIFF" + b"\x00" * 64)
+    sess = {
+        "ts": "20240101_000000", "dir": str(tmp_path),
+        "with_mic": False, "with_zip": True,
+        "videos": {"A1": str(video)}, "devaudio": {},
+        "logcat_captures": {"A1": str(log)},
+        "mic_path": str(mic), "mic_started": True,
+        "pointer_location_prev": {}, "show_touches_prev": {},
+    }
+    return sess, video, log, mic
+
+
+class _FakeCap:
+    """替身 logcat 抓取：只关心「停了吗、按什么参数停的」。"""
+
+    def __init__(self):
+        self.stopped = []
+
+    def stop(self, serial, zip_on_stop=True):
+        self.stopped.append((serial, zip_on_stop))
+
+    def is_running(self, serial):
+        return False
+
+
+def test_screen_record_cancel_deletes_files_without_zip(tmp_path):
+    """取消要真的把本次产物删掉，且**不**打包、**不**合并。
+
+    回归背景：以前「录错了」只能点「停止」——它一定走合成 / 打包，用户拿到
+    一个「✓ 已打包」的 zip，再自己去目录里删。取消的语义是「一个都不留」。
+    """
+    api = _make_api()
+    sess, video, log, mic = _cancel_session(tmp_path)
+    api._rec_session = sess
+    api.logcat_capture = _FakeCap()
+
+    calls = []
+
+    class FakeVideo:
+        def discard_ex(self, s):
+            calls.append(("discard", s))
+            return True, [], None
+
+        def stop_ex(self, s):
+            raise AssertionError("取消不该走 stop_ex（会把当前段 pull 回来）")
+
+        def stop(self, s):
+            raise AssertionError("取消不该走 stop（会把当前段 pull 回来）")
+
+    api.video = FakeVideo()
+
+    res = api.screen_record_cancel()
+
+    assert res["ok"] is True, res
+    assert res["removed"] == 3, res
+    assert calls == [("discard", "A1")], calls
+    assert not video.exists() and not log.exists() and not mic.exists()
+    # 不打包：目录里不该出现 zip
+    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".zip"] == []
+    # 抓取要按「不打包」停：zip_on_stop=True 会在抓取侧再压一次
+    assert api.logcat_capture.stopped == [("A1", False)]
+    toasts = [p for p in _events_by_kind(api).get("status", []) if p.get("toast")]
+    assert len(toasts) == 1 and toasts[0]["type"] == "ok", toasts
+    assert "3 个文件已删除" in toasts[0]["text"], toasts[0]["text"]
+    assert api._rec_session == {}, "取消后会话必须清空（否则录屏永久锁死）"
+
+
+def test_screen_record_cancel_deletes_pretaken_and_mic(tmp_path):
+    """设备被拔掉时已取回的段（video_segs）与麦克风文件同样要删。
+
+    这两处是「不在 videos 里、但确实是本次产物」的典型：漏了它们，取消之后
+    保存目录里还躺着几个 mp4 / wav，用户以为取消没生效。
+    """
+    api = _make_api()
+    sess, video, _log, mic = _cancel_session(tmp_path)
+    extra = tmp_path / "record_A1_20240101_000000_p2.mp4"
+    extra.write_bytes(b"\x00" * 128)
+    sess["video_segs"] = {"A1": [str(extra)]}
+    api._rec_session = sess
+    api.logcat_capture = _FakeCap()
+    api.video = type("V", (), {"discard_ex": lambda self, s: (
+        False, [], "该设备未在录制")})()
+
+    api.screen_record_cancel()
+
+    assert not extra.exists(), "已取回的分段也要删"
+    assert not mic.exists(), "麦克风文件也要删"
+
+
+def test_screen_record_cancel_never_deletes_directory(tmp_path):
+    """只删普通文件：目录一律跳过。
+
+    取消是最容易被写成「把这次涉及到的路径全删掉」的地方，一旦某条登记进来的
+    是目录（例如误把保存目录本身记进 videos），递归删除就等于删用户的文件夹。
+    这里断言目录完好，且取消照常回报成功。
+    """
+    api = _make_api()
+    sess, video, _log, _mic = _cancel_session(tmp_path)
+    keep_dir = tmp_path / "sub"
+    keep_dir.mkdir()
+    (keep_dir / "keep.txt").write_text("x", encoding="utf-8")
+    sess["videos"]["B2"] = str(keep_dir)
+    api._rec_session = sess
+    api.logcat_capture = _FakeCap()
+    api.video = type("V", (), {"discard_ex": lambda self, s: (
+        False, [], "该设备未在录制")})()
+
+    res = api.screen_record_cancel()
+
+    assert res["ok"] is True, res
+    assert keep_dir.is_dir() and (keep_dir / "keep.txt").exists()
+    assert not video.exists()
+
+
+def test_screen_record_cancel_reports_undeletable_file(tmp_path, monkeypatch):
+    """删不掉的文必须说出来，不能「取消成功」了事。
+
+    最现实的场景：刚拉回来的那段 mp4 还被播放器开着，Windows 直接拒绝删除。
+    这时文件还在磁盘上，沉默地报成功等于骗用户。
+    """
+    import backend.controllers.record as rec_mod
+
+    api = _make_api()
+    sess, video, _log, _mic = _cancel_session(tmp_path)
+    api._rec_session = sess
+    api.logcat_capture = _FakeCap()
+    api.video = type("V", (), {"discard_ex": lambda self, s: (True, [], None)})()
+
+    real_remove = rec_mod.os.remove
+
+    def fake_remove(p, *a, **kw):
+        if str(p).endswith(".mp4"):
+            raise PermissionError("被占用")
+        return real_remove(p, *a, **kw)
+
+    monkeypatch.setattr(rec_mod.os, "remove", fake_remove)
+
+    res = api.screen_record_cancel()
+
+    assert res["ok"] is True, res
+    assert res["kept"] and res["kept"][0].endswith(".mp4"), res
+    assert video.exists(), "删不掉的文件本来就应该还在"
+    toasts = [p for p in _events_by_kind(api).get("status", []) if p.get("toast")]
+    assert toasts and toasts[0]["type"] == "warn", toasts
+    assert "未能删除" in toasts[0]["text"], toasts[0]["text"]
+    assert "record_A1_20240101_000000.mp4" in toasts[0]["text"], toasts[0]["text"]
+
+
+def test_screen_record_cancel_restores_overlays(tmp_path):
+    """取消同样要把设备 overlay 恢复原值（录屏开过指针位置 / 触摸圆点）。
+
+    这两项是设备系统设置，与「这次的东西留不留」无关；漏了它，用户点一次取消
+    就发现自己手机上永远开着准星，而且不知道是谁开的。
+    """
+    api = _make_api()
+    sess, _video, _log, _mic = _cancel_session(tmp_path)
+    sess["pointer_location_prev"] = {"A1": "0"}
+    api._rec_session = sess
+    api.logcat_capture = _FakeCap()
+    api.video = type("V", (), {"discard_ex": lambda self, s: (True, [], None)})()
+
+    seen = []
+    api._restore_overlays = lambda s: seen.append(s)
+
+    api.screen_record_cancel()
+
+    assert seen and seen[0] is sess, seen
+
+
+def test_screen_record_cancel_without_session_is_not_error():
+    """没有会话时点取消：一句 info，不算失败（与「停止」同一套口径）。"""
+    api = _make_api()
+    api._rec_session = {}
+
+    res = api.screen_record_cancel()
+
+    assert res == {"ok": False, "reason": "no_session"}, res
+    statuses = _events_by_kind(api).get("status", [])
+    assert any("没有进行中的录屏" in (p.get("text") or "") for p in statuses), statuses
+    assert not [p for p in statuses if p.get("type") == "err"], statuses
+
+
+def test_screen_record_cancel_clears_session_even_on_exception(tmp_path):
+    """取消过程抛异常时，会话标记也必须清空。
+
+    与停止同理：`_rec_session` 残留 → 之后每次「开始录屏」都被守卫判为
+    recording，录屏功能永久锁死，只能重启程序。
+    """
+    api = _make_api()
+    sess, _video, _log, _mic = _cancel_session(tmp_path)
+    api._rec_session = sess
+
+    def boom(s):
+        raise OSError("磁盘掉线")
+
+    api._session_discard = boom
+
+    res = api.screen_record_cancel()
+
+    assert res["ok"] is False and res["reason"] == "cancel_error", res
+    assert api._rec_session == {}, "异常路径也必须清空会话"
+    toasts = [p for p in _events_by_kind(api).get("status", []) if p.get("toast")]
+    assert any("取消录屏出现异常" in p["text"] for p in toasts), toasts
+    # 还能重新开始录屏（守卫不再误判）
+    assert api.screen_record_start(None, save_dir=str(tmp_path)).get(
+        "reason") != "recording"

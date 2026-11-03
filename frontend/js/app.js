@@ -38,6 +38,7 @@
     toolShot: $("tool-shot"), shotClipboard: $("shot-clipboard"),
     toolRec: $("tool-rec"),
     toolRecStop: $("tool-rec-stop"),
+    toolRecCancel: $("tool-rec-cancel"),
     recLogcat: $("rec-logcat"), recZip: $("rec-zip"),
     recPointerLocation: $("rec-pointer-location"), recShowTouches: $("rec-show-touches"),
     // 应用安装（APK）
@@ -2262,6 +2263,9 @@
     recInFlight = busy;
     if (els.toolRec) els.toolRec.disabled = busy;
     if (els.toolRecStop) els.toolRecStop.disabled = busy;
+    // 取消同样要锁：它背后是「停设备端 → 删文件」，几秒级的重操作，连点两次
+    // 第二次会撞上已清空的会话，用户看到的是「没有进行中的录屏」这种莫名其妙的话。
+    if (els.toolRecCancel) els.toolRecCancel.disabled = busy;
   }
 
   /* 录屏态：录制中把「停止」按钮切成红色实心并带轻微呼吸光晕，空闲时恢复灰。
@@ -2279,6 +2283,9 @@
     els.toolRecStop.disabled = !running;
     els.toolRecStop.classList.toggle("danger", running);
     els.toolRecStop.classList.toggle("live", running);
+    // 「取消」只在录制中可点：它做的事是「停止 + 删除本次产物」，没有会话时
+    // 点了只会得到一句「当前没有进行中的录屏」，不如直接不给点。
+    if (els.toolRecCancel) els.toolRecCancel.disabled = !running;
     els.recLogcat.disabled = running;
     els.recZip.disabled = running;
     els.recPointerLocation.disabled = running;
@@ -5443,6 +5450,45 @@
       }
       setRecRunning(false);
     });
+    /* 取消录制：停止并删除本次已产生的文件（不合并、不打包）。
+       为什么要有它：录错了（选错设备 / 场景不对 / 只是点错了「开始」）时，
+       以前唯一的出口是「停止」——那会把几段合成、打包、再告诉你「已完成」，
+       用户得自己进目录一个个删。取消 = 这次的东西一个都不留。
+       与「停止」紧挨着，误点一次就等于把刚录的东西删掉且没有回收站，
+       所以必须让用户再确认一次（原生 confirm，与删除指令 / 删除文件同一套）。 */
+    if (els.toolRecCancel) {
+      els.toolRecCancel.addEventListener("click", async () => {
+        if (recInFlight) return;
+        const ask = "取消本次录制？\n\n已录到的内容会被删除（不合并、不打包），无法恢复。";
+        // jsdom / 无原生对话框的环境里 confirm 可能不存在：那种情况下不拦，
+        // 否则按钮会变成「点了没反应」。
+        if (typeof confirm === "function" && !confirm(ask)) return;
+        setRecInFlight(true);
+        if (els.toolRecCancel) els.toolRecCancel.title = "正在停止设备端录制并删除文件…";
+        /* 取消要「停设备端 → 等拉取收尾 → 删文件」，几秒起步；期间按钮全灰，
+           没有一句话用户会以为点空了。 */
+        pushStatus("info", "🗑 正在取消录制并删除本次产生的文件…");
+        let res = null;
+        try {
+          res = await callApi(api.screen_record_cancel());
+        } finally {
+          setRecInFlight(false);
+          if (els.toolRecCancel) {
+            els.toolRecCancel.title = "取消本次录制：停止并删除刚录到的文件，不合并、不打包";
+          }
+        }
+        if (res && res.ok === false && res.reason !== "no_session") {
+          /* 只认 message（reason 是机器码）；no_session 不算失败 —— 后端已用
+             info 说明「当前没有进行中的录屏」，再说成「取消失败」纯属误导。 */
+          pushStatus("err", "⚠ 取消录屏失败："
+            + (res.message || res.reason || "未知原因")
+            + "；本次产物可能仍有残留，请检查保存目录");
+        }
+        // 无论成败都回到「未录制」：后端在 finally 里已经清掉会话，
+        // 界面若还停在「录制中」，用户点停止只会得到 no_session。
+        setRecRunning(false);
+      });
+    }
     // 保存目录（工具 / Logcat / 文件 三处输入共享）：任一输入实时镜像到另两处，
     // 失焦/回车时写入 settings.json（下次启动 default_save_dir 直接用它）。
     [els.toolDir, els.lcDir, els.fileDir].forEach((el) => {

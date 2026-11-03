@@ -726,6 +726,74 @@ class VideoRecorder:
         msgs = ([err] if err else []) + notes
         return ok, paths, ("；".join(msgs) if msgs else None)
 
+    def discard_ex(self, serial):
+        """取消录制：停掉设备端 screenrecord 并把这一段**丢弃**，返回待删的本地文件。
+
+        返回 (ok, [本地路径...], err)。
+
+        与 stop_ex 的区别只有一条，但很关键：**不拉当前段**。用户点了「取消」，
+        这次的内容他明确不要 —— 把几百 MB 从设备 pull 回来再删掉，既慢又白占
+        磁盘（弱网下要几十秒，用户只会以为程序卡死）。已经在后台拉回的段（自动
+        分段时每录满一段就并行拉一段）不重复下载，但它们的本地路径要交回调用方
+        删掉：那些同样是本次录制的产物，取消后不该留在保存目录里。
+
+        设备端临时文件一并 rm：screenrecord 拒绝覆盖同名文件，上一次取消留下的
+        残留会让下一次录屏直接启动失败，而用户只会看到「录屏启动失败」，完全联
+        想不到是上一次取消留下的。
+
+        与 stop_ex 一样，必须先置 stopping 再收尾，否则 _watch_exit 会把这次退出
+        当成「意外中断」上报，触发一轮多余的自动收尾（那时会话已不在，收尾拿不到
+        任何东西，只在状态栏留下一条莫名其妙的告警）。
+        """
+        with self._lock:
+            sess = self._sessions.get(serial)
+            if sess is None:
+                return False, [], "该设备未在录制"
+            sess["stopping"] = True
+        proc = sess.get("proc")
+        # 1) POSIX：SIGINT 让 adb 转发中断，screenrecord 优雅收尾（我们随后删文件，
+        #    但进程必须真的退出——否则它会一直占着编码器到 180 秒上限）。
+        if proc is not None and os.name != "nt":
+            try:
+                proc.send_signal(signal.SIGINT)
+            except Exception:
+                pass
+        self._stop_device_screenrecord(self.adb, serial, sess.get("remote"))
+        stopped = True
+        try:
+            if proc is not None:
+                proc.wait(timeout=10)
+        except Exception:
+            stopped = False
+            try:
+                if proc is not None:
+                    proc.kill()
+            except Exception:
+                pass
+        with self._lock:
+            self._sessions.pop(serial, None)
+        # 2) 已录完的段正在后台并行拉取：等它们各自结束再交路径，否则 pull 线程
+        #    还在往同一个路径写，调用方删掉后它继续写进已删除的 inode —— 磁盘上
+        #    看不到、也没人报错。
+        paths, notes = [], []
+        segs = sorted(sess.get("segments") or [], key=lambda x: x.get("n") or 0)
+        for seg in segs:
+            if not seg["done"].wait(timeout=90):
+                notes.append("第 %s 段的拉取未在 90 秒内完成" % seg.get("n"))
+            if seg.get("local"):
+                paths.append(seg["local"])
+        # 3) 设备端残留（当前段 + 各历史段）：无论 pull 成功与否都 rm 一遍，幂等。
+        remotes = [sess.get("remote")] + [x.get("remote") for x in segs]
+        for r in [x for x in remotes if x]:
+            try:
+                subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", r],
+                               **adb_kwargs(10))
+            except Exception:
+                pass
+        if not stopped:
+            notes.append("设备端 screenrecord 未能确认退出")
+        return stopped, paths, ("；".join(notes) if notes else None)
+
     def stop_all(self):
         """停止全部录制会话。
 

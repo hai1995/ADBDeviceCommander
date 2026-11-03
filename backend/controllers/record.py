@@ -457,6 +457,168 @@ class RecordMixin:
         finally:
             self._rec_session = {}
 
+    def screen_record_cancel(self):
+        """取消录屏：停止并**删除**本次产生的全部文件（不合并、不打包）。
+
+        为什么需要单独一条路径：「录错了」是常态 —— 选错设备、场景不对、只是
+        想试试。在此之前用户唯一的出口是「停止」，而它会把几段视频合并、打包，
+        再告诉你「已完成」：几百 MB 的垃圾照样落盘，十几秒的 ffmpeg 拼接白白
+        烧掉，用户还得自己进目录一个个删。取消的语义是「这次的东西一个都不留」。
+
+        与停止一样，会话标记必须在 finally 里清掉：任何异常都不能让它残留，
+        残留即之后每次「开始录屏」都被守卫判成 recording，功能永久锁死。
+        """
+        with self._rec_lock:
+            try:
+                return self._screen_record_cancel_locked()
+            except Exception as ex:
+                self._push_toast("err", "⚠ 取消录屏出现异常：%s" % ex)
+                return {"ok": False, "reason": "cancel_error", "error": str(ex)}
+            finally:
+                self._rec_session = {}
+
+    def _screen_record_cancel_locked(self):
+        """（须在持有 _rec_lock 时调用）取消并删除，返回给前端的结构。"""
+        if not self._rec_session:
+            # 与「停止」同一套说法：不算错误，故不带 message（前端按 message 弹
+            # 错误 toast，会把「本来就没在录」说成「取消失败」）。
+            self._push_status("info", "ℹ 当前没有进行中的录屏（无需取消）")
+            return {"ok": False, "reason": "no_session"}
+        sess = self._rec_session
+        removed, kept, total = self._session_discard(sess)
+        self._push_status("info", "🗑 录屏已取消（本次产物未保留）")
+        if kept:
+            # 删不掉必须说：通常是文件还被别的程序占着（播放器开着刚拉回来的
+            # 那一段）。沉默地「取消成功」等于骗人 —— 文件还在磁盘上。
+            self._push_toast(
+                "warn", "⚠ 已取消录屏，但有 %d 个文件未能删除（可能仍被其它程序"
+                        "占用），请手动删除：%s"
+                        % (len(kept), "、".join(os.path.basename(p) for p in kept)))
+        elif not total:
+            self._push_toast("ok", "✓ 已取消录屏：本次还没有产生任何文件")
+        else:
+            self._push_toast(
+                "ok", "✓ 已取消录屏：本次产生的 %d 个文件已删除（未合并、未打包）"
+                % removed)
+        return {"ok": True, "removed": removed, "kept": kept}
+
+    def _session_discard(self, sess):
+        """取消录屏的收尾主体：停止一切并**删掉**本场产物（须持 _rec_lock）。
+
+        返回 (已删除文件数, 未能删除的路径列表, 本次涉及的文件总数)。
+
+        刻意不复用 _session_teardown：那条路径的每一步都在「保住产物」（合成
+        音频、合并分段、打包、失败一个段都不删），这里每一步都在「确认产物不
+        存在」。两者共用一套代码，迟早有一边走错方向 —— 比如把「打包后删源
+        文件」这种副作用带进取消路径，或者反过来让取消的删除混进正常收尾里。
+        宁可重复几行，也不让「删用户的录像」和「保用户的录像」共用同一条链。
+        """
+        # 设备 overlay（指针位置 / 触摸圆点）必须先恢复：它们是设备系统设置，
+        # 与这次录的东西留不留毫无关系，取消也得把设备状态还回去。
+        self._restore_overlays(sess)
+        candidates = []
+        # 1) 同步 logcat：先**全部**下发停止（异步、立刻返回），最后再统一等它们
+        #    写完。逐台「停一台等一台」会把 N 台的等待串起来，而取消本该越快越好。
+        caps = dict(sess.get("logcat_captures") or {})
+        for s in list(caps.keys()):
+            try:
+                self.logcat_capture.stop(s, zip_on_stop=False)
+            except Exception:
+                pass
+        candidates.extend(p for p in caps.values() if p)
+        # 2) 设备侧：停止录制并丢弃（不拉当前段），已拉回的段交给下面一起删。
+        videos_map = sess.get("videos", {}) or {}
+        devaudio_map = sess.get("devaudio", {}) or {}
+        pretaken = sess.get("video_segs", {}) or {}
+        serials = list(videos_map.keys()) + [
+            s for s in devaudio_map if s not in videos_map]
+        for s in serials:
+            if s in videos_map:
+                fn = getattr(self.video, "discard_ex", None)
+                try:
+                    if fn is not None:
+                        ok, paths, err = fn(s)
+                    else:
+                        # 旧实现 / 测试替身没有 discard_ex：退化为正常停止 + 删除
+                        # （多花一次 pull，但语义仍然是「一个都不留」）。
+                        ok, paths, err = self._stop_video(s)
+                except Exception as ex:
+                    ok, paths, err = False, [], str(ex)
+                candidates.extend(paths or [])
+                # 「该设备未在录制」是正常情况（它已经自己收尾过了），不报警
+                if not ok and err and err != "该设备未在录制":
+                    self._push_status(
+                        "warn", "⚠ %s 取消时未能正常停止录屏（%s）；设备端可能还会"
+                                "录到 3 分钟上限才自行结束，该段不会保存"
+                                % (s, err))
+            if s in devaudio_map:
+                try:
+                    local_a = self.device_audio.stop(s)
+                except Exception as ex:
+                    local_a = None
+                    self._push_status(
+                        "warn", "⚠ %s 取消时设备音频收尾失败：%s" % (s, ex))
+                if local_a:
+                    candidates.append(local_a)
+        # 3) 电脑麦克风：stop() 会返回落盘路径，一并删。
+        if self._mic is not None:
+            mic = None
+            try:
+                mic = self._mic.stop()
+            except Exception:
+                mic = None
+            self._mic = None
+            if mic:
+                candidates.append(mic)
+        # 4) 会话登记过的本地路径：第 1 段（discard_ex 不拉它，但可能早已存在）、
+        #    麦克风文件、以及「设备被拔掉时已经取回的那几段」（video_segs）。
+        candidates.extend(p for p in videos_map.values() if p)
+        for ps in pretaken.values():
+            candidates.extend(ps or [])
+        if sess.get("mic_path"):
+            candidates.append(sess["mic_path"])
+        # 5) 等 logcat 把缓冲区写完再删：文件还在写的时候删，Windows 会直接拒绝
+        #    （PermissionError），结果就是「取消成功」但 txt 还在。
+        for s in list(caps.keys()):
+            for _ in range(20):
+                try:
+                    if not self.logcat_capture.is_running(s):
+                        break
+                except Exception:
+                    break
+                time.sleep(0.1)
+        return self._delete_files(candidates)
+
+    @staticmethod
+    def _delete_files(paths):
+        """删掉若干本地文件，返回 (成功删除数, 未能删除的路径列表, 去重后总数)。
+
+        只删**普通文件**：目录一律跳过 —— 取消录屏绝不能变成一次递归删除，
+        它删的只能是「本次录制产生的那些文件」。不存在的路径静默忽略（本次
+        可能一段都没落盘）；单个失败不影响其余继续删（一个被播放器占着的
+        mp4 不该让后面几个 txt 留在磁盘上）。
+        """
+        removed, kept = 0, []
+        seen = set()
+        for p in paths or []:
+            if not p:
+                continue
+            try:
+                key = os.path.normcase(os.path.abspath(p))
+            except Exception:
+                key = p
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if os.path.isdir(p) or not os.path.exists(p):
+                    continue
+                os.remove(p)
+                removed += 1
+            except Exception:
+                kept.append(p)
+        return removed, kept, len(seen)
+
     def _session_teardown(self, sess):
         """录屏会话收尾主体（须在持有 _rec_lock 时调用；异常由调用方兜底）。
 

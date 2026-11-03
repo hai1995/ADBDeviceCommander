@@ -1124,7 +1124,9 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
    左侧竖条 + 低饱和底，避免与真正的错误提示抢注意力。 */
 .rec-limit {
   display: flex; flex-direction: column; gap: 2px;
-  margin: 0 0 10px; padding: 7px 10px 7px 12px;
+  /* 这一块在录屏卡里排在操作区块**下方**（按钮 / 开关先出现，说明沉底）：
+     所以是上外边距留白，不留下边距——否则卡片底部会多出一段空白。 */
+  margin: 10px 0 0; padding: 7px 10px 7px 12px;
   font-size: var(--fs-sm); line-height: 1.65; color: var(--text-2);
   background: var(--warn-soft);
   border-left: 3px solid var(--warn);

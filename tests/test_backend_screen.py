@@ -1137,3 +1137,81 @@ def test_early_exit_is_still_death(tmp_path):
 
     assert vr.died_serials() == ["A1"]
     assert vr.limit_serials() == []
+
+
+def test_discard_ex_does_not_pull_current_segment(monkeypatch, tmp_path):
+    """取消录屏：停掉设备端进程，但**不**把当前段拉回来。
+
+    回归背景：取消以前只能靠「停止」实现，而 stop_ex 一定会 pull —— 用户明确
+    不要这段录像，程序还是把几百 MB 从设备搬回来再删掉（弱网下几十秒），
+    取消本该是「立刻止损」。
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, proc = _recorder(tmp_path)
+
+    def boom(sess):
+        raise AssertionError("discard_ex 不该 pull 当前段")
+
+    monkeypatch.setattr(vr, "_pull_one", boom)
+
+    ok, paths, err = vr.discard_ex("A1")
+
+    assert ok is True, (ok, err)
+    assert paths == [], paths
+    assert "A1" not in vr._sessions, "会话必须清掉（否则界面永远显示录制中）"
+    # 设备端临时文件要删：残留会让下一次 screenrecord 因同名文件直接启动失败
+    rms = [c for c in calls if "rm" in c]
+    assert rms and any("/sdcard/adb_rec_A1.mp4" in c for c in rms), calls
+
+
+def test_discard_ex_returns_already_pulled_segments(monkeypatch, tmp_path):
+    """自动分段时，先几段已经在后台拉回本地 —— 它们的路径要交回调用方删除。"""
+    monkeypatch.setattr(
+        ss.subprocess, "run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    vr, proc = _recorder(tmp_path)
+    p1 = tmp_path / "record_A1_T1.mp4"
+    p1.write_bytes(b"seg1")
+    done = threading.Event()
+    done.set()
+    vr._sessions["A1"].update({
+        "segments": [{"n": 1, "serial": "A1", "remote": "/r1",
+                      "local": str(p1), "dir": str(tmp_path),
+                      "ok": True, "err": None, "done": done}],
+    })
+
+    ok, paths, err = vr.discard_ex("A1")
+
+    assert ok and err is None, (ok, err)
+    assert paths == [str(p1)], paths
+
+
+def test_discard_ex_is_not_reported_as_unexpected_death(monkeypatch, tmp_path):
+    """取消是用户主动停止：不许被 _watch_exit 当成「录屏意外中断」。
+
+    误判的代价是触发一轮多余自动收尾（会话已不在，收不到任何东西），
+    状态栏却留下一条「录屏被中断、视频不完整」的告警，用户以为出了问题。
+    """
+    monkeypatch.setattr(
+        ss.subprocess, "run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    vr, proc = _recorder(tmp_path)
+    sess = vr._sessions["A1"]
+
+    vr.discard_ex("A1")
+    vr._watch_exit("A1", sess["proc"])
+
+    assert vr.died_serials() == [], "取消不该被标记成意外中断"
+
+
+def test_discard_unknown_serial_is_rejected(tmp_path):
+    """没在录的设备点取消：返回「未在录制」，不抛异常。"""
+    vr = ss.VideoRecorder(_Bus(), "adb")
+    ok, paths, err = vr.discard_ex("NOPE")
+    assert ok is False and paths == [] and "未在录制" in err, (ok, paths, err)

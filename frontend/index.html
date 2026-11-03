@@ -281,19 +281,14 @@
           </div>
           <div class="tool-body" id="rec-body">
             <div class="tool-desc">对受控设备各录一段 MP4（adb screenrecord）。需要复盘时勾上「同步录制 logcat」——日志按<b>全量</b>抓取，不截断也不过滤。</div>
-            <!-- 录制时长 / 自动分段 / 拼接说明（常驻）：Android 的 screenrecord
-                 单段硬上限就是 180 秒，不传 --time-limit 时到点是被系统掐断的。
-                 这几句必须写在按钮旁边 —— 用户往往录到一半才发现自己需要的是一段
-                 8 分钟的长视频，而「分段是怎么分的、拼完是不是完整、哪里会缺画面」
-                 直接决定他事后要不要重录。宁可字多，也不能让他录完才发现要重来。 -->
-            <div class="rec-limit" role="note">
-              <span class="rec-limit-t">⏱ 约每 3 分钟自动分段续录，无需任何手动操作，停止后合并为一个完整 MP4</span>
-              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，这是设备端硬限制、程序绕不过去。程序因此按 <b>170 秒</b>一段录制：到点自动收尾并<b>立刻接上下一段</b>，logcat 全程连续不中断。点「停止」后自动把各段<b>无损拼接成一个</b> mp4（只搬码流、不重新编码，画质与分段时完全一致），文件名仍是 <code>record_设备_时间.mp4</code>，不需要你自己拼。</span>
-              <span><b>三个必须知道的特殊点：①</b> 每处拼接点有<b>约 1 秒间隙</b>，那一瞬的画面确实录不到（设备端重启 screenrecord 的耗时，软件无法消除）——<b>N 段就有 N-1 处、累计约 N-1 秒</b>，回放到那里画面会一跳，<b>不是录制中断、也不是丢文件</b>；<b>②</b> 合并依赖本机 <code>ffmpeg</code>，没装时程序不会硬来：保留 <code>_p2</code>、<code>_p3</code>… 分段文件（每个都能单独播放），并在状态栏说明原因；<b>③</b> 单场最多 <b>20 段（约 57 分钟）</b>，到上限按<b>正常收尾</b>处理并明确提示，已录部分完整可播。</span>
-            </div>
             <div class="tool-row">
               <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
               <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止</button>
+              <!-- 取消：录错了（选错设备 / 场景不对 / 只是点错了开始）时的出口。
+                   与「停止」的区别是**不保留**：停止并删除本次已产生的文件，不合并、
+                   不打包。紧挨着「停止」有误点风险，故点击后还要再确认一次。 -->
+              <button id="tool-rec-cancel" class="btn" disabled data-icon="trash"
+                      title="取消本次录制：停止并删除刚录到的文件，不合并、不打包">取消</button>
             </div>
             <!-- 录屏开关：每项按内容宽度排布、随宽度自动换行。
                  「同步录制 logcat」「结束自动压缩 zip」默认开启（与 core/prefs.py 的
@@ -310,7 +305,20 @@
               <label class="chk"><input type="checkbox" id="rec-pointer-location" checked>指针位置（画面常驻准星，跟随触摸）</label>
               <label class="chk"><input type="checkbox" id="rec-show-touches" checked>触摸圆点（触摸时屏幕出圆点）</label>
             </div>
-            <div class="tool-desc dim">logcat 走落盘抓取：<b>全部缓冲区</b>（main / system / events / crash / radio …）＋ <b>全部级别</b>（V/D/I/W/E/F），不做任何过滤与截断，结束录制时随视频一并打包（若勾选压缩）。指针位置 / 触摸圆点为设备系统 overlay（settings put system pointer_location / show_touches），停止录屏时自动恢复设备原设置。</div>
+            <div class="tool-desc dim">logcat 走落盘抓取：<b>全部缓冲区</b>（main / system / events / crash / radio …）＋ <b>全部级别</b>（V/D/I/W/E/F），不做任何过滤与截断，结束录制时随视频一并打包（若勾选压缩）。指针位置 / 触摸圆点为设备系统 overlay（settings put system pointer_location / show_touches），停止录屏时自动恢复设备原设置。取消录制 = 停止并删除本次已产生的文件（不合并、不打包）。</div>
+            <!-- 录制时长 / 自动分段 / 拼接说明（常驻，放在操作区块**下方**）：
+                 Android 的 screenrecord 单段硬上限就是 180 秒，不传 --time-limit
+                 时到点是被系统掐断的。这段话必须常驻 —— 用户往往录到一半才发现
+                 自己需要的是一段 8 分钟的长视频，而「分段是怎么分的、拼完是不是
+                 完整、哪里会缺画面」直接决定他事后要不要重录。
+                 但它是**说明**、不是操作：早前放在按钮上方，一整块黄底长文把
+                 「开始录制 / 停止」挤到屏幕下半截，每次录屏都得先滚过它。现在
+                 按钮与开关在最上面，说明沉到区块下方。 -->
+            <div class="rec-limit" role="note">
+              <span class="rec-limit-t">⏱ 约每 3 分钟自动分段续录，无需任何手动操作，停止后合并为一个完整 MP4</span>
+              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，这是设备端硬限制、程序绕不过去。程序因此按 <b>170 秒</b>一段录制：到点自动收尾并<b>立刻接上下一段</b>，logcat 全程连续不中断。点「停止」后自动把各段<b>无损拼接成一个</b> mp4（只搬码流、不重新编码，画质与分段时完全一致），文件名仍是 <code>record_设备_时间.mp4</code>，不需要你自己拼。</span>
+              <span><b>三个必须知道的特殊点：①</b> 每处拼接点有<b>约 1 秒间隙</b>，那一瞬的画面确实录不到（设备端重启 screenrecord 的耗时，软件无法消除）——<b>N 段就有 N-1 处、累计约 N-1 秒</b>，回放到那里画面会一跳，<b>不是录制中断、也不是丢文件</b>；<b>②</b> 合并依赖本机 <code>ffmpeg</code>，没装时程序不会硬来：保留 <code>_p2</code>、<code>_p3</code>… 分段文件（每个都能单独播放），并在状态栏说明原因；<b>③</b> 单场最多 <b>20 段（约 57 分钟）</b>，到上限按<b>正常收尾</b>处理并明确提示，已录部分完整可播。</span>
+            </div>
           </div>
         </div>
 
