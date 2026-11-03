@@ -1136,6 +1136,20 @@ def test_echart_downsample_keeps_none_gaps_and_small_series():
     assert svc._downsample(small, cap=900) == small
 
 
+def test_report_states_reason_when_echarts_init_fails():
+    """ECharts 初始化失败必须**说出来**，不能留七个空白块。
+
+    回归：服务端只判断「库文件在不在」。文件在、但对方浏览器内核过旧或安全
+    软件拦了脚本时，`echarts.init` 会抛错 —— 没有兜底就是 180px 空白，读者
+    会以为「这次没采到数据」，而不是「图表没画出来」。这是纯粹的静默失败。
+    """
+    html = svc.build_report_html(_demo_samples(30), {"serial": "A1"})
+    assert 'typeof echarts==="undefined"' in html, "库未加载的分支必须存在"
+    assert "图表初始化失败" in html and "ECharts 未加载" in html
+    assert "try{var c=echarts.init" in html, "init 必须包 try/catch"
+    assert "try{c.resize();}" in html, "resize 失败也不许把整段脚本炸掉"
+
+
 def test_report_html_size_stays_bounded_for_long_sessions():
     """一小时以上的会话（8000 点）报告不能涨到几 MB —— 双击打开会卡住。
 

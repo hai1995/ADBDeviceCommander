@@ -1627,6 +1627,13 @@ def _echarts_script(options, units, prefix):
         'function p2(n){return (n<10?"0":"")+n;}'
         'function hm(ms){var d=new Date(ms);'
         'return p2(d.getHours())+":"+p2(d.getMinutes())+":"+p2(d.getSeconds());}'
+        'function bad(el,why){while(el.firstChild)el.removeChild(el.firstChild);'
+        'var d=document.createElement("div");d.className="nochart";'
+        'd.textContent="图表初始化失败："+why;el.appendChild(d);}'
+        'if(typeof echarts==="undefined"){'
+        'O.forEach(function(o,i){var el=document.getElementById("%s"+i);'
+        'if(el)bad(el,"ECharts 未加载（脚本被拦截或浏览器版本过旧）");});'
+        'return;}'
         'O.forEach(function(o,i){'
         'var el=document.getElementById("%s"+i);if(!el)return;'
         'var u=U[i]||"";'
@@ -1637,10 +1644,13 @@ def _echarts_script(options, units, prefix):
         's+="<br>"+p.marker+" "+p.seriesName+": "'
         '+(v==null?"—":(+v).toFixed(1))+u;});'
         'return s;};'
-        'var c=echarts.init(el,null,{renderer:"canvas"});c.setOption(o);A.push(c);'
+        'try{var c=echarts.init(el,null,{renderer:"canvas"});'
+        'c.setOption(o);A.push(c);}'
+        'catch(e){bad(el,(e&&e.message)?e.message:String(e));}'
         '});'
-        'addEventListener("resize",function(){A.forEach(function(c){c.resize();});});'
-        '})();</script>' % (js, data, units_json, prefix)
+        'addEventListener("resize",function(){A.forEach(function(c){'
+        'try{c.resize();}catch(e){}});});'
+        '})();</script>' % (js, data, units_json, prefix, prefix)
     )
 
 
