@@ -302,9 +302,18 @@ def test_full_segment_rolls_to_next_part(monkeypatch, tmp_path):
     monkeypatch.setattr(vr, "_pull_segment_bg",
                         lambda seg: seg["done"].set())
     monkeypatch.setattr(vr, "_confirm_segment", lambda *a: None)
+    # 续段会为新的一段再起一个 watcher（真实环境里它会阻塞在 proc.wait() 上，
+    # 直到那一段真的录满/被杀）。这里 Popen 是假的，_Proc.wait() 立刻返回 0 ——
+    # 那条 watcher 随即判定「远未到点就退出」，把 died 标上，与本用例的断言
+    # 抢跑（高负载时偶发失败）。所以把类上的 _watch_exit 换成只记调用的假函数，
+    # 再由本用例直接调用**原函数对象**跑一次真实的判定逻辑。
+    real_watch = ss.VideoRecorder.__dict__["_watch_exit"]
+    spawned = []
+    monkeypatch.setattr(ss.VideoRecorder, "_watch_exit",
+                        lambda self, s, p: spawned.append((s, p)))
     vr._sessions["A1"]["started"] = time.time() - (ss.REC_SEGMENT_S + 1)
 
-    vr._watch_exit("A1", proc)
+    real_watch(vr, "A1", proc)
 
     assert vr.died_serials() == [], "录满不是死亡"
     assert vr.limit_serials() == [], "录满不该结束整场录制"
@@ -313,6 +322,8 @@ def test_full_segment_rolls_to_next_part(monkeypatch, tmp_path):
     assert sess["seg"] == 2
     assert sess["local"].endswith("_p2.mp4"), sess["local"]
     assert len(sess["segments"]) == 1 and sess["segments"][0]["n"] == 1
+    # 新那一段也要有自己的 watcher，否则它录满后没人接第 3 段
+    assert len(spawned) == 1 and spawned[0][0] == "A1", spawned
     rec = [c for c in captured if "screenrecord" in c][0]
     assert rec[-1] != sess["segments"][0]["remote"], (
         "新段必须用新的远端文件名（重名会让 screenrecord 拒绝启动）：%r" % rec)
