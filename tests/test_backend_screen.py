@@ -4,6 +4,7 @@
 只验证「停止时是否把设备端 screenrecord 一并收尾」这类进程/资源语义，
 adb 调用全部用 subprocess.run 替身拦截。
 """
+import io
 import threading
 import time
 
@@ -180,18 +181,24 @@ def test_start_uses_unique_remote_name(monkeypatch, tmp_path):
     assert remote2 != remote, "两次录制远端文件名应不同（防残留文件冲突）"
 
 
-def test_start_has_no_time_limit_option(monkeypatch, tmp_path):
-    """固定时长功能已移除：screenrecord 命令不得再带 --time-limit。
+def test_start_passes_segment_time_limit(monkeypatch, tmp_path):
+    """每段必须显式下发 --time-limit：到点由 screenrecord 自己优雅收尾后接下一段。
 
-    录屏只能手动停止（点「停止」由 stop() 优雅收尾）。这条断言锁定移除结果，
-    防止哪天又加回来——UI 已无入口，后端也不该再支持。
+    这里锁定的是「自动分段」的实现方式，而不是早年被移除的「固定时长」：
+    那时到点会**结束整场录制**，现在到点只结束**这一段**，紧接着自动接下一段，
+    用户完全不用操作（见 _roll_segment_locked / rolled_serials）。
+    为什么不依赖 180 秒硬上限：硬上限到点是被系统掐断，慢设备上来不及写完
+    moov，产物没有时长、播放不了。故取 REC_SEGMENT_S（留 10 秒余量）。
     """
     captured = []
 
     class _Proc:
         def poll(self): return None
+
         def terminate(self): pass
+
         def kill(self): pass
+
         def wait(self, timeout=None): return 0
 
     monkeypatch.setattr(ss.subprocess, "Popen",
@@ -202,12 +209,180 @@ def test_start_has_no_time_limit_option(monkeypatch, tmp_path):
     ok, local = vr.start("A1", str(tmp_path))
     assert ok, local
     rec = [c for c in captured if "screenrecord" in c][0]
-    assert "--time-limit" not in rec, "固定时长已移除，不应再下发 --time-limit：%r" % rec
-    # start() 签名里也不该再有 duration 参数
+    assert "--time-limit" in rec, "每段都要带 --time-limit（自动分段的前提）：%r" % rec
+    assert str(ss.REC_SEGMENT_S) in rec, rec
+    from core.constants import REC_MAX_S as _HARD_MAX
+    assert ss.REC_SEGMENT_S < _HARD_MAX, "段长必须留出余量，别撞 180 秒硬上限"
+    # 整场录制仍然只由用户停止：start() 不接受 duration，也没有「到点自动收尾整场」
     import inspect
     assert "duration" not in inspect.signature(ss.VideoRecorder.start).parameters
-    assert not hasattr(vr, "_wait_fixed"), "固定时长的自动收尾线程应一并移除"
+    assert not hasattr(vr, "_wait_fixed"), "固定时长（到点收尾整场）的线程不应回来"
 
+
+def test_old_rom_without_time_limit_is_retried(monkeypatch, tmp_path):
+    """设备不认 --time-limit：去掉该参数重试一次，仍要能录。
+
+    极老 ROM / 定制机上 screenrecord 会直接报 `unrecognized option`，整台设备
+    就此完全录不了 —— 而分段只是体验优化，不能因为它把录屏功能本身弄挂。
+    去掉参数后退化到 180 秒硬上限，自动分段照旧（180 > 170，判据不受影响）。
+    """
+    calls = []
+    state = {"n": 0}
+
+    class _Bad:
+        def __init__(self):
+            self.stdout = io.StringIO(
+                "screenrecord: unrecognized option '--time-limit'\n")
+            self.stderr = io.StringIO("")
+
+        def poll(self):
+            return 1
+
+        def wait(self, timeout=None):
+            return 1
+
+        def kill(self):
+            pass
+
+    class _Good:
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kw):
+        calls.append(list(cmd))
+        state["n"] += 1
+        return _Bad() if state["n"] == 1 else _Good()
+
+    monkeypatch.setattr(ss.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ss.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    vr = ss.VideoRecorder(_Bus(), "adb")
+
+    ok, local = vr.start("A1", str(tmp_path))
+
+    assert ok, local
+    assert len(calls) == 2, calls
+    assert "--time-limit" in calls[0]
+    assert "--time-limit" not in calls[1], (
+        "老 ROM 上必须去掉该选项重试：%r" % calls[1])
+    assert calls[0][-1] != calls[1][-1], "重试要换新的远端文件名（防残留文件阻断）"
+    assert vr._sessions["A1"]["no_lim"] is True
+
+
+def test_full_segment_rolls_to_next_part(monkeypatch, tmp_path):
+    """一段录满后**自动接下一段**，用户不需要做任何操作。
+
+    回归：录满时只标一个「到上限」，整场录制就此收尾 —— 用户想录 8 分钟，得自己
+    盯着表、到 3 分钟手动停一次再点开始，还要自己把几个文件对应起来。现在这一段
+    到点即自动续录，产物仍归同一个会话、文件名带 _pN 顺序。
+    """
+    captured = []
+
+    class _Proc:
+        def poll(self): return None
+
+        def terminate(self): pass
+
+        def kill(self): pass
+
+        def wait(self, timeout=None): return 0
+
+    monkeypatch.setattr(ss.subprocess, "Popen",
+                        lambda cmd, **k: (captured.append(list(cmd)), _Proc())[1])
+    vr, proc = _recorder(tmp_path)
+    vr._sessions["A1"].update({"ts": "T1", "extra": "T1", "seg": 1,
+                               "segments": []})
+    # 拉取另有测试，这里只关心续段本身（避免后台线程去跑真实 adb）
+    monkeypatch.setattr(vr, "_pull_segment_bg",
+                        lambda seg: seg["done"].set())
+    monkeypatch.setattr(vr, "_confirm_segment", lambda *a: None)
+    vr._sessions["A1"]["started"] = time.time() - (ss.REC_SEGMENT_S + 1)
+
+    vr._watch_exit("A1", proc)
+
+    assert vr.died_serials() == [], "录满不是死亡"
+    assert vr.limit_serials() == [], "录满不该结束整场录制"
+    assert vr.rolled_serials() == [("A1", 2)]
+    sess = vr._sessions["A1"]
+    assert sess["seg"] == 2
+    assert sess["local"].endswith("_p2.mp4"), sess["local"]
+    assert len(sess["segments"]) == 1 and sess["segments"][0]["n"] == 1
+    rec = [c for c in captured if "screenrecord" in c][0]
+    assert rec[-1] != sess["segments"][0]["remote"], (
+        "新段必须用新的远端文件名（重名会让 screenrecord 拒绝启动）：%r" % rec)
+
+
+def test_segment_limit_ends_session_as_normal(monkeypatch, tmp_path):
+    """到段数上限后不再续录，但仍是**正常收尾**（不能报成意外中断）。"""
+    vr, proc = _recorder(tmp_path)
+    vr._sessions["A1"].update({"ts": "T1", "extra": "T1",
+                               "seg": ss.REC_MAX_SEGMENTS, "segments": []})
+    vr._sessions["A1"]["started"] = time.time() - (ss.REC_SEGMENT_S + 1)
+
+    vr._watch_exit("A1", proc)
+
+    assert vr.limit_serials() == ["A1"]
+    assert vr.died_serials() == []
+    assert vr.rolled_serials() == []
+
+
+def test_roll_failure_keeps_previous_segment(monkeypatch, tmp_path):
+    """下一段起不来：录制到此为止，但**上一段必须完好保留**并说明是哪一段断了。
+
+    只标一个 died 的话，用户会以为整场录制都废了，把本来完整的前几段一并扔掉。
+    """
+    def boom(cmd, **k):
+        raise OSError("编码器被占用")
+
+    monkeypatch.setattr(ss.subprocess, "Popen", boom)
+    vr, proc = _recorder(tmp_path)
+    vr._sessions["A1"].update({"ts": "T1", "extra": "T1", "seg": 1,
+                               "segments": []})
+    monkeypatch.setattr(vr, "_pull_segment_bg", lambda seg: seg["done"].set())
+    vr._sessions["A1"]["started"] = time.time() - (ss.REC_SEGMENT_S + 1)
+
+    vr._watch_exit("A1", proc)
+
+    assert vr.died_serials() == ["A1"], "续不上就是中断，要触发收尾"
+    note = vr.seg_notes().get("A1") or ""
+    assert "第 2 段" in note and "编码器被占用" in note, note
+    segs = vr._sessions["A1"]["segments"]
+    assert [x["n"] for x in segs] == [1], "上一段必须留在待收尾列表里"
+
+
+def test_stop_ex_returns_all_segments(monkeypatch, tmp_path):
+    """停止时必须把**所有段**都拉回来，不能只回最后一段。
+
+    回归：分段后 stop 只返回当前段，先前几段既不合成也不进 zip，用户拿到一个
+    只有 3 分钟的视频，以为自己录的 8 分钟根本没录上。
+    """
+    monkeypatch.setattr(ss.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    vr, proc = _recorder(tmp_path)
+    p1 = tmp_path / "record_A1_T1.mp4"
+    p1.write_bytes(b"seg1")
+    p2 = tmp_path / "record_A1_T1_p2.mp4"
+    p2.write_bytes(b"seg2")
+    done = threading.Event()
+    done.set()
+    vr._sessions["A1"].update({
+        "ts": "T1", "extra": "T1", "seg": 2, "local": str(p2),
+        "segments": [{"n": 1, "serial": "A1", "remote": "/r1",
+                      "local": str(p1), "dir": str(tmp_path),
+                      "ok": True, "err": None, "done": done}],
+    })
+    monkeypatch.setattr(vr, "_pull_one", lambda sess: (True, sess["local"], None))
+
+    ok, paths, err = vr.stop_ex("A1")
+
+    assert ok and err is None, (ok, err)
+    assert paths == [str(p1), str(p2)], paths
 
 def test_start_reports_failure_when_screenrecord_exits_early(monkeypatch, tmp_path):
     """screenrecord 启动即退出（权限/不支持）应被 start() 立即捕获并报启动失败。"""
@@ -942,24 +1117,8 @@ def test_stop_recording_never_kills_mirror_by_process_name(monkeypatch, tmp_path
         assert "-f" in c, "兜底清理必须按命令行特征（-f）：%r" % (c,)
         assert "screenrecord" not in c, "不得按进程名杀同名进程：%r" % (c,)
 
-def test_screenrecord_hitting_time_limit_is_not_death(tmp_path):
-    """录满 180 秒后自行退出是**正常收尾**，不能标成「意外死亡」。
-
-    screenrecord 不传 --time-limit 时默认 180 秒，到点会先写回 moov 再退出；
-    本地看到的只是 adb 客户端自己结束，与进程崩了完全一样。标记成 died 会让
-    controller 按「意外中断、视频不完整、请完整重录」收尾 —— 用户白录一场。
-    """
-    vr, proc = _recorder(tmp_path)
-    vr._sessions["A1"]["started"] = time.time() - (ss.REC_MAX_S + 1)
-
-    vr._watch_exit("A1", proc)
-
-    assert vr.died_serials() == [], "跑到上限不能被当成意外死亡"
-    assert vr.limit_serials() == ["A1"]
-
-
 def test_early_exit_is_still_death(tmp_path):
-    """录到一半就退出（远未到 180 秒）仍按意外死亡处理，不能被上限判定吞掉。"""
+    """录到一半就退出（远未录满一段）仍按意外死亡处理，不能被续段判定吞掉。"""
     vr, proc = _recorder(tmp_path)
     vr._sessions["A1"]["started"] = time.time() - 30
 

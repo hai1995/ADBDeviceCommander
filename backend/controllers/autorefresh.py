@@ -5,6 +5,7 @@ from backend.controller import (
     AUTO_REFRESH_MS, REC_DEATH_CHECK_S, time
 )
 from backend.screen_service import device_present
+from core.constants import REC_MAX_SEGMENTS, REC_SEGMENT_S
 
 class AutoRefreshMixin:
     """自动轮询与孤儿回收（录屏/工具/录制）。"""
@@ -60,8 +61,16 @@ class AutoRefreshMixin:
         早就切到别的页签做别的事了。检测本身极轻（VideoRecorder 内的 watcher
         线程已标记，这里只是取标记），故可放在自动轮询线程里直接跑。
         """
+        # 自动分段：录满一段后程序自己接上下一段，用户什么都没做。这件事必须
+        # 说出来 —— 否则保存目录里凭空多出一个 _p2.mp4，没人说得清它是哪来的，
+        # 更没人敢相信「停止的时候不会漏掉它」。
+        roll_fn = getattr(self.video, "rolled_serials", None)
+        for s, n in (roll_fn() if roll_fn else []) or []:
+            self._push_status(
+                "info", "⏱ %s 已录满一段，已自动接着录第 %d 段（无需操作）"
+                        % (s, n))
         died = self.video.died_serials()
-        # 「跑到单段上限后自己结束」与「被外力打断」在本地表现完全一样（adb 客户端
+        # 「跑到分段上限后自己结束」与「被外力打断」在本地表现完全一样（adb 客户端
         # 自己退出），但结论相反：前者视频完整、只是录到头了，后者才需要重录。
         # 分开取标记，才能给用户不同的话。替身没有该方法时按「没有」处理。
         fn = getattr(self.video, "limit_serials", None)
@@ -96,15 +105,28 @@ class AutoRefreshMixin:
         # 以下播报放在锁外：_rec_lock 保护的是会话状态，往界面推事件不需要它，
         # 占着锁推只会让并发的「开始/停止」多等一会儿。
         if limited:
-            # 跑到 180s 上限是**正常结束**（screenrecord 先写回 moov 再退出）。
+            # 到分段上限是**正常结束**（screenrecord 先写回 moov 再退出）。
             # 不单独说明的话，用户会看到和「进程崩了」一模一样的收尾流程，
             # 以为视频坏了白录一场；而实际上它完整可用，只是录到头了。
             self._push_status(
                 "info",
-                "⏱ %s 已达到单段录制上限（约 3 分钟），录屏已正常收尾、视频完整；"
-                "需要更长请分段录制" % "、".join(sorted(limited)))
+                "⏱ %s 已达到自动分段上限（共 %d 段，约 %d 分钟），录屏已正常"
+                "收尾、所有分段视频完整；需要更长时间请停止后重新开始录制"
+                % ("、".join(sorted(limited)), REC_MAX_SEGMENTS,
+                   REC_MAX_SEGMENTS * REC_SEGMENT_S // 60))
         if dead:
-            self._push_toast("warn", self._build_death_message(sorted(dead)))
+            # 续段失败的原因（第 N 段起不来 / 起来就退）只有录屏服务知道，
+            # 不带出来就只剩一句笼统的「被意外中断」，用户会把已经录好的
+            # 前几段也一起扔掉。
+            note_fn = getattr(self.video, "seg_notes", None)
+            notes = {}
+            if note_fn is not None:
+                try:
+                    notes = note_fn() or {}
+                except Exception:
+                    notes = {}
+            self._push_toast(
+                "warn", self._build_death_message(sorted(dead), notes=notes))
         # 完整收尾：停掉其余设备 / 麦 / 设备音频、恢复指针位置/触摸圆点、合成与打包
         # 照常进行（异常由 _screen_record_stop_locked 兜底并清会话）。
         self.screen_record_stop()
@@ -112,7 +134,7 @@ class AutoRefreshMixin:
         # 界面会一直显示「录制中」（后端停了、前端不知道）。
         self.bus.push("rec_state", {"running": False, "reason": "died"})
 
-    def _build_death_message(self, dead, probe=None):
+    def _build_death_message(self, dead, probe=None, notes=None):
         """根据设备是否真的掉线，给出准确的录屏中断原因。
 
         不再写死「常见原因是 adb root」——录屏路径里本工具不会重启 adbd
@@ -128,15 +150,23 @@ class AutoRefreshMixin:
         probe = probe or device_present
         names = "、".join(dead)
         gone = [s for s in dead if not probe(self.state.adb_path, s)]
+        # 自动分段中途断掉时，用户最需要知道的是「前面几段还在」—— 不说的话，
+        # 「视频不完整」四个字足以让他把整场录制当成废品删掉。
+        seg_txt = ""
+        for s in dead:
+            why = (notes or {}).get(s)
+            if why:
+                seg_txt += ("；%s 的分段续录中断：%s（此前已录好的分段完整保留，"
+                            "已在保存目录中）" % (s, why))
         if gone:
             return ("⚠ 检测到录屏中断（%s）：设备连接已断开（USB 掉线 / adb 失去连接），"
                     "已保留已录片段。常见诱因是 USB 接触不良、系统 USB 省电"
                     "（选择性暂停），或在录屏同时叠加满缓冲全级别 logcat 拉满 USB 带宽"
                     "——可换后置 USB 口 / 短线缆 / 关闭 USB 选择性暂停，"
-                    "或只抓需要的 logcat 缓冲区。" % names)
+                    "或只抓需要的 logcat 缓冲区。%s" % (names, seg_txt))
         return ("⚠ 检测到录屏进程意外结束（%s）：设备仍在连接，screenrecord 自身异常终止，"
                 "已保留已录片段。若你曾在录屏时执行 adb root / 切无线调试，"
-                "adbd 重启也会触发此情况。" % names)
+                "adbd 重启也会触发此情况。%s" % (names, seg_txt))
 
     def _reap_gone_tools(self):
         """设备被移除（gone）后，收拾它正在进行的 logcat 监控 / 抓取，以及录屏会话里
@@ -199,7 +229,15 @@ class AutoRefreshMixin:
         """
         for s in gone_set:
             try:
-                self.video.stop(s)
+                # 用 stop_ex 取回**全部段**并记进会话：设备虽然掉了，掉之前录完的
+                # 那几段已经拉回本地，收尾时必须一并进包。只调 stop() 的话它们
+                # 就留在目录里、既不合成也不打包，用户以为没录上。
+                ok, paths, err = self._stop_video(s)
+                if paths:
+                    with self._rec_lock:
+                        sess = self._rec_session
+                        if sess:
+                            sess.setdefault("video_segs", {})[s] = paths
             except Exception:
                 pass
             try:

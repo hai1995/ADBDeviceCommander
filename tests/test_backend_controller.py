@@ -1473,9 +1473,11 @@ def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
     }
     order = []
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    # 打 _stop_video 而不是 video.stop：收尾现在走 stop_ex（自动分段会有多段），
+    # 这里只关心「日志停止」与「视频收尾」的先后顺序。
     monkeypatch.setattr(
-        api.video, "stop",
-        lambda s: (order.append("video"), (True, str(video), None))[1])
+        api, "_stop_video",
+        lambda s: (order.append("video"), (True, [str(video)], None))[1])
     monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: False)
     monkeypatch.setattr(
         api.logcat_capture, "stop",
@@ -1748,7 +1750,7 @@ def test_screen_record_stop_clears_session_even_on_exception(monkeypatch, tmp_pa
         raise OSError("保存目录不可用")
 
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(api.video, "stop", boom)
+    monkeypatch.setattr(api, "_stop_video", boom)
 
     res = api.screen_record_stop()
     assert res["ok"] is False and res["reason"] == "stop_error", res
@@ -2310,6 +2312,123 @@ def test_zip_stores_video_and_compresses_log(tmp_path):
             "视频不应再走 DEFLATE（纯烧 CPU）")
         assert z.getinfo("logcat_A1.txt").compress_type == zipfile.ZIP_DEFLATED, (
             "日志是文本，必须压缩（体积能差一个数量级）")
+
+
+def test_all_segments_are_kept_and_zipped(monkeypatch, tmp_path):
+    """自动分段的每一段都要落盘并进包 —— 只留最后一段等于把前几段扔掉。
+
+    回归：分段后收尾只取当前（最后）一段，先前每段 170 秒的视频既不进 zip 也
+    不出现在任何提示里。用户录了 8 分钟，最后只拿到一个 3 分钟的文件，还以为
+    中间那 5 分钟根本没录上。
+    """
+    api = _make_api()
+    s1 = tmp_path / "record_A1_ts1.mp4"
+    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    s2 = tmp_path / "record_A1_ts1_p2.mp4"
+    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": True,
+        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    monkeypatch.setattr(
+        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    z = tmp_path / "rec_ts1.zip"
+    assert z.exists(), "分段产物应照常打包"
+    with zipfile.ZipFile(str(z)) as zf:
+        names = zf.namelist()
+    assert "record_A1_ts1.mp4" in names and "record_A1_ts1_p2.mp4" in names, names
+
+
+def test_partially_failed_teardown_keeps_finished_segments(monkeypatch, tmp_path):
+    """最后一段收尾失败时，前面已录完的段必须照常保留并进包。
+
+    只说一句「录屏收尾失败」的话，用户会以为整场录制都废了，把本来完好的几段
+    一并删掉 —— 而它们其实就在保存目录里躺着。
+    """
+    api = _make_api()
+    s1 = tmp_path / "record_A1_ts1.mp4"
+    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    partial = tmp_path / "record_A1_ts1_p2.mp4"
+    partial.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": True,
+        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    # stop_ex 的语义：paths 只含正常收尾的段，残片路径在 err 里
+    monkeypatch.setattr(
+        api, "_stop_video",
+        lambda s: (False, [str(s1)],
+                   "缺 moov 头，无法播放（当前段残片：%s）" % partial))
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    z = tmp_path / "rec_ts1.zip"
+    with zipfile.ZipFile(str(z)) as zf:
+        names = zf.namelist()
+    assert "record_A1_ts1.mp4" in names, names
+    assert "record_A1_ts1_p2.mp4" not in names, (
+        "没正常收尾的残片不该进包（但不代表要删掉它）：%r" % (names,))
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("已完成的 1 段完整保留" in t for t in texts), texts
+
+
+def test_segment_roll_is_announced(monkeypatch):
+    """自动接下一段时要告诉用户：否则目录里凭空多出 _p2.mp4，没人说得清。"""
+    api = _make_api()
+    api._rec_session = {"videos": {"A1": "x"}, "devaudio": {}}
+
+    class FakeVideo:
+        def rolled_serials(self):
+            return [("A1", 2)]
+
+        def died_serials(self):
+            return []
+
+        def limit_serials(self):
+            return []
+
+    api.video = FakeVideo()
+    api._reap_dead_recordings()
+
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("第 2 段" in t for t in texts), texts
+
+
+def test_gone_device_segments_survive_teardown(monkeypatch, tmp_path):
+    """设备中途被拔掉：拔之前录完的段已经拉回来了，收尾必须照样进包。
+
+    回归：设备移除走 _reap_gone_recording 强停（那时已经拿到多段路径），但收尾
+    发现该设备「未在录制」，只按启动时记下的第一段兜底 —— 后面几段就留在目录里
+    既不合成也不进包，用户以为没录上。
+    """
+    api = _make_api()
+    s1 = tmp_path / "record_A1_ts1.mp4"
+    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    s2 = tmp_path / "record_A1_ts1_p2.mp4"
+    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": True,
+        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
+        "video_segs": {"A1": [str(s1), str(s2)]},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: False)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    with zipfile.ZipFile(str(tmp_path / "rec_ts1.zip")) as zf:
+        names = zf.namelist()
+    assert "record_A1_ts1_p2.mp4" in names, names
 
 
 # ---------------------------------------------------------------------------

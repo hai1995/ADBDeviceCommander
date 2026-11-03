@@ -58,8 +58,10 @@ class RecordMixin:
                             pointer_location=True, show_touches=True):
         """启动录屏会话（可含设备音频 / 麦 / logcat）。
 
-        录屏一律**手动停止**（点「停止」或关窗口）：早期支持过「固定时长」，
-        但实际使用中手动停止更直观，该选项已移除。
+        整场录制由用户**手动停止**（点「停止」或关窗口），中间不需要任何操作：
+        单段到 170 秒会自动接下一段（Android screenrecord 单段硬上限 180 秒），
+        产物落在同一目录、按 _p2 / _p3 顺序命名，收尾时一并打包。早年的
+        「固定时长」（到点结束整场录制）已移除，与自动分段不是一回事。
         _rec_lock 保护整个会话生命周期，与 screen_record_stop / shutdown
         互斥：连点 start、start 与 stop 撞车，都不会再出现会话引用被覆盖、
         漏停漏合成的情况。内部实现见 _screen_record_start_locked。
@@ -423,12 +425,18 @@ class RecordMixin:
             # 完成强提醒：收尾可能要拉文件 / 等设备端写 moov / 合成 / 打包，
             # 耗时以秒计，用户很可能已切去别的页签——一条汇总 toast 说清
             # 「存在哪」，明细（逐台合成/保存/打包）留在状态栏。
+            # 自动分段时文件不止一个：说清「几段」，用户才对得上「我录了 8 分钟」
+            # 和「目录里为什么有 3 个 mp4」。段数只数 mp4（包里还有 logcat 的 txt）。
+            seg_n = len([f for f in files
+                         if str(f).lower().endswith(".mp4")])
+            seg_tip = "（%d 段视频）" % seg_n if seg_n > 1 else ""
             if zpath:
-                self._push_toast("ok", "✓ 录屏已完成，产物已打包: %s" % zpath)
+                self._push_toast(
+                    "ok", "✓ 录屏已完成%s，产物已打包: %s" % (seg_tip, zpath))
             elif files:
                 self._push_toast(
-                    "ok", "✓ 录屏已完成：%d 个文件已保存到 %s"
-                    % (len(files), sess.get("dir") or "保存目录"))
+                    "ok", "✓ 录屏已完成%s：%d 个文件已保存到 %s"
+                    % (seg_tip, len(files), sess.get("dir") or "保存目录"))
             return {"ok": True}
         except Exception as ex:
             self._push_toast("err", "⚠ 录屏收尾出现异常：%s" % ex)
@@ -460,9 +468,14 @@ class RecordMixin:
         dead = sess.get("dead") or set()
         serials = list(videos_map.keys()) + [
             s for s in devaudio_map if s not in videos_map]
-        teardown = self._teardown_devices(serials, dead, videos_map, devaudio_map)
-        local_videos = {s: v for s, (v, _a) in teardown.items()
-                        if v and os.path.exists(v)}
+        teardown = self._teardown_devices(
+            serials, dead, videos_map, devaudio_map,
+            pretaken=sess.get("video_segs") or {})
+        local_videos = {}
+        for s, (vs, _a) in teardown.items():
+            keep = [p for p in (vs or []) if p and os.path.exists(p)]
+            if keep:
+                local_videos[s] = keep
         local_devaudio = {s: a for s, (_v, a) in teardown.items() if a}
         mic_path = None
         if self._mic is not None:
@@ -476,32 +489,41 @@ class RecordMixin:
         # 上面已经 toast 过「电脑麦克风启动失败」，不再重复归因为「全程静音」。
         mic_lost = bool(sess.get("with_mic") and sess.get("mic_started")
                         and not mic_path)
-        for s, vlocal in local_videos.items():
+        for s, vlist in local_videos.items():
             audios = []
             if local_devaudio.get(s):
                 audios.append(local_devaudio[s])
             if mic_path:
                 audios.append(mic_path)
-            if audios:
-                final = (vlocal[:-4] + "_final.mp4") if vlocal.endswith(
-                    ".mp4") else (vlocal + ".final.mp4")
-                merged = ffmpeg_mux(vlocal, audios, final)
-                if merged:
-                    self._push_status("ok", "✓ 已合成音视频: %s" % merged)
-                    rec_files.append(merged)
+            if audios and len(vlist) > 1:
+                # 音频是**整场连续**的一条，视频却被切成了多段。按段切音频需要
+                # 每一段的起始偏移，任何一处算错都会让后几段音画错位 —— 那比
+                # 干脆没有声音更难排查。这里只把音频并进第 1 段，其余段保留为
+                # 无音轨视频，并明确说出来（不说的话用户会以为是合成失败）。
+                self._push_status(
+                    "warn", "⚠ %s 共 %d 段：音频只并入第 1 段，其余段为无音轨视频"
+                            % (s, len(vlist)))
+            for idx, vlocal in enumerate(vlist):
+                if audios and idx == 0:
+                    final = (vlocal[:-4] + "_final.mp4") if vlocal.endswith(
+                        ".mp4") else (vlocal + ".final.mp4")
+                    merged = ffmpeg_mux(vlocal, audios, final)
+                    if merged:
+                        self._push_status("ok", "✓ 已合成音视频: %s" % merged)
+                        rec_files.append(merged)
+                    else:
+                        # 合成失败/产出不可播放时**保留原视频**，并说清原因：
+                        # 「未安装 ffmpeg」只是其中一种，音频为空、ffmpeg 过旧同样会走到这里。
+                        why = "" if _have_ffmpeg() else "（未检测到 ffmpeg）"
+                        self._push_toast(
+                            "warn", "⚠ 合成音视频失败%s，原始视频已保存（无音轨）: %s"
+                            % (why, vlocal))
+                        if os.path.exists(vlocal):
+                            rec_files.append(vlocal)
                 else:
-                    # 合成失败/产出不可播放时**保留原视频**，并说清原因：
-                    # 「未安装 ffmpeg」只是其中一种，音频为空、ffmpeg 过旧同样会走到这里。
-                    why = "" if _have_ffmpeg() else "（未检测到 ffmpeg）"
-                    self._push_toast(
-                        "warn", "⚠ 合成音视频失败%s，原始视频已保存（无音轨）: %s"
-                        % (why, vlocal))
+                    self._push_status("ok", "✓ 录屏已保存: %s" % vlocal)
                     if os.path.exists(vlocal):
                         rec_files.append(vlocal)
-            else:
-                self._push_status("ok", "✓ 录屏已保存: %s" % vlocal)
-                if os.path.exists(vlocal):
-                    rec_files.append(vlocal)
         if mic_lost:
             # 空录音（麦克风被占用 / 全程静音 / 无录音权限）现在会返回 None 并删除坏文件，
             # 这里明确告诉用户「为什么没有声音」，否则用户只看到成片没音轨。
@@ -552,7 +574,28 @@ class RecordMixin:
                 self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
         return rec_files, zpath
 
-    def _teardown_devices(self, serials, dead, videos_map, devaudio_map):
+    def _stop_video(self, serial):
+        """停止单台设备并取回**全部段**。返回 (ok, [本地路径...], err)。
+
+        优先用 stop_ex（自动分段下会有多段）。只有旧实现 / 测试替身才退化为
+        stop()，那时只可能有一段。
+        """
+        fn = getattr(self.video, "stop_ex", None)
+        if fn is not None:
+            return fn(serial)
+        # 旧 stop() 只有「路径」一个出口，失败时它可能带回来的是**残片**（缺 moov
+        # 的半截 mp4）。这里不能把它当成「已正常收尾的段」放进列表：那会让残片
+        # 混进压缩包，用户拿到一个播放不了的文件却分不出是哪个、为什么。路径改
+        # 由 err 带出去，信息不少一条，但不会被当成成品。
+        ok, lp, err = self.video.stop(serial)
+        if ok:
+            return True, ([lp] if lp else []), err
+        if lp:
+            return False, [], "%s（残片：%s）" % (err or "收尾失败", lp)
+        return False, [], err
+
+    def _teardown_devices(self, serials, dead, videos_map, devaudio_map,
+                          pretaken=None):
         """逐设备收尾（拉视频 + 拉设备端音频），**多台设备并行**。
 
         单台设备的 stop 要走「kill 设备端进程 → 等本地 adb 退出 → 轮询设备端
@@ -562,43 +605,59 @@ class RecordMixin:
         以上才见到「录屏已完成」，其间 _rec_lock 一直被占着，别的录屏动作全
         排不上。各设备之间是彼此独立的 adb 调用、没有共享状态，直接并行。
 
-        返回 {serial: (本地视频路径或 None, 本地音频路径或 None)}。
-        逐台兜住异常：一台收尾炸了不该让其余设备连文件都拉不回来。
+        返回 {serial: (本地视频路径列表, 本地音频路径或 None)}。列表是因为自动
+        分段：一台设备的一场录制会有多段（每段约 170 秒），每一段都要落盘、合成
+        与打包，只留最后一段等于把前几段直接扔掉。逐台兜住异常：一台收尾炸了
+        不该让其余设备连文件都拉不回来。
         """
         def one(s):
-            local_v = None
+            local_vs = []
             if s in videos_map:
                 if self.video.is_recording(s):
-                    ok, lp, err = self.video.stop(s)
+                    ok, paths, err = self._stop_video(s)
+                    paths = [p for p in (paths or []) if p]
                     if ok:
-                        local_v = lp
+                        local_vs = paths
+                        if err:
+                            # 有段没取回来、当前段却是好的：不能静默。用户以为
+                            # 录了 8 分钟，包里只有 5 分钟，缺的那 3 分钟他会以为
+                            # 是「本来就没发生」。
+                            self._push_toast(
+                                "warn", "⚠ %s 部分分段未取回：%s" % (s, err))
                     else:
-                        # 收尾失败时 stop() 仍可能带回一个**残片**路径（缺 moov 头
-                        # 的半截 MP4 / 打包失败的落盘文件）。只报「收尾失败」时，
-                        # 用户在保存目录里看到 record_*.mp4 既不知道是哪一段、
-                        # 也不知道它为什么没进 zip，更不知道能不能用 —— 把路径
-                        # 直接给出来，他立刻就能去确认要不要重录。
-                        partial = lp if (lp and os.path.exists(lp)) else ""
-                        where = "（残片：%s）" % partial if partial else ""
+                        # paths 里全是**已正常收尾**的段（残片只在 err 里说明），
+                        # 必须整体保留：只报一句「收尾失败」会让用户把前面几段
+                        # 本来完好的视频一并扔掉。
+                        local_vs = paths
+                        where = ""
+                        kept = ("已完成的 %d 段完整保留：%s。"
+                                % (len(local_vs),
+                                   "、".join(os.path.basename(x)
+                                             for x in local_vs))
+                                if local_vs else "")
                         if s in dead:
-                            # 进程意外死亡（adb root 等）：文案说清「视频不完整」，
-                            # 与普通收尾失败区分开（用户据此知道该重录，而不是怀疑
-                            # 程序坏了）。
+                            # 进程意外死亡（续段失败 / adb root 等）：文案说清
+                            # 「视频不完整」，与普通收尾失败区分开。
                             self._push_toast(
                                 "warn",
-                                "⚠ %s 录屏被意外中断，视频不完整（%s）。%s"
-                                "音频未合成；请完整重录。"
+                                "⚠ %s 录屏被意外中断，这一段视频不完整（%s）。"
+                                "%s%s未合成音频。"
                                 % (s, err or "设备端进程已提前退出",
-                                   where or "残片已保留在保存目录，"))
+                                   where or "残片已保留在保存目录，", kept))
                         else:
                             self._push_toast(
-                                "warn", "⚠ 录屏收尾失败 %s：%s%s"
-                                        % (s, err or "未知原因", where))
+                                "warn", "⚠ 录屏收尾失败 %s：%s%s%s"
+                                        % (s, err or "未知原因", where, kept))
                 else:
-                    # 会话已被其他路径收尾弹出（stop_all / 异常清理等）时，
-                    # 这里再用 stop() 只会得到「该设备未在录制」。必须用启动时记录的
-                    # 本地路径兜底，否则这段视频既不合成音频、也不进 zip、界面也无提示。
-                    local_v = videos_map.get(s)
+                    # 会话已被其他路径收尾弹出（stop_all / 异常清理 / 设备被移除后
+                    # 强停）时，这里再用 stop() 只会得到「该设备未在录制」。必须用
+                    # 之前记录的路径兜底，否则这段视频既不合成音频、也不进 zip、
+                    # 界面也无提示。pretaken 是「设备被移除时已经取回的那几段」，
+                    # 没有它就只能拿到第一段。
+                    local_vs = list((pretaken or {}).get(s) or [])
+                    if not local_vs:
+                        first = videos_map.get(s)
+                        local_vs = [first] if first else []
             local_a = None
             if s in devaudio_map:
                 try:
@@ -608,7 +667,7 @@ class RecordMixin:
                     self._push_status(
                         "warn", "⚠ %s 设备音频收尾失败：%s" % (s, e))
                     local_a = None
-            return s, (local_v, local_a)
+            return s, (local_vs, local_a)
 
         if len(serials) <= 1:
             return dict(one(s) for s in serials)
