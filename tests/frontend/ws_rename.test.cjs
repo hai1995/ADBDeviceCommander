@@ -236,7 +236,7 @@ if (watchdog.unref) watchdog.unref();
     ok(inp.maxLength === 24, "输入框本身也限了 24（打到上限就不再进去）");
   }
 
-  console.log("\n[7] 重命名途中来的事件不能把输入框冲掉");
+  console.log("\n[7] 改名途中来的事件不能把输入框冲掉");
   {
     const env = await boot();
     const doc = env.doc;
@@ -245,15 +245,14 @@ if (watchdog.unref) watchdog.unref();
     env.open("w2");
     const inp = renameInput(doc, "w2");
     inp.value = "打了一半";
-    // 后台正好开始跑命令：会触发 tab 重绘（busy 点）
+    // 后台正好开始跑命令：会更新这个 tab 的状态（忙碌小圆点）。前端是 400ms 轮询
+    // 取事件的，所以等它真的消费到 —— 否则测的是「还没发生」。
     env.push({ kind: "stop_state", payload: { running: true, ws: "w2" } });
-    await sleep(200);
+    ok(await waitFor(() => tabOf(doc, "w2").classList.contains("is-busy"), 3000, "busy"),
+      "忙碌指示照常打到这个 tab 上（改名不该让它瞎掉）");
     ok(renameInput(doc, "w2") === inp, "输入框还在，输入的内容没丢");
     ok(inp.value === "打了一半", "内容原样：" + inp.value);
-    // 提交后再补渲染一次：忙碌指示不能因为「让路」而永久缺席
-    env.key(inp, "Enter");
-    ok(await waitFor(() => tabOf(doc, "w2").classList.contains("is-busy"), 2000, "补渲染 busy"),
-      "让路期间跳过的状态渲染，改完立刻补上（busy 点回来了）");
+    ok(inp.isConnected !== false, "输入框仍然在文档里（没有被摘掉后继续打字）");
   }
 
   console.log("\n[8] 双击「关闭」键不进入改名（用户只是想连点两下关掉）");
@@ -332,6 +331,26 @@ if (watchdog.unref) watchdog.unref();
     await sleep(30);
     ok(savedNames(env.calls) === null, "同名不写 config.json");
     ok(!/已重命名/.test(statusText(doc)), "也不播报（没改的事不必说）");
+  }
+
+  console.log("\n[14] 结束改名只就地更新，不重建 tab 条");
+  {
+    const env = await boot();
+    const doc = env.doc;
+    doc.getElementById("btn-ws-add").click();
+    await waitFor(() => tabs(doc).length === 2);
+    env.open("w1");
+    const inp = renameInput(doc, "w1");
+    inp.value = "日常 adb";
+    const before = tabs(doc);
+    // 真实浏览器里「点另一个 tab」= mousedown 触发 blur（提交）→ 紧接着 click
+    inp.blur();
+    const after = tabs(doc);
+    ok(after.length === before.length && after.every((t, i) => t === before[i]),
+      "失焦提交的同一刻没有重建 tab 条（重建会把紧跟着的那一击连同节点一起丢掉）");
+    ok(labelOf(doc, "w1") === "日常 adb", "名字就地换好了（不用重建也能改字）");
+    ok(!!tabOf(doc, "w2").querySelector(".ws-label"),
+      "别的 tab 结构完好（标签仍在，不是被摘掉后忘了补回来）");
   }
 
   console.log("\n结果：" + pass + " 通过 / " + fail + " 失败");

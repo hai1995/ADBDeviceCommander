@@ -2562,8 +2562,10 @@ error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数�
 几条刻意的边界：
 
 - **重命名途中不重建 tab 条**（`renderWsTabs` 见 `wsRenaming` 直接让路记账）：
-  `innerHTML` 一清，正在输入的 `<input>` 就没了，打到一半的名字直接丢。跳过的
-  那次渲染在改完（`endWsRename`）立刻补上，忙碌小圆点不会因此永久缺席。
+  `innerHTML` 一清，正在输入的 `<input>` 就没了，打到一半的名字直接丢。当前的重绘
+  入口（新建 / 关闭 / 恢复布局）其实都走不到「改名途中」这一刻，这行因此是**防御性**
+  的 —— 但这条约束不能靠调用顺序去赌：少这一行，将来任何一处新加的重绘就是一次
+  「打着字突然没了」，且极难复现。真被跳过时，渲染在改完的下一拍补上。
 - **`activateWs` 也不再重建 tab 条**，只改状态类：`innerHTML` 一清，双击的第二下
   就落在刚创建的新节点上，浏览器不补发 `dblclick` —— 双击改名会「时灵时不灵」，
   而且极难复现（得正好在切换 tab 的瞬间双击）。
@@ -2591,7 +2593,7 @@ error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数�
 | `frontend/css/app.css` | 新增 `.btn.warn` / `:hover` / `:active` / `:disabled`；`.ws-tab.is-renaming` 与 `.ws-rename` 输入框 |
 | `frontend/index.html` | 取消按钮 `class="btn warn"`；`#ws-hint` 初始文案补「双击 tab 名可重命名」 |
 | `frontend/js/app.js` | `wsRenaming` / `wsRenameReplay`；`beginWsRename` / `endWsRename` / `acceptWsName` / `sanitizeWsName` / `syncWsTabText` / `fitWsRename`；`renderWsTabState` / `updateWsHint`；`activateWs` 改为不重建 tab；`addWorkspace(persist, silent, wanted)` + `nextWsName()`；`restoreWorkspaces` 把名字随创建一起下发；`persistWs` 空名兜底 |
-| `tests/frontend/ws_rename.test.cjs` | **新增** 45 条：入口 / 双击进入输入框（焦点、整段选中）/ 回车三处同步 / Esc 不落盘 / 空名拒绝 / 逗号过滤 / 24 字截断 / 重命名途中事件不冲掉输入框 / 双击叉号不改名 / F2 / 不撞名 / 重启恢复把名字交给后端 / 默认工作区不打扰后端 / 同名不播报 |
+| `tests/frontend/ws_rename.test.cjs` | **新增** 49 条：入口 / 双击进入输入框（焦点、整段选中）/ 回车三处同步 / Esc 不落盘 / 空名拒绝 / 逗号过滤 / 24 字截断 / 重命名途中事件不冲掉输入框且忙碌点照常 / 结束改名不重建 tab 条 / 双击叉号不改名 / F2 / 不撞名 / 重启恢复把名字交给后端 / 默认工作区不打扰后端 / 同名不播报 |
 | `tests/frontend/rec_cancel.test.cjs` | **新增** 7 条：`.warn` 存在 / 不是 `.danger` / CSS 有 `:hover` 与 `:disabled` / 「停止」不用警示色 |
 | `tests/test_backend_workspace.py` | **新增** 3 条：改名后状态栏前缀跟着变 / 开满 8 个时仍能改名（上限只挡新建）/ 空名不改动已有名字 |
 | `README.md` / `使用说明.txt` | 「取消」配色口径（琥珀 vs 红）；重命名怎么用、三条限制 |
@@ -2600,7 +2602,7 @@ error   : 更新源暂时拒绝访问（HTTP 403，通常是接口调用次数�
 
 - `pytest`：**1263 passed / 1 skipped**（新增 3 条）。
 - `pyflakes backend core tools tests`：0。
-- 前端 jsdom：**72** 个文件 0 失败（新增 `ws_rename` 45 条；`rec_cancel` 30 条）。
+- 前端 jsdom：**72** 个文件 0 失败（新增 `ws_rename` 49 条；`rec_cancel` 30 条）。
 - **回退验证**：`git stash` 掉 `frontend/` 后，`ws_rename` 在「tab 里有 `.ws-label`」
   「提示写明双击重命名」等入口断言上失败并**以退出码 1 结束**（加了看门狗，不会
   挂住）；`rec_cancel` 在 4 条配色断言上失败。

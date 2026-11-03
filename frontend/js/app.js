@@ -5056,7 +5056,13 @@
     if (commit && ws) acceptWsName(ws, raw);
     // 名字可能刚被改过：文字与提示同步成最终值（取消时就是原值）
     if (ws) syncWsTabText(ws);
-    if (wsRenameReplay) { wsRenameReplay = false; renderWsTabs(); }
+    if (wsRenameReplay) {
+      wsRenameReplay = false;
+      // 补一次被让路的渲染。推迟到下一拍：结束改名的原因常常是「点了另一个
+      // tab」，此刻手指还在按下与抬起之间，现在重建节点会让那一击落到已摘除的
+      // 元素上 —— 浏览器只把 click 派给仍连通的共同祖先，切 tab 就白点了。
+      setTimeout(() => { if (!wsRenaming) renderWsTabs(); }, 0);
+    }
   }
 
   function acceptWsName(ws, raw) {
@@ -5103,8 +5109,10 @@
 
   function renderWsTabs() {
     if (!els.wsTabs) return;
-    // 重命名进行中不重建 tab：innerHTML 一清空，正在输入的那个 <input> 就没了，
-    // 用户打到一半的名字直接丢。先记账，改完（endWsRename）再补渲染一次。
+    // 重命名进行中不重建 tab 条：innerHTML 一清空，正在输入的那个 <input> 就没了，
+    // 用户打到一半的名字直接丢。当前的重绘入口（新建 / 关闭 / 恢复布局）都走不到
+    // 「改名途中」这一刻，但这条约束不能靠调用顺序去赌：少这一行，将来任何一处
+    // 新加的重绘就是一次「打着字突然没了」，而且极难复现。
     if (wsRenaming) { wsRenameReplay = true; return; }
     els.wsTabs.innerHTML = "";
     wsMap.forEach((ws) => {
