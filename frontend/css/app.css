@@ -1619,6 +1619,7 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
 .modal.hidden, .overlay.hidden { display: none; }
 .export-hint { font-size: 12px; margin: 4px 2px 10px; line-height: 1.5; }
 #cmd-export-text { font-family: var(--mono, monospace); font-size: 12px; resize: vertical; }
+
 .modal-box {
   position: relative;
   background: var(--surface); border: 1px solid var(--line-strong);
@@ -1740,6 +1741,29 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   padding: 0 5px; font-family: var(--font-mono); color: var(--accent);
 }
 .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); box-sizing: border-box; }
+
+/* ---------------- 二次确认弹窗（应用内自绘，见 app.js 的 askConfirm） ----------------
+   必须写在 .modal / .modal-box 之后：.confirm-box 与 .modal-box 同为单类选择器，
+   特异性相同，靠先后顺序决胜 —— 写在前面的话 width: 80% 会把 440px 顶掉，
+   弹窗变成一屏宽，看着像把内容弹窗误开成了确认框。
+   z-index 也要高于普通 .modal（50）：确认框经常是在另一个弹窗之上被叫起来的
+   （例如从内容弹窗里点删除），压在下面等于点了没反应。 */
+.confirm-modal { z-index: 60; }
+.confirm-box { width: 440px; max-width: calc(100% - 48px); }
+/* 正文沿用界面的等宽字体（与终端风格一致），但排版参数按「一段要读的话」调：
+   pre-wrap 保留调用方写进来的换行（「删哪些文件」是一条条列的）；
+   word-break 必须掰回 normal —— .modal-body 为日志路径设了 break-all，套到这段话上
+   会把「logcat」「停止录制」从中间硬断开，一段说明读起来支离破碎。 */
+.confirm-text {
+  font-size: var(--fs-md); line-height: 1.75;
+  white-space: pre-wrap; word-break: normal; overflow-wrap: break-word;
+  color: var(--text-2);
+}
+.confirm-box .modal-foot .btn { min-width: 96px; justify-content: center; }
+/* 键盘用户靠 Tab 在「否 / 是」之间走，得看得出停在哪一个 */
+.confirm-box .modal-foot .btn:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 
 /* ============ 命令卡片右侧 kebab 菜单（复制 / 修改 / 删除） ============ */
 .cmd-chip { position: relative; padding-right: 20px; }

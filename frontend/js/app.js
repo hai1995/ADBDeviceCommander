@@ -126,6 +126,10 @@
     modal: $("modal"), modalTitle: $("modal-title"),
     modalBody: $("modal-body"), modalClose: $("modal-close"),
     modalOpenLocal: $("modal-open-local"),
+    // 二次确认弹窗（应用内自绘，见 askConfirm）
+    confirmModal: $("confirm-modal"), confirmTitle: $("confirm-title"),
+    confirmText: $("confirm-text"), confirmYes: $("confirm-yes"),
+    confirmNo: $("confirm-no"), confirmX: $("confirm-x"),
     // 命令编辑弹窗
     cmdEdit: $("cmd-edit-modal"),
     cmdEditModal: $("cmd-edit-modal"), cmdEditTitle: $("cmd-edit-title"),
@@ -562,6 +566,78 @@
       pushStatus("err", "调用后端失败：" + (e && e.message ? e.message : e));
       return null;
     }
+  }
+
+  /* ---------------- 二次确认弹窗（应用内自绘） ----------------
+     为什么不用 window.confirm：pywebview 各版本对它的支持并不一致 —— 部分版本里
+     它是个空函数，调用返回 undefined，于是 `!confirm(...)` 恒为 true，点「取消录制」
+     会**一声不响地什么都不做**：按钮像坏的、没有提示、数据也没删。这类「点了没
+     反应」是最难自查的静默失败，而它偏偏发生在「删除」这个最不该含糊的入口上。
+     自绘还顺带换来两件事：默认焦点落在「否」（顺手一个回车不会删数据），以及
+     能把「到底删哪些文件」写清楚，而不是一句笼统的「确定要取消吗」。
+
+     askConfirm(opts) → Promise<boolean>：只有用户明确点了「是」才 resolve(true)。
+     其余一切出口（否 / × / 遮罩 / Esc / 界面里没有这个弹窗）都是 false。
+     调用方只认 true —— 没确认就绝不动手。 */
+  let confirmResolve = null;     // 当前等待中的那次确认（同一时刻只允许一个）
+
+  function askConfirm(opts) {
+    const o = opts || {};
+    return new Promise((resolve) => {
+      if (!els.confirmModal || !els.confirmYes || !els.confirmNo) {
+        // 界面里没有这个弹窗（裁剪过的 HTML / 版本错配）：**直接判否**。
+        // 绝不能「没有弹窗就当他同意了」—— 那正好是删数据最不该走的分支。
+        // 但也不能一声不响：按钮点了毫无反应，用户只会以为程序卡了。
+        pushStatus("warn", "⚠ 无法确认：界面里缺少确认弹窗，已按「否」处理，未做任何删除");
+        resolve(false);
+        return;
+      }
+      // 已经有一个在等：先把上一个判否收掉。否则旧的那个 Promise 永远不 resolve，
+      // 它的调用方就一直卡在 await 上（按钮已锁、状态栏停在「正在…」）。
+      const prev = confirmResolve;
+      confirmResolve = null;
+      if (prev) prev(false);
+
+      if (els.confirmTitle) els.confirmTitle.textContent = o.title || "确认操作";
+      if (els.confirmText) els.confirmText.textContent = o.text || "";
+      els.confirmYes.textContent = o.yes || "确定";
+      els.confirmNo.textContent = o.no || "取消";
+      // 「是」的配色跟着后果走：会删东西的才用警示色，普通确认用强调色。
+      // 两个类都显式 toggle（不是只加不减）：同一个弹窗会复用，残留上一次的
+      // 配色会让「只是普通确认」看起来像「要删东西」。
+      els.confirmYes.classList.toggle("warn", !!o.danger);
+      els.confirmYes.classList.toggle("accent", !o.danger);
+
+      confirmResolve = resolve;
+      els.confirmModal.classList.remove("hidden");
+      // 默认焦点给「否」：弹窗里最容易被顺手按下的是回车，落在「否」上才是安全侧
+      try { els.confirmNo.focus(); } catch (_) { /* 个别环境没有 focus */ }
+    });
+  }
+
+  /* 关闭弹窗并给出答案。重复关闭是安全的（后一次 no-op）：
+     点「是」之后紧接着按 Esc，不能让同一个 Promise 被 resolve 两次。 */
+  function settleConfirm(answer) {
+    if (!els.confirmModal) return;
+    els.confirmModal.classList.add("hidden");
+    const fn = confirmResolve;
+    confirmResolve = null;
+    if (fn) fn(answer === true);
+  }
+
+  /* Tab 在弹窗内循环：焦点跑到背后的界面上，键盘用户的下一次回车就可能落在
+     背后的某个按钮上 —— 弹窗还开着，看起来就像弹窗失灵。 */
+  function trapConfirmTab(e) {
+    if (!els.confirmModal || els.confirmModal.classList.contains("hidden")) return;
+    const items = [els.confirmNo, els.confirmYes, els.confirmX]
+      .filter((el) => el && !el.disabled);
+    if (!items.length) return;
+    e.preventDefault();
+    const cur = items.indexOf(document.activeElement);
+    const next = e.shiftKey
+      ? (cur <= 0 ? items.length - 1 : cur - 1)
+      : (cur === items.length - 1 ? 0 : cur + 1);
+    try { items[next].focus(); } catch (_) { /* 同上 */ }
   }
 
   /* ---------------- 事件路由 ----------------
@@ -5637,17 +5713,36 @@
     });
     /* 取消录制：停止并删除本次已产生的文件（不合并、不打包）。
        为什么要有它：录错了（选错设备 / 场景不对 / 只是点错了「开始」）时，
-       以前唯一的出口是「停止」——那会把几段合成、打包、再告诉你「已完成」，
+       以前唯一的出口是「停止录制」——那会把几段合成、打包、再告诉你「已完成」，
        用户得自己进目录一个个删。取消 = 这次的东西一个都不留。
-       与「停止」紧挨着，误点一次就等于把刚录的东西删掉且没有回收站，
-       所以必须让用户再确认一次（原生 confirm，与删除指令 / 删除文件同一套）。 */
+       与「停止录制」紧挨着，误点一次就等于把刚录的东西删掉且没有回收站，
+       所以必须先过一道二次确认（应用内弹窗，不用 window.confirm，见 askConfirm）。 */
     if (els.toolRecCancel) {
       els.toolRecCancel.addEventListener("click", async () => {
         if (recInFlight) return;
-        const ask = "取消本次录制？\n\n已录到的内容会被删除（不合并、不打包），无法恢复。";
-        // jsdom / 无原生对话框的环境里 confirm 可能不存在：那种情况下不拦，
-        // 否则按钮会变成「点了没反应」。
-        if (typeof confirm === "function" && !confirm(ask)) return;
+        const yes = await askConfirm({
+          title: "取消本次录制？",
+          text: "本次已经录到的内容会被删除，且无法恢复：\n"
+            + "· 视频分段（含已自动拉回本地的段）\n"
+            + "· 同步抓取的 logcat\n"
+            + "· 麦克风录音（若开了）\n\n"
+            + "不合并、不打包，保存目录里不会留下本次的任何文件。\n"
+            + "想保留已经录到的内容，请点「停止录制」。",
+          yes: "是，全部删除",
+          no: "否，保留",
+          danger: true,
+        });
+        if (!yes) return;
+        /* 弹窗开着的这几秒里，录制可能已经自己结束了（设备拔线 / 进程死亡 /
+           触摸到 20 段上限，后端都会广播 running=false 并把按钮置灰）。
+           此时再往后端要「取消」只会拿到 no_session，还会被这里报成
+           「取消录屏失败」，用户看着一句莫名其妙的失败提示发懵。
+           状态栏本来就已经由后端说明过，这里只需安静收手。 */
+        if (recInFlight) return;
+        if (els.toolRecCancel && els.toolRecCancel.disabled) {
+          pushStatus("info", "ℹ 录制已经结束，没有需要取消的内容");
+          return;
+        }
         setRecInFlight(true);
         if (els.toolRecCancel) els.toolRecCancel.title = "正在停止设备端录制并删除文件…";
         /* 取消要「停设备端 → 等拉取收尾 → 删文件」，几秒起步；期间按钮全灰，
@@ -5837,12 +5932,35 @@
     els.statusModal.addEventListener("click", (e) => {
       if (e.target === els.statusModal) closeStatusModal();
     });
+    /* 二次确认弹窗：四个出口（否 / × / 遮罩 / Esc）全部收成「否」，
+       只有点「是」才 resolve(true)。 */
+    if (els.confirmModal) {
+      els.confirmYes.addEventListener("click", () => settleConfirm(true));
+      els.confirmNo.addEventListener("click", () => settleConfirm(false));
+      if (els.confirmX) els.confirmX.addEventListener("click", () => settleConfirm(false));
+      // 点遮罩（弹窗自身而不是那块白框）= 否：误点一下空白不该等于「确认删除」。
+      els.confirmModal.addEventListener("click", (e) => {
+        if (e.target === els.confirmModal) settleConfirm(false);
+      });
+    }
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
+      // 确认弹窗最优先：它开着的时候，Esc 只回答这个弹窗（= 否）。
+      // 不能顺带把背后的状态面板也关掉 —— 用户会以为「Esc 关掉了删除确认」，
+      // 直到下次想看状态才发现那个窗口也没了。
+      if (els.confirmModal && !els.confirmModal.classList.contains("hidden")) {
+        e.preventDefault();
+        settleConfirm(false);
+        return;
+      }
       if (!els.statusModal.classList.contains("hidden")) { closeStatusModal(); return; }
       // 无线调试 / 设备信息：同样是「点开就想随手关掉」的查看类弹窗
       if (els.wifiModal && !els.wifiModal.classList.contains("hidden")) { wifiClose(); return; }
       if (els.devinfoModal && !els.devinfoModal.classList.contains("hidden")) closeDevInfo();
+    });
+    // Tab 焦点圈在确认弹窗内（与上面那条 Escape 分开：那条一进来就把非 Esc 滤掉了）
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") trapConfirmTab(e);
     });
     // 大文件「查看」：直接调系统默认程序打开已拉取到本地的临时文件
     els.modalOpenLocal.addEventListener("click", () => {

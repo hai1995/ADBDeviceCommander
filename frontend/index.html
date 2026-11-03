@@ -282,15 +282,18 @@
           <div class="tool-body" id="rec-body">
             <div class="tool-desc">对受控设备各录一段 MP4（adb screenrecord）。需要复盘时勾上「同步录制 logcat」——日志按<b>全量</b>抓取，不截断也不过滤。</div>
             <div class="tool-row">
+              <!-- 三个按钮都带「录制」二字：「停止」「取消」单独挂在这里，脱离上下文会被
+                   误读成「停止刷新」「取消选择」。名字本身就要说清动作落在什么上。 -->
               <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
-              <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止</button>
-              <!-- 取消：录错了（选错设备 / 场景不对 / 只是点错了开始）时的出口。
-                   与「停止」的区别是**不保留**：停止并删除本次已产生的文件，不合并、
-                   不打包。紧挨着「停止」有误点风险，故点击后还要再确认一次；
-                   配色用琥珀（.btn.warn）而不是红（.btn.danger）—— 录制中的「停止」
+              <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止录制</button>
+              <!-- 取消录制：录错了（选错设备 / 场景不对 / 只是点错了开始）时的出口。
+                   与「停止录制」的区别是**不保留**：停止并删除本次已产生的文件，不合并、
+                   不打包。紧挨着「停止录制」有误点风险，故点击后必须过一道二次确认弹窗
+                   （应用内自绘，非 window.confirm，见 app.js 的 askConfirm）；
+                   配色用琥珀（.btn.warn）而不是红（.btn.danger）—— 录制中的「停止录制」
                    本身是红块呼吸，两键同色等于没区分，用户照样点错。 -->
               <button id="tool-rec-cancel" class="btn warn" disabled data-icon="trash"
-                      title="取消本次录制：停止并删除刚录到的文件，不合并、不打包">取消</button>
+                      title="取消本次录制：停止并删除刚录到的文件，不合并、不打包">取消录制</button>
             </div>
             <!-- 录屏开关：每项按内容宽度排布、随宽度自动换行。
                  「同步录制 logcat」「结束自动压缩 zip」默认开启（与 core/prefs.py 的
@@ -318,7 +321,7 @@
                  按钮与开关在最上面，说明沉到区块下方。 -->
             <div class="rec-limit" role="note">
               <span class="rec-limit-t">⏱ 约每 3 分钟自动分段续录，无需任何手动操作，停止后合并为一个完整 MP4</span>
-              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，这是设备端硬限制、程序绕不过去。程序因此按 <b>170 秒</b>一段录制：到点自动收尾并<b>立刻接上下一段</b>，logcat 全程连续不中断。点「停止」后自动把各段<b>无损拼接成一个</b> mp4（只搬码流、不重新编码，画质与分段时完全一致），文件名仍是 <code>record_设备_时间.mp4</code>，不需要你自己拼。</span>
+              <span>Android <code>screenrecord</code> 单段上限 <b>180 秒</b>，这是设备端硬限制、程序绕不过去。程序因此按 <b>170 秒</b>一段录制：到点自动收尾并<b>立刻接上下一段</b>，logcat 全程连续不中断。点「停止录制」后自动把各段<b>无损拼接成一个</b> mp4（只搬码流、不重新编码，画质与分段时完全一致），文件名仍是 <code>record_设备_时间.mp4</code>，不需要你自己拼。</span>
               <span><b>三个必须知道的特殊点：①</b> 每处拼接点有<b>约 1 秒间隙</b>，那一瞬的画面确实录不到（设备端重启 screenrecord 的耗时，软件无法消除）——<b>N 段就有 N-1 处、累计约 N-1 秒</b>，回放到那里画面会一跳，<b>不是录制中断、也不是丢文件</b>；<b>②</b> 合并依赖本机 <code>ffmpeg</code>，没装时程序不会硬来：保留 <code>_p2</code>、<code>_p3</code>… 分段文件（每个都能单独播放），并在状态栏说明原因；<b>③</b> 单场最多 <b>20 段（约 57 分钟）</b>，到上限按<b>正常收尾</b>处理并明确提示，已录部分完整可播。</span>
             </div>
           </div>
@@ -746,6 +749,31 @@
 
   <!-- 高优先级提示语 toast 容器（错误 / 关键警告弹窗，位于顶栏下方右上角） -->
   <div id="toast-wrap" class="toast-wrap" aria-live="polite"></div>
+
+  <!-- 二次确认弹窗（应用内自绘，**不用** window.confirm）
+       为什么不用原生 confirm：pywebview 各版本对它的支持并不一致，在部分版本里
+       window.confirm 是个空函数 —— 调用返回 undefined，`!confirm(...)` 恒为 true，
+       于是「点了取消，什么都没发生，也没有任何提示」：按钮像坏的，数据也没删，
+       用户唯一能想到的解释是程序卡了。这类「点了没反应」是最难自查的静默失败。
+       自绘还顺带解决两件事：① 默认焦点落在「否」上（顺手一个回车不会删数据）；
+       ② 能写清到底删哪些文件，而不是一句笼统的「确定要取消吗」。
+       按钮文案由 JS 每次填，同一个弹窗复用于所有需要二次确认的地方。 -->
+  <div id="confirm-modal" class="modal confirm-modal hidden" role="dialog" aria-modal="true"
+       aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <div class="modal-box confirm-box">
+      <div class="modal-head">
+        <span id="confirm-title">确认操作</span>
+        <div class="modal-actions">
+          <button id="confirm-x" class="modal-x" type="button" title="关闭（等同「否」）">×</button>
+        </div>
+      </div>
+      <div class="modal-body confirm-text" id="confirm-text"></div>
+      <div class="modal-foot">
+        <button id="confirm-no" class="btn" type="button">否</button>
+        <button id="confirm-yes" class="btn accent" type="button">是</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Logcat 抓取 / 文件查看 等内容弹窗 -->
   <div id="modal" class="modal hidden">
