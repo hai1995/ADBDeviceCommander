@@ -9,9 +9,14 @@
    [2] 长按手势：子 tab 长按需 ≥400ms 才进入拖动态（is-dragging + body.tool-sorting）；
        短按（不等待）不触发拖动，仍是普通切换。
    [3] 拖动中换位 + 松手落盘：stub elementFromPoint 模拟指针扫到目标 tab，验证 DOM
-       真被重排；松手调用 save_settings 写入 tool_tab_order；随后紧跟的 click 被
-       toolTabClickGuard 压制（不会「拖一下 tab 反而切走」）。
-   [4] 点击切换面板：点某子 tab 后它 active、对应面板显示、其余面板 hidden。 */
+       真被重排（按钮与面板同步）；松手调用 save_settings 写入 tool_tab_order；
+       随后紧跟的 click 被 toolTabClickGuard 压制（不会「拖一下 tab 反而切走」）。
+   [4] 点击切换面板：点某子 tab 后它 active、对应面板显示、其余面板 hidden。
+   [5] 键盘导航：方向键 / Home / End 按 DOM 顺序移动并激活（首尾循环），
+       roving tabindex 只让当前项可被 Tab 停住。
+   [6] 记忆上次停留项：settings.tool_active_tab 命中即恢复、回填不写盘；
+       配置里的 key 已失效（版本删了某项）时回退到第一项。
+   [7] 拖动中按 Esc 取消：顺序还原到按下前、退出拖动态、不落盘（松手也不写）。 */
 const fs = require("fs");
 const path = require("path");
 const { JSDOM } = require("jsdom");
@@ -196,6 +201,12 @@ function pane(doc, key) { return doc.querySelector('.tool-pane[data-tool-pane="'
     ok(patch.tool_tab_order === "rec,scrcpy,apk,diag,shot",
        "落盘 tool_tab_order 与拖后顺序一致: " + patch.tool_tab_order);
 
+    // 面板 DOM 也要跟着重排：按钮与面板一一对应，后续按 key 查找不会错位
+    const panesOrder = Array.from(doc.querySelectorAll("#tool-panes .tool-pane"))
+      .map((p) => p.dataset.toolPane);
+    ok(panesOrder.join(",") === "rec,scrcpy,apk,diag,shot",
+       "松手后面板 DOM 同步重排: " + panesOrder.join(","));
+
     // 紧随的 click 应被 toolTabClickGuard 压制：不切换（shot 仍是 active）
     ok(subBtn(doc, "shot").classList.contains("active"), "拖动前 shot 子 tab active");
     btn.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -255,6 +266,75 @@ function pane(doc, key) { return doc.querySelector('.tool-pane[data-tool-pane="'
     // roving tabindex：只有当前子 tab 能被 Tab 键停住
     ok(subBtn(doc, "diag").tabIndex === 0, "当前子 tab tabindex=0");
     ok(subBtn(doc, "shot").tabIndex === -1, "非当前子 tab tabindex=-1");
+  }
+
+  console.log("\n[6] 记忆上次停留的子 tab（tool_active_tab）");
+  {
+    const { window, calls } = mkEnv({ settings: { tool_active_tab: "apk" } });
+    const doc = window.document;
+    const restored = await waitFor(
+      () => subBtn(doc, "apk") && subBtn(doc, "apk").classList.contains("active"),
+      4000, "回填上次 tab");
+    ok(restored, "启动停在 tool_active_tab=apk（而不是固定回截图）");
+    ok(!pane(doc, "apk").hidden && pane(doc, "shot").hidden,
+       "apk 面板显示、shot 面板隐藏");
+    const bootSaved = calls.filter((c) => c.fn === "save_settings")
+      .map((c) => c.args[0]).filter((p) => p && "tool_active_tab" in p);
+    ok(bootSaved.length === 0, "启动回填不写盘（persist:false，避免打开就刷一次盘）");
+
+    subBtn(doc, "rec").dispatchEvent(new window.Event("click", { bubbles: true }));
+    await sleep(40);
+    const saves = calls.filter((c) => c.fn === "save_settings");
+    const patch = saves.length ? saves[saves.length - 1].args[0] : {};
+    ok(patch.tool_active_tab === "rec",
+       "用户切换后落盘 tool_active_tab=rec（实际 " + patch.tool_active_tab + "）");
+
+    // 重复点同一个子 tab 不该反复写盘（值没变，save_settings 次数不涨）
+    const beforeDup = calls.filter((c) => c.fn === "save_settings").length;
+    subBtn(doc, "rec").dispatchEvent(new window.Event("click", { bubbles: true }));
+    await sleep(40);
+    const afterDup = calls.filter((c) => c.fn === "save_settings").length;
+    ok(afterDup === beforeDup, "再点同一个子 tab 不重复写盘（" + beforeDup + "→" + afterDup + "）");
+
+    // 版本变动删了某项 → 配置里的 key 已不存在，回退到第一项而不是白屏
+    const { window: w2 } = mkEnv({ settings: { tool_active_tab: "removed-tab" } });
+    const d2 = w2.document;
+    const fallback = await waitFor(
+      () => subBtn(d2, "shot") && subBtn(d2, "shot").classList.contains("active"),
+      4000, "失效 key 回退");
+    ok(fallback, "tool_active_tab 存了不存在的 key → 回退默认（shot）");
+  }
+
+  console.log("\n[7] 拖动中按 Esc 取消：顺序还原、不落盘");
+  {
+    const { window, calls } = mkEnv();
+    const doc = window.document;
+    await waitFor(() => subBtn(doc, "shot"), 3000, "就绪");
+    const btn = subBtn(doc, "shot");
+    doc.elementFromPoint = () => subBtn(doc, "diag");
+    const before = toolOrder(doc).join(",");
+    btn.dispatchEvent(pointerEvent(window, "pointerdown", 10, 10));
+    await waitFor(() => btn.classList.contains("is-dragging"), 1500, "长按激活");
+    window.dispatchEvent(pointerEvent(window, "pointermove", 200, 300));
+    const moved = await waitFor(
+      () => toolOrder(doc).join(",") !== before, 2000, "拖动换位");
+    ok(moved, "拖动中顺序确实变了: " + toolOrder(doc).join(",") + "（原 " + before + "）");
+
+    window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await sleep(40);
+    ok(toolOrder(doc).join(",") === before,
+       "Esc 后顺序还原: " + toolOrder(doc).join(","));
+    ok(!doc.body.classList.contains("tool-sorting"), "Esc 后退出拖动态（cursor 复原）");
+    const savedBeforeUp = calls.filter(
+      (c) => c.fn === "save_settings" && c.args[0] && "tool_tab_order" in c.args[0]);
+    ok(savedBeforeUp.length === 0, "Esc 取消不当场落盘");
+
+    window.dispatchEvent(pointerEvent(window, "pointerup", 200, 300));
+    await sleep(20);
+    const savedAfterUp = calls.filter(
+      (c) => c.fn === "save_settings" && c.args[0] && "tool_tab_order" in c.args[0]);
+    ok(savedAfterUp.length === 0, "取消后再松手也不落盘（顺序仍是原样）");
+    ok(toolOrder(doc).join(",") === before, "松手后顺序保持原样");
   }
 
   clearTimeout(watchdog);

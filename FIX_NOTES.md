@@ -3290,3 +3290,38 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 ## 回归
 - 受影响的 5 个前端用例全部通过：`tool_card_order` 39、`tool_cards_layout` 75、
   `tools_rec_collapse_scrcpy` 51、`ui_style_card_tabs` 36、`settings_persist` 57（均 0 失败）。
+
+# 第四十一轮：工具子 tab 收尾优化（记忆停留项 / DOM 派生 / Esc 取消）
+
+## 优化点
+- **记忆上次停留的子 tab**：新增 `tool_active_tab`（config.json）。启动按它恢复，没记过 /
+  key 已失效（版本删了某项）则回退「设备截图」。启动回填传 `persist:false`，不会「打开就写一次盘」；
+  值没变（连点同一项 / 方向键绕回原项）也不重复写盘。
+- **tab key 从 DOM 派生**：删掉 JS 里手写的 `TOOL_TABS` 常量，改为 `toolTabKeys()` 读取
+  `#tool-subtabs .tool-subtab` 的 `data-tool-tab`；`applyToolTabOrder` 用「按钮 ∪ 面板」求并集。
+  将来增删一项只改 index.html，不会出现 JS 常量与 HTML 漂移。
+- **拖动结束后同步重排面板 DOM**：按钮顺序变了，面板也按同一顺序重排（`reorderToolTabs`），
+  两者始终一一对应。
+- **Esc 取消拖动**：拖动中按 Esc 还原按下前的顺序、退出拖动态且不落盘（松开也不再写）；
+  解决长按误触没有退路的问题。
+
+## 配置 schema 修正（真实漂移）
+- `core/prefs.py` 更新滞后于前端：仍登记 `shot_collapsed` / `rec_collapsed` / `scrcpy_collapsed` /
+  `apk_collapsed` / `diag_collapsed` / `tool_card_order`（全部已废弃），而前端实际写入的
+  `tool_tab_order`、`tool_active_tab` 却没登记（靠 sanitize「未知键原样保留」侥幸能存）。
+  本轮删除 6 个废弃键、登记 2 个新键，并同步 `tests/test_core_prefs.py` 的豁免名单。
+  老 config.json 里的旧键不会被删（sanitize 对未知键保留），只是不再读写。
+
+## 文档同步
+- `frontend/index.html` 关于页「功能概览」：由「竖向排列的三张卡、标题栏可收起」改为
+  五个子 tab + 长按排序 + 记忆停留项。
+- `README.md`：工具行与「配置持久化」清单同步为子 tab 模型（`tool_tab_order` / `tool_active_tab`），
+  移除 `*_collapsed` 描述。
+
+## 回归测试
+- `tool_card_order.test.cjs` 扩到 52 条：新增「面板 DOM 同步重排」、「`tool_active_tab` 回填 /
+  切换落盘 / 重复点击不写盘 / 失效 key 回退」、「Esc 取消还原且不落盘」。
+- 通过：`tool_card_order` 52、`tool_cards_layout` 75、`tools_rec_collapse_scrcpy` 51、
+  `settings_persist` 57、`ui_style_card_tabs` 36、`about_subtab_manual` 14、
+  `ui_layout_fixes` 17、`tools_tab_scroll` 7、`layout_resizable` 21（均 0 失败）。
+- 后端 `pytest`：1299 passed / 1 skipped；`pyflakes` 干净。

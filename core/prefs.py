@@ -27,7 +27,7 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
                Logcat 落盘抓取（结束后打包 / 级别过滤）
   * rec_logcat / rec_zip / rec_pointer_location / rec_show_touches
                录屏各开关（设备音频 / 电脑麦克风 / 同步 logcat / 结束后打包 /
-               指针位置 / 触摸圆点 / 同步 logcat 的级别过滤 / 录屏卡收起状态）
+               指针位置 / 触摸圆点 / 同步 logcat 的级别过滤）
   * scrcpy_path  用户手动指定的 scrcpy 目录或可执行文件（留空 = 自动探测）
   * mirror_*     备用投屏的参数（播放器路径 / 分辨率 / 码率 / 预览帧率 /
                  预览区宽高 mirror_view_w / mirror_view_h，0 = 自适应）
@@ -35,10 +35,12 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
                性能监控的目标应用 / 采样间隔 / 图表当前指标 / 告警阈值表达式
   * wifi_port / wifi_recent
                无线调试的端口与最近连接过的地址（逗号分隔，最新在前）
-  * apk_replace / apk_downgrade / apk_grant / apk_collapsed
-              APK 安装的默认选项（覆盖 / 允许降级 / 授予全部权限）与安装卡收起态
-  * tool_card_order  工具页卡片的拖动排序结果（逗号分隔的卡片 id；留空 = 用 HTML
-              默认序：截图 → 录屏 → 投屏 → 安装 → 诊断）
+  * apk_replace / apk_downgrade / apk_grant
+              APK 安装的默认选项（覆盖 / 允许降级 / 授予全部权限）
+  * tool_tab_order  工具区子 tab 的顺序（逗号分隔的 tab key；留空 = 用 HTML
+              默认序：shot → rec → scrcpy → apk → diag）。长按拖动子 tab 后写入。
+  * tool_active_tab 上次停留的工具区子 tab（留空 = 兜底到 shot）。只记 key，
+              启动时若该 key 已不存在（版本删了某项）则回退到默认项。
 
 跨设备同步的两条关键约定：
   * **旧文件自动迁移**：早期版本用 settings.json 存同样的内容。启动时若
@@ -133,16 +135,12 @@ PREFS_DEFAULTS = {
     "rec_zip": True,
     "rec_pointer_location": True,
     "rec_show_touches": True,
-    # 工具页三张卡各自的收起态：开关项多、占屏太高，收起后只留一行标题。
-    # 分开存（不是一个大布尔）：用户常常长期收起「投屏」却天天用「录屏」。
-    "shot_collapsed": False,
-    "rec_collapsed": False,
-    "scrcpy_collapsed": False,
-    "apk_collapsed": False,
-    # 工具页卡片的手动排序（长按拖动后落盘）：逗号分隔的卡片 id，按「先后」排列。
-    # 留空 = 按 HTML 默认序（截图 → 录屏 → 投屏 → 应用安装 → 诊断包）。与
-    # cmd_order 同一套「逗号串」约定：多值存成一个字符串，手改 config.json 也不易写坏。
-    "tool_card_order": "",
+    # 工具页已由「多张可折叠卡片」改为「子 tab」（每项整页展示），因此原来
+    # shot_collapsed / rec_collapsed / scrcpy_collapsed / apk_collapsed /
+    # diag_collapsed 五个折叠态键全部废弃。老 config.json 里残留的旧键不会被删（sanitize 对
+    # 未知键原样保留），只是不再读写，不影响启动。
+    "tool_tab_order": "",
+    "tool_active_tab": "",
     # 无线调试（Wi-Fi ADB）：
     #   wifi_port    上次用的连接端口（默认 5555；adb tcpip 换过端口的话记住它）
     #   wifi_recent  最近连接过的地址，逗号分隔、最新在前（最多 5 条）
@@ -159,10 +157,8 @@ PREFS_DEFAULTS = {
     # 诊断包（一键收集设备信息 / 日志尾部 / 进程 / 应用 / ANR）：
     #   diag_with_logcat   是否包含 logcat 尾部（默认包含：排障时最常要的就是它）
     #   diag_logcat_lines  尾部行数（默认 2000 ≈ 300 KB 文本，压缩后几十 KB）
-    #   diag_collapsed     诊断卡收起态
     "diag_with_logcat": True,
     "diag_logcat_lines": 2000,
-    "diag_collapsed": False,
     # 投屏：用户手动指定的 scrcpy 目录 / 可执行文件（空 = 自动探测）
     "scrcpy_path": "",
     # 备用投屏（没装 scrcpy 时用）：播放器路径、分辨率、码率、低帧率预览帧率。

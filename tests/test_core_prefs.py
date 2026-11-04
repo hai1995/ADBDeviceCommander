@@ -326,14 +326,12 @@ _BOOL_KEY_TO_HTML_ID = {
     "update_check": "about-update-auto",
 }
 
-# 没有对应 HTML 复选框的布尔键：设备栏收起是「标题前的 « / » 按钮切换」、
-# 四张工具卡（截图 / 录屏 / 安装 / 诊断包 / 投屏）收起是「标题栏整条点击」切换，都不存在
-# 「界面默认勾选」可对齐，故不参与下面的逐项比对。
+# 没有对应 HTML 复选框的布尔键：设备栏收起是「标题前的 « / » 按钮切换」，
+# 不存在「界面默认勾选」可对齐，故不参与下面的逐项比对。
+# （工具区改子 tab 后，shot/rec/scrcpy/apk/diag 的 *_collapsed 键已从 schema 删除。）
 # 显式列出（而非放宽断言）：将来真加了复选框的键必须登记进映射表，
 # 不允许被顺手塞进这个豁免名单。
-_NO_HTML_CHECKBOX_KEYS = {"sidebar_collapsed",
-                          "shot_collapsed", "rec_collapsed", "scrcpy_collapsed",
-                          "apk_collapsed", "diag_collapsed"}
+_NO_HTML_CHECKBOX_KEYS = {"sidebar_collapsed"}
 
 
 def _html_checkbox_checked():

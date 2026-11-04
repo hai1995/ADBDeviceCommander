@@ -938,8 +938,10 @@
     // 否则首屏按 HTML 默认序排好、再被重排一次，用户会看到顺序跳一下。
     if (typeof s.tool_tab_order === "string") loadToolTabOrder(s.tool_tab_order);
     applyToolTabOrder();
-    // 默认激活「设备截图」子 tab（顺序调整后仍保证有一项可见）
-    switchToolTab("shot");
+    // 恢复到上次停留的子 tab（tool_active_tab）；没记过 / key 已失效则回退截图。
+    // persist:false —— 启动回填不该再写一次盘。
+    switchToolTab(typeof s.tool_active_tab === "string" && s.tool_active_tab
+      ? s.tool_active_tab : "shot", { persist: false });
     // ---- APK 安装选项（默认值只写在 core/prefs.py 一处，此处仅回填）----
     if (els.apkReplace && typeof s.apk_replace === "boolean") {
       els.apkReplace.checked = s.apk_replace;
@@ -1568,8 +1570,9 @@
   /* ---- 工具区子 tab 长按拖动排序（截图 / 录屏 / 投屏 / 安装 / 诊断）----
      与指令卡同一套长按手势：子 tab 按钮整颗可长按拖动重排；短按是切换子 tab，
      长按才进入拖动态，松手若真的拖过就压制随后的 click，避免一次操作既换位又切换。
-     落盘 tool_tab_order，下次启动照旧。 */
+     落盘 tool_tab_order（顺序）与 tool_active_tab（上次停留项），下次启动照旧。 */
   let toolTabOrder = [];                // 手动排过序的子 tab key（按先后）
+  let toolActiveTab = "";               // 当前停留的子 tab key（用于「值没变就不写盘」）
   let toolTabDrag = null;               // 拖动会话：{tab, x, y, timer, active}
   let toolTabClickGuard = 0;            // 拖动结束后压制紧随其后的 click（避免既换位又切换）
   const TOOL_LONGPRESS_MS = 400;        // 与指令卡一致：按住多久算「要拖」
@@ -2767,8 +2770,15 @@
 
   /* 工具区子 tab（截图 / 录屏 / 投屏 / 应用安装 / 诊断包）：每项一个子 tab，
      整页展示该项全部功能，互不挤压。顺序可长按拖动调整，落盘到 config.json 的
-     tool_tab_order（默认顺序只在 HTML 里写一份，与 TOOL_TABS 一致）。 */
-  const TOOL_TABS = ["shot", "rec", "scrcpy", "apk", "diag"];
+     tool_tab_order；上次停留的子 tab 记在 tool_active_tab。
+     tab 的 key 一律从 DOM 推导（data-tool-tab 只在 index.html 写一份），
+     将来增删一项只改 HTML，不必记得同步 JS 常量。 */
+  function toolTabKeys() {
+    const bar = document.getElementById("tool-subtabs");
+    if (!bar) return [];
+    return Array.from(bar.querySelectorAll(".tool-subtab"))
+      .map((b) => b.dataset.toolTab).filter(Boolean);
+  }
 
   function toolTabBtn(key) {
     return document.querySelector('#tool-subtabs .tool-subtab[data-tool-tab="' + key + '"]');
@@ -2777,9 +2787,15 @@
     return document.querySelector('#tool-panes .tool-pane[data-tool-pane="' + key + '"]');
   }
 
-  /* 切换子 tab：只显示对应面板，其余 hidden；按钮 active / aria-selected 同步 */
-  function switchToolTab(key) {
-    TOOL_TABS.forEach((k) => {
+  /* 切换子 tab：只显示对应面板，其余 hidden；按钮 active / aria-selected 同步。
+     persist 默认 true（用户点击 / 方向键切换都记）；启动回填时传 false，
+     避免「打开就写一次盘」。 */
+  function switchToolTab(key, opts) {
+    const keys = toolTabKeys();
+    if (!keys.length) return;
+    // 配置里存的是已删除的 tab（版本变动）→ 回退到当前顺序里的第一项
+    if (keys.indexOf(key) === -1) key = keys[0];
+    keys.forEach((k) => {
       const active = k === key;
       const btn = toolTabBtn(k), pane = toolTabPane(k);
       if (btn) {
@@ -2790,10 +2806,17 @@
       }
       if (pane) pane.hidden = !active;
     });
+    const changed = toolActiveTab !== key;
+    toolActiveTab = key;
+    // 值没变就不写盘：连点同一个子 tab、方向键绕一圈回到原项时都省一次
+    // 「读-合并-写」；启动回填（persist:false）只更新内存值。
+    if (changed && (!opts || opts.persist !== false)) {
+      persistPref("tool_active_tab", key);
+    }
   }
 
   function bindToolSubtabs() {
-    TOOL_TABS.forEach((k) => {
+    toolTabKeys().forEach((k) => {
       const btn = toolTabBtn(k);
       if (!btn) return;
       // 长按拖动刚结束会紧随一个 click：此时已换位，若再切换就跳回原 tab，
@@ -2824,7 +2847,7 @@
   /* ---- 子 tab 长按拖动排序（与指令卡同一套长按手势）---- */
   // 每张子 tab 左侧注入拖拽手柄（两列圆点），但长按手势绑在整颗按钮上——点哪都能拖。
   function injectToolTabGrips() {
-    TOOL_TABS.forEach((k) => {
+    toolTabKeys().forEach((k) => {
       const btn = toolTabBtn(k);
       if (!btn || btn.querySelector(".tool-grip")) return;
       const grip = document.createElement("span");
@@ -2840,27 +2863,43 @@
     toolTabOrder = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
   }
 
-  // 按保存顺序重排子 tab 按钮与对应面板（启动时调用）。不在顺序表里的补到末尾。
+  /* 按给定 key 顺序重排子 tab 按钮与对应面板（按钮 / 面板始终一一对应）。 */
+  function reorderToolTabs(keys) {
+    const bar = document.getElementById("tool-subtabs");
+    const panes = document.getElementById("tool-panes");
+    if (!bar || !panes) return;
+    keys.forEach((k) => {
+      const btn = toolTabBtn(k), pane = toolTabPane(k);
+      if (btn) bar.appendChild(btn);
+      if (pane) panes.appendChild(pane);
+    });
+  }
+
+  /* 按保存顺序重排子 tab 按钮与对应面板（启动时 / 拖动结束后调用）。
+     不在顺序表里的补到末尾 —— 以页面上真实存在的按钮 ∪ 面板为准，
+     将来加一项只改 HTML 就能自动纳入，不用回来改这里。 */
   function applyToolTabOrder() {
     const bar = document.getElementById("tool-subtabs");
     const panes = document.getElementById("tool-panes");
     if (!bar || !panes || !toolTabOrder.length) return;
-    const btnById = new Map(TOOL_TABS.map((k) => [k, toolTabBtn(k)]));
-    const paneById = new Map(TOOL_TABS.map((k) => [k, toolTabPane(k)]));
+    const keys = [];
+    const add = (k) => { if (k && keys.indexOf(k) === -1) keys.push(k); };
+    Array.from(bar.querySelectorAll(".tool-subtab")).forEach((b) => add(b.dataset.toolTab));
+    Array.from(panes.querySelectorAll(".tool-pane")).forEach((p) => add(p.dataset.toolPane));
+    if (!keys.length) return;
     const seen = new Set();
     const order = [];
-    toolTabOrder.forEach((k) => { if (btnById.has(k)) { order.push(k); seen.add(k); } });
-    TOOL_TABS.forEach((k) => { if (!seen.has(k)) order.push(k); });
-    order.forEach((k) => {
-      if (btnById.get(k)) bar.appendChild(btnById.get(k));
-      if (paneById.get(k)) panes.appendChild(paneById.get(k));
+    toolTabOrder.forEach((k) => {
+      if (keys.indexOf(k) !== -1 && !seen.has(k)) { order.push(k); seen.add(k); }
     });
+    keys.forEach((k) => { if (!seen.has(k)) order.push(k); });
+    reorderToolTabs(order);
   }
 
   function saveToolTabOrder() {
     const bar = document.getElementById("tool-subtabs");
     if (!bar) return;
-    // 按子 tab 在 DOM 里的真实顺序排列（拖动后已重排），不要反向用 TOOL_TABS
+    // 按子 tab 在 DOM 里的真实顺序排列（拖动后已重排），不要反向用固定的
     // 这个固定数组去 filter——那样只会还原成默认顺序，丢掉用户刚拖好的顺序。
     toolTabOrder = Array.from(bar.querySelectorAll(".tool-subtab"))
       .map((b) => b.dataset.toolTab);
@@ -2889,6 +2928,8 @@
     if (!btn) return;
     toolTabDrag = {
       tab: btn, x: ev.clientX || 0, y: ev.clientY || 0, active: false,
+      // 记录拖动前的顺序：中途按 Esc / 失焦取消时按它还原
+      prev: toolTabKeys(),
       timer: setTimeout(beginToolTabDrag, TOOL_LONGPRESS_MS),
     };
   }
@@ -2918,7 +2959,22 @@
     endToolTabDrag();
     toolTabClickGuard = Date.now() + 350;
     saveToolTabOrder();
+    // 面板 DOM 跟着按钮一起重排：两者始终一一对应，后续按 key 查找也不会错位
+    applyToolTabOrder();
     pushStatus("info", "✓ 工具顺序已保存（长按子 tab 可再次调整）");
+  }
+
+  /* 拖动中按 Esc 取消：顺序还原成按下前的样子，且不落盘。 */
+  function cancelToolTabDrag() {
+    const d = toolTabDrag;
+    if (!d || !d.active) return false;
+    const prev = d.prev || [];
+    endToolTabDrag();
+    if (prev.length) reorderToolTabs(prev);
+    // 松手后还会紧跟一个 click：一并压掉，免得取消完又切走一个子 tab
+    toolTabClickGuard = Date.now() + 350;
+    pushStatus("info", "已取消工具顺序调整");
+    return true;
   }
 
   let _toolTabDragBound = false;
@@ -2933,6 +2989,10 @@
     window.addEventListener("pointercancel", () => endToolTabDrag());
     // 在窗口外松手收不到 pointerup：失焦也当作结束，免得卡在「拖住不放」
     window.addEventListener("blur", () => endToolTabDrag());
+    // Esc 取消：拖到一半后悔时按一下就能还原（不保存）
+    window.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && cancelToolTabDrag()) ev.preventDefault();
+    });
     // 触摸长按会同时触发系统的 contextmenu（弹「复制/粘贴」），拖动态里必须挡掉
     window.addEventListener("contextmenu", (ev) => {
       if (toolTabDrag && toolTabDrag.active) ev.preventDefault();
