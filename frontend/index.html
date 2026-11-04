@@ -337,6 +337,67 @@
           </div>
         </div>
 
+
+        <!-- 投屏：直接调用用户机器上已安装的 scrcpy（不内置、不重打包），
+             自动在 PATH / 常见安装目录里找；找不到时可手填 scrcpy(.exe) 全路径。 -->
+        <div class="tool-card" id="scrcpy-card">
+          <div class="tool-h tool-h--toggle" id="scrcpy-toggle" role="button" tabindex="0"
+               aria-expanded="true" aria-controls="scrcpy-body" title="单击收起 / 展开投屏选项">
+            投屏<span class="panel-sub">SCRCPY</span>
+            <span class="tool-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </span>
+          </div>
+          <div class="tool-body" id="scrcpy-body">
+            <div class="tool-desc">把受控设备画面实时投到电脑上（调用本机 <b>scrcpy</b>，官方投屏工具，不随本程序打包）。多台受控设备会各开一个投屏窗口。</div>
+            <div class="tool-row">
+              <button id="tool-scrcpy" class="btn accent" disabled data-icon="monitor">开启 Scrcpy 投屏</button>
+              <button id="tool-scrcpy-detect" class="btn" data-icon="refresh">重新检测</button>
+              <span id="scrcpy-state" class="scrcpy-state">检测中…</span>
+            </div>
+            <div class="tool-row">
+              <label class="lbl" for="scrcpy-path">scrcpy 路径</label>
+              <input id="scrcpy-path" type="text" class="inp grow"
+                     placeholder="留空 = 自动探测（PATH / 常见安装目录）；或填 scrcpy.exe 全路径">
+            </div>
+            <div class="tool-desc dim">自动探测顺序：配置里填的路径 → 系统 PATH → 常见安装目录（Windows：%LOCALAPPDATA%\scrcpy、C:\scrcpy 等；macOS/Linux：/usr/local/bin、/opt/homebrew/bin 等）。未安装时：Windows 可 <code>winget install Genymobile.scrcpy</code>，macOS <code>brew install scrcpy</code>，或从 github.com/Genymobile/scrcpy 下载解压后把目录填到上面。scrcpy 自带 adb，会与本程序各自的 adb 客户端共存（同一台设备同时连多个 adb 客户端是支持的）。</div>
+
+            <div class="mirror-sep">没装 scrcpy？用备用方式投屏</div>
+            <div class="tool-row">
+              <button id="tool-mirror" class="btn" disabled data-icon="monitor">备用投屏（无需 scrcpy）</button>
+              <button id="tool-mirror-stop" class="btn" disabled data-icon="stop">停止投屏</button>
+              <span id="mirror-state" class="scrcpy-state">未开启</span>
+            </div>
+            <div id="mirror-preview" class="mirror-preview" hidden>
+              <div class="mirror-frame" id="mirror-frame">
+                <img id="mirror-view" alt="设备画面预览">
+                <!-- 右下角拖拽手柄：按住拖动改变预览大小（宽高各自独立，画面按
+                     contain 等比缩放，多出来的部分留黑边，不会被拉变形）。
+                     双击手柄恢复「自适应」大小。 -->
+                <span id="mirror-grip" class="mirror-grip" role="separator"
+                      aria-label="拖动调整预览大小"
+                      title="拖动改变预览大小 · 双击恢复自适应"></span>
+              </div>
+              <div class="mirror-preview-tip">低帧率预览（screencap 轮询）· 右下角可拖动改大小</div>
+            </div>
+            <div class="tool-row">
+              <label class="lbl" for="mirror-size">投屏分辨率</label>
+              <input id="mirror-size" type="text" class="inp" placeholder="留空 = 自动（长边缩到 1080），或填 720x1280">
+              <label class="lbl" for="mirror-bitrate">码率 Mbps</label>
+              <input id="mirror-bitrate" type="number" min="1" max="50" class="inp narrow">
+              <label class="lbl" for="mirror-fps">预览帧率</label>
+              <input id="mirror-fps" type="number" min="1" max="10" class="inp narrow">
+            </div>
+            <div class="tool-row">
+              <label class="lbl" for="mirror-player-path">播放器路径</label>
+              <input id="mirror-player-path" type="text" class="inp grow"
+                     placeholder="留空 = 自动探测 ffplay / mpv / mplayer / vlc">
+            </div>
+            <div class="tool-desc dim">备用方式会<b>自动降级</b>：① <b>screenrecord 管道</b> —— 把设备画面打成 H.264 流，喂给本机播放器窗口（ffplay / mpv / mplayer / vlc 任一即可，30~60fps、延迟约 0.2~1s，画面在独立窗口，<b>不能反向控制设备</b>；screenrecord 有 180 秒上限，到点会自动续流）；② <b>低帧率预览</b> —— 一个播放器都没装时退到此档，纯 adb 循环截图，画面直接显示在上面（1~3fps，只能看个状态、不适合演示）。少数 ROM（如部分华为机型）删掉了 screenrecord，那类设备会自动走 ②。</div>
+          </div>
+        </div>
+
         <!-- 应用安装：把本地 APK 装到受控设备（每台一个后台安装，互不影响）。
              选项默认「覆盖安装」——测试时反复装同一个包是常态；「允许降级」
              「授予全部权限」默认关闭：前者会静默压掉设备上的更高版本，后者
@@ -405,65 +466,6 @@
           </div>
         </div>
 
-        <!-- 投屏：直接调用用户机器上已安装的 scrcpy（不内置、不重打包），
-             自动在 PATH / 常见安装目录里找；找不到时可手填 scrcpy(.exe) 全路径。 -->
-        <div class="tool-card" id="scrcpy-card">
-          <div class="tool-h tool-h--toggle" id="scrcpy-toggle" role="button" tabindex="0"
-               aria-expanded="true" aria-controls="scrcpy-body" title="单击收起 / 展开投屏选项">
-            投屏<span class="panel-sub">SCRCPY</span>
-            <span class="tool-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </span>
-          </div>
-          <div class="tool-body" id="scrcpy-body">
-            <div class="tool-desc">把受控设备画面实时投到电脑上（调用本机 <b>scrcpy</b>，官方投屏工具，不随本程序打包）。多台受控设备会各开一个投屏窗口。</div>
-            <div class="tool-row">
-              <button id="tool-scrcpy" class="btn accent" disabled data-icon="monitor">开启 Scrcpy 投屏</button>
-              <button id="tool-scrcpy-detect" class="btn" data-icon="refresh">重新检测</button>
-              <span id="scrcpy-state" class="scrcpy-state">检测中…</span>
-            </div>
-            <div class="tool-row">
-              <label class="lbl" for="scrcpy-path">scrcpy 路径</label>
-              <input id="scrcpy-path" type="text" class="inp grow"
-                     placeholder="留空 = 自动探测（PATH / 常见安装目录）；或填 scrcpy.exe 全路径">
-            </div>
-            <div class="tool-desc dim">自动探测顺序：配置里填的路径 → 系统 PATH → 常见安装目录（Windows：%LOCALAPPDATA%\scrcpy、C:\scrcpy 等；macOS/Linux：/usr/local/bin、/opt/homebrew/bin 等）。未安装时：Windows 可 <code>winget install Genymobile.scrcpy</code>，macOS <code>brew install scrcpy</code>，或从 github.com/Genymobile/scrcpy 下载解压后把目录填到上面。scrcpy 自带 adb，会与本程序各自的 adb 客户端共存（同一台设备同时连多个 adb 客户端是支持的）。</div>
-
-            <div class="mirror-sep">没装 scrcpy？用备用方式投屏</div>
-            <div class="tool-row">
-              <button id="tool-mirror" class="btn" disabled data-icon="monitor">备用投屏（无需 scrcpy）</button>
-              <button id="tool-mirror-stop" class="btn" disabled data-icon="stop">停止投屏</button>
-              <span id="mirror-state" class="scrcpy-state">未开启</span>
-            </div>
-            <div id="mirror-preview" class="mirror-preview" hidden>
-              <div class="mirror-frame" id="mirror-frame">
-                <img id="mirror-view" alt="设备画面预览">
-                <!-- 右下角拖拽手柄：按住拖动改变预览大小（宽高各自独立，画面按
-                     contain 等比缩放，多出来的部分留黑边，不会被拉变形）。
-                     双击手柄恢复「自适应」大小。 -->
-                <span id="mirror-grip" class="mirror-grip" role="separator"
-                      aria-label="拖动调整预览大小"
-                      title="拖动改变预览大小 · 双击恢复自适应"></span>
-              </div>
-              <div class="mirror-preview-tip">低帧率预览（screencap 轮询）· 右下角可拖动改大小</div>
-            </div>
-            <div class="tool-row">
-              <label class="lbl" for="mirror-size">投屏分辨率</label>
-              <input id="mirror-size" type="text" class="inp" placeholder="留空 = 自动（长边缩到 1080），或填 720x1280">
-              <label class="lbl" for="mirror-bitrate">码率 Mbps</label>
-              <input id="mirror-bitrate" type="number" min="1" max="50" class="inp narrow">
-              <label class="lbl" for="mirror-fps">预览帧率</label>
-              <input id="mirror-fps" type="number" min="1" max="10" class="inp narrow">
-            </div>
-            <div class="tool-row">
-              <label class="lbl" for="mirror-player-path">播放器路径</label>
-              <input id="mirror-player-path" type="text" class="inp grow"
-                     placeholder="留空 = 自动探测 ffplay / mpv / mplayer / vlc">
-            </div>
-            <div class="tool-desc dim">备用方式会<b>自动降级</b>：① <b>screenrecord 管道</b> —— 把设备画面打成 H.264 流，喂给本机播放器窗口（ffplay / mpv / mplayer / vlc 任一即可，30~60fps、延迟约 0.2~1s，画面在独立窗口，<b>不能反向控制设备</b>；screenrecord 有 180 秒上限，到点会自动续流）；② <b>低帧率预览</b> —— 一个播放器都没装时退到此档，纯 adb 循环截图，画面直接显示在上面（1~3fps，只能看个状态、不适合演示）。少数 ROM（如部分华为机型）删掉了 screenrecord，那类设备会自动走 ②。</div>
-          </div>
-        </div>
         <!-- 状态信息已抽离到顶栏跑马灯（点击弹窗查看全量历史） -->
       </section>
 

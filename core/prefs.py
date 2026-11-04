@@ -36,7 +36,9 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
   * wifi_port / wifi_recent
                无线调试的端口与最近连接过的地址（逗号分隔，最新在前）
   * apk_replace / apk_downgrade / apk_grant / apk_collapsed
-               APK 安装的默认选项（覆盖 / 允许降级 / 授予全部权限）与安装卡收起态
+              APK 安装的默认选项（覆盖 / 允许降级 / 授予全部权限）与安装卡收起态
+  * tool_card_order  工具页卡片的拖动排序结果（逗号分隔的卡片 id；留空 = 用 HTML
+              默认序：截图 → 录屏 → 投屏 → 安装 → 诊断）
 
 跨设备同步的两条关键约定：
   * **旧文件自动迁移**：早期版本用 settings.json 存同样的内容。启动时若
@@ -134,6 +136,10 @@ PREFS_DEFAULTS = {
     "rec_collapsed": False,
     "scrcpy_collapsed": False,
     "apk_collapsed": False,
+    # 工具页卡片的手动排序（长按拖动后落盘）：逗号分隔的卡片 id，按「先后」排列。
+    # 留空 = 按 HTML 默认序（截图 → 录屏 → 投屏 → 应用安装 → 诊断包）。与
+    # cmd_order 同一套「逗号串」约定：多值存成一个字符串，手改 config.json 也不易写坏。
+    "tool_card_order": "",
     # 无线调试（Wi-Fi ADB）：
     #   wifi_port    上次用的连接端口（默认 5555；adb tcpip 换过端口的话记住它）
     #   wifi_recent  最近连接过的地址，逗号分隔、最新在前（最多 5 条）

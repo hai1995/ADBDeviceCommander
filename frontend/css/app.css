@@ -1869,6 +1869,32 @@ body.cmd-sorting .cmd-chip .chip-popup { display: none !important; }
 }
 
 /* ============================================================================
+   工具卡长按拖动排序（截图 / 录屏 / 投屏 / 安装 / 诊断）
+   ============================================================================
+   手柄是两列圆点，只作「可拖动」的视觉提示；长按手势实际上绑在整条标题栏上，
+   点标题任意位置都能拖。配色 / 抬层沿用指令卡拖动态，保持全站一致手感。 */
+.tool-grip {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 18px; margin-right: 2px; color: var(--muted);
+  cursor: grab; opacity: .5;
+  transition: color var(--dur-fast) ease, opacity var(--dur-fast) ease;
+}
+.tool-grip svg { width: 12px; height: 14px; display: block; fill: currentColor; }
+.tool-h--toggle:hover .tool-grip { color: var(--accent); opacity: 1; }
+.tool-grip:active { cursor: grabbing; }
+/* 长按拖动中：整页 cursor 变 grabbing，其余卡片半透明，被拖的那张抬到最上层 */
+body.tool-sorting, body.tool-sorting * { cursor: grabbing !important; }
+body.tool-sorting .tool-card:not(.is-dragging) { opacity: .55; }
+.tool-card.is-dragging {
+  z-index: 40; opacity: 1 !important;
+  transform: scale(1.02); cursor: grabbing;
+  border-color: var(--accent) !important;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .55), 0 0 0 3px rgba(52, 224, 234, .18);
+  /* 拖动中不要选中文字（长按 + 移动很容易变成选区） */
+  user-select: none;
+}
+
+/* ============================================================================
    性能监控：目标应用选择器（下拉 + 模糊搜索）
    ============================================================================
    不用原生 <select>：原生 select 不支持搜索、也没法在一个控件里混「跟随前台 /

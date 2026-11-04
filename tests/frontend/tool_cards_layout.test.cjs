@@ -3,7 +3,8 @@
    版式走过的弯路：先是三张卡各占一整行（投屏要往下滚），后来把「截图 / 录屏」
    并成两列（两列内容量差太多、勾选项被挤成两行）。现在统一成「自上而下一列 +
    每张卡标题栏可收起」——想看的展开，不看的收成一行标题。这里锁四件事：
-   1) 结构：三张卡是工具页 section 的直接子元素，按 截图 → 录屏 → 投屏 排列，
+   1) 结构：五张卡都是工具页 section 的直接子元素，按
+      截图 → 录屏 → 投屏 → 应用安装 → 诊断包 排列（投屏在录屏下方，第三位），
       每张都有 .tool-h--toggle 标题与 .tool-body 内容区；
    2) 样式：没有两列网格（退回并排会在这里失败），收起态真的隐藏 .tool-body；
    3) 行为：点标题只折自己那张卡，收起态各自落盘（shot_collapsed /
@@ -113,8 +114,8 @@ const folded = (doc, id) => doc.getElementById(id).classList.contains("collapsed
 
     const cards = Array.from(tools.querySelectorAll(":scope > .tool-card"));
     ok(cards.length === 5, "五张卡都是 section 的直接子元素（实际 " + cards.length + "）");
-    ok(cards.map((c) => c.id).join(",") === "shot-card,rec-card,apk-card,diag-card,scrcpy-card",
-       "自上而下：截图 → 录屏 → 应用安装 → 诊断包 → 投屏（实际 " + cards.map((c) => c.id).join(",") + "）");
+    ok(cards.map((c) => c.id).join(",") === "shot-card,rec-card,scrcpy-card,apk-card,diag-card",
+       "自上而下：截图 → 录屏 → 投屏 → 应用安装 → 诊断包（实际 " + cards.map((c) => c.id).join(",") + "）");
     ok(!tools.querySelector(".tool-pair"), "没有并排用的 .tool-pair 容器");
 
     CARDS.forEach((d) => {

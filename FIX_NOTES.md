@@ -3070,3 +3070,35 @@ adb shell rm -f /sdcard/x      ← 成败都清
 - `pytest`：**1290 passed / 1 skipped**（较上轮 +7）。
 - `pyflakes backend core tools tests`：0。
 - 前端 75 文件 0 失败。
+
+# 第三十三轮：投屏卡片换位 + 工具区卡片长按拖动排序
+
+## 改动一：投屏卡片挪到录屏下方（第三位）
+- 旧序：截图 → 录屏 → 应用安装 → 诊断包 → **投屏（第五）**；用户希望投屏紧挨录屏。
+- 新序：截图 → 录屏 → **投屏** → 应用安装 → 诊断包（`#scrcpy-card` 从诊断包之后
+  移到 `#rec-card` 之后）。HTML 默认序即此，未保存过顺序的用户直接看到新布局。
+
+## 改动二：工具区卡片支持长按拖动排序
+- 五张卡（截图 / 录屏 / 投屏 / 安装 / 诊断）标题栏注入拖拽手柄 `.tool-grip`（两列圆点图标，
+  仅作视觉提示），**长按手势绑在整条标题栏上**——点哪都能拖。
+- 复用指令卡那套长按手感：`pointerdown` 后需按住 ≥400ms 才进入拖动态（`is-dragging` +
+  `body.tool-sorting`），中途移动超 8px 视为滚动/误触、放弃本次长按；松手若真拖过，
+  则压制紧随的 `click`，避免「拖了一下卡反而折起」。
+- 拖动中实时换位（`elementFromPoint` 命中目标卡、按纵向中线决定插到前/后）；松手落盘
+  `tool_card_order`（逗号串，与 `cmd_order` 同一约定）。
+- 启动按保存顺序恢复（`applyToolCardOrder`）：顺序表里的卡按序排，表里没有的（如未来
+  新增的卡）补到末尾，不把顺序顶歪。后端 `core/prefs.py` 的 `PREFS_DEFAULTS` 注册
+  `tool_card_order`（默认空 = 用 HTML 默认序）。
+- CSS：`.tool-grip`（cursor:grab）、`.tool-card.is-dragging`（抬层 z-index:40 + 磷光青描边 +
+  轻微放大 + 禁选中）、`body.tool-sorting`（整页 grabbing 光标）。
+
+## 回归测试
+- 前端 `tool_card_order.test.cjs`（21 条断言）：默认序投屏第三位且 5 张卡各有手柄；
+  启动按保存序恢复、未知卡补末尾；长按需等待才激活、短按不触发；拖动换位 + 松手落盘
+  + 紧随 click 被压制；折叠开关仍可用（回归）。
+- `tool_cards_layout.test.cjs`：同步更新预期顺序为「截图→录屏→投屏→安装→诊断」，锁定新默认布局。
+
+## 验证
+- `pytest`：**1290 passed / 1 skipped**（较上轮持平）。
+- `pyflakes backend core tools tests`：0。
+- 前端 **76 文件 0 失败**（较上轮 +1：新增 `tool_card_order.test.cjs`）。
