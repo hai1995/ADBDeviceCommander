@@ -2948,8 +2948,14 @@
     const bar = document.getElementById("tool-subtabs");
     if (!over || !bar || over === d.tab) return;
     const r = over.getBoundingClientRect();
-    // 水平排列：落点在目标中线以右 → 插到后面，否则插到前面
-    const after = (ev.clientX || 0) > r.left + r.width / 2;
+    // 子 tab 在窄窗口会换行（flex-wrap）。同一行按水平中线判断插前/插后；
+    // 跨行时按垂直中线判断（指针在目标行下方 = 插到它后面），否则永远只能
+    // 在「同一行内」换位，拖到第二行会插错位置。
+    const cy = ev.clientY || 0;
+    const sameRow = Math.abs(cy - (r.top + r.height / 2)) < r.height / 2;
+    const after = sameRow
+      ? (ev.clientX || 0) > r.left + r.width / 2
+      : cy > r.top + r.height / 2;
     bar.insertBefore(d.tab, after ? over.nextSibling : over);
   }
   function onToolTabPointerUp() {

@@ -3304,6 +3304,9 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
   两者始终一一对应。
 - **Esc 取消拖动**：拖动中按 Esc 还原按下前的顺序、退出拖动态且不落盘（松开也不再写）；
   解决长按误触没有退路的问题。
+- **窄窗口换行时拖对位置**：子 tab 栏 flex-wrap 后可能排成两行，原实现只按目标的中线做
+  水平判断，跨行拖动会插错。改为同行按水平中线、跨行按垂直中线（指针在目标行下方 = 插到
+  它后面）。
 
 ## 配置 schema 修正（真实漂移）
 - `core/prefs.py` 更新滞后于前端：仍登记 `shot_collapsed` / `rec_collapsed` / `scrcpy_collapsed` /
@@ -3319,9 +3322,10 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
   移除 `*_collapsed` 描述。
 
 ## 回归测试
-- `tool_card_order.test.cjs` 扩到 52 条：新增「面板 DOM 同步重排」、「`tool_active_tab` 回填 /
-  切换落盘 / 重复点击不写盘 / 失效 key 回退」、「Esc 取消还原且不落盘」。
-- 通过：`tool_card_order` 52、`tool_cards_layout` 75、`tools_rec_collapse_scrcpy` 51、
+- `tool_card_order.test.cjs` 扩到 54 条：新增「面板 DOM 同步重排」、「`tool_active_tab` 回填 /
+  切换落盘 / 重复点击不写盘 / 失效 key 回退」、「Esc 取消还原且不落盘」、「换行后跨行拖动
+  的插入位置」。
+- 通过：`tool_card_order` 54、`tool_cards_layout` 75、`tools_rec_collapse_scrcpy` 51、
   `settings_persist` 57、`ui_style_card_tabs` 36、`about_subtab_manual` 14、
   `ui_layout_fixes` 17、`tools_tab_scroll` 7、`layout_resizable` 21（均 0 失败）。
 - 后端 `pytest`：1299 passed / 1 skipped；`pyflakes` 干净。

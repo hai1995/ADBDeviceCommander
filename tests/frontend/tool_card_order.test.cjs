@@ -16,7 +16,8 @@
        roving tabindex 只让当前项可被 Tab 停住。
    [6] 记忆上次停留项：settings.tool_active_tab 命中即恢复、回填不写盘；
        配置里的 key 已失效（版本删了某项）时回退到第一项。
-   [7] 拖动中按 Esc 取消：顺序还原到按下前、退出拖动态、不落盘（松手也不写）。 */
+   [7] 拖动中按 Esc 取消：顺序还原到按下前、退出拖动态、不落盘（松手也不写）。
+   [8] 窄窗口换行：同一行按水平中线、跨行按垂直中线判断插入位置。 */
 const fs = require("fs");
 const path = require("path");
 const { JSDOM } = require("jsdom");
@@ -335,6 +336,41 @@ function pane(doc, key) { return doc.querySelector('.tool-pane[data-tool-pane="'
       (c) => c.fn === "save_settings" && c.args[0] && "tool_tab_order" in c.args[0]);
     ok(savedAfterUp.length === 0, "取消后再松手也不落盘（顺序仍是原样）");
     ok(toolOrder(doc).join(",") === before, "松手后顺序保持原样");
+  }
+
+  console.log("\n[8] 窄窗口换行：跨行拖动按垂直中线判断插入位置");
+  {
+    const { window } = mkEnv();
+    const doc = window.document;
+    await waitFor(() => subBtn(doc, "shot"), 3000, "就绪");
+    // 模拟 flex-wrap 后的两行布局：shot/rec/scrcpy 第一行，apk/diag 第二行
+    const rows = {
+      shot: [0, 0, 80, 30], rec: [88, 0, 80, 30], scrcpy: [176, 0, 80, 30],
+      apk: [0, 38, 80, 30], diag: [88, 38, 80, 30],
+    };
+    Object.keys(rows).forEach((k) => {
+      const [x, y, w, h] = rows[k];
+      subBtn(doc, k).getBoundingClientRect = () =>
+        ({ left: x, top: y, width: w, height: h, right: x + w, bottom: y + h });
+    });
+    const btn = subBtn(doc, "shot");
+    doc.elementFromPoint = () => subBtn(doc, "diag");
+    btn.dispatchEvent(pointerEvent(window, "pointerdown", 10, 10));
+    await waitFor(() => btn.classList.contains("is-dragging"), 1500, "长按激活");
+    // 指针在第二行 diag（top=38, h=30, 中线 53）的**上方**（y=45）→ 应插到 diag 之前
+    window.dispatchEvent(pointerEvent(window, "pointermove", 120, 45));
+    await sleep(40);
+    ok(toolOrder(doc).join(",") === "rec,scrcpy,apk,shot,diag",
+       "跨行拖到 diag 上半 → 插到 diag 之前: " + toolOrder(doc).join(","));
+
+    // 同一行内仍按水平中线：拖到 rec 右半边（x=170 > rec 中线 128）→ 插到 rec 之后
+    doc.elementFromPoint = () => subBtn(doc, "rec");
+    window.dispatchEvent(pointerEvent(window, "pointermove", 170, 15));
+    await sleep(40);
+    ok(toolOrder(doc).join(",") === "rec,shot,scrcpy,apk,diag",
+       "同行拖到 rec 右半 → shot 落到 rec 之后: " + toolOrder(doc).join(","));
+    window.dispatchEvent(pointerEvent(window, "pointerup", 170, 15));
+    await sleep(20);
   }
 
   clearTimeout(watchdog);
