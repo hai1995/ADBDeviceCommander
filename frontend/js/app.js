@@ -2962,11 +2962,14 @@
     const d = toolTabDrag;
     if (!d) return;
     if (!d.active) { endToolTabDrag(); return; }   // 短按 = 普通切换，交给 click
+    const tab = d.tab;
     endToolTabDrag();
     toolTabClickGuard = Date.now() + 350;
     saveToolTabOrder();
     // 面板 DOM 跟着按钮一起重排：两者始终一一对应，后续按 key 查找也不会错位
     applyToolTabOrder();
+    // 重排会移动节点、可能把焦点丢掉：还给被拖的那颗，键盘用户能接着用方向键
+    if (tab && tab.focus) tab.focus();
     pushStatus("info", "✓ 工具顺序已保存（长按子 tab 可再次调整）");
   }
 
@@ -2975,8 +2978,10 @@
     const d = toolTabDrag;
     if (!d || !d.active) return false;
     const prev = d.prev || [];
+    const tab = d.tab;
     endToolTabDrag();
     if (prev.length) reorderToolTabs(prev);
+    if (tab && tab.focus) tab.focus();   // 还原后焦点仍留在原处
     // 松手后还会紧跟一个 click：一并压掉，免得取消完又切走一个子 tab
     toolTabClickGuard = Date.now() + 350;
     pushStatus("info", "已取消工具顺序调整");

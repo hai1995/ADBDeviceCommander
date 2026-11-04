@@ -207,6 +207,8 @@ function pane(doc, key) { return doc.querySelector('.tool-pane[data-tool-pane="'
       .map((p) => p.dataset.toolPane);
     ok(panesOrder.join(",") === "rec,scrcpy,apk,diag,shot",
        "松手后面板 DOM 同步重排: " + panesOrder.join(","));
+    ok(doc.activeElement === subBtn(doc, "shot"),
+       "拖动结束后焦点仍在被拖的子 tab（键盘可接着用）");
 
     // 紧随的 click 应被 toolTabClickGuard 压制：不切换（shot 仍是 active）
     ok(subBtn(doc, "shot").classList.contains("active"), "拖动前 shot 子 tab active");
