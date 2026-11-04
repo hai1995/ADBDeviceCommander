@@ -1569,7 +1569,6 @@
      与指令卡同一套长按手势：子 tab 按钮整颗可长按拖动重排；短按是切换子 tab，
      长按才进入拖动态，松手若真的拖过就压制随后的 click，避免一次操作既换位又切换。
      落盘 tool_tab_order，下次启动照旧。 */
-  const TOOL_TAB_SEL = '.tab[data-tab="tools"]';
   let toolTabOrder = [];                // 手动排过序的子 tab key（按先后）
   let toolTabDrag = null;               // 拖动会话：{tab, x, y, timer, active}
   let toolTabClickGuard = 0;            // 拖动结束后压制紧随其后的 click（避免既换位又切换）
@@ -2771,8 +2770,12 @@
      tool_tab_order（默认顺序只在 HTML 里写一份，与 TOOL_TABS 一致）。 */
   const TOOL_TABS = ["shot", "rec", "scrcpy", "apk", "diag"];
 
-  function toolTabBtn(key) { return document.querySelector('.tool-subtab[data-tool-tab="' + key + '"]'); }
-  function toolTabPane(key) { return document.querySelector('.tool-pane[data-tool-pane="' + key + '"]'); }
+  function toolTabBtn(key) {
+    return document.querySelector('#tool-subtabs .tool-subtab[data-tool-tab="' + key + '"]');
+  }
+  function toolTabPane(key) {
+    return document.querySelector('#tool-panes .tool-pane[data-tool-pane="' + key + '"]');
+  }
 
   /* 切换子 tab：只显示对应面板，其余 hidden；按钮 active / aria-selected 同步 */
   function switchToolTab(key) {
@@ -2782,6 +2785,8 @@
       if (btn) {
         btn.classList.toggle("active", active);
         btn.setAttribute("aria-selected", active ? "true" : "false");
+        // roving tabindex：Tab 键只停在当前子 tab 上，切换用方向键（ARIA tabs 规范）
+        btn.tabIndex = active ? 0 : -1;
       }
       if (pane) pane.hidden = !active;
     });
@@ -2798,7 +2803,20 @@
         switchToolTab(k);
       });
       btn.addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); switchToolTab(k); }
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); switchToolTab(k); return; }
+        // 方向键 / Home / End 在子 tab 间移动并激活；顺序取 DOM（= 拖动后的视觉顺序）
+        const step = ev.key === "ArrowRight" ? 1 : ev.key === "ArrowLeft" ? -1 : 0;
+        if (!step && ev.key !== "Home" && ev.key !== "End") return;
+        ev.preventDefault();
+        const tabs = Array.from(document.querySelectorAll("#tool-subtabs .tool-subtab"));
+        if (!tabs.length) return;
+        const idx = tabs.indexOf(btn);
+        let next;
+        if (ev.key === "Home") next = 0;
+        else if (ev.key === "End") next = tabs.length - 1;
+        else next = (idx + step + tabs.length) % tabs.length;
+        const nb = tabs[next];
+        if (nb) { switchToolTab(nb.dataset.toolTab); nb.focus(); }
       });
     });
   }

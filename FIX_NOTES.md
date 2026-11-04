@@ -3270,3 +3270,23 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 - `settings_persist.test.cjs`：移除 `shot_collapsed` / `scrcpy_collapsed` 落盘断言，新增
   `tool_tab_order` 启动回填校验。
 - `ui_style_card_tabs.test.cjs`：把 `tool-subtab` 纳入允许样式类清单。
+
+# 第四十轮：工具子 tab 无障碍补全 + 测试健壮性
+
+## 优化点
+- 补全 ARIA tabs 语义：tablist 加 `aria-orientation`；每个子 tab 加 `id` / `aria-controls` /
+  roving `tabindex`（激活项 0、其余 -1）；每个面板加 `id` / `role="tabpanel"` / `aria-labelledby`。
+- 键盘导航：方向键 ←/→ 在子 tab 间移动并激活（按 DOM 视觉顺序、首尾循环），Home/End 跳首/尾；
+  Enter/Space 仍可激活。
+- 拖动排序中整页禁 `user-select`，避免长按拖动把子 tab 文字拉成选区。
+- 清理死代码 `TOOL_TAB_SEL`；`toolTabBtn` / `toolTabPane` 查询收窄到 `#tool-subtabs` / `#tool-panes`。
+
+## 测试健壮性修复
+- `settings_persist.test.cjs` 残留一段已删除的 `shot-toggle` / `scrcpy-toggle` 点击（折叠功能已移除），
+  `getElementById` 取到 null 后 `.click()` 抛异常；而该文件没有看门狗、`unhandledRejection` 又静默吞掉，
+  导致整套前端测试在这里「假死」。移除残留块，并把 `unhandledRejection` 改为打印栈 + 立即退出。
+- `tool_card_order.test.cjs` 增加方向键 / Home / End + roving tabindex + `role=tabpanel` / `aria-controls` 断言。
+
+## 回归
+- 受影响的 5 个前端用例全部通过：`tool_card_order` 39、`tool_cards_layout` 75、
+  `tools_rec_collapse_scrcpy` 51、`ui_style_card_tabs` 36、`settings_persist` 57（均 0 失败）。

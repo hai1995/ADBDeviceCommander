@@ -1886,9 +1886,13 @@ body.cmd-sorting .cmd-chip .chip-popup { display: none !important; }
   user-select: none;
 }
 
-/* 子 tab 长按拖动排序中：整页 cursor 变 grabbing（被拖动的子 tab 用
+/* 子 tab 长按拖动排序中：整页 cursor 变 grabbing、禁止选中文字（被拖动的子 tab 用
    .tool-subtab.is-dragging 降透明度，见上方「工具区子 tab」区块）。 */
-body.tool-sorting, body.tool-sorting * { cursor: grabbing !important; }
+body.tool-sorting, body.tool-sorting * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
 
 /* ============================================================================
    性能监控：目标应用选择器（下拉 + 模糊搜索）

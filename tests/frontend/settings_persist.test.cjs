@@ -16,7 +16,12 @@ const ROOT = path.join(__dirname, "..", "..");
 const html = fs.readFileSync(path.join(ROOT, "frontend/index.html"), "utf8");
 const js = fs.readFileSync(path.join(ROOT, "frontend/js/app.js"), "utf8");
 
-process.on("unhandledRejection", () => {});
+// 未捕获异常不要把进程挂住（jsdom 的定时器会让 node 一直不退）：打印栈并立即退出，
+// 否则 CI 只会看到「卡死」而不知道是哪条断言抛的。
+process.on("unhandledRejection", (e) => {
+  console.error("\n[未捕获异常] " + (e && e.stack ? e.stack : e));
+  process.exit(2);
+});
 
 let pass = 0, fail = 0;
 function ok(cond, name) {
@@ -273,18 +278,6 @@ const saved = (calls, key) =>
       saved(calls, "rec_logcat").pop().args[0].rec_logcat === true,
       3000, "rec_logcat=true"),
       "再点一次恢复 → rec_logcat=true");
-
-    // 三张工具卡的标题栏单击 → 各自的收起态落盘（互不牵连）
-    click("shot-toggle");
-    ok(await waitFor(() => saved(calls, "shot_collapsed").length &&
-      saved(calls, "shot_collapsed").pop().args[0].shot_collapsed === true,
-      3000, "shot_collapsed"),
-      "收起截图卡 → shot_collapsed=true");
-    click("scrcpy-toggle");
-    ok(await waitFor(() => saved(calls, "scrcpy_collapsed").length &&
-      saved(calls, "scrcpy_collapsed").pop().args[0].scrcpy_collapsed === true,
-      3000, "scrcpy_collapsed"),
-      "收起投屏卡 → scrcpy_collapsed=true（与截图卡分开记）");
 
     const dir = doc.getElementById("tool-dir");
     dir.value = "D:\\new-shots";

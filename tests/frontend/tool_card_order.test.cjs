@@ -120,7 +120,13 @@ function pane(doc, key) { return doc.querySelector('.tool-pane[data-tool-pane="'
     ok(/\.tool-subtab\.is-dragging\s*\{[^}]*opacity/.test(css),
        "拖动中的子 tab 降透明度（is-dragging）");
     ok(/body\.tool-sorting[^{]*\{[^}]*cursor:\s*grabbing/.test(css),
-       "拖动进行中整页 cursor: grabbing");
+       "拖动进行中整页 cursor: grabbing（并禁 user-select）");
+    ok(/body\.tool-sorting[^{]*\{[^}]*user-select:\s*none/.test(css),
+       "拖动进行中禁止选中文字（user-select: none）");
+    ok(doc.querySelectorAll('#tool-panes .tool-pane[role="tabpanel"]').length === 5,
+       "5 个面板都标了 role=tabpanel");
+    ok(subBtn(doc, "shot").getAttribute("aria-controls") === "tool-pane-shot",
+       "子 tab 的 aria-controls 指向对应面板");
   }
 
   console.log("\n[1] 启动按保存顺序恢复（tool_tab_order 命中即重排）");
@@ -216,6 +222,39 @@ function pane(doc, key) { return doc.querySelector('.tool-pane[data-tool-pane="'
     ok(subBtn(doc, "diag").classList.contains("active"), "点诊断 → diag active");
     ok(!pane(doc, "diag").hidden, "diag 面板显示");
     ok(pane(doc, "rec").hidden, "rec 面板被隐藏");
+  }
+
+  console.log("\n[5] 方向键 / Home / End 在子 tab 间移动并激活（按 DOM 顺序，含循环）");
+  {
+    const { window } = mkEnv();
+    const doc = window.document;
+    await waitFor(() => subBtn(doc, "shot"), 3000, "就绪");
+    const key = (el, k) =>
+      el.dispatchEvent(new window.KeyboardEvent("keydown", { key: k, bubbles: true }));
+
+    key(subBtn(doc, "shot"), "ArrowRight");
+    await sleep(40);
+    ok(subBtn(doc, "rec").classList.contains("active"), "ArrowRight：截图 → 录屏");
+    ok(pane(doc, "rec").hidden === false, "录屏面板显示");
+    key(subBtn(doc, "rec"), "ArrowRight");
+    await sleep(40);
+    ok(subBtn(doc, "scrcpy").classList.contains("active"), "ArrowRight：录屏 → 投屏");
+    key(subBtn(doc, "scrcpy"), "ArrowLeft");
+    await sleep(40);
+    ok(subBtn(doc, "rec").classList.contains("active"), "ArrowLeft：投屏 → 录屏");
+    key(subBtn(doc, "rec"), "End");
+    await sleep(40);
+    ok(subBtn(doc, "diag").classList.contains("active"), "End：跳到最后一个（诊断）");
+    key(subBtn(doc, "diag"), "Home");
+    await sleep(40);
+    ok(subBtn(doc, "shot").classList.contains("active"), "Home：回到第一个（截图）");
+    key(subBtn(doc, "shot"), "ArrowLeft");
+    await sleep(40);
+    ok(subBtn(doc, "diag").classList.contains("active"), "首个再 ArrowLeft 循环到最后一个（诊断）");
+
+    // roving tabindex：只有当前子 tab 能被 Tab 键停住
+    ok(subBtn(doc, "diag").tabIndex === 0, "当前子 tab tabindex=0");
+    ok(subBtn(doc, "shot").tabIndex === -1, "非当前子 tab tabindex=-1");
   }
 
   clearTimeout(watchdog);
