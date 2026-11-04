@@ -158,7 +158,8 @@
         <div class="savedir-row">
           <label class="lbl">保存目录</label>
           <input id="lc-dir" type="text" class="inp grow" placeholder="Logcat 抓取保存目录">
-          <button id="lc-open" class="btn" data-icon="folder">打开</button>
+          <button id="lc-pick" class="btn" data-icon="folder">选择</button>
+          <button id="lc-open" class="btn" data-icon="folder">打开目录</button>
           <label class="lbl">缓冲区</label>
           <select id="lc-buf" class="inp sel-inp" title="监控与抓取共同读取的日志缓冲区范围">
             <option>main（主日志）</option>
@@ -235,7 +236,8 @@
         <div class="savedir-row">
           <label class="lbl">保存目录</label>
           <input id="tool-dir" type="text" class="inp grow" placeholder="截图/录屏保存目录">
-          <button id="tool-open" class="btn" data-icon="folder">打开</button>
+          <button id="tool-pick" class="btn" data-icon="folder">选择</button>
+          <button id="tool-open" class="btn" data-icon="folder">打开目录</button>
         </div>
 
         <!-- 工具页三张卡统一自上而下堆叠，每张的标题栏单击可收起。
@@ -265,6 +267,14 @@
               <li>勾选「同步至粘贴板」时只复制<b>第一张</b>——剪贴板一次只能放一张（图片仍全部存盘），可直接到微信 / QQ / 文档里 Ctrl+V。</li>
               <li>开关与保存目录都记在 <code>config.json</code>，下次启动沿用。</li>
             </ul>
+            <div class="shot-preview" id="shot-preview" hidden>
+              <div class="shot-preview-frame" id="shot-preview-frame">
+                <img id="shot-preview-img" alt="截图预览">
+                <span class="shot-preview-grip" id="shot-preview-grip"
+                      aria-label="拖动调整预览大小" title="拖动改变预览大小 · 双击恢复自适应"></span>
+              </div>
+              <div class="tool-desc dim" id="shot-preview-name"></div>
+            </div>
           </div>
         </div>
 
@@ -582,7 +592,8 @@
         <div class="savedir-row">
           <label class="lbl">保存目录</label>
           <input id="file-dir" type="text" class="inp grow" placeholder="文件下载保存目录">
-          <button id="file-open" class="btn" data-icon="folder">打开</button>
+          <button id="file-pick" class="btn" data-icon="folder">选择</button>
+          <button id="file-open" class="btn" data-icon="folder">打开目录</button>
         </div>
         <div class="file-panel">
           <div class="file-bar">
@@ -734,8 +745,8 @@
         </div>
         <pre id="update-notes" class="update-notes"></pre>
         <div class="update-hint dim" id="update-hint">
-          在浏览器里下载后，退出本程序并用新包里的文件覆盖当前目录即可；
-          <code>config.json</code> 是你的设置，覆盖时请保留它。
+          在浏览器里下载后，退出本程序，<b>只用新包里的 exe 覆盖当前目录下的同名 exe</b> 即可；
+          其余 <code>*.json</code> 配置文件（<code>config.json</code>、<code>quick_commands.json</code> 等）是你的本地设置，<b>请勿替换或删除</b>。
         </div>
       </div>
       <div class="modal-foot">

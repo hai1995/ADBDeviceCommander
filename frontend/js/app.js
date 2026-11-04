@@ -32,10 +32,13 @@
     lcCapZipstop: $("lc-cap-zipstop"),
     lcCapStart: $("lc-cap-start"), lcCapStop: $("lc-cap-stop"),
     lcCapStatus: $("lc-cap-status"), lcCapLevels: $("lc-cap-levels"),
-    lcDir: $("lc-dir"), lcOpen: $("lc-open"),
+    lcDir: $("lc-dir"), lcOpen: $("lc-open"), lcPick: $("lc-pick"),
     // tools
-    toolDir: $("tool-dir"), toolOpen: $("tool-open"),
+    toolDir: $("tool-dir"), toolOpen: $("tool-open"), toolPick: $("tool-pick"),
     toolShot: $("tool-shot"), shotClipboard: $("shot-clipboard"),
+    shotPreview: $("shot-preview"), shotPreviewFrame: $("shot-preview-frame"),
+    shotPreviewImg: $("shot-preview-img"), shotPreviewGrip: $("shot-preview-grip"),
+    shotPreviewName: $("shot-preview-name"),
     toolRec: $("tool-rec"),
     toolRecStop: $("tool-rec-stop"),
     toolRecCancel: $("tool-rec-cancel"),
@@ -99,7 +102,7 @@
     fileRefresh: $("file-refresh"), fileMkdir: $("file-mkdir"),
     fileTouch: $("file-touch"), fileUpload: $("file-upload"),
     fileBody: $("file-body"),
-    fileDir: $("file-dir"), fileOpen: $("file-open"),
+    fileDir: $("file-dir"), fileOpen: $("file-open"), filePick: $("file-pick"),
     fileSelAll: $("file-sel-all"), fileBatchDl: $("file-batch-dl"),
     fileBatchDel: $("file-batch-del"), fileSelCount: $("file-sel-count"),
     fileTableWrap: $("file-table-wrap"), fileDropOverlay: $("file-drop-overlay"),
@@ -697,6 +700,9 @@
             els.diagResult.title = p.path;
             els.diagResult.classList.remove("dim");
           }
+        } else if (p.type === "screenshot" && p.path) {
+          // 每次截屏完在卡片下方生成预览图（默认宽度自适应、可拖拽改大小）
+          showShotPreview(p.path);
         }
         break;
       case "stop_state": {
@@ -970,6 +976,10 @@
     // 预览区大小（0 = 自适应）：上次拖到多大，这次投屏还原成多大
     if (typeof s.mirror_view_w === "number" || typeof s.mirror_view_h === "number") {
       applyMirrorViewSize(s.mirror_view_w, s.mirror_view_h);
+    }
+    // 截图预览区大小（0 = 自适应）：上次拖到多大，这次截屏还原成多大
+    if (typeof s.shot_preview_w === "number" || typeof s.shot_preview_h === "number") {
+      applyShotPreviewSize(s.shot_preview_w, s.shot_preview_h);
     }
     // 性能监控：目标包名 / 采样间隔 / 图表指标
     if (typeof s.perf_pkg === "string") setPerfPkg(s.perf_pkg, true);
@@ -2867,6 +2877,89 @@
       e.preventDefault();
       applyMirrorViewSize(0, 0);
       persistPrefs({ mirror_view_w: 0, mirror_view_h: 0 });
+    });
+  }
+
+  /* 截图预览：每次截屏后在卡片下方生成，默认宽度自适应工具卡内容区最大宽度，
+     右下角手柄可拖动改变大小、双击恢复自适应（复用备用投屏预览的手感）。 */
+  const SHOT_PREVIEW_MIN_W = 160, SHOT_PREVIEW_MIN_H = 120, SHOT_PREVIEW_MAX_H = 1400;
+  let shotPreviewSize = { w: 0, h: 0 };
+
+  async function showShotPreview(path) {
+    if (!els.shotPreview || !els.shotPreviewImg) return;
+    const res = await callApi(api.screenshot_data(path));
+    if (!res || !res.ok || !res.data) return;
+    els.shotPreviewImg.src = "data:image/png;base64," + res.data;
+    if (els.shotPreviewName) {
+      els.shotPreviewName.textContent = res.name || path;
+      els.shotPreviewName.title = path;
+    }
+    els.shotPreview.hidden = false;
+  }
+
+  function applyShotPreviewSize(w, h) {
+    const nw = Math.max(0, Math.round(Number(w) || 0));
+    const nh = Math.max(0, Math.round(Number(h) || 0));
+    shotPreviewSize = (nw && nh) ? { w: nw, h: nh } : { w: 0, h: 0 };
+    const frame = els.shotPreviewFrame;
+    if (!frame) return;
+    const sized = shotPreviewSize.w > 0;
+    frame.classList.toggle("is-sized", sized);
+    if (sized) {
+      frame.style.width = shotPreviewSize.w + "px";
+      frame.style.height = shotPreviewSize.h + "px";
+    } else {
+      frame.style.width = "";
+      frame.style.height = "";
+    }
+  }
+
+  function bindShotPreviewResize() {
+    const grip = els.shotPreviewGrip;
+    const frame = els.shotPreviewFrame;
+    if (!grip || !frame) return;
+    let drag = null;
+    grip.addEventListener("pointerdown", (e) => {
+      const fr = frame.getBoundingClientRect ? frame.getBoundingClientRect() : null;
+      // 横向上限取「所在工具卡内容区宽」而非预览框当前宽：预览框默认 width:100%，
+      // 拿它当上限等于「永远只能这么宽」，用户一像素都拖不大。
+      const body = frame.closest && frame.closest(".tool-body");
+      drag = {
+        x: e.clientX, y: e.clientY,
+        w: shotPreviewSize.w || Math.round((fr && fr.width) || 0) || 320,
+        h: shotPreviewSize.h || Math.round((fr && fr.height) || 0) || 480,
+        maxW: Math.max(SHOT_PREVIEW_MIN_W,
+          Math.round((body && body.clientWidth) || 720) - 20),
+      };
+      frame.classList.add("is-resizing");
+      if (grip.setPointerCapture && e.pointerId != null) {
+        try { grip.setPointerCapture(e.pointerId); } catch (_) { /* 部分环境不支持 */ }
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    grip.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const w = Math.min(drag.maxW, Math.max(SHOT_PREVIEW_MIN_W,
+        drag.w + (e.clientX - drag.x)));
+      const h = Math.min(SHOT_PREVIEW_MAX_H, Math.max(SHOT_PREVIEW_MIN_H,
+        drag.h + (e.clientY - drag.y)));
+      applyShotPreviewSize(w, h);
+      e.preventDefault();
+    });
+    const end = () => {
+      if (!drag) return;
+      drag = null;
+      frame.classList.remove("is-resizing");
+      persistPrefs({ shot_preview_w: shotPreviewSize.w, shot_preview_h: shotPreviewSize.h });
+    };
+    grip.addEventListener("pointerup", end);
+    grip.addEventListener("pointercancel", end);
+    // 双击恢复自适应：拖成一条缝之后若没有还原入口，用户只能一直拖着走。
+    grip.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      applyShotPreviewSize(0, 0);
+      persistPrefs({ shot_preview_w: 0, shot_preview_h: 0 });
     });
   }
 
@@ -5403,6 +5496,21 @@
     els.toolOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
     els.lcOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
     els.fileOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
+    // 「选择」：弹出系统文件夹对话框代替手动输入路径（仅 Windows 原生支持）
+    [["lcPick", els.lcDir], ["toolPick", els.toolDir], ["filePick", els.fileDir]]
+      .forEach(([key, input]) => {
+        if (els[key] && input) {
+          els[key].addEventListener("click", async () => {
+            const cur = (input.value || "").trim();
+            const res = await callApi(api.select_save_dir(cur));
+            if (res && res.ok && res.path) {
+              input.value = res.path;
+              // 复用现有 change 逻辑：镜像到另两处输入 + 落盘 + 状态提示
+              input.dispatchEvent(new window.Event("change", { bubbles: true }));
+            }
+          });
+        }
+      });
     // 截图开关「同步至粘贴板」：布尔值直接随截图动作下发（即时生效，不依赖
     // settings.json 是否写成功），同时落盘到 settings.json 供下次启动沿用。
     els.toolShot.addEventListener("click", async () => {
@@ -5584,6 +5692,7 @@
       });
     }
     bindMirrorResize();
+    bindShotPreviewResize();
     if (els.mirrorPlayerPath) {
       els.mirrorPlayerPath.addEventListener("change", async () => {
         const v = (els.mirrorPlayerPath.value || "").trim();

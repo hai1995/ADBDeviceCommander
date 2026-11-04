@@ -3031,3 +3031,42 @@ adb shell rm -f /sdcard/x      ← 成败都清
 - `pytest`：**1283 passed / 1 skipped**（较上轮 +1）。
 - `pyflakes backend core tools tests`：0。
 - 前端 72 文件 0 失败。
+
+# 第三十二轮：指令台三处易用性打磨（更新提示语 / 保存目录「选择」/ 截图预览）
+
+## 改动一：新版本提示语修整（只覆盖 exe，json 配置保留）
+- 旧文：「在浏览器里下载后，退出本程序并用新包里的文件覆盖当前目录即可；
+  `config.json` 是你的设置，覆盖时请保留它。」—— 笼统说「覆盖当前目录」，
+  用户可能把 `quick_commands.json` 等本地配置也一并替换 / 删掉。
+- 新文：「……**只用新包里的 exe 覆盖当前目录下的同名 exe** 即可；其余
+  `*.json` 配置文件（`config.json`、`quick_commands.json` 等）是你的本地设置，
+  **请勿替换或删除**。」
+- 文件：`frontend/index.html` 的 `#update-hint`。
+
+## 改动二：保存目录增加「选择」按钮 + 「打开」更名「打开目录」
+- 三处保存目录（工具 / Logcat / 文件）各加一个「选择」按钮，点击弹系统文件夹
+  对话框（`SHBrowseForFolder` + `BIF_USENEWUI`，带可粘贴路径的输入框），
+  代替手动输入路径；原「打开」按钮更名为「打开目录」。
+- 后端新增 `FileMixin.select_save_dir`：仅 Windows 原生支持，其它平台返回
+  `unsupported`，用户取消返回 `cancelled`。
+- 前端 `api.select_save_dir` 选中后写回输入框、镜像到另两处、落盘 save_settings。
+
+## 改动三：截图完成后生成可拖拽预览图
+- 截图卡片下方新增预览区：每次截屏完（`tool` 事件 `type:"screenshot"）在卡片
+  下方生成预览图，默认宽度自适应工具卡内容区最大宽度。
+- 后端新增 `ScreenshotMixin.screenshot_data(path)`：读落盘 PNG 返回 base64
+  （带存在性 + PNG 魔数校验，避免把非图片当预览图）。
+- 右下角手柄可拖动改变大小、双击恢复自适应（复用备用投屏预览的手感，
+  落盘 `shot_preview_w/h`，下次启动还原）。
+
+## 回归测试
+- 后端：`test_backend_file.py`（select_save_dir 三分支）、
+  `test_backend_screenshot.py`（screenshot_data 正常 / 缺失 / 非 PNG）。
+- 前端：`update_hint.test.cjs`（提示语文案 + 按钮更名）、
+  `savedir_pick.test.cjs`（选择回写 + 落盘）、
+  `shot_preview.test.cjs`（预览渲染 + 拖拽改大小 + 双击还原）。
+
+## 验证
+- `pytest`：**1290 passed / 1 skipped**（较上轮 +7）。
+- `pyflakes backend core tools tests`：0。
+- 前端 75 文件 0 失败。

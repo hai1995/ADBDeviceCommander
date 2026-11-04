@@ -2,7 +2,7 @@
 """backend.controllers.screenshot —— 截图"""
 
 from backend.controller import (
-    ScreenCapturer, clipboard, get_pref
+    ScreenCapturer, clipboard, get_pref, os
 )
 
 class ScreenshotMixin:
@@ -210,3 +210,23 @@ class ScreenshotMixin:
         else:
             # 单设备：tool 事件即时推（前端可据此刷新缩略图等）
             self.bus.push("tool", payload)
+
+    def screenshot_data(self, path):
+        """读取已保存的截图文件，返回 base64（供前端在截图卡片下方预览）。
+
+        路径来自后端自己生成的落盘路径，可信；仍做存在性 + PNG 魔数校验，
+        避免把非图片 / 不存在的文件当成预览图返回。
+        """
+        import base64
+        p = (path or "").strip()
+        if not p or not os.path.isfile(p):
+            return {"ok": False, "reason": "missing"}
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+        if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            return {"ok": False, "reason": "not_png"}
+        return {"ok": True, "data": base64.b64encode(data).decode("ascii"),
+                "name": os.path.basename(p)}

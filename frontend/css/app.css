@@ -1237,6 +1237,38 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .mirror-preview-tip {
   font: 400 var(--fs-sm)/1.4 var(--font-mono); color: var(--faint);
 }
+/* 截图预览：每次截屏后在卡片下方生成，默认宽度自适应工具卡内容区的最大宽度，
+   右下角手柄可拖动改变大小、双击恢复自适应（与备用投屏预览同一手感）。 */
+.shot-preview {
+  margin: 10px 0 2px; padding: 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--surface-2);
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 6px; max-width: 100%;
+}
+.shot-preview-frame {
+  position: relative; display: block; line-height: 0;
+  width: 100%; max-width: 100%; border-radius: var(--r-sm);
+  background: #000; box-shadow: 0 0 0 1px rgba(255, 255, 255, .04);
+}
+.shot-preview-frame img {
+  display: block; width: 100%; height: auto;
+  border-radius: var(--r-sm); background: #000;
+}
+.shot-preview-frame.is-sized { width: auto; height: auto; }
+.shot-preview-frame.is-sized img {
+  width: 100%; height: 100%; max-width: none; max-height: none;
+  object-fit: contain;
+}
+.shot-preview-frame.is-resizing { outline: 1px solid var(--accent); }
+.shot-preview-grip {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; touch-action: none; opacity: .55;
+  background: repeating-linear-gradient(135deg,
+    transparent 0 3px, var(--accent) 3px 4px);
+  border-bottom-right-radius: var(--r-sm);
+  transition: opacity var(--dur-fast) ease;
+}
+.shot-preview-grip:hover, .shot-preview-frame.is-resizing .shot-preview-grip { opacity: 1; }
 /* 数字类输入的窄框（码率 / 帧率）：不跟着 flex 撑开 */
 .inp.narrow { width: 68px; flex: none; text-align: center; }
 /* 录屏开关：横向自动换行（一行尽量多放几个，减小纵向占高）；每个仍是可点 chip */

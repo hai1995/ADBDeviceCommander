@@ -5,6 +5,68 @@ from backend.controller import (
     os, safe_name, subprocess, sys, threading
 )
 
+
+def _win_select_folder(title):
+    """Windows 原生「选择文件夹」对话框（SHBrowseForFolder + BIF_USENEWUI）。
+
+    返回选中的绝对路径；用户取消或当前平台不支持（非 Windows）时返回 None。
+    不预选目录：SHBrowseForFolder 没有可靠的「选中」入参，预选回调在不同
+    Windows 版本上行为不一，为稳妥起见直接打开在桌面根，由用户点选。
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+    try:
+        BIF_RETURNONLYFSDIRS = 0x0001
+        BIF_USENEWUI = 0x0040          # 新版 UI：带可粘贴路径的输入框
+        BIF_NONEWFOLDERBUTTON = 0x0200  # 不显示「新建文件夹」
+
+        class BROWSEINFO(ctypes.Structure):
+            _fields_ = [
+                ("hwndOwner", wintypes.HWND),
+                ("pidlRoot", ctypes.c_void_p),
+                ("pszDisplayName", ctypes.c_wchar_p),
+                ("lpszTitle", ctypes.c_wchar_p),
+                ("ulFlags", wintypes.UINT),
+                ("lpfn", ctypes.c_void_p),
+                ("lParam", ctypes.c_void_p),
+                ("iImage", wintypes.INT),
+            ]
+
+        shell32 = ctypes.windll.shell32
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize.argtypes = [ctypes.c_void_p]
+        ole32.CoInitialize.restype = wintypes.HRESULT
+
+        bi = BROWSEINFO()
+        bi.hwndOwner = None
+        bi.pidlRoot = None
+        bi.pszDisplayName = ctypes.create_unicode_buffer(2048)
+        bi.lpszTitle = title or "选择文件夹"
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI | BIF_NONEWFOLDERBUTTON
+        bi.lpfn = None
+        bi.lParam = None
+        bi.iImage = 0
+
+        ole32.CoInitialize(None)
+        try:
+            pidl = shell32.SHBrowseForFolder(ctypes.byref(bi))
+            if not pidl:
+                return None
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH + 1)
+            if not shell32.SHGetPathFromIDListW(pidl, buf):
+                return None
+            return buf.value or None
+        finally:
+            ole32.CoUninitialize()
+    except Exception:
+        return None
+
+
 class FileMixin:
     """设备文件浏览/增删改/上传下载/预览。"""
 
@@ -46,6 +108,19 @@ class FileMixin:
         except Exception as e:
             self._push_status("err", "⚠ 无法打开目录 %s: %s" % (d, e))
             return {"ok": False, "text": str(e)}
+
+    def select_save_dir(self, current=None):
+        """弹出系统「选择文件夹」对话框，返回用户选中的目录。
+
+        用于代替手动输入保存目录。仅 Windows 支持（其它平台没有原生 GUI 对话框）；
+        用户点取消也返回 cancelled。
+        """
+        path = _win_select_folder("选择保存目录")
+        if not path:
+            if sys.platform.startswith("win"):
+                return {"ok": False, "reason": "cancelled"}
+            return {"ok": False, "reason": "unsupported"}
+        return {"ok": True, "path": path}
 
     @staticmethod
     def _parent_dir(path):
