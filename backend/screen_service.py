@@ -16,6 +16,7 @@ import itertools
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -161,22 +162,36 @@ class ScreenCapturer:
     # 专门把这一类分辨出来，免得用户把它当成「车机没 root」。
 
     @staticmethod
-    def screenshot(adb, serial, save_dir):
+    def screenshot(adb, serial, save_dir, save_file=True):
         """对单台设备截图，返回本地 png 路径或 (None, 错误文本)。
 
         先走 exec-out；坏了自动降级为「设备端落盘 + pull」；两条都不通时
         分别报出原因（能判定是 shell 通道被密码 / 权限拦住时给准确提示）。
+
+        save_file：是否把图写入保存目录。为 False 时（前端「自动保存文件」关掉）
+        不往保存目录落盘，而是写到系统临时目录（前缀 adc_shot_，随程序退出/启动
+        被清理），仅用于预览与剪贴板 —— 用户只想瞄一眼、不想让保存目录被一堆
+        截图占满时，关掉开关即可，且不影响后续的预览与复制。
         """
-        try:
-            os.makedirs(save_dir, exist_ok=True)
-        except Exception as e:
-            return None, "无法创建保存目录 %s: %s" % (save_dir, e)
+        if save_file:
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except Exception as e:
+                return None, "无法创建保存目录 %s: %s" % (save_dir, e)
         ts = time.strftime("%Y%m%d_%H%M%S")
         # safe_name：无线 ADB 序列号形如 192.168.1.5:5555，冒号是 Windows
         # 文件名非法字符，不净化会让 open() 直接失败（截图静默丢失）。
-        out = os.path.join(
-            save_dir, "screenshot_%s_%s_%d.png" % (
-                safe_name(serial), ts, next(ScreenCapturer._seq)))
+        # 落盘目标按 save_file 分流：保存目录 vs 系统临时目录。
+        if save_file:
+            out_dir = save_dir
+            out_name = "screenshot_%s_%s_%d.png" % (
+                safe_name(serial), ts, next(ScreenCapturer._seq))
+        else:
+            out_dir = tempfile.gettempdir()
+            # 临时目录里同样用 safe_name 净化序列号，避免冒号等字符污染文件名
+            out_name = "adc_shot_%s_%s_%d.png" % (
+                safe_name(serial), ts, next(ScreenCapturer._seq))
+        out = os.path.join(out_dir, out_name)
 
         data, why = ScreenCapturer._exec_out(adb, serial)
         if data:

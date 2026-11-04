@@ -36,6 +36,7 @@
     // tools
     toolDir: $("tool-dir"), toolOpen: $("tool-open"), toolPick: $("tool-pick"),
     toolShot: $("tool-shot"), shotClipboard: $("shot-clipboard"),
+    shotSaveFile: $("shot-save-file"),
     shotPreview: $("shot-preview"), shotPreviewFrame: $("shot-preview-frame"),
     shotPreviewImg: $("shot-preview-img"), shotPreviewGrip: $("shot-preview-grip"),
     shotPreviewName: $("shot-preview-name"),
@@ -87,6 +88,7 @@
     perfPkgAll: $("perf-pkg-all"), perfPkgCount: $("perf-pkg-count"),
     perfPkgRefresh: $("perf-pkg-refresh"),
     perfStart: $("perf-start"), perfStop: $("perf-stop"), perfExport: $("perf-export"),
+    perfView: $("perf-view"),
     perfState: $("perf-state"), perfStats: $("perf-stats"),
     perfCanvas: $("perf-canvas"), perfEmpty: $("perf-empty"),
     perfTip: $("perf-tip"), perfCross: $("perf-cross"),
@@ -185,6 +187,7 @@
   let lcCapRunning = false;      // 抓取是否进行中（控制抓取开始/停止按钮态）
   let shotInFlight = false;      // 截图是否在途（后端 shot_state 驱动，锁「立即截图」）
   let lcFilterTimer = null;      // 关键字过滤防抖定时器
+  let lcFilterHits = null;       // 当前关键字在缓冲里命中的行数（null = 未过滤/未知）
   let lcCapSerial = null;        // 正在抓取的设备（与 lcSerial 解耦：抓取期间
                                  // 改勾选不会停错设备，也不会停不下来）
   let fileSerial = null;            // 当前文件浏览设备
@@ -880,6 +883,11 @@
     // 缺省不写就保持 HTML 的默认勾选（默认开启）；用户显式设过值则以设置为准
     if (els.shotClipboard && typeof s.shot_to_clipboard === "boolean") {
       els.shotClipboard.checked = s.shot_to_clipboard;
+    }
+    // 「自动保存文件」：缺省不写就保持 HTML 默认勾选（默认开启）；用户显式
+    // 设过值则以设置为准。关闭后截图不往保存目录落盘（只进预览/剪贴板）。
+    if (els.shotSaveFile && typeof s.shot_save_file === "boolean") {
+      els.shotSaveFile.checked = s.shot_save_file;
     }
     if (typeof s.keep_input === "boolean") {
       // 「保留输入内容」是全局设置：所有工作区一起回填
@@ -2023,7 +2031,11 @@
     if (!f.levels.includes(ln.level)) return false;
     if (f.onlyExc && !ln.exc) return false;
     if (f.kw) {
-      const hay = ((ln.msg || "") + " " + (ln.tag || "")).toLowerCase();
+      // 在整行（raw）里找：tag/msg 之外的字段（如进程名、PID、长消息里被截断前
+      // 的部分）出现的关键字也能命中。此前只拼 msg+tag，导致「账号绑定」这类落在
+      // 消息其它位置的字眼在下方区域完全搜不到。
+      const hay = ((ln.raw || "") + " " + (ln.msg || "") + " " + (ln.tag || ""))
+        .toLowerCase();
       if (!hay.includes(f.kw)) return false;
     }
     return true;
@@ -2136,8 +2148,14 @@
     // 没有缓冲（切设备 / 设备消失 / 清空）时也必须把计数刷成 0：视图已经空了，
     // 计数却留着上一台的「行数/异常」，与眼前的空视图自相矛盾。
     const buf = lcBuffers[serial];
-    els.lcCounter.textContent = "行数: " + (buf ? buf.total : 0)
+    let text = "行数: " + (buf ? buf.total : 0)
       + " · 异常: " + (buf ? buf.exc : 0);
+    // 关键字过滤时附上命中数：让用户知道「有 N 行匹配」，过滤没反应时至少能
+    // 看出是「搜到了 0 行」还是「界面卡住」，而不是对着空视图发懵。
+    if (lcFilterHits != null) {
+      text += " · 命中: " + lcFilterHits;
+    }
+    els.lcCounter.textContent = text;
   }
   function currentLcFilter() {
     const kw = (els.lcFilter.value || "").toLowerCase();
@@ -2154,24 +2172,42 @@
     if (!lcSerial) {
       // 计数也要一起归零：否则取消勾选后「行数/异常」仍停在上一台的数字
       els.lcView.innerHTML = "";
+      lcFilterHits = null;
       els.lcCounter.textContent = "行数: 0 · 异常: 0";
       return;
     }
     // 切到「还没缓冲过」的设备：视图清空的同时计数一并归零
     const buf = lcBuffers[lcSerial];
-    if (!buf) { els.lcView.innerHTML = ""; updateLcCounter(lcSerial); return; }
+    if (!buf) { els.lcView.innerHTML = ""; lcFilterHits = null; updateLcCounter(lcSerial); return; }
     const f = currentLcFilter();
-    const frag = document.createDocumentFragment();
     const view = els.lcView;
-    const startIdx = Math.max(0, buf.lines.length - LC_RENDER_CAP);
-    for (let i = startIdx; i < buf.lines.length; i++) {
+    // 关键字激活时，扫描**整个缓冲**（不止最后 LC_RENDER_CAP 行）：否则较早出现、
+    // 已被实时渲染裁剪出视图的关键字行永远搜不到，用户会以为「过滤不灵」。
+    // 命中数也一并统计，给出可解释的反馈（见 updateLcCounter）。
+    let hits = 0;
+    const matches = [];          // 命中行（按原顺序）
+    for (let i = 0; i < buf.lines.length; i++) {
       const ln = buf.lines[i];
       if (!linePassesFilter(ln, f)) continue;
-      frag.appendChild(makeLineNode(ln));
+      hits += 1;
+      matches.push(ln);
+    }
+    if (f.kw) {
+      lcFilterHits = hits;
+    } else {
+      lcFilterHits = null;
+    }
+    // 渲染上限：整段匹配超过 LC_RENDER_CAP 时，保留**最近** LC_RENDER_CAP 行
+    // （读最新日志是主场景），避免一次性插几千个 DOM 节点卡住界面。
+    const start = Math.max(0, matches.length - LC_RENDER_CAP);
+    const frag = document.createDocumentFragment();
+    for (let i = start; i < matches.length; i++) {
+      frag.appendChild(makeLineNode(matches[i]));
     }
     view.innerHTML = "";
     view.appendChild(frag);
     if (els.lcAuto.checked) view.scrollTop = view.scrollHeight;
+    updateLcCounter(lcSerial);
   }
   /* ---------------- 日志右键菜单（选中复制） ----------------
      .lc-view 已用 CSS user-select:text 放开框选，Ctrl+C / 右键系统菜单里的
@@ -2317,13 +2353,23 @@
   function saveLogcat() {
     if (!lcSerial) { pushStatus("warn", "请先开始监控并选择设备"); return; }
     const text = bufToText(lcSerial);
-    const blob = new Blob([text], { type: "text/plain" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "logcat_" + safeFileName(lcSerial) + "_" + Date.now() + ".txt";
-    a.click();
-    // 立刻 revoke 会把下载掐断（WebView2 下尤其明显）：延后释放，并把节点移除。
-    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+    if (!text.trim()) {
+      pushStatus("warn", "当前没有可保存的日志（先开始监控并等待日志产生）");
+      return;
+    }
+    // 走后端写盘：前端的 a.click() + Blob 下载在 WebView2 下会被静默吞掉
+    // （点了没反应）。后端落到保存目录并回传路径，前端据此给出明确成功提示。
+    callApi(api.logcat_save(lcSerial, text)).then((res) => {
+      if (res && res.ok) {
+        pushStatus("ok", "✓ 日志已保存到 " + (res.path || "保存目录"));
+      } else if (res && res.reason === "empty") {
+        // 后端已就空内容给出提示，这里不再重复
+      } else if (res && res.reason === "no_device") {
+        pushStatus("warn", "请先开始监控并选择设备");
+      } else {
+        pushStatus("err", "⚠ 保存日志失败：" + ((res && res.text) || (res && res.reason) || "未知原因"));
+      }
+    });
   }
 
   /* ---------------- 工具 ---------------- */
@@ -5678,12 +5724,18 @@
       if (els.toolShot.disabled) return;
       els.toolShot.disabled = true;
       const res = await callApi(api.screenshot(
-        null, !!(els.shotClipboard && els.shotClipboard.checked)));
+        null, !!(els.shotClipboard && els.shotClipboard.checked),
+        !!(els.shotSaveFile && els.shotSaveFile.checked)));
       if (!res || res.ok === false) syncToolButtons();
     });
     if (els.shotClipboard) {
       els.shotClipboard.addEventListener("change", () => {
         persistPref("shot_to_clipboard", !!els.shotClipboard.checked);
+      });
+    }
+    if (els.shotSaveFile) {
+      els.shotSaveFile.addEventListener("change", () => {
+        persistPref("shot_save_file", !!els.shotSaveFile.checked);
       });
     }
     // 录屏各开关一律即时记忆（config.json），下次启动沿用以往配置。
@@ -5873,6 +5925,13 @@
     if (els.perfStart) els.perfStart.addEventListener("click", startPerf);
     if (els.perfStop) els.perfStop.addEventListener("click", stopPerf);
     if (els.perfExport) els.perfExport.addEventListener("click", exportPerf);
+    // 查看报告：导出后想翻看刚生成的报告时，一键打开报告所在目录（保存目录），
+    // 不用回工具页再点「打开目录」。与「打开目录」同一套后端 open_save_dir。
+    if (els.perfView) {
+      els.perfView.addEventListener("click", () => {
+        callApi(api.open_save_dir(saveDir()));
+      });
+    }
     if (els.perfThBtn) els.perfThBtn.addEventListener("click", openPerfThresholds);
     if (els.perfThSave) els.perfThSave.addEventListener("click", savePerfThresholds);
     if (els.perfThCancel) els.perfThCancel.addEventListener("click", closePerfThresholds);
@@ -6296,9 +6355,15 @@
     if (lcSerial) lcBuffers[lcSerial] = { lines: [], total: 0, exc: 0 };
     updateLcCounter(null);
     // 返回 Promise：调用方据此判断后端是否真的启动了（失败要回滚按钮态）
+    // 注意：关键字只在前端做即时过滤（见 linePassesFilter / renderLogcat），
+    // 不再下发给后端 logcat_start。原因：后端按「启动那一刻」的关键字预过滤后，
+    // 缓冲里只剩当时命中的行 —— 之后改关键字只能越缩越窄、清掉关键字也回不来，
+    // 正是用户反映「输入账号绑定下方不显示」的根因之一。后端只按级别 + 仅异常
+    // 预过滤（这俩是流量闸门，仍需要它控制总线体量）；关键字交给前端对完整
+    // 缓冲做实时过滤，既能搜到较早被裁剪出视图的行，也能在清空后还原全部。
     return callApi(api.logcat_start(lcSerial, buffers(),
       Array.from(els.lcLevels.querySelectorAll("input:checked")).map((c) => c.value),
-      els.lcFilter.value, els.lcOnlyExc.checked));
+      "", els.lcOnlyExc.checked));
   }
 
   /* ---------------- 状态信息选中复制 ----------------

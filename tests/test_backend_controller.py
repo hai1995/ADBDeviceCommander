@@ -985,8 +985,8 @@ class _FakeCapturer:
         self.err = err
         self.calls = []
 
-    def screenshot(self, adb, serial, save_dir):
-        self.calls.append((adb, serial, save_dir))
+    def screenshot(self, adb, serial, save_dir, save_file=True):
+        self.calls.append((adb, serial, save_dir, save_file))
         return (None, self.err) if self.err else (self.path, None)
 
 
@@ -1025,7 +1025,7 @@ def test_screenshot_double_click_runs_twice(monkeypatch):
     release = threading.Event()
     seen = []
 
-    def blocked(_adb, serial, _save_dir):
+    def blocked(_adb, serial, _save_dir, _save_file=True):
         seen.append(serial)
         release.wait(3.0)
         return ("D:/shots/x.png", None)
@@ -1133,6 +1133,46 @@ def test_screenshot_pref_can_turn_it_off(monkeypatch):
     assert clip.calls == []
 
 
+def test_screenshot_save_file_default_true(monkeypatch):
+    """「自动保存文件」默认开启：不传 save_file 时按偏好落盘（save_file=True）。"""
+    api = _make_api()
+    capturer, _clip = _install_screenshot_fakes(api, monkeypatch)
+    # get_pref 一律回退到各自默认值：shot_save_file 默认 True
+    patch_ctrl(monkeypatch, "get_pref", lambda key, default=None: default)
+
+    api.screenshot("A1", False)
+
+    assert capturer.calls, "截图应已调用 ScreenCapturer"
+    assert capturer.calls[-1][3] is True, "默认应保存到保存目录"
+
+
+def test_screenshot_save_file_off_does_not_save(monkeypatch):
+    """取消「自动保存文件」后：不写保存目录，toast 改为「未保存到目录」。"""
+    api = _make_api()
+    capturer, _clip = _install_screenshot_fakes(api, monkeypatch)
+    patch_ctrl(monkeypatch, "get_pref", lambda key, default=None: False)
+
+    api.screenshot("A1", False)
+
+    assert capturer.calls, "截图应已调用 ScreenCapturer"
+    assert capturer.calls[-1][3] is False, "关闭后不应写保存目录"
+    by_kind = _events_by_kind(api)
+    toasts = [p for p in by_kind.get("status", []) if p.get("toast")]
+    assert any(p["type"] == "ok" and "未保存到目录" in p["text"]
+               for p in toasts), "关闭后应提示未保存到目录：%r" % toasts
+
+
+def test_screenshot_save_file_explicit_false(monkeypatch):
+    """即使偏好开启，前端显式传 save_file=False 也立即生效（不落盘）。"""
+    api = _make_api()
+    capturer, _clip = _install_screenshot_fakes(api, monkeypatch)
+    patch_ctrl(monkeypatch, "get_pref", lambda key, default=None: True)
+
+    api.screenshot("A1", False, False)
+
+    assert capturer.calls[-1][3] is False, "显式 False 应优先生效"
+
+
 # ---------------------------------------------------------------------------
 # 截图完成：全局 toast（用户可能已切去别的页签，只看得到 toast）
 # ---------------------------------------------------------------------------
@@ -1191,7 +1231,7 @@ def test_screenshot_batch_summary_reports_failures(monkeypatch):
     _install_screenshot_fakes(api, monkeypatch)
 
     # A1 成功、B2 失败：按序列号分流
-    def flaky(adb, serial, save_dir):
+    def flaky(adb, serial, save_dir, save_file=True):
         if serial == "B2":
             return None, "设备离线"
         return (r"D:\shots\s.png", None)
@@ -1232,7 +1272,7 @@ def test_screenshot_batch_shot_state_flips_once(monkeypatch):
     release = threading.Event()
     seen = []
 
-    def blocked(_adb, serial, _save_dir):
+    def blocked(_adb, serial, _save_dir, _save_file=True):
         seen.append(serial)
         release.wait(3.0)
         return ("D:/shots/x.png", None)
@@ -1274,7 +1314,7 @@ def test_screenshot_overlapping_requests_keep_running(monkeypatch):
     gates = [threading.Event(), threading.Event()]
     seen = []
 
-    def gated(_adb, serial, _save_dir):
+    def gated(_adb, serial, _save_dir, _save_file=True):
         i = len(seen)
         seen.append(serial)
         gates[i].wait(3.0)
@@ -1308,7 +1348,7 @@ def test_screenshot_worker_exception_still_releases_button(monkeypatch):
     api = _make_api()
     _install_screenshot_fakes(api, monkeypatch)
 
-    def boom(_adb, _serial, _save_dir):
+    def boom(_adb, _serial, _save_dir, _save_file=True):
         raise RuntimeError("adb 崩了")
 
     monkeypatch.setattr(ctrl.ScreenCapturer, "screenshot",
@@ -1326,7 +1366,7 @@ def test_screenshot_batch_worker_exception_still_summarizes(monkeypatch):
     api.toggle_device("B2", True)
     _install_screenshot_fakes(api, monkeypatch)
 
-    def half_boom(adb, serial, save_dir):
+    def half_boom(adb, serial, save_dir, save_file=True):
         if serial == "B2":
             raise RuntimeError("adb 崩了")
         return (r"D:\shots\s.png", None)
@@ -1489,6 +1529,48 @@ def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
     assert "logcat" in order and "video" in order, order
     assert order.index("logcat") < order.index("video"), (
         "日志必须在视频收尾之前就下发停止，否则会比视频多跑数秒：%r" % (order,))
+
+
+def test_logcat_save_writes_file_and_returns_path(monkeypatch, tmp_path):
+    """「保存到文件」改走后端写盘：文本落盘到保存目录并回传路径。
+
+    回归：前端原先用 a.click() + Blob 下载，在 WebView2 下被静默吞掉（点了没反应）。
+    现在由后端落到保存目录，落盘真实发生、调用方拿到路径，前端据此提示成功。
+    """
+    api = _make_api()
+    # 保存目录固定到 tmp_path，便于断言文件真写出来了
+    patch_ctrl(monkeypatch, "load_prefs", lambda: {"save_dir": str(tmp_path)})
+    monkeypatch.setattr(api, "_default_save_dir",
+                        lambda: str(tmp_path), raising=False)
+
+    res = api.logcat_save("A1",
+                          "08-29 10:00:00.000  1  1 I Tag: 账号绑定成功\n"
+                          "08-29 10:00:01.000  1  1 W Tag: 电量低\n")
+
+    assert res["ok"] is True, res
+    assert "path" in res and res["path"]
+    p = res["path"]
+    assert os.path.isfile(p), "文件应当真实落盘"
+    with open(p, "r", encoding="utf-8") as f:
+        saved = f.read()
+    assert "账号绑定成功" in saved and "电量低" in saved, saved
+    assert p.startswith(str(tmp_path)), "应落在保存目录：%s" % p
+    # 返回路径应被回传给前端做提示（这里以事件形式体现：toast 推了出去）
+    toasts = [e["payload"]["text"] for e in api.bus.take()
+              if e["kind"] == "status" and e["payload"].get("toast")]
+    assert any("已保存" in t for t in toasts), toasts
+
+
+def test_logcat_save_empty_is_rejected(monkeypatch, tmp_path):
+    """没有可保存内容时不写空文件，而是明确告知。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "load_prefs", lambda: {"save_dir": str(tmp_path)})
+    monkeypatch.setattr(api, "_default_save_dir",
+                        lambda: str(tmp_path), raising=False)
+
+    res = api.logcat_save("A1", "   \n  ")
+    assert res["ok"] is False
+    assert res["reason"] == "empty"
 
 
 def test_devaudio_remote_path_safe_for_wireless_serial(monkeypatch, tmp_path):
@@ -4102,7 +4184,7 @@ def test_screenshot_two_batches_do_not_mix_counts(monkeypatch):
     release = threading.Event()
     started = []
 
-    def blocked(_adb, serial, _save_dir):
+    def blocked(_adb, serial, _save_dir, _save_file=True):
         started.append(serial)
         release.wait(3.0)
         return ("D:/shots/%s.png" % serial, None)
@@ -4304,7 +4386,7 @@ def test_screenshot_batch_completes_when_one_spawn_fails(monkeypatch):
     api.toggle_device("B2", True)
     monkeypatch.setattr(
         ctrl.ScreenCapturer, "screenshot",
-        staticmethod(lambda adb, s, d: ("D:/shots/%s.png" % s, None)))
+        staticmethod(lambda adb, s, d, sf=True: ("D:/shots/%s.png" % s, None)))
     monkeypatch.setattr(ctrl.clipboard, "copy_image", lambda p: (True, ""))
     calls = {"n": 0}
 

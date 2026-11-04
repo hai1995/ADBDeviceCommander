@@ -37,6 +37,41 @@ class LogcatMixin:
         self.bus.push("logcat", {"serial": serial, "status": "clear"})
         return {"ok": True}
 
+    def logcat_save(self, serial, text):
+        """把当前实时监控视图里的日志文本落盘到保存目录，并返回文件路径。
+
+        前端「保存到文件」原本走 ``a.click()`` + Blob 下载，在 WebView2 下
+        经常是「点了没有任何反应」——程序化锚点下载在嵌入式 WebView 里被静默吞掉。
+        这里改成后端写盘：路径可信、落盘即真实发生，前端据此给出明确的成功提示
+        与文件路径，体验与「打开目录」一致。
+        """
+        if not serial:
+            return {"ok": False, "reason": "no_device"}
+        # 没有可保存的内容：明确告知，而不是写一个空文件让用户以为导出了
+        content = (text or "")
+        if not content.strip():
+            self._push_status("warn", "⚠ 当前没有可保存的日志（先开始监控并等待日志产生）")
+            return {"ok": False, "reason": "empty"}
+        save_dir = self._default_save_dir()
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except Exception as e:
+            self._push_status(
+                "err", "⚠ 无法创建保存目录 %s：%s" % (save_dir, e))
+            return {"ok": False, "reason": "mkdir", "text": str(e)}
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        # unique_path：同一秒内连点两次也不会互相覆盖（从编号 2 起追加 -1/-2…）
+        path = unique_path(
+            os.path.join(save_dir, "logcat_%s_%s.txt" % (safe_name(serial), ts)))
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(content)
+        except Exception as e:
+            self._push_status("err", "⚠ 保存日志失败 %s：%s" % (path, e))
+            return {"ok": False, "reason": "write", "text": str(e)}
+        self._push_toast("ok", "✓ 日志已保存到 %s" % path)
+        return {"ok": True, "path": path}
+
     def logcat_capture_start(self, serial, save_dir, buffers, level_filter=None):
         if not serial:
             return {"ok": False, "reason": "no_device"}

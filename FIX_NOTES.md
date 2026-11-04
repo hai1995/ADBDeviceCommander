@@ -3141,3 +3141,90 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 - `pytest`：**1294 passed / 1 skipped**（较上轮 +4）。
 - `pyflakes backend core tools tests`：0。
 - 前端 76 文件 0 失败。
+
+
+# 第三十五轮：截图新增「自动保存文件」开关（默认开启）
+
+## 现象
+用户希望：不想每次截图都往保存目录塞一张图时，有个开关能关掉落盘；但仍要生成预览、
+可复制到粘贴板。原截图逻辑是无条件写盘，没有这个开关。
+
+## 修复
+- `core/prefs.py` 的 `PREFS_DEFAULTS` 注册 `shot_save_file`（默认 True）。
+- `backend/screen_service.ScreenCapturer.screenshot` 增加 `save_file` 参数：为 False 时
+  不写保存目录，而是写到系统临时目录（前缀 `adc_shot_`，随程序退出/启动被清理），
+  仍可供预览与剪贴板使用。
+- `backend/controllers/screenshot.py`：`screenshot(serial, to_clipboard, save_file)` 透传
+  save_file；新增 `_shot_save_file_pref`；`toast` 文案区分「已保存截图（路径）」与
+  「截图完成（未保存到目录）」；批量汇总也按 `b["saved"]` 描述是否落盘。
+- 前端：截图卡片在「立即截图」同一行新增「自动保存文件」复选框（默认勾选）；
+  `shotSaveFile` 进 `els`，按 `shot_save_file` 偏好回填，点击随截图动作下发给
+  `api.screenshot` 第 3 参数，并 `persistPref`。
+
+## 回归测试
+- 后端 `test_backend_controller.py` 新增 3 条：`save_file` 默认 True、关掉后不落盘且
+  toast 提示「未保存到目录」、显式传 False 优先生效；并补齐因新增参数签名变化的
+  多个内联 fake。
+- 前端 `tests/frontend/screenshot_autosave.test.cjs`（14 断言）：默认勾选、随动作下发
+  第 3 参数、取消持久化、启动按偏好回填。
+- `tests/test_core_prefs.py` 的布尔键映射表加入 `shot_save_file`；
+  `tests/frontend/checkbox_switch_style.test.cjs` 复选框计数 29→30（工具×5→×6）。
+
+# 第三十六轮：Logcat 实时监控「保存到文件」改走后端写盘
+
+## 现象
+用户反馈：点「保存到文件」没有任何反应。
+
+## 根因
+原 `saveLogcat` 用 `a.click()` + Blob 下载。在 WebView2（本程序运行环境）下，程序化
+锚点下载被静默吞掉——`URL.createObjectURL` 的 blob 链接点了没动静，文件既不出现也不报错。
+
+## 修复
+- `backend/controllers/logcat.py` 新增 `logcat_save(serial, text)`：把当前视图文本写入
+  保存目录（`logcat_<序列号>_<时间戳>.txt`，`unique_path` 防重名），回传路径并推 toast；
+  空内容明确拒绝（不写空文件）。
+- 前端 `saveLogcat` 改为 `callApi(api.logcat_save(lcSerial, bufToText(lcSerial)))`，按
+  返回结果给用户成功/失败提示。
+
+## 回归测试
+- 后端 `test_backend_controller.py` 新增 2 条：写盘落盘且回传路径、空内容被拒。
+- 前端 `tests/frontend/logcat_save_filename.test.cjs` 改写为断言「点击调用
+  api.logcat_save(serial, text) + 完整文本送后端 + 空缓冲不调用」；
+  `tests/frontend/logcat_restart_clears_buffer.test.cjs` 同步适配新后端写盘路径。
+
+# 第三十七轮：Logcat 实时监控过滤完善
+
+## 现象
+用户输入「账号绑定」，下方区域没显示出对应文字。
+
+## 根因（两处）
+1. `renderLogcat` 重建时只扫描缓冲最后 `LC_RENDER_CAP`(3000) 行：较早出现、已被实时
+   裁剪出视图的命中行永远搜不到。
+2. 关键字在后端 `logcat_start` 启动时固定预过滤：缓冲里只剩当时命中的行，之后改关键字
+   只能越缩越窄、清掉关键字也回不来（`bufToText` 也就读不到早先被丢的行）。
+
+## 修复
+- 前端 `startLc` 不再把关键字下发给后端（仍发级别 + 仅异常，二者是流量闸门）；
+  关键字完全在前端对**完整缓冲**做实时过滤（窄/宽都行）。
+- `linePassesFilter` 的搜索范围从 `msg + tag` 扩展到整行 `raw`，tag/msg 之外字段里
+  的关键字也能命中。
+- `renderLogcat` 关键字激活时扫描**整个缓冲**并按命中行渲染（超 `LC_RENDER_CAP` 取最近
+  一批）；计数区附「命中: N」反馈，过滤没反应时至少能看出是搜到 0 行还是界面卡住。
+
+## 回归测试
+- 前端 `tests/frontend/logcat_filter_full_buffer.test.cjs`（4 断言）：4000 行缓冲里关键字
+  命中第 100 行（远早于最后 3000 行）也能显示并给出命中数；清空关键字还原全部。
+
+# 第三十八轮：性能监控新增「查看报告」按钮
+
+## 现象
+用户希望在「导出报告」之后有一个「查看报告」入口，一键打开报告所在目录。
+
+## 修复
+- `index.html` 在 `perf-export` 之后新增 `perf-view`（查看报告）按钮。
+- 前端绑定点击 → `callApi(api.open_save_dir(saveDir()))`，复用工具页「打开目录」同一套
+  后端调用，打开报告（保存）目录。
+
+## 回归测试
+- 前端 `tests/frontend/perf_view_report.test.cjs`（5 断言）：按钮存在且位于导出报告之后；
+  点击调用 `open_save_dir` 打开保存目录。

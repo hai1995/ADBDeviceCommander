@@ -89,6 +89,9 @@ PREFS_DEFAULTS = {
     "save_dir": "",
     "adb_dir": "",
     "shot_to_clipboard": True,
+    # 截图是否写入保存目录（默认开启）。关掉后截图仍会生成预览、可复制到
+    # 粘贴板，只是不往保存目录落盘（临时副本重启时清理），方便只想看一眼的场景。
+    "shot_save_file": True,
     "keep_input": True,
     "cmd_filter": "",
     # 指令台卡片的手动排序（长按拖动后落盘）：逗号分隔的命令 id，按「先后」

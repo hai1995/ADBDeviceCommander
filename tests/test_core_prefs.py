@@ -306,6 +306,7 @@ def test_new_key_wins_over_legacy_on_migration(monkeypatch, tmp_path):
 # schema 键 -> 前端复选框 id（新增开关时两边同步改，这张表就是同步点）
 _BOOL_KEY_TO_HTML_ID = {
     "shot_to_clipboard": "shot-clipboard",
+    "shot_save_file": "shot-save-file",
     "keep_input": "keep-input",
     "lc_only_exc": "lc-only-exc",
     "lc_autoscroll": "lc-autoscroll",

@@ -8,12 +8,15 @@ from backend.controller import (
 class ScreenshotMixin:
     """截图（单设备/批量/剪贴板）。"""
 
-    def screenshot(self, serial=None, to_clipboard=None):
+    def screenshot(self, serial=None, to_clipboard=None, save_file=None):
         """对勾选（或指定）设备各截一张 PNG。
 
         to_clipboard：是否同步写入系统剪贴板。前端在开关变化时同时下发这个值
         （即时、不依赖 config.json 是否可写）；未传则读用户偏好
         （shot_to_clipboard，缺省 = 开启）。
+        save_file：是否把图写入保存目录（缺省 = 开启，对应前端「自动保存文件」
+        开关）。关闭时不往保存目录落盘，只写到系统临时目录用于预览/剪贴板，
+        避免不想要存档时保存目录被一堆截图占满。
 
         多设备批量时**不自动复制**：剪贴板一次只能放一张，几台设备的后台线程
         互相覆盖后最终是哪一张完全不确定，还不如明确告知（文件照常各存一份）。
@@ -35,6 +38,9 @@ class ScreenshotMixin:
         if to_clipboard is None:
             to_clipboard = self._shot_to_clipboard_pref()
         to_clipboard = bool(to_clipboard)
+        if save_file is None:
+            save_file = self._shot_save_file_pref()
+        save_file = bool(save_file)
         batch = len(serials) > 1
         save_dir = self._default_save_dir()
         if to_clipboard and batch:
@@ -50,7 +56,7 @@ class ScreenshotMixin:
             # 而后一批真正到齐时 _shot_batch 已置 None，连提示都没有。实测「2 台 +
             # 2 台」连点：只弹一条「✓ 已完成 2 台设备的截图」，保存目录里却是 4 张。
             bstate = {"total": len(serials), "ok": 0, "fail": 0,
-                      "dir": save_dir, "errs": []}
+                      "dir": save_dir, "errs": [], "saved": save_file}
             with self._shot_batch_lock:
                 self._shot_batch = bstate      # 仅供外部查询「当前批次」
         failed = []
@@ -65,7 +71,7 @@ class ScreenshotMixin:
                 self.workers.spawn(
                     "screenshot_%s_%d" % (s, next(self._shot_seq)),
                     self._do_screenshot, s, save_dir, to_clipboard and not batch,
-                    batch, bstate)
+                    batch, bstate, save_file)
             except Exception as e:
                 # 线程起不来（线程数耗尽 / 内存告急）：这台没有 worker，也就不会
                 # 有任何人来记账 —— 批量汇总永远凑不齐（那条 toast 再也弹不出来），
@@ -135,15 +141,18 @@ class ScreenshotMixin:
             b["closed"] = True
             if self._shot_batch is b:
                 self._shot_batch = None         # 先摘计数器，避免与下一批交叉
+        saved = b.get("saved", True)
         if b["fail"]:
+            where = ("保存目录 %s" % b["dir"]) if saved else "（未保存到目录）"
             self._push_toast(
                 "warn",
-                "⚠ 批量截图完成：%d 成功，%d 失败（%s）——保存目录 %s"
-                % (b["ok"], b["fail"], "；".join(b["errs"])[:120], b["dir"]))
+                "⚠ 批量截图完成：%d 成功，%d 失败（%s）——%s"
+                % (b["ok"], b["fail"], "；".join(b["errs"])[:120], where))
         else:
+            where = ("保存目录 %s" % b["dir"]) if saved else "（未保存到目录）"
             self._push_toast(
-                "ok", "✓ 已完成 %d 台设备的截图，保存目录 %s"
-                % (b["ok"], b["dir"]))
+                "ok", "✓ 已完成 %d 台设备的截图，%s"
+                % (b["ok"], where))
 
     def _shot_to_clipboard_pref(self):
         """用户偏好：截图后同步到粘贴板与否（缺省开启）。"""
@@ -152,14 +161,25 @@ class ScreenshotMixin:
         except Exception:
             return True
 
+    def _shot_save_file_pref(self):
+        """用户偏好：截图是否写入保存目录（缺省开启）。
+
+        关掉（前端「自动保存文件」取消勾选）后不往保存目录落盘，只写到系统
+        临时目录供预览/剪贴板用，避免不想要的存档占用保存目录。
+        """
+        try:
+            return bool(get_pref("shot_save_file", True))
+        except Exception:
+            return True
+
     def _do_screenshot(self, serial, save_dir, to_clipboard=False, batch=False,
-                       bstate=None):
+                       bstate=None, save_file=True):
         # 在途登记放在 worker 入口：与 finally 的 -1 严格同源，成败甚至抛
         # 异常都平衡；批量 N 台也只在 0<->1 翻转时推事件（见 _shot_state_change）
         self._shot_state_change(1)
         try:
             self._do_screenshot_locked(serial, save_dir, to_clipboard, batch,
-                                       bstate)
+                                       bstate, save_file)
         except Exception:
             if batch:
                 # 未预期的异常也要记进批次账：否则汇总 toast 永远等不齐，
@@ -173,9 +193,9 @@ class ScreenshotMixin:
             self._shot_state_change(-1)
 
     def _do_screenshot_locked(self, serial, save_dir, to_clipboard=False,
-                             batch=False, bstate=None):
+                             batch=False, bstate=None, save_file=True):
         path, err = ScreenCapturer.screenshot(
-            self.state.adb_path, serial, save_dir)
+            self.state.adb_path, serial, save_dir, save_file)
         if err:
             self._push_status("err", "⚠ 截图失败 %s: %s" % (serial, err))
             if batch:
@@ -187,10 +207,16 @@ class ScreenshotMixin:
         # 用户点击截图后第一时间就看到结果，而不是干等剪贴板。
         # 批量模式例外：N 台设备各弹一条会刷屏，toast 收口到 _shot_batch_done
         # 的一条汇总，这里只写状态栏明细。
-        if batch:
-            self._push_status("ok", "✓ 已保存截图: %s" % path)
+        # save_file=False 时不落盘到保存目录（只到临时目录供预览/剪贴板用），
+        # 措辞改「截图完成（未保存到目录）」避免用户去保存目录找一份不存在的图。
+        if save_file:
+            saved_msg = "✓ 已保存截图: %s" % path
         else:
-            self._push_toast("ok", "✓ 已保存截图: %s" % path)
+            saved_msg = "✓ 截图完成（未保存到目录）"
+        if batch:
+            self._push_status("ok", saved_msg)
+        else:
+            self._push_toast("ok", saved_msg)
         payload = {"type": "screenshot", "serial": serial, "path": path}
         clip_ok = None
         if to_clipboard:

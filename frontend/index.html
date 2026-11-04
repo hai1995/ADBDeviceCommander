@@ -260,11 +260,13 @@
             <div class="tool-row">
               <button id="tool-shot" class="btn accent" data-icon="camera">立即截图</button>
               <label class="chk"><input type="checkbox" id="shot-clipboard" checked>同步至粘贴板</label>
+              <label class="chk"><input type="checkbox" id="shot-save-file" checked>自动保存文件</label>
             </div>
             <ul class="tool-tips">
               <li>文件名形如 <code>screenshot_&lt;序列号&gt;_&lt;时间&gt;.png</code>，多台设备各存一张。</li>
               <li>走后台 adb 直接取帧，不会打断设备当前操作。</li>
               <li>勾选「同步至粘贴板」时只复制<b>第一张</b>——剪贴板一次只能放一张（图片仍全部存盘），可直接到微信 / QQ / 文档里 Ctrl+V。</li>
+              <li>「自动保存文件」默认开启；只想瞄一眼、不想让保存目录被一堆截图占满时，取消勾选即可——仍会生成下方预览、可复制到粘贴板，只是不落盘。</li>
               <li>开关与保存目录都记在 <code>config.json</code>，下次启动沿用。</li>
             </ul>
             <div class="shot-preview" id="shot-preview" hidden>
@@ -510,6 +512,7 @@
           <button id="perf-start" class="btn accent" disabled data-icon="pulse">开始监控</button>
           <button id="perf-stop" class="btn" disabled data-icon="stop">停止</button>
           <button id="perf-export" class="btn" disabled data-icon="report">导出报告</button>
+          <button id="perf-view" class="btn" data-icon="folder">查看报告</button>
           <button id="perf-th" class="btn" data-icon="sliders"
                   title="自定义告警阈值（超标时指标卡切红、报告里标色带）">阈值</button>
           <span id="perf-state" class="scrcpy-state">未开始</span>
