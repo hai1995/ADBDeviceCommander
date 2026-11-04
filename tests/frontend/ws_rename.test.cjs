@@ -179,6 +179,13 @@ if (watchdog.unref) watchdog.unref();
     ok(/抓 logcat/.test(tabOf(doc, "w2").title), "悬停提示同步成新名字");
     ok(/抓 logcat/.test((tabOf(doc, "w2").querySelector(".ws-x") || {}).title || ""),
       "关闭键的提示也同步（还写着旧名字会让人以为关错）");
+    // w2 正是当前停留的工作区：cmd_active_ws 存的是名字，改名必须一起更新，
+    // 否则下次启动按旧名字匹配不到，会莫名回退到第一个工作区。
+    const activeSaved = env.calls.filter((c) => c.api === "save_settings" &&
+      c.args[0] && "cmd_active_ws" in c.args[0]);
+    ok(activeSaved.length > 0 &&
+       activeSaved[activeSaved.length - 1].args[0].cmd_active_ws === "抓 logcat",
+       "改名的是当前工作区 → cmd_active_ws 同步成新名字");
   }
 
   console.log("\n[3] Esc 取消：一个字都不改，也不落盘");

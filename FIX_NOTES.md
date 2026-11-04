@@ -3331,3 +3331,24 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
   `settings_persist` 57、`ui_style_card_tabs` 36、`about_subtab_manual` 14、
   `ui_layout_fixes` 17、`tools_tab_scroll` 7、`layout_resizable` 21（均 0 失败）。
 - 后端 `pytest`：1299 passed / 1 skipped；`pyflakes` 干净。
+
+# 第四十二轮：指令台工作区记住上次停留项
+
+## 优化点
+- 新增 `cmd_active_ws`（config.json）：重启后回到上次停留的那个工作区，而不是固定回 `w1`。
+  存**名字**而不是内部 id —— id 按创建顺序给，关掉中间一个再重启，同一个 id 会指向另一个
+  工作区；名字对不上（改过名 / 已关闭 / 手改坏）则回退第一个，不会出现「一个都不选」。
+- 只在真的换工作区时写盘：启动恢复期间用 `wsRestoring` 压住回写（否则开 N 个工作区就往
+  盘里写 N 次），重复点当前 tab 也不写。
+- 改名的是当前工作区时，`cmd_active_ws` 同步成新名字（否则下次启动按旧名匹配不到、莫名回退）。
+
+## 与工具区的行为对齐
+- 工具区子 tab：`tool_tab_order`（顺序）+ `tool_active_tab`（上次停留）
+- 指令台工作区：`cmd_workspaces`（布局）+ `cmd_active_ws`（上次停留）
+
+## 回归测试
+- `ws_tabs.test.cjs` 扩到 47 条：新增「按 cmd_active_ws 恢复激活 tab / 往返切换落盘 /
+  重复点击不写盘 / 名字失效回退第一个 / 启动恢复不写盘」。
+- `ws_rename.test.cjs` 扩到 50 条：新增「改名当前工作区 → cmd_active_ws 同步」。
+- 全量前端套件：79 个文件 0 失败（`run-all.cjs`，3m53s）；后端 `pytest` 1299 passed/1 skipped；
+  `pyflakes` 干净。

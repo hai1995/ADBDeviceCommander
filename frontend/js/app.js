@@ -208,6 +208,7 @@
   const WS_NAME_MAX = 24;           // 工作区名长度上限（与后端 ws_open 的截断一致）
   const wsMap = new Map();          // id -> 工作区对象
   let wsActive = "w1";              // 当前显示的工作区
+  let wsRestoring = false;          // 启动恢复布局期间：不要回写 cmd_active_ws
   let wsSeq = 1;                    // 新建时用的序号（w2、w3…），不复用已关闭的
   let wsRenaming = null;            // 正在重命名的工作区 id（渲染让路，见 renderWsTabs）
   let wsRenameReplay = false;       // 重命名期间被跳过的渲染，结束后补一次
@@ -889,9 +890,11 @@
       // 「保留输入内容」是全局设置：所有工作区一起回填
       wsMap.forEach((ws) => { if (ws.keepEl) ws.keepEl.checked = s.keep_input; });
     }
-    // 指令台工作区布局（上次开了几个 tab、各叫什么）：必须在 renderCommands
-    // 之前恢复，否则首屏只渲染默认工作区，切到新开的 tab 会是空的。
-    if (typeof s.cmd_workspaces === "string") restoreWorkspaces(s.cmd_workspaces);
+    // 指令台工作区布局（上次开了几个 tab、各叫什么、停在哪个）：必须在
+    // renderCommands 之前恢复，否则首屏只渲染默认工作区，切到新开的 tab 会是空的。
+    if (typeof s.cmd_workspaces === "string" || typeof s.cmd_active_ws === "string") {
+      restoreWorkspaces(s.cmd_workspaces, s.cmd_active_ws);
+    }
     // 指令台搜索关键字：恢复后立即重跑一次过滤，界面与实际过滤结果一致
     const ws1 = wsOf("w1");
     if (ws1 && ws1.filterEl && typeof s.cmd_filter === "string" && s.cmd_filter) {
@@ -5369,9 +5372,10 @@
     pushStatus("info", "已关闭「" + ws.name + "」（其中的输出一并丢弃）");
   }
 
-  function activateWs(id) {
+  function activateWs(id, opts) {
     const ws = wsMap.get(id);
     if (!ws) return;
+    const prev = wsActive;
     wsActive = id;
     wsMap.forEach((w) => w.root.classList.toggle("active", w.id === id));
     // 这里**不重建** tab 条：innerHTML 一清，双击的第二下就落在了一个刚创建
@@ -5379,6 +5383,12 @@
     renderWsTabState();
     // 切回来补一次重绘：隐藏期间窗口可能缩过，左栏的内联宽度已被钳制过
     if (ws.filterEl) applyCmdFilter(ws);
+    // 记住上次停留的工作区（存名字；名字为空时用 id 兜底，与 persistWs 一致）。
+    // 只在真的换了工作区时写，启动恢复期间（wsRestoring）由 restoreWorkspaces
+    // 显式选中，不回写 —— 否则开几个工作区就往盘里写几次。
+    if (prev !== id && !wsRestoring && (!opts || opts.persist !== false)) {
+      persistPref("cmd_active_ws", sanitizeWsName(ws.name) || ws.id);
+    }
   }
 
   function markWsBusy(ws) {
@@ -5509,6 +5519,9 @@
     const old = ws.name;
     ws.name = nm;
     persistWs();
+    // 改的是当前停留的那个：cmd_active_ws 里存的是名字，不改就指向一个
+    // 已经不存在的名字，下次启动会莫名回退到第一个工作区。
+    if (ws.id === wsActive) persistPref("cmd_active_ws", nm);
     // 默认工作区不用通知后端：它的状态播报本来就不带前缀（单工作区时代的文案
     // 一字不变），登记了也用不上。
     if (ws.id !== "w1" && api && api.ws_open) callApi(api.ws_open(ws.id, nm));
@@ -5609,16 +5622,34 @@
   /* 恢复上次的工作区布局（config.json 的 cmd_workspaces，逗号分隔的名字）。
      第一个名字对应默认工作区（它总是存在），其余按顺序补开。
      名字必须在这一步交给 addWorkspace（它随 ws_open 一起送给后端），不能开完
-     再改 ws.name：那样后端记的还是「工作区 3」，重启后状态栏前缀与 tab 对不上。 */
-  function restoreWorkspaces(raw) {
+     再改 ws.name：那样后端记的还是「工作区 3」，重启后状态栏前缀与 tab 对不上。
+     cmd_active_ws 记的是上次停留的那个，全部开完后按名字选中它。 */
+  function restoreWorkspaces(raw, activeName) {
     const names = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (names.length <= 1) return;
-    const w1 = wsMap.get("w1");
-    if (w1 && sanitizeWsName(names[0])) w1.name = sanitizeWsName(names[0]);
-    for (let i = 1; i < names.length && wsMap.size < WS_MAX; i += 1) {
-      addWorkspace(false, true, names[i]);
+    // 恢复期间 addWorkspace 会逐个 activate：先压住「写 cmd_active_ws」，
+    // 等全部开完再选中目标，避免启动时连写好几次盘。
+    wsRestoring = true;
+    try {
+      if (names.length > 1) {
+        const w1 = wsMap.get("w1");
+        if (w1 && sanitizeWsName(names[0])) w1.name = sanitizeWsName(names[0]);
+        for (let i = 1; i < names.length && wsMap.size < WS_MAX; i += 1) {
+          addWorkspace(false, true, names[i]);
+        }
+      }
+      // 按名字匹配（兼容旧值里存的是内部 id 的情况）；找不到（改过名 / 已关闭 /
+      // 配置被手改）就落回默认工作区，而不是让页面空着一个都不选。
+      const want = sanitizeWsName(activeName);
+      let target = "";
+      if (want) {
+        wsMap.forEach((w, id) => {
+          if (!target && (sanitizeWsName(w.name) === want || w.id === want)) target = id;
+        });
+      }
+      activateWs(target || "w1", { persist: false });
+    } finally {
+      wsRestoring = false;
     }
-    activateWs("w1");
     renderWsTabs();
   }
 

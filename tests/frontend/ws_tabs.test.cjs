@@ -9,7 +9,8 @@
      2) 执行时把工作区 id 一起下发；
      3) 输出/停止按钮态按事件里的 ws 精确分流，不串台；
      4) 关闭工作区会通知后端杀会话，默认工作区不给关；
-     5) 数量上限有明确提示，重启后按 config.json 恢复布局。
+     5) 数量上限有明确提示，重启后按 config.json 恢复布局；
+     6) 重启后回到上次停留的工作区（cmd_active_ws 存名字，对不上则回退第一个）。
 */
 const fs = require("fs");
 const path = require("path");
@@ -245,6 +246,42 @@ const activePanel = (doc) => doc.querySelector(".tab[data-tab='cmd'] .ws-panel.a
     const names = wsTabs(doc).map((t) => t.textContent.replace(/×/g, "").trim());
     ok(names[2] === "抓日志", "自定的工作区名也一起恢复（实际：" + names[2] + "）");
     ok(panels(doc).length === 3, "每个工作区都有一套面板");
+  }
+
+  console.log("\n[10] 记住上次停留的工作区（cmd_active_ws）");
+  {
+    const { doc, calls } = mkEnv({
+      cmd_workspaces: "工作区 1,工作区 2,抓日志", cmd_active_ws: "抓日志",
+    });
+    const restored = await waitFor(() => wsTabs(doc).length === 3, 3000, "恢复 3 个 tab");
+    ok(restored, "启动恢复 3 个工作区（实际 " + wsTabs(doc).length + "）");
+    await waitFor(() => activePanel(doc) === panels(doc)[2], 3000, "选中抓日志");
+    ok(activePanel(doc) === panels(doc)[2], "启动停在上次的工作区「抓日志」");
+    const activeSaves = () => calls.filter((c) => c.api === "save_settings" &&
+      c.args[0] && "cmd_active_ws" in c.args[0]);
+    ok(activeSaves().length === 0, "启动恢复不回写 cmd_active_ws（不白写盘）");
+
+    // 切到第一个 → 落盘
+    wsTabs(doc)[0].dispatchEvent(new doc.defaultView.Event("click", { bubbles: true }));
+    await sleep(80);
+    ok(activeSaves().length === 1 &&
+       activeSaves()[0].args[0].cmd_active_ws === "工作区 1",
+       "点第一个 tab → 落盘 cmd_active_ws=工作区 1（实际 " +
+       (activeSaves().length ? activeSaves()[0].args[0].cmd_active_ws : "无") + "）");
+
+    // 再点当前这个：没换工作区，不该重复写
+    wsTabs(doc)[0].dispatchEvent(new doc.defaultView.Event("click", { bubbles: true }));
+    await sleep(80);
+    ok(activeSaves().length === 1, "再点当前工作区不重复写盘（仍 1 次）");
+
+    // 配置里的名字已经不存在 → 回退第一个，而不是一个都不选
+    const { doc: d2 } = mkEnv({
+      cmd_workspaces: "工作区 1,工作区 2", cmd_active_ws: "早就删了",
+    });
+    await waitFor(() => wsTabs(d2).length === 2, 3000, "恢复 2 个");
+    await waitFor(() => activePanel(d2) === panels(d2)[0], 3000, "回退第一个");
+    ok(activePanel(d2) === panels(d2)[0],
+       "cmd_active_ws 名字对不上 → 回退第一个工作区");
   }
 
   console.log("\n结果：" + pass + " 通过 / " + fail + " 失败");
