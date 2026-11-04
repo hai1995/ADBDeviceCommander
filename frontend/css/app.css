@@ -1198,6 +1198,9 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .tool-panes { display: block; min-height: 0; }
 .tool-pane { display: block; }
 .tool-pane[hidden] { display: none; }
+/* 一个面板里只有一张卡：卡自身留给「下一张卡」的 14px 下边距在这里是纯空白
+   （滚动到底会多出一截），去掉它。 */
+.tool-pane > .tool-card { margin-bottom: 0; }
 /* 投屏卡：探测结果一行文字（成功=青、失败=橙） */
 .scrcpy-state {
   font: 400 var(--fs-sm)/1.5 var(--font-mono); color: var(--faint);

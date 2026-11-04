@@ -3300,6 +3300,8 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 - **tab key 从 DOM 派生**：删掉 JS 里手写的 `TOOL_TABS` 常量，改为 `toolTabKeys()` 读取
   `#tool-subtabs .tool-subtab` 的 `data-tool-tab`；`applyToolTabOrder` 用「按钮 ∪ 面板」求并集。
   将来增删一项只改 index.html，不会出现 JS 常量与 HTML 漂移。
+- **面板底部多余空白**：`.tool-pane > .tool-card` 去掉 14px 下边距——一屏只有一张卡，
+  那条原本留给「下一张卡」的间距会变成滚动到底的一截空白。
 - **拖动结束后同步重排面板 DOM**：按钮顺序变了，面板也按同一顺序重排（`reorderToolTabs`），
   两者始终一一对应。
 - **Esc 取消拖动**：拖动中按 Esc 还原按下前的顺序、退出拖动态且不落盘（松开也不再写）；
