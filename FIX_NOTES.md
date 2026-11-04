@@ -3002,3 +3002,32 @@ adb shell rm -f /sdcard/x      ← 成败都清
 * **不代输密码**：密码 / 授权码属于用户凭据，程序只提示，不尝试自动填入；
 * 若某车型每次 `adb shell` 都强制要密码且无法记住授权，本工具确实无法截图——
   提示语会说明这一点，并建议先用系统命令行确认。
+
+# 第三十一轮：内置「重启ADB」改用 taskkill 强杀进程
+
+## 诉求
+指令台内置的「重启ADB服务」只有 `kill-server → start-server → devices`。
+`adb kill-server` 只是给 adb 服务发一条退出指令，**当 adb.exe 进程卡死（不响应指令）
+时，服务永远起不来**，重启形同虚设。用户要求内置命令先做 `taskkill /F /IM adb.exe`，
+再 kill/start-server，并用 `||delay=N` 控制每条之间的间隔。
+
+## 修复
+把 `bi.restart-adb` 升级为「重启ADB」，在 kill-server 之前先用 `taskkill` 强杀进程：
+
+1. `taskkill /F /IM adb.exe 2>$null`（delay 100）—— 强杀进程；`2>$null` 压掉
+   「找不到进程」的报错（PowerShell 语法，不是 cmd 的 `2>nul`）；
+2. `adb kill-server`（delay 1000）—— 兜底清残留；
+3. `adb start-server`（delay 1000）—— 拉起新服务；
+4. `adb devices`（delay 1000）—— 确认设备在线。
+
+`2>$null` 必须是 PowerShell 的重定向，持久 PowerShell 会话里才不报错。
+
+## 回归测试
+- `test_builtin_restart_adb_kills_process_before_server`：step0 必须以
+  `taskkill /F /IM adb.exe` 开头且含 `2>$null`；间隔 `[100,1000,1000,1000]`；
+  命令序列逐条钉死，回退旧实现会让该断言失败。
+
+## 验证
+- `pytest`：**1283 passed / 1 skipped**（较上轮 +1）。
+- `pyflakes backend core tools tests`：0。
+- 前端 72 文件 0 失败。

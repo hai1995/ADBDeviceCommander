@@ -323,6 +323,29 @@ def test_builtin_wake_unlock_uses_wakeup_not_power():
     assert not any("keyevent 26" in c for c in cmds), cmds
 
 
+def test_builtin_restart_adb_kills_process_before_server():
+    """「重启ADB」必须先 taskkill 强杀 adb.exe 进程，再 kill/start-server/devices。
+
+    回归：旧版只做 kill-server/start-server/devices，若 adb.exe 进程卡死
+    （kill-server 仅发指令、卡死时不响应），服务永远起不来；先用 taskkill /F
+    强杀进程才真正重启。step0 后短等 100ms，server 起停留 1000ms。
+    """
+    cmds = [e for b in BUILTIN_COMMANDS
+            if b["id"] == "bi.restart-adb" for e in b["commands"]]
+    seq = [e["command"] for e in cmds]
+    assert seq[0].startswith("taskkill /F /IM adb.exe"), seq
+    # 重定向必须是 PowerShell 的 2>$null（不是 cmd 的 2>nul），否则在持久会话里报错
+    assert "2>$null" in seq[0], seq
+    # 间隔：taskkill 后短等，server 起重留时间更长
+    assert cmds[0]["delay"] == 100
+    assert [e["delay"] for e in cmds[1:]] == [1000, 1000, 1000], cmds
+    assert seq == [
+        "taskkill /F /IM adb.exe 2>$null",
+        "adb kill-server",
+        "adb start-server",
+        "adb devices",
+    ], seq
+
 def test_builtin_commands_avoid_non_gbK_chars():
     """内置命令里不能出现 GBK 编码不下的字符。
 

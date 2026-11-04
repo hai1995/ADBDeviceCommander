@@ -122,9 +122,13 @@ BUILTIN_COMMANDS = [
             {"delay": 100, "command": "adb shell input keyevent 224"},
             {"delay": 1000, "command": "adb shell input swipe 540 1800 540 600 300"}]},
     {
-        "id": "bi.restart-adb", "name": "重启ADB服务", "labels": ["内置"], "section": "连接与投屏",
+        "id": "bi.restart-adb", "name": "重启ADB", "labels": ["内置"], "section": "连接与投屏",
         "clickCount": 0, "builtin": True,
+        # 先 taskkill 强杀 adb.exe 进程：adb kill-server 只是发指令，进程卡死时不响应，
+        # 服务永远起不来；用 taskkill /F 强杀进程才真正重启。2>$null 压掉「找不到进程」的报错；
+        # 之后 kill-server 兜底清残留、start-server 拉新服务、devices 确认设备在线。
         "commands": [
+            {"delay": 100, "command": "taskkill /F /IM adb.exe 2>$null"},
             {"delay": 1000, "command": "adb kill-server"},
             {"delay": 1000, "command": "adb start-server"},
             {"delay": 1000, "command": "adb devices"}]},
