@@ -1,12 +1,12 @@
-/* jsdom 前端行为测试：录屏卡折叠 + 投屏（scrcpy）区块 + kebab 图标层级/尺寸
+/* jsdom 前端行为测试：录屏面板（子 tab）+ 投屏（scrcpy）区块 + kebab 图标层级/尺寸
 
    本轮三件事：
      1. 命令卡右侧 kebab 小点点再缩小一点，且层级必须在 popup **之下**
         （此前 kebab 带 z-index 形成层叠上下文，后面卡片的点点会盖到 popup 上）；
-     2. 工具页「设备录屏」占屏太高 → 标题栏整条可点收起 / 展开，状态持久化；
-        并让「同步录制 logcat」「结束自动压缩为 zip」默认打开（logcat 现为全量，
-        那行级别勾选已撤掉）；
-     3. 工具页下方新增投屏区块：一键调用本机 scrcpy。
+     2. 工具页五项功能改为子 tab（截图 / 录屏 / 投屏 / 安装 / 诊断），点录屏子 tab
+        切到录屏面板；并让「同步录制 logcat」「结束自动压缩为 zip」默认打开
+        （logcat 现为全量，那行级别勾选已撤掉）；
+     3. 工具页下方投屏区块：一键调用本机 scrcpy。
 
    后端侧（找 scrcpy / 拉进程 / 秒退原因）由 tests/test_backend_scrcpy.py 与
    tests/test_backend_controller.py 锁定；这里只锁前端结构与交互。 */
@@ -96,6 +96,8 @@ const savedPatch = (calls, key) => {
   const hit = callsOf(calls, "save_settings").filter((c) => c.args[0] && key in c.args[0]);
   return hit.length ? hit[hit.length - 1].args[0][key] : undefined;
 };
+const subBtn = (doc, key) => doc.querySelector('.tool-subtab[data-tool-tab="' + key + '"]');
+const pane = (doc, key) => doc.querySelector('.tool-pane[data-tool-pane="' + key + '"]');
 
 /* 看门狗：断言抛错会被上面的 unhandledRejection 吞掉，jsdom 定时器又不停，
    进程会挂住（曾卡死整套前端测试）。到点按当前结果强制退出。 */
@@ -121,55 +123,54 @@ const WATCHDOG_MS = 30000;
     ok(!doc.getElementById("rec-lc-levels"), "级别行容器已撤掉");
   }
 
-  console.log("\n[2] 点标题栏收起 / 展开，并落盘 rec_collapsed");
-  {
-    const { window, calls } = mkEnv();
-    const doc = window.document;
-    const card = () => doc.getElementById("rec-card");
-    const toggle = doc.getElementById("rec-toggle");
-    ok(await waitFor(() => !!toggle, 3000, "折叠标题"), "录屏卡标题栏存在");
-    ok(card().classList.contains("collapsed") === false, "默认展开");
-    ok(toggle.getAttribute("aria-expanded") === "true", "aria-expanded 初始 true");
-
-    toggle.click();
-    await sleep(80);
-    ok(card().classList.contains("collapsed") === true, "点标题栏后收起");
-    ok(toggle.getAttribute("aria-expanded") === "false", "收起后 aria-expanded=false");
-    ok(savedPatch(calls, "rec_collapsed") === true, "收起态写进 config.json（rec_collapsed=true）");
-
-    toggle.click();
-    await sleep(80);
-    ok(card().classList.contains("collapsed") === false, "再点一次恢复展开");
-    ok(savedPatch(calls, "rec_collapsed") === false, "展开态写回 rec_collapsed=false");
-  }
-
-  console.log("\n[3] 键盘 Enter / 空格同样能切换（可达性）");
+  console.log("\n[2] 点录屏子 tab 切到录屏面板（不再依赖折叠收起）");
   {
     const { window } = mkEnv();
     const doc = window.document;
-    const toggle = doc.getElementById("rec-toggle");
-    await waitFor(() => !!toggle, 3000, "折叠标题");
-    const ev = new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true });
-    toggle.dispatchEvent(ev);
-    await sleep(60);
-    ok(doc.getElementById("rec-card").classList.contains("collapsed") === true,
-       "Enter 收起");
-    toggle.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
-    await sleep(60);
+    const btn = subBtn(doc, "rec");
+    ok(await waitFor(() => !!btn, 3000, "子 tab"), "录屏子 tab 存在");
+    ok(subBtn(doc, "shot").classList.contains("active"), "默认激活的是截图子 tab");
+    ok(pane(doc, "shot").hidden === false, "默认截图面板可见");
+    ok(pane(doc, "rec").hidden === true, "录屏面板初始 hidden");
+
+    btn.click();
+    await sleep(80);
+    ok(subBtn(doc, "rec").classList.contains("active"), "点录屏子 tab → rec active");
+    ok(subBtn(doc, "rec").getAttribute("aria-selected") === "true", "aria-selected 同步为 true");
+    ok(pane(doc, "rec").hidden === false, "录屏面板显示");
+    ok(pane(doc, "shot").hidden === true, "截图面板被隐藏（互斥切换）");
     ok(doc.getElementById("rec-card").classList.contains("collapsed") === false,
-       "空格展开");
+       "录屏卡不依赖 collapsed（子 tab 切面板，非折叠）");
   }
 
-  console.log("\n[4] 启动时按 settings.rec_collapsed 回填（且不重复落盘）");
+  console.log("\n[3] 键盘 Enter / 空格同样能切到录屏子 tab（可达性）");
   {
-    const { window, calls } = mkEnv({ settings: { rec_collapsed: true } });
+    const { window } = mkEnv();
     const doc = window.document;
-    ok(await waitFor(() => doc.getElementById("rec-card") &&
-                       doc.getElementById("rec-card").classList.contains("collapsed"),
-                      4000, "折叠标题回填"),
-       "上次收起过 → 启动即收起");
+    const btn = subBtn(doc, "rec");
+    await waitFor(() => !!btn, 3000, "子 tab");
+    btn.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await sleep(60);
+    ok(subBtn(doc, "rec").classList.contains("active"), "Enter 切到录屏子 tab");
+    ok(pane(doc, "rec").hidden === false, "录屏面板显示");
+    subBtn(doc, "shot").dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await sleep(60);
+    ok(subBtn(doc, "shot").classList.contains("active"), "空格切回截图子 tab");
+  }
+
+  console.log("\n[4] 启动默认激活截图子 tab（不再有 rec_collapsed 收起回填）");
+  {
+    const { window, calls } = mkEnv();
+    const doc = window.document;
+    ok(await waitFor(() => subBtn(doc, "shot"), 4000, "子 tab 就绪"),
+       "子 tab 渲染完成");
+    ok(subBtn(doc, "shot").classList.contains("active"), "默认截图子 tab active");
+    ok(pane(doc, "shot").hidden === false, "截图面板可见");
+    ok(pane(doc, "rec").hidden === true, "录屏面板初始 hidden");
+    ok(doc.getElementById("rec-card").classList.contains("collapsed") === false,
+       "录屏卡无 collapsed（折叠已移除）");
     ok(savedPatch(calls, "rec_collapsed") === undefined,
-       "回填不触发 save_settings（避免启动时无意义写盘）");
+       "启动不写 rec_collapsed（折叠键已废弃）");
   }
 
   console.log("\n[5] 投屏区块：探测结果 + 未装 scrcpy 时的提示");
@@ -266,12 +267,14 @@ const WATCHDOG_MS = 30000;
        "三点点点比原来（16px）更小，实际 " + (size && size[1]) + "px");
   }
 
-  console.log("\n[10] CSS：折叠态隐藏 tool-body；投屏状态文字样式存在");
+  console.log("\n[10] CSS：未激活面板隐藏；子 tab 选中态；投屏状态样式存在");
   {
-    ok(/\.tool-card\.collapsed \.tool-body \{[^}]*display:\s*none/.test(css),
-       "收起时隐藏 .tool-body");
-    ok(/\.tool-card\.collapsed \.tool-chevron \{[^}]*rotate\(-90deg\)/.test(css),
-       "收起时箭头转向（视觉指示）");
+    ok(/\.tool-pane\[hidden\]\s*\{\s*display:\s*none/.test(css),
+       "未激活的子 tab 面板 [hidden] 隐藏");
+    ok(/\.tool-subtab\.active\s*\{[^}]*var\(--accent\)/.test(css),
+       "子 tab 选中态用磷光青");
+    ok(/\.tool-subtab\.is-dragging\s*\{[^}]*opacity/.test(css),
+       "拖动中的子 tab 降透明度");
     ok(/\.scrcpy-state\.ok/.test(css) && /\.scrcpy-state\.err/.test(css),
        "投屏状态的成功 / 失败配色存在");
   }

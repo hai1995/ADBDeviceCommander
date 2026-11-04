@@ -63,12 +63,8 @@
     devinfoRows: $("devinfo-rows"), devinfoCopy: $("devinfo-copy"),
     devinfoRefresh: $("devinfo-refresh"),
     devinfoClose: $("devinfo-close"), devinfoClose2: $("devinfo-close2"),
-    // 工具卡折叠（开关项太多、占屏太高，标题栏单击收起）：三张卡各一套
-    shotCard: $("shot-card"), shotToggle: $("shot-toggle"),
-    recCard: $("rec-card"), recToggle: $("rec-toggle"),
-    apkCard: $("apk-card"), apkToggle: $("apk-toggle"),
-    diagCard: $("diag-card"), diagToggle: $("diag-toggle"),
-    scrcpyCard: $("scrcpy-card"), scrcpyToggle: $("scrcpy-toggle"),
+    // 工具区子 tab（截图 / 录屏 / 投屏 / 应用安装 / 诊断包）：每项一个子 tab，
+    // 整页展示该项全部功能；顺序可长按拖动调整，落盘 tool_tab_order。
     // 投屏（调用本机 scrcpy）
     toolScrcpy: $("tool-scrcpy"), scrcpyDetect: $("tool-scrcpy-detect"),
     scrcpyPath: $("scrcpy-path"), scrcpyState: $("scrcpy-state"),
@@ -938,14 +934,12 @@
     if (els.recShowTouches && typeof s.rec_show_touches === "boolean") {
       els.recShowTouches.checked = s.rec_show_touches;
     }
-    // 四张工具卡的收起态（布局偏好）：缺省 / 非布尔 → 保持 HTML 的展开态
-    TOOL_CARDS.forEach((d) => {
-      if (typeof s[d.key] === "boolean") setToolCollapsed(d.key, s[d.key], false);
-    });
-    // 工具卡手动排序（长按拖动后落盘）：必须在 bindUI 注入手柄 & 重建之后读进来，
-    // 否则首屏按 HTML 默认序排好、再被重排一次，用户会看到卡片跳一下。
-    if (typeof s.tool_card_order === "string") loadToolCardOrder(s.tool_card_order);
-    applyToolCardOrder();
+    // 工具子 tab 顺序（长按拖动后落盘 tool_tab_order）：必须在重建之后读进来，
+    // 否则首屏按 HTML 默认序排好、再被重排一次，用户会看到顺序跳一下。
+    if (typeof s.tool_tab_order === "string") loadToolTabOrder(s.tool_tab_order);
+    applyToolTabOrder();
+    // 默认激活「设备截图」子 tab（顺序调整后仍保证有一项可见）
+    switchToolTab("shot");
     // ---- APK 安装选项（默认值只写在 core/prefs.py 一处，此处仅回填）----
     if (els.apkReplace && typeof s.apk_replace === "boolean") {
       els.apkReplace.checked = s.apk_replace;
@@ -1571,14 +1565,14 @@
   const CMD_LONGPRESS_MS = 400;         // 按住多久算「要拖」而不是「要执行」
   const CMD_DRAG_SLOP = 8;              // 长按判定前允许的手抖像素（超了就是滚动/误触）
 
-  /* ---- 工具卡长按拖动排序（截图 / 录屏 / 投屏 / 安装 / 诊断）----
-     与指令卡同一套长按手势：标题栏整条是「收起 / 展开」的开关，所以拖动必须
-     用长按区分——短按是折叠、长按才进入拖动态，松手若真的拖过就压制随后的
-     click，避免一次操作既换位又折起。落盘 tool_card_order，下次启动照旧。 */
+  /* ---- 工具区子 tab 长按拖动排序（截图 / 录屏 / 投屏 / 安装 / 诊断）----
+     与指令卡同一套长按手势：子 tab 按钮整颗可长按拖动重排；短按是切换子 tab，
+     长按才进入拖动态，松手若真的拖过就压制随后的 click，避免一次操作既换位又切换。
+     落盘 tool_tab_order，下次启动照旧。 */
   const TOOL_TAB_SEL = '.tab[data-tab="tools"]';
-  let toolCardOrder = [];               // 手动排过序的卡片 id（按先后）
-  let toolDrag = null;                  // 拖动会话：{card, x, y, timer, active}
-  let toolClickGuard = 0;               // 拖动结束后压制紧随其后的 toggle click
+  let toolTabOrder = [];                // 手动排过序的子 tab key（按先后）
+  let toolTabDrag = null;               // 拖动会话：{tab, x, y, timer, active}
+  let toolTabClickGuard = 0;            // 拖动结束后压制紧随其后的 click（避免既换位又切换）
   const TOOL_LONGPRESS_MS = 400;        // 与指令卡一致：按住多久算「要拖」
   const TOOL_DRAG_SLOP = 8;             // 长按判定前允许的手抖像素
   const TOOL_GRIP_SVG =
@@ -2772,180 +2766,158 @@
   }
 
 
-  /* 五张工具卡（截图 / 录屏 / 投屏 / 应用安装 / 诊断包）共用一套收起逻辑：开关项
-     竖排太占高度，收起后只留一行标题，把屏高让给别的卡。收起态是布局偏好，各自
-     记进 config.json（shot_collapsed / rec_collapsed / scrcpy_collapsed /
-     apk_collapsed / diag_collapsed）——各记各的，收一张不会连带把另一张也折起来。
-     数组顺序仅用于收起态绑定，与卡片在工具页里的排列（可长按拖动调整）无关。 */
-  const TOOL_CARDS = [
-    { key: "shot_collapsed", card: "shotCard", toggle: "shotToggle" },
-    { key: "rec_collapsed", card: "recCard", toggle: "recToggle" },
-    { key: "scrcpy_collapsed", card: "scrcpyCard", toggle: "scrcpyToggle" },
-    { key: "apk_collapsed", card: "apkCard", toggle: "apkToggle" },
-    { key: "diag_collapsed", card: "diagCard", toggle: "diagToggle" },
-  ];
+  /* 工具区子 tab（截图 / 录屏 / 投屏 / 应用安装 / 诊断包）：每项一个子 tab，
+     整页展示该项全部功能，互不挤压。顺序可长按拖动调整，落盘到 config.json 的
+     tool_tab_order（默认顺序只在 HTML 里写一份，与 TOOL_TABS 一致）。 */
+  const TOOL_TABS = ["shot", "rec", "scrcpy", "apk", "diag"];
 
-  /* persist=false 时只改界面，用于回填设置时避免多余写盘 */
-  function setToolCollapsed(key, collapsed, persist) {
-    const d = TOOL_CARDS.find((x) => x.key === key);
-    if (!d) return;
-    const card = els[d.card];
-    if (!card) return;
-    card.classList.toggle("collapsed", !!collapsed);
-    const tg = els[d.toggle];
-    if (tg) tg.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    if (persist) persistPref(key, !!collapsed);
-  }
+  function toolTabBtn(key) { return document.querySelector('.tool-subtab[data-tool-tab="' + key + '"]'); }
+  function toolTabPane(key) { return document.querySelector('.tool-pane[data-tool-pane="' + key + '"]'); }
 
-  function toggleToolCard(key) {
-    const d = TOOL_CARDS.find((x) => x.key === key);
-    if (!d || !els[d.card]) return;
-    setToolCollapsed(key, !els[d.card].classList.contains("collapsed"), true);
-  }
-
-  /* 标题栏整条是开关：单击、或键盘 Enter / 空格都等价（role=button 的可达性要求） */
-  function bindToolCardToggle(key) {
-    const d = TOOL_CARDS.find((x) => x.key === key);
-    const tg = d && els[d.toggle];
-    if (!tg) return;
-    // 长按拖动结束后会紧接着冒一个 click：此时 card 已被重新排序，若再折起
-    // 用户就「拖了一下卡反而收起了」，所以拖动刚结束时压制这次 toggle。
-    tg.addEventListener("click", () => {
-      if (toolClickGuard && Date.now() < toolClickGuard) return;
-      toggleToolCard(key);
-    });
-    tg.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggleToolCard(key); }
+  /* 切换子 tab：只显示对应面板，其余 hidden；按钮 active / aria-selected 同步 */
+  function switchToolTab(key) {
+    TOOL_TABS.forEach((k) => {
+      const active = k === key;
+      const btn = toolTabBtn(k), pane = toolTabPane(k);
+      if (btn) {
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      }
+      if (pane) pane.hidden = !active;
     });
   }
 
-  /* ---- 工具卡长按拖动排序 ---- */
-  // 每张卡标题栏左侧注入一个拖拽手柄（两列圆点，暗示「可拖动」），
-  // 但长按手势绑在整条标题栏上——点哪都能拖，手柄只是视觉提示。
-  function injectToolGrips() {
-    const tab = document.querySelector(TOOL_TAB_SEL);
-    if (!tab) return;
-    tab.querySelectorAll(".tool-h--toggle").forEach((h) => {
-      if (h.querySelector(".tool-grip")) return;
+  function bindToolSubtabs() {
+    TOOL_TABS.forEach((k) => {
+      const btn = toolTabBtn(k);
+      if (!btn) return;
+      // 长按拖动刚结束会紧随一个 click：此时已换位，若再切换就跳回原 tab，
+      // 故用 toolTabClickGuard 压制这次 click（与指令卡同思路）。
+      btn.addEventListener("click", () => {
+        if (toolTabClickGuard && Date.now() < toolTabClickGuard) return;
+        switchToolTab(k);
+      });
+      btn.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); switchToolTab(k); }
+      });
+    });
+  }
+
+  /* ---- 子 tab 长按拖动排序（与指令卡同一套长按手势）---- */
+  // 每张子 tab 左侧注入拖拽手柄（两列圆点），但长按手势绑在整颗按钮上——点哪都能拖。
+  function injectToolTabGrips() {
+    TOOL_TABS.forEach((k) => {
+      const btn = toolTabBtn(k);
+      if (!btn || btn.querySelector(".tool-grip")) return;
       const grip = document.createElement("span");
       grip.className = "tool-grip";
       grip.setAttribute("aria-hidden", "true");
-      grip.title = "长按拖动以调整卡片顺序";
+      grip.title = "长按拖动以调整工具顺序";
       grip.innerHTML = TOOL_GRIP_SVG;
-      h.insertBefore(grip, h.firstChild);
+      btn.insertBefore(grip, btn.firstChild);
     });
   }
 
-  // 读出保存的顺序：仅当某项仍在 DOM 里才认，删掉的卡不会把顺序顶歪。
-  function loadToolCardOrder(raw) {
-    toolCardOrder = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
+  function loadToolTabOrder(raw) {
+    toolTabOrder = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
   }
 
-  // 按保存顺序排好 DOM（启动时调用）。不在顺序表里的卡片（如后来新增的）
-  // 一律排在已排序项之后，保持原有相对次序。
-  function applyToolCardOrder() {
-    const tab = document.querySelector(TOOL_TAB_SEL);
-    if (!tab || !toolCardOrder.length) return;
-    const cards = Array.from(tab.querySelectorAll(".tool-card"));
-    const byId = new Map(cards.map((c) => [c.id, c]));
+  // 按保存顺序重排子 tab 按钮与对应面板（启动时调用）。不在顺序表里的补到末尾。
+  function applyToolTabOrder() {
+    const bar = document.getElementById("tool-subtabs");
+    const panes = document.getElementById("tool-panes");
+    if (!bar || !panes || !toolTabOrder.length) return;
+    const btnById = new Map(TOOL_TABS.map((k) => [k, toolTabBtn(k)]));
+    const paneById = new Map(TOOL_TABS.map((k) => [k, toolTabPane(k)]));
     const seen = new Set();
-    const frag = [];  // 排好序的卡片
-    toolCardOrder.forEach((id) => {
-      const c = byId.get(id);
-      if (c) { frag.push(c); seen.add(id); }
+    const order = [];
+    toolTabOrder.forEach((k) => { if (btnById.has(k)) { order.push(k); seen.add(k); } });
+    TOOL_TABS.forEach((k) => { if (!seen.has(k)) order.push(k); });
+    order.forEach((k) => {
+      if (btnById.get(k)) bar.appendChild(btnById.get(k));
+      if (paneById.get(k)) panes.appendChild(paneById.get(k));
     });
-    // 顺序表里没有的（新增 / 改名）补到末尾，维持 DOM 原序
-    cards.forEach((c) => { if (!seen.has(c.id)) frag.push(c); });
-    // 只重排 .tool-card，绝不碰顶部「保存目录」那一行
-    frag.forEach((c) => tab.appendChild(c));
   }
 
-  function saveToolCardOrder() {
-    const tab = document.querySelector(TOOL_TAB_SEL);
-    if (!tab) return;
-    const ids = Array.from(tab.querySelectorAll(".tool-card")).map((c) => c.id).filter(Boolean);
-    toolCardOrder = ids;
-    persistPref("tool_card_order", ids.join(","));
+  function saveToolTabOrder() {
+    const bar = document.getElementById("tool-subtabs");
+    if (!bar) return;
+    // 按子 tab 在 DOM 里的真实顺序排列（拖动后已重排），不要反向用 TOOL_TABS
+    // 这个固定数组去 filter——那样只会还原成默认顺序，丢掉用户刚拖好的顺序。
+    toolTabOrder = Array.from(bar.querySelectorAll(".tool-subtab"))
+      .map((b) => b.dataset.toolTab);
+    persistPref("tool_tab_order", toolTabOrder.join(","));
   }
 
-  function beginToolDrag() {
-    const drag = toolDrag;
-    if (!drag) return;
-    drag.timer = null;
-    drag.active = true;
-    drag.card.classList.add("is-dragging");
+  function beginToolTabDrag() {
+    const d = toolTabDrag;
+    if (!d) return;
+    d.timer = null; d.active = true;
+    d.tab.classList.add("is-dragging");
     document.body.classList.add("tool-sorting");
   }
-
-  function endToolDrag() {
-    const drag = toolDrag;
-    toolDrag = null;
-    if (!drag) return;
-    if (drag.timer) { clearTimeout(drag.timer); drag.timer = null; }
-    drag.card.classList.remove("is-dragging");
+  function endToolTabDrag() {
+    const d = toolTabDrag; toolTabDrag = null;
+    if (!d) return;
+    if (d.timer) { clearTimeout(d.timer); d.timer = null; }
+    d.tab.classList.remove("is-dragging");
     document.body.classList.remove("tool-sorting");
   }
 
-  function onToolPointerDown(ev) {
+  function onToolTabPointerDown(ev) {
     if (ev.button !== undefined && ev.button !== 0) return;   // 只认左键
-    if (toolDrag) endToolDrag();
-    const header = ev.target.closest && ev.target.closest(".tool-h--toggle");
-    if (!header) return;
-    const card = header.closest(".tool-card");
-    if (!card) return;
-    toolDrag = {
-      card, x: ev.clientX || 0, y: ev.clientY || 0, active: false,
-      timer: setTimeout(beginToolDrag, TOOL_LONGPRESS_MS),
+    if (toolTabDrag) endToolTabDrag();
+    const btn = ev.target.closest && ev.target.closest(".tool-subtab");
+    if (!btn) return;
+    toolTabDrag = {
+      tab: btn, x: ev.clientX || 0, y: ev.clientY || 0, active: false,
+      timer: setTimeout(beginToolTabDrag, TOOL_LONGPRESS_MS),
     };
   }
-
-  function onToolPointerMove(ev) {
-    const drag = toolDrag;
-    if (!drag) return;
+  function onToolTabPointerMove(ev) {
+    const d = toolTabDrag;
+    if (!d) return;
     const x = ev.clientX || 0, y = ev.clientY || 0;
-    if (!drag.active) {
-      // 还没到长按时限就移动超阈值 = 用户想滚动 / 点别处，放弃这次长按
-      if (Math.abs(x - drag.x) > TOOL_DRAG_SLOP || Math.abs(y - drag.y) > TOOL_DRAG_SLOP) {
-        endToolDrag();
-      }
+    if (!d.active) {
+      // 还没到长按时限就移动超阈值 = 用户想点别处，放弃这次长按
+      if (Math.abs(x - d.x) > TOOL_DRAG_SLOP || Math.abs(y - d.y) > TOOL_DRAG_SLOP) endToolTabDrag();
       return;
     }
     if (ev.cancelable) ev.preventDefault();
     const hit = (document.elementFromPoint ? document.elementFromPoint(x, y) : null);
-    const over = hit && hit.closest ? hit.closest(".tool-card") : null;
-    const tab = document.querySelector(TOOL_TAB_SEL);
-    if (!over || !tab || over === drag.card) return;
+    const over = hit && hit.closest ? hit.closest(".tool-subtab") : null;
+    const bar = document.getElementById("tool-subtabs");
+    if (!over || !bar || over === d.tab) return;
     const r = over.getBoundingClientRect();
-    // 落点在中线以下 → 插到目标卡后面，否则插到前面（垂直列表按纵向判断）
-    const after = y > r.top + r.height / 2;
-    tab.insertBefore(drag.card, after ? over.nextSibling : over);
+    // 水平排列：落点在目标中线以右 → 插到后面，否则插到前面
+    const after = (ev.clientX || 0) > r.left + r.width / 2;
+    bar.insertBefore(d.tab, after ? over.nextSibling : over);
+  }
+  function onToolTabPointerUp() {
+    const d = toolTabDrag;
+    if (!d) return;
+    if (!d.active) { endToolTabDrag(); return; }   // 短按 = 普通切换，交给 click
+    endToolTabDrag();
+    toolTabClickGuard = Date.now() + 350;
+    saveToolTabOrder();
+    pushStatus("info", "✓ 工具顺序已保存（长按子 tab 可再次调整）");
   }
 
-  function onToolPointerUp() {
-    const drag = toolDrag;
-    if (!drag) return;
-    if (!drag.active) { endToolDrag(); return; }   // 短按 = 普通折叠点击，交给 click
-    endToolDrag();
-    toolClickGuard = Date.now() + 350;
-    saveToolCardOrder();
-    pushStatus("info", "✓ 卡片顺序已保存（长按卡片标题可再次调整）");
-  }
-
-  let _toolDragWindowBound = false;
-  function bindToolCardDrag() {
-    injectToolGrips();
-    const tab = document.querySelector(TOOL_TAB_SEL);
-    if (tab) tab.addEventListener("pointerdown", onToolPointerDown);
-    if (_toolDragWindowBound) return;
-    _toolDragWindowBound = true;
-    window.addEventListener("pointermove", onToolPointerMove, { passive: false });
-    window.addEventListener("pointerup", onToolPointerUp);
-    window.addEventListener("pointercancel", () => endToolDrag());
+  let _toolTabDragBound = false;
+  function bindToolTabDrag() {
+    injectToolTabGrips();
+    const bar = document.getElementById("tool-subtabs");
+    if (bar) bar.addEventListener("pointerdown", onToolTabPointerDown);
+    if (_toolTabDragBound) return;
+    _toolTabDragBound = true;
+    window.addEventListener("pointermove", onToolTabPointerMove, { passive: false });
+    window.addEventListener("pointerup", onToolTabPointerUp);
+    window.addEventListener("pointercancel", () => endToolTabDrag());
     // 在窗口外松手收不到 pointerup：失焦也当作结束，免得卡在「拖住不放」
-    window.addEventListener("blur", () => endToolDrag());
+    window.addEventListener("blur", () => endToolTabDrag());
     // 触摸长按会同时触发系统的 contextmenu（弹「复制/粘贴」），拖动态里必须挡掉
     window.addEventListener("contextmenu", (ev) => {
-      if (toolDrag && toolDrag.active) ev.preventDefault();
+      if (toolTabDrag && toolTabDrag.active) ev.preventDefault();
     });
   }
 
@@ -5746,10 +5718,9 @@
      ["recShowTouches", "rec_show_touches"]].forEach(([el, key]) => {
       if (els[el]) els[el].addEventListener("change", () => persistPref(key, !!els[el].checked));
     });
-    // 三张工具卡的折叠：标题栏整条可点，收起态各自持久化
-    TOOL_CARDS.forEach((d) => bindToolCardToggle(d.key));
-    // 工具卡长按拖动排序：注入手柄 + 绑定长按手势（与指令卡同一套）
-    bindToolCardDrag();
+    // 工具区子 tab：点击切换 + 长按拖动排序（与指令卡同一套长按手势）
+    bindToolSubtabs();
+    bindToolTabDrag();
     // ---- 应用安装（APK）----
     if (els.apkPick) els.apkPick.addEventListener("click", pickApk);
     if (els.apkInstall) els.apkInstall.addEventListener("click", installApk);

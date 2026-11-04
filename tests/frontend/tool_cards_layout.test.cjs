@@ -1,15 +1,17 @@
-/* jsdom 前端行为测试：工具页三张卡（截图 / 录屏 / 投屏）竖排 + 各自的收起按钮
+/* jsdom 前端行为测试：工具页「子 tab」结构（设备截图 / 设备录屏 / 投屏 /
+   应用安装 / 诊断包）。
 
-   版式走过的弯路：先是三张卡各占一整行（投屏要往下滚），后来把「截图 / 录屏」
-   并成两列（两列内容量差太多、勾选项被挤成两行）。现在统一成「自上而下一列 +
-   每张卡标题栏可收起」——想看的展开，不看的收成一行标题。这里锁四件事：
-   1) 结构：五张卡都是工具页 section 的直接子元素，按
-      截图 → 录屏 → 投屏 → 应用安装 → 诊断包 排列（投屏在录屏下方，第三位），
-      每张都有 .tool-h--toggle 标题与 .tool-body 内容区；
-   2) 样式：没有两列网格（退回并排会在这里失败），收起态真的隐藏 .tool-body；
-   3) 行为：点标题只折自己那张卡，收起态各自落盘（shot_collapsed /
-      rec_collapsed / scrcpy_collapsed），三张互不牵连；
-   4) 回填：启动时按各自的键还原收起态，缺省保持 HTML 的展开态。 */
+   原先是五张卡竖排、各自可收起；现改成同层级的五个子 tab，点哪个就整页显示
+   那一项功能，互不挤压。这里锁四件事：
+   1) 结构：#tool-subtabs 下 5 个 .tool-subtab 按钮（data-tool-tab=
+      shot/rec/scrcpy/apk/diag），#tool-panes 下 5 个对应的
+      .tool-pane[data-tool-pane=...]；每张卡仍是 .tool-card（.tool-h + .tool-body），
+      但标题栏不再可折叠（无 .tool-h--toggle / .collapsed / .tool-chevron）；
+   2) 样式：没有两列网格（退回并排会在这里失败）；未激活的面板真的被
+      [hidden] 隐藏；.tool-subtab 走 tab 视觉语言（手型光标 + 选中态）；
+   3) 行为：点子 tab 只切自己那一项——被点的 active、对应面板显示、其余面板
+      hidden，互不牵连；
+   4) 回填：启动时默认激活「设备截图」子 tab，其余面板初始化为 hidden。 */
 const fs = require("fs");
 const path = require("path");
 const { JSDOM } = require("jsdom");
@@ -50,13 +52,14 @@ function block(selector) {
   return css.slice(i, end + 1);
 }
 
-const CARDS = [
-  { id: "shot-card", toggle: "shot-toggle", body: "shot-body", key: "shot_collapsed" },
-  { id: "rec-card", toggle: "rec-toggle", body: "rec-body", key: "rec_collapsed" },
-  { id: "apk-card", toggle: "apk-toggle", body: "apk-body", key: "apk_collapsed" },
-  { id: "diag-card", toggle: "diag-toggle", body: "diag-body", key: "diag_collapsed" },
-  { id: "scrcpy-card", toggle: "scrcpy-toggle", body: "scrcpy-body", key: "scrcpy_collapsed" },
-];
+const TABS = ["shot", "rec", "scrcpy", "apk", "diag"];
+const PANE_OF = {
+  shot: ["tool-shot"],
+  rec: ["tool-rec"],
+  scrcpy: ["tool-scrcpy", "mirror-preview"],
+  apk: ["apk-install"],
+  diag: ["diag-build", "diag-download"],
+};
 
 async function boot(settings) {
   const dom = new JSDOM(html, {
@@ -96,9 +99,8 @@ async function boot(settings) {
 
 const click = (doc, el) => el.dispatchEvent(
   new doc.defaultView.Event("click", { bubbles: true }));
-const savedPrefs = (calls) =>
-  calls.filter((c) => c.fn === "save_settings").map((c) => c.args[0]);
-const folded = (doc, id) => doc.getElementById(id).classList.contains("collapsed");
+const subBtn = (doc, key) => doc.querySelector('.tool-subtab[data-tool-tab="' + key + '"]');
+const pane = (doc, key) => doc.querySelector('.tool-pane[data-tool-pane="' + key + '"]');
 
 (async () => {
   const watchdog = setTimeout(() => {
@@ -106,130 +108,121 @@ const folded = (doc, id) => doc.getElementById(id).classList.contains("collapsed
     process.exit(fail ? 1 : 0);
   }, 60000);
 
-  console.log("[1] 结构：五张卡竖排、各自带折叠标题与内容区");
+  console.log("[1] 结构：5 个子 tab + 5 个面板，顺序一致、控件都在面板内");
   {
     const doc = new JSDOM(html).window.document;
     const tools = doc.querySelector('section.tab[data-tab="tools"]');
     ok(!!tools, "工具页 section 存在");
 
-    const cards = Array.from(tools.querySelectorAll(":scope > .tool-card"));
-    ok(cards.length === 5, "五张卡都是 section 的直接子元素（实际 " + cards.length + "）");
-    ok(cards.map((c) => c.id).join(",") === "shot-card,rec-card,scrcpy-card,apk-card,diag-card",
-       "自上而下：截图 → 录屏 → 投屏 → 应用安装 → 诊断包（实际 " + cards.map((c) => c.id).join(",") + "）");
+    const subtabs = Array.from(doc.querySelectorAll("#tool-subtabs .tool-subtab"));
+    ok(subtabs.length === 5, "5 个子 tab 都在 #tool-subtabs 内（实际 " + subtabs.length + "）");
+    ok(subtabs.map((b) => b.dataset.toolTab).join(",") === TABS.join(","),
+       "自上而下：截图 → 录屏 → 投屏 → 应用安装 → 诊断（实际 " +
+       subtabs.map((b) => b.dataset.toolTab).join(",") + "）");
     ok(!tools.querySelector(".tool-pair"), "没有并排用的 .tool-pair 容器");
 
-    CARDS.forEach((d) => {
-      const card = doc.getElementById(d.id);
-      ok(!!card, "#" + d.id + " 存在");
-      const h = card.querySelector(":scope > .tool-h--toggle");
-      ok(!!h && h.id === d.toggle, "#" + d.id + " 有可点标题 #" + d.toggle);
-      ok(h && h.getAttribute("aria-expanded") === "true",
-         "#" + d.id + " 初始 aria-expanded=true（展开）");
-      ok(h && h.getAttribute("aria-controls") === d.body,
-         "#" + d.id + " 的 aria-controls 指向 #" + d.body);
-      const body = card.querySelector(":scope > .tool-body");
-      ok(!!body && body.id === d.body, "#" + d.id + " 有内容区 #" + d.body);
-      ok(!!card.querySelector(".tool-chevron"), "#" + d.id + " 标题右侧有折叠箭头");
+    const panes = Array.from(doc.querySelectorAll("#tool-panes .tool-pane"));
+    ok(panes.length === 5, "5 个面板都在 #tool-panes 内（实际 " + panes.length + "）");
+    ok(panes.map((p) => p.dataset.toolPane).join(",") === TABS.join(","),
+       "面板顺序与子 tab 顺序对齐（实际 " +
+       panes.map((p) => p.dataset.toolPane).join(",") + "）");
+
+    // 每张卡仍是 .tool-card（.tool-h + .tool-body），但标题栏不可折叠
+    TABS.forEach((key) => {
+      const p = pane(doc, key);
+      ok(!!p, "#" + key + " 面板存在");
+      const card = p.querySelector(":scope > .tool-card");
+      ok(!!card, "#" + key + " 面板里是一张 .tool-card");
+      ok(!!card.querySelector(":scope > .tool-h"), "#" + key + " 卡有 .tool-h 标题（非折叠）");
+      ok(!!card.querySelector(":scope > .tool-body"), "#" + key + " 卡有 .tool-body 内容区");
+      ok(!card.querySelector(".tool-h--toggle"), "#" + key + " 标题栏不是可折叠 .tool-h--toggle");
+      ok(!card.querySelector(".tool-chevron"), "#" + key + " 没有折叠箭头 .tool-chevron");
+      ok(!card.classList.contains("collapsed"), "#" + key + " 卡不带 collapsed 收起态");
     });
 
-    // 交互元素必须都在内容区里：否则收起时按钮仍露在标题下，看着像没收起
-    ok(doc.querySelector("#shot-body #tool-shot"), "截图按钮在 #shot-body 内");
-    ok(doc.querySelector("#rec-body #tool-rec"), "开始录制按钮在 #rec-body 内");
-    ok(doc.querySelector("#apk-body #apk-install"), "安装按钮在 #apk-body 内");
-    ok(doc.querySelector("#scrcpy-body #tool-scrcpy"), "投屏按钮在 #scrcpy-body 内");
-    ok(doc.querySelector("#scrcpy-body #mirror-preview"),
-       "备用投屏的预览块在 #scrcpy-body 内（收起时一并隐藏）");
+    // 交互元素必须都在各自面板内，否则切到别处时按钮会跟着露出来
+    ok(doc.querySelector('.tool-pane[data-tool-pane="shot"] #tool-shot'), "截图按钮在 shot 面板内");
+    ok(doc.querySelector('.tool-pane[data-tool-pane="rec"] #tool-rec'), "开始录制按钮在 rec 面板内");
+    ok(doc.querySelector('.tool-pane[data-tool-pane="apk"] #apk-install'), "安装按钮在 apk 面板内");
+    ok(doc.querySelector('.tool-pane[data-tool-pane="scrcpy"] #tool-scrcpy'), "投屏按钮在 scrcpy 面板内");
+    ok(doc.querySelector('.tool-pane[data-tool-pane="scrcpy"] #mirror-preview'),
+       "备用投屏的预览块在 scrcpy 面板内（切走时一并隐藏）");
   }
 
-  console.log("\n[2] 样式：一列堆叠 + 收起真的隐藏内容");
+  console.log("\n[2] 样式：一列面板 + 未激活面板真被隐藏 + 子 tab 走 tab 视觉");
   {
     ok(!/\.tool-pair\s*\{/.test(css), "样式表里没有 .tool-pair 两列网格");
-    const b = block(".tool-card {");
-    ok(!!b && /margin-bottom:\s*14px/.test(b),
-       ".tool-card 仍靠 margin-bottom 拉开竖向间距（不依赖 grid gap）");
-    ok(/\.tool-card\.collapsed\s+\.tool-body\s*\{\s*display:\s*none/.test(css),
-       ".tool-card.collapsed .tool-body 设了 display:none");
-    ok(/\.tool-card\.collapsed\s+\.tool-chevron\s*\{\s*transform:\s*rotate\(-90deg\)/.test(css),
-       "收起时箭头转 -90°（指向右 = 已折叠）");
-    ok(/\.tool-h--toggle\s*\{\s*cursor:\s*pointer/.test(css),
-       "折叠标题是手型光标（可点）");
+    ok(/\.tool-pane\[hidden\]\s*\{\s*display:\s*none/.test(css),
+       ".tool-pane[hidden] 设了 display:none（未激活面板隐藏）");
+    const sub = block(".tool-subtab {");
+    ok(!!sub, ".tool-subtab 规则存在");
+    ok(/cursor:\s*pointer/.test(sub || ""), "子 tab 常态是手型光标（可点）");
+    const act = block(".tool-subtab.active {");
+    ok(!!act, ".tool-subtab.active 规则存在");
+    ok(/var\(--accent\)/.test(act || ""), "选中态用磷光青（与全站 tab 语言一致）");
+    ok(/is-dragging/.test(css) && /\.tool-subtab\.is-dragging\s*\{/.test(css),
+       "拖动中的子 tab 有 is-dragging 降透明度样式");
   }
 
-  console.log("\n[3] 点标题只折自己那张卡，收起态各自落盘");
+  console.log("\n[3] 点子 tab 只切自己那一项（active + 面板显隐互不牵连）");
   {
-    const { window, calls } = await boot();
+    const { window } = await boot();
     const doc = window.document;
-    ok(await waitFor(() => !!doc.getElementById("shot-toggle"), 4000, "页面就绪"),
-       "五张卡渲染完成");
-    ok(!folded(doc, "shot-card") && !folded(doc, "rec-card")
-       && !folded(doc, "apk-card") && !folded(doc, "diag-card")
-       && !folded(doc, "scrcpy-card"),
-       "初始五张卡都是展开态");
+    ok(await waitFor(() => !!subBtn(doc, "shot"), 4000, "页面就绪"),
+       "子 tab 渲染完成");
 
-    click(doc, doc.getElementById("shot-toggle"));
-    await sleep(80);
-    ok(folded(doc, "shot-card"), "点截图标题 → 截图卡收起");
-    ok(!folded(doc, "rec-card"), "录屏卡不受影响");
-    ok(!folded(doc, "apk-card"), "应用安装卡不受影响");
-    ok(!folded(doc, "diag-card"), "诊断包卡不受影响");
-    ok(!folded(doc, "scrcpy-card"), "投屏卡不受影响");
-    ok(doc.getElementById("shot-toggle").getAttribute("aria-expanded") === "false",
-       "收起后 aria-expanded=false");
-    ok(await waitFor(() => savedPrefs(calls).some((p) => p.shot_collapsed === true),
-                     3000, "shot_collapsed"),
-       "收起态落盘 shot_collapsed=true");
-    ok(!savedPrefs(calls).some((p) => "rec_collapsed" in p),
-       "没有顺手把 rec_collapsed 也写一遍");
+    click(doc, subBtn(doc, "rec"));
+    await sleep(60);
+    ok(subBtn(doc, "rec").classList.contains("active"), "点录屏 → rec 子 tab active");
+    ok(subBtn(doc, "shot").classList.contains("active") === false, "截图子 tab 不再 active");
+    ok(pane(doc, "rec").hidden === false, "rec 面板显示");
+    ok(pane(doc, "shot").hidden === true, "shot 面板被隐藏");
+    ok(pane(doc, "apk").hidden === true && pane(doc, "diag").hidden === true,
+       "其余面板保持 hidden");
 
-    // 键盘等价：role=button 必须能用 Enter / 空格触发
-    doc.getElementById("scrcpy-toggle").dispatchEvent(
+    // 键盘等价：role=tab 必须能用 Enter / 空格触发
+    subBtn(doc, "scrcpy").dispatchEvent(
       new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await sleep(60);
-    ok(folded(doc, "scrcpy-card"), "Enter 键也能折叠投屏卡");
-    doc.getElementById("rec-toggle").dispatchEvent(
-      new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
-    await sleep(60);
-    ok(folded(doc, "rec-card"), "空格键也能折叠录屏卡");
-
-    click(doc, doc.getElementById("shot-toggle"));
-    await sleep(80);
-    ok(!folded(doc, "shot-card"), "再点一次展开");
-    ok(await waitFor(() => {
-      const last = savedPrefs(calls).filter((p) => "shot_collapsed" in p).pop();
-      return last && last.shot_collapsed === false;
-    }, 3000, "shot_collapsed=false"), "展开态同样落盘（false）");
+    ok(subBtn(doc, "scrcpy").classList.contains("active"), "Enter 键也能切到投屏子 tab");
+    ok(pane(doc, "scrcpy").hidden === false, "scrcpy 面板显示");
+    ok(pane(doc, "rec").hidden === true, "rec 面板被隐藏");
     window.close();
   }
 
-  console.log("\n[4] 启动按各自键还原收起态");
+  console.log("\n[4] 启动默认激活「设备截图」子 tab，其余面板 hidden");
   {
-    const { window } = await boot({ shot_collapsed: true, scrcpy_collapsed: true });
+    const { window } = await boot();
     const doc = window.document;
-    ok(await waitFor(() => folded(doc, "shot-card"), 4000, "截图卡还原"),
-       "shot_collapsed=true → 截图卡启动即收起");
-    ok(folded(doc, "scrcpy-card"), "scrcpy_collapsed=true → 投屏卡启动即收起");
-    ok(!folded(doc, "rec-card"), "没给 rec_collapsed 的录屏卡保持展开（不被连带）");
-    window.close();
-  }
-
-  console.log("\n[5] 缺省 / 非法值保持展开（不被误折）");
-  {
-    const { window } = await boot({ shot_collapsed: "yes" });
-    const doc = window.document;
-    ok(await waitFor(() => !!doc.getElementById("shot-toggle"), 4000, "页面就绪"),
+    ok(await waitFor(() => subBtn(doc, "shot"), 4000, "页面就绪"),
        "页面就绪");
-    ok(!folded(doc, "shot-card"), "字符串 \"yes\" 不是布尔 → 保持 HTML 的展开态");
+    ok(subBtn(doc, "shot").classList.contains("active"), "默认 shot 子 tab active");
+    ok(pane(doc, "shot").hidden === false, "shot 面板可见");
+    ok(TABS.slice(1).every((k) => pane(doc, k).hidden === true),
+       "其余 4 个面板初始化为 hidden");
     window.close();
   }
 
-  console.log("\n[6] 录屏卡：音频 / 麦克风 / 级别行已撤掉，只剩 4 个开关");
+  console.log("\n[5] 缺省 / 非法 tab 顺序不破坏结构（回退默认）");
+  {
+    const { window } = await boot({ tool_tab_order: "not-a-real-tab" });
+    const doc = window.document;
+    ok(await waitFor(() => subBtn(doc, "shot"), 4000, "页面就绪"),
+       "页面就绪");
+    ok(Array.from(doc.querySelectorAll("#tool-subtabs .tool-subtab"))
+         .map((b) => b.dataset.toolTab).join(",") === TABS.join(","),
+       "非法顺序只落一个未知 tab 时不打乱默认顺序");
+    window.close();
+  }
+
+  console.log("\n[6] 录屏面板：音频 / 麦克风 / 级别行已撤掉，只剩 4 个开关");
   {
     const doc = new JSDOM(html).window.document;
     ["rec-devaudio", "rec-mic", "rec-levels", "rec-lc-levels"].forEach((id) => {
       ok(!doc.getElementById(id), "#" + id + " 已从界面上撤掉");
     });
     const opts = doc.querySelector("#rec-body .rec-opts");
-    ok(!!opts, "开关容器 .rec-opts 仍在 #rec-body 内");
+    ok(!!opts, "开关容器 .rec-opts 仍在 #rec-pane 内");
     const ids = Array.from(opts.querySelectorAll("input[type=checkbox]"))
       .map((c) => c.id);
     ok(ids.join(",") === "rec-logcat,rec-zip,rec-pointer-location,rec-show-touches",

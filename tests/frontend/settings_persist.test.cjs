@@ -139,11 +139,11 @@ const saved = (calls, key) =>
        "保存目录镜像到 Logcat 页");
     ok(doc.getElementById("file-dir").value === "D:\\shots",
        "保存目录镜像到文件页");
-    // 三张工具卡的收起态各记各的：这里只给了录屏，另外两张必须保持展开
-    ok(!doc.getElementById("shot-card").classList.contains("collapsed"),
-       "截图卡没给 shot_collapsed → 保持展开");
-    ok(!doc.getElementById("scrcpy-card").classList.contains("collapsed"),
-       "投屏卡没给 scrcpy_collapsed → 保持展开");
+    // 工具区已改为子 tab，不再有「收起」概念：默认激活「设备截图」子 tab
+    ok(!!doc.querySelector('.tool-subtab[data-tool-tab="shot"].active'),
+       "工具区默认激活「设备截图」子 tab（不再用 collapsed 收起）");
+    ok(!!doc.querySelector('.tool-pane[data-tool-pane="shot"]:not([hidden])'),
+       "截图面板默认可见");
   }
 
   console.log("\n[3] 配置缺失时保持界面默认（不回填）");
@@ -295,6 +295,26 @@ const saved = (calls, key) =>
       "改保存目录 → save_dir 落盘（下次启动 default_save_dir 直接用它）");
     ok(doc.getElementById("lc-dir").value === "D:\\new-shots",
        "保存目录三处输入实时镜像");
+
+    // 工具区已改为子 tab：不再写 shot_collapsed / scrcpy_collapsed 这类折叠键
+    ok(saved(calls, "shot_collapsed").length === 0 &&
+       saved(calls, "scrcpy_collapsed").length === 0,
+       "不再写 shot_collapsed / scrcpy_collapsed（折叠键已废弃）");
+  }
+
+  console.log("\n[5b] tool_tab_order：启动按保存顺序重排子 tab（读路径回填）");
+  {
+    const savedOrder = "diag,apk,rec,scrcpy,shot";
+    const { window } = mkEnv({ settings: { tool_tab_order: savedOrder } });
+    const doc = window.document;
+    ok(await waitFor(() => {
+      const order = Array.from(doc.querySelectorAll("#tool-subtabs .tool-subtab"))
+        .map((b) => b.dataset.toolTab);
+      return order.join(",") === savedOrder;
+    }, 4000, "子 tab 重排"),
+       "启动按 tool_tab_order 重排子 tab：实际顺序与保存一致（" +
+       Array.from(window.document.querySelectorAll("#tool-subtabs .tool-subtab"))
+         .map((b) => b.dataset.toolTab).join(",") + "）");
   }
 
   console.log("\n[6] 指令过滤关键字落盘（cmd_filter）");

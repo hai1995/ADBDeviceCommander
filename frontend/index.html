@@ -240,21 +240,18 @@
           <button id="tool-open" class="btn" data-icon="folder">打开目录</button>
         </div>
 
-        <!-- 工具页三张卡统一自上而下堆叠，每张的标题栏单击可收起。
-             曾把「截图 / 录屏」并成两列：两列内容量差太多、勾选项还被挤成两行，
-             反而更难扫读。改回竖排后靠「逐卡收起」省屏高——想看的展开，不看的
-             收成一行标题（三张卡的收起态各自记忆，互不牵连）。 -->
-        <div class="tool-card" id="shot-card">
-          <!-- 标题栏整条可点：单击收起 / 展开下方全部内容。收起态记在
-               config.json 的 shot_collapsed，下次启动沿用。 -->
-          <div class="tool-h tool-h--toggle" id="shot-toggle" role="button" tabindex="0"
-               aria-expanded="true" aria-controls="shot-body" title="单击收起 / 展开截图选项">
-            设备截图
-            <span class="tool-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </span>
-          </div>
+        <div class="tool-subtabs" id="tool-subtabs" role="tablist">
+          <button class="tool-subtab active" data-tool-tab="shot" role="tab" aria-selected="true">设备截图</button>
+          <button class="tool-subtab" data-tool-tab="rec" role="tab" aria-selected="false">设备录屏</button>
+          <button class="tool-subtab" data-tool-tab="scrcpy" role="tab" aria-selected="false">投屏</button>
+          <button class="tool-subtab" data-tool-tab="apk" role="tab" aria-selected="false">应用安装</button>
+          <button class="tool-subtab" data-tool-tab="diag" role="tab" aria-selected="false">诊断包</button>
+        </div>
+        <div class="tool-panes" id="tool-panes">
+
+        <div class="tool-pane" data-tool-pane="shot">
+<div class="tool-card" id="shot-card">
+          <div class="tool-h" id="shot-h">设备截图</div>
           <div class="tool-body" id="shot-body">
             <div class="tool-desc">对受控设备各截一张 PNG（adb exec-out screencap）。</div>
             <div class="tool-row">
@@ -279,18 +276,11 @@
             </div>
           </div>
         </div>
+        </div>
 
-        <div class="tool-card" id="rec-card">
-          <!-- 标题栏整条可点：单击收起 / 展开下方全部内容（开关项占屏太高）。
-               收起态记在 config.json 的 rec_collapsed，下次启动沿用。 -->
-          <div class="tool-h tool-h--toggle" id="rec-toggle" role="button" tabindex="0"
-               aria-expanded="true" aria-controls="rec-body" title="单击收起 / 展开录屏选项">
-            设备录屏
-            <span class="tool-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </span>
-          </div>
+        <div class="tool-pane" data-tool-pane="rec" hidden>
+<div class="tool-card" id="rec-card">
+          <div class="tool-h" id="rec-h">设备录屏</div>
           <div class="tool-body" id="rec-body">
             <div class="tool-desc">对受控设备各录一段 MP4（adb screenrecord）。需要复盘时勾上「同步录制 logcat」——日志按<b>全量</b>抓取，不截断也不过滤。</div>
             <div class="tool-row">
@@ -338,19 +328,14 @@
             </div>
           </div>
         </div>
+        </div>
 
 
         <!-- 投屏：直接调用用户机器上已安装的 scrcpy（不内置、不重打包），
              自动在 PATH / 常见安装目录里找；找不到时可手填 scrcpy(.exe) 全路径。 -->
-        <div class="tool-card" id="scrcpy-card">
-          <div class="tool-h tool-h--toggle" id="scrcpy-toggle" role="button" tabindex="0"
-               aria-expanded="true" aria-controls="scrcpy-body" title="单击收起 / 展开投屏选项">
-            投屏<span class="panel-sub">SCRCPY</span>
-            <span class="tool-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </span>
-          </div>
+        <div class="tool-pane" data-tool-pane="scrcpy" hidden>
+<div class="tool-card" id="scrcpy-card">
+          <div class="tool-h" id="scrcpy-h">投屏<span class="panel-sub">SCRCPY</span></div>
           <div class="tool-body" id="scrcpy-body">
             <div class="tool-desc">把受控设备画面实时投到电脑上（调用本机 <b>scrcpy</b>，官方投屏工具，不随本程序打包）。多台受控设备会各开一个投屏窗口。</div>
             <div class="tool-row">
@@ -399,20 +384,15 @@
             <div class="tool-desc dim">备用方式会<b>自动降级</b>：① <b>screenrecord 管道</b> —— 把设备画面打成 H.264 流，喂给本机播放器窗口（ffplay / mpv / mplayer / vlc 任一即可，30~60fps、延迟约 0.2~1s，画面在独立窗口，<b>不能反向控制设备</b>；screenrecord 有 180 秒上限，到点会自动续流）；② <b>低帧率预览</b> —— 一个播放器都没装时退到此档，纯 adb 循环截图，画面直接显示在上面（1~3fps，只能看个状态、不适合演示）。少数 ROM（如部分华为机型）删掉了 screenrecord，那类设备会自动走 ②。</div>
           </div>
         </div>
+        </div>
 
         <!-- 应用安装：把本地 APK 装到受控设备（每台一个后台安装，互不影响）。
              选项默认「覆盖安装」——测试时反复装同一个包是常态；「允许降级」
              「授予全部权限」默认关闭：前者会静默压掉设备上的更高版本，后者
              会掩盖权限相关缺陷，都该由使用者显式决定。 -->
-        <div class="tool-card" id="apk-card">
-          <div class="tool-h tool-h--toggle" id="apk-toggle" role="button" tabindex="0"
-               aria-expanded="true" aria-controls="apk-body" title="单击收起 / 展开安装选项">
-            应用安装 <span class="panel-sub">APK</span>
-            <span class="tool-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </span>
-          </div>
+        <div class="tool-pane" data-tool-pane="apk" hidden>
+<div class="tool-card" id="apk-card">
+          <div class="tool-h" id="apk-h">应用安装 <span class="panel-sub">APK</span></div>
           <div class="tool-body" id="apk-body">
             <div class="tool-desc">选择本地 APK 后一键安装到全部受控设备（<code>adb install</code>，走后台线程，可同时装多台）。</div>
             <div class="tool-row">
@@ -432,20 +412,15 @@
             </ul>
           </div>
         </div>
+        </div>
 
         <!-- 诊断包：把一次问题的现场证据一次收齐并打成一个 zip。
              为什么是一个按钮而不是五个功能各点一遍：复现完 bug 之后要发回给
              开发的东西每次都一样（什么机器 / 系统版本、logcat 尾部、谁在吃内存、
              装了哪些应用、有没有 ANR），分散去点必然漏一两项，事后补不回来。 -->
-        <div class="tool-card" id="diag-card">
-          <div class="tool-h tool-h--toggle" id="diag-toggle" role="button" tabindex="0"
-               aria-expanded="true" aria-controls="diag-body" title="单击收起 / 展开诊断包选项">
-            诊断包<span class="panel-sub">DIAG</span>
-            <span class="tool-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </span>
-          </div>
+        <div class="tool-pane" data-tool-pane="diag" hidden>
+<div class="tool-card" id="diag-card">
+          <div class="tool-h" id="diag-h">诊断包<span class="panel-sub">DIAG</span></div>
           <div class="tool-body" id="diag-body">
             <div class="tool-desc">把「这台机器现在什么样」一次收齐：设备信息、<code>getprop</code> 全量、logcat 尾部、内存 TOP、应用清单、ANR / tombstone 线索 —— 打包成一个 zip，直接发给开发。</div>
             <div class="tool-row">
@@ -466,6 +441,9 @@
               <li>收集过程不影响正在进行的 logcat 监控 / 录屏：它只读，不改设备状态。</li>
             </ul>
           </div>
+        </div>
+        </div>
+
         </div>
 
         <!-- 状态信息已抽离到顶栏跑马灯（点击弹窗查看全量历史） -->

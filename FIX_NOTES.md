@@ -3228,3 +3228,45 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 ## 回归测试
 - 前端 `tests/frontend/perf_view_report.test.cjs`（5 断言）：按钮存在且位于导出报告之后；
   点击调用 `open_save_dir` 打开保存目录。
+
+# 第三十九轮：工具区五项功能改为子 tab
+
+## 现象
+工具区原本是「设备截图 / 设备录屏 / 投屏 / 应用安装 / 诊断包」五张卡竖排，每张卡标题栏
+可点开/收起。用户希望把这几项改成不同的**子 tab**，这样单项功能能显示得更完整，
+不必靠「逐卡收起」去省高度。
+
+## 决策（与用户确认）
+- 去掉「点标题收起/展开」：子 tab 一次只显示一项功能，天然互不挤压。
+- 「工具卡可长按拖动改顺序」改为「长按拖动排子 tab」，顺序落盘到 `tool_tab_order`
+  （覆盖原来的 `tool_card_order`），顺序表外的 tab 补到末尾。
+
+## 修复
+- `index.html`：原五张卡整段包进 `#tool-subtabs`（`role=tablist`，5 个 `.tool-subtab`
+  子 tab 按钮）+ `#tool-panes`（5 个 `.tool-pane[data-tool-pane=...]`）。每张卡标题栏从
+  可折叠的 `.tool-h--toggle`（带 `.tool-chevron`）改为纯 `.tool-h`，内部控件 id 全部保留。
+- `css/app.css`：删除 `.tool-h--toggle` / `.tool-chevron` / `.tool-card.collapsed` 等旧折叠
+  规则；新增 `.tool-subtab`（与关于页 `.about-subtab` 同一套视觉语言：`surface` 底、`muted`
+  字、选中态 `accent` 描边 + 光晕）、`.tool-subtab .tool-grip`（12×14 拖拽手柄）、
+  `.tool-subtab.is-dragging`（拖动中降透明度）、`.tool-pane[hidden] { display:none }`
+  （未激活面板隐藏）；清理已无用的 `.tool-grip` 旧卡级拖动态规则，仅保留
+  `body.tool-sorting` 整页 `cursor:grabbing`。
+- `js/app.js`：原 `TOOL_CARDS` 折叠 + 卡级拖动整套替换为 `TOOL_TABS` 子 tab 逻辑——
+  `switchToolTab` / `bindToolSubtabs`（click + Enter/Space 切换，拖动后压制紧随 click）、
+  `injectToolTabGrips` / `loadToolTabOrder` / `applyToolTabOrder` / `saveToolTabOrder` /
+  `bindToolTabDrag`。**修复 `saveToolTabOrder` 的排序 bug**：原先用固定数组 `TOOL_TABS`
+  去 `filter(bar.contains(...))`，无论 DOM 怎么拖都只会还原成默认顺序，丢失用户刚排好的
+  顺序；改为直接按 `#tool-subtabs` 内 `.tool-subtab` 的真实 DOM 顺序读取。
+
+## 回归测试
+- `tool_card_order.test.cjs`（重写）：子 tab 默认顺序 / `tool_tab_order` 启动回填（未知 tab
+  补末尾）/ 长按 ≥400ms 才进拖动态、短按不触发 / 拖动换位 + 松手落盘（紧随 click 被压制）/
+  点击切换面板显隐。
+- `tool_cards_layout.test.cjs`（重写）：5 子 tab + 5 面板结构对齐、控件都在各自面板内、无
+  折叠残留（`.tool-h--toggle` / `.tool-chevron` / `collapsed`）、子 tab 切换互不牵连、默认
+  激活截图子 tab、非法 `tool_tab_order` 不破坏结构、录屏面板只剩 4 个开关。
+- `tools_rec_collapse_scrcpy.test.cjs`：移除折叠断言，改为子 tab 切换 / 键盘 Enter·空格
+  切换 / 默认激活截图子 tab；保留投屏探测、scrcpy 启停、kebab 层级与尺寸回归。
+- `settings_persist.test.cjs`：移除 `shot_collapsed` / `scrcpy_collapsed` 落盘断言，新增
+  `tool_tab_order` 启动回填校验。
+- `ui_style_card_tabs.test.cjs`：把 `tool-subtab` 纳入允许样式类清单。

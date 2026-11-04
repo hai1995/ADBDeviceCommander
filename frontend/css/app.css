@@ -1167,19 +1167,37 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   font-family: var(--font-mono, monospace); font-size: .95em;
   padding: 0 3px; border-radius: 3px; background: rgba(0, 0, 0, .25);
 }
-/* 可折叠的工具卡（截图 / 录屏 / 投屏三张都是）：标题栏整条是开关，
-   右侧箭头指示当前状态；收起时只留一行标题，把屏高让给其他内容。 */
-.tool-h--toggle { cursor: pointer; user-select: none; border-radius: var(--r-sm); }
-.tool-h--toggle:hover { color: var(--accent); }
-.tool-h--toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
-.tool-chevron {
-  margin-left: auto; display: inline-flex; align-items: center;
-  color: var(--muted); transition: transform var(--dur-fast) ease, color var(--dur-fast) ease;
+/* 工具区子 tab（截图 / 录屏 / 投屏 / 应用安装 / 诊断包）：二级 tab，与
+   关于页子 tab 同一套视觉语言。每个子 tab 整页展示一项功能，互不挤压——
+   原先靠「逐卡收起」省下的高度，现在交给子 tab 切换（一次只看一项）。 */
+.tool-subtabs { display: flex; gap: 8px; flex-wrap: wrap; flex: none; margin-bottom: 10px; }
+.tool-subtab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--surface);
+  color: var(--muted); cursor: pointer;
+  font: 600 var(--fs-md)/1 var(--font-display); letter-spacing: .06em;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease,
+              border-color var(--dur-fast) ease;
 }
-.tool-chevron svg { width: 15px; height: 15px; display: block; }
-.tool-h--toggle:hover .tool-chevron { color: var(--accent); }
-.tool-card.collapsed .tool-chevron { transform: rotate(-90deg); }
-.tool-card.collapsed .tool-body { display: none; }
+.tool-subtab:hover { color: var(--text); border-color: var(--line-strong); }
+.tool-subtab.active {
+  color: var(--accent); border-color: var(--accent);
+  background: rgba(52, 224, 234, .08);
+  box-shadow: 0 0 0 1px var(--accent-glow) inset;
+}
+/* 子 tab 可长按拖动排序：左侧两列圆点手柄暗示「可拖动」 */
+.tool-subtab .tool-grip {
+  width: 12px; height: 14px; display: inline-block; margin-right: 2px;
+  color: var(--muted); opacity: .65; cursor: grab;
+}
+.tool-subtab .tool-grip svg { width: 12px; height: 14px; display: block; fill: currentColor; }
+.tool-subtab:hover .tool-grip { color: var(--accent); opacity: 1; }
+.tool-subtab.is-dragging { opacity: .5; }
+/* 子 tab 内容面板：同一时刻只显示一个 */
+.tool-panes { display: block; min-height: 0; }
+.tool-pane { display: block; }
+.tool-pane[hidden] { display: none; }
 /* 投屏卡：探测结果一行文字（成功=青、失败=橙） */
 .scrcpy-state {
   font: 400 var(--fs-sm)/1.5 var(--font-mono); color: var(--faint);
@@ -1868,31 +1886,9 @@ body.cmd-sorting .cmd-chip .chip-popup { display: none !important; }
   user-select: none;
 }
 
-/* ============================================================================
-   工具卡长按拖动排序（截图 / 录屏 / 投屏 / 安装 / 诊断）
-   ============================================================================
-   手柄是两列圆点，只作「可拖动」的视觉提示；长按手势实际上绑在整条标题栏上，
-   点标题任意位置都能拖。配色 / 抬层沿用指令卡拖动态，保持全站一致手感。 */
-.tool-grip {
-  flex: none; display: inline-flex; align-items: center; justify-content: center;
-  width: 16px; height: 18px; margin-right: 2px; color: var(--muted);
-  cursor: grab; opacity: .5;
-  transition: color var(--dur-fast) ease, opacity var(--dur-fast) ease;
-}
-.tool-grip svg { width: 12px; height: 14px; display: block; fill: currentColor; }
-.tool-h--toggle:hover .tool-grip { color: var(--accent); opacity: 1; }
-.tool-grip:active { cursor: grabbing; }
-/* 长按拖动中：整页 cursor 变 grabbing，其余卡片半透明，被拖的那张抬到最上层 */
+/* 子 tab 长按拖动排序中：整页 cursor 变 grabbing（被拖动的子 tab 用
+   .tool-subtab.is-dragging 降透明度，见上方「工具区子 tab」区块）。 */
 body.tool-sorting, body.tool-sorting * { cursor: grabbing !important; }
-body.tool-sorting .tool-card:not(.is-dragging) { opacity: .55; }
-.tool-card.is-dragging {
-  z-index: 40; opacity: 1 !important;
-  transform: scale(1.02); cursor: grabbing;
-  border-color: var(--accent) !important;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, .55), 0 0 0 3px rgba(52, 224, 234, .18);
-  /* 拖动中不要选中文字（长按 + 移动很容易变成选区） */
-  user-select: none;
-}
 
 /* ============================================================================
    性能监控：目标应用选择器（下拉 + 模糊搜索）
