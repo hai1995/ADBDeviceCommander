@@ -2501,11 +2501,11 @@
     wifiBusy = false;
     if (res && res.ok) {
       els.wifiAddr.value = res.address || addr;
-      pushStatus("ok", "✓ 无线调试已连接：" + (res.address || addr));
       refreshWifi();
-    } else if (res && res.reason) {
-      pushStatus("err", "✗ 无线连接失败：" + res.reason);
     }
+    // 失败 / 授权 / 离线等反馈已由后端统一推送（含「已检测到设备却连不上」的
+    // 对账说明），前端不再重复 push —— 否则成功 / 失败会各弹两条，还与
+    // device_service 的「检测到新设备」打架。
   }
 
   async function wifiDisconnect(addr, btn) {

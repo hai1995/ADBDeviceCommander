@@ -168,6 +168,88 @@ def test_wifi_connect_failure_explains_reason(api, monkeypatch):
     assert api.wifi_state()["recent"] == []      # 失败不记入最近列表
 
 
+def test_wifi_connect_reconciles_false_failure(api, monkeypatch):
+    """`adb connect` 报失败、但设备其实已注册进 adb devices → 应判为连上。
+
+    回归：旧实现直接信任 `adb connect` 的 stderr，于是出现「设备已检测到」却
+    「连接失败」的自相矛盾。这里以 adb devices 的实际状态对账纠正假失败。
+    """
+    def fake_run(cmd, **kw):
+        if len(cmd) > 1 and cmd[1] == "connect":
+            return _R("", "failed to connect to '172.20.2.35:5555': Connection refused")
+        if len(cmd) > 1 and cmd[1] == "devices":
+            return _R("List of devices attached\n172.20.2.35:5555\tdevice\n")
+        return _R()
+    _patch_run(monkeypatch, fake_run)
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    res = api.wifi_connect("172.20.2.35:5555")
+    assert res["ok"] is True, res
+    assert res["address"] == "172.20.2.35:5555"
+    # 连上的副作用：记进最近列表
+    assert api.wifi_state()["recent"] == ["172.20.2.35:5555"]
+    # 状态栏只有一条成功提示，没有「连接失败」（纠正旧的自相矛盾）
+    texts = _status_texts(api)
+    assert any("已连接" in t for t in texts), texts
+    assert not any("连接失败" in t for t in texts), texts
+
+
+def test_wifi_connect_unauthorized_gives_guidance(api, monkeypatch):
+    """设备已注册但 unauthorized（需车机端授权）→ 给准确提示而非笼统失败。"""
+    def fake_run(cmd, **kw):
+        if len(cmd) > 1 and cmd[1] == "connect":
+            return _R("", "failed to connect to '172.20.2.35:5555': Connection refused")
+        if len(cmd) > 1 and cmd[1] == "devices":
+            return _R("List of devices attached\n172.20.2.35:5555\tunauthorized\n")
+        return _R()
+    _patch_run(monkeypatch, fake_run)
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    res = api.wifi_connect("172.20.2.35:5555")
+    assert res["ok"] is False, res
+    assert "授权" in res["reason"], res
+    texts = _status_texts(api)
+    assert any("连接失败" in t and "未授权" in t for t in texts), texts
+    assert api.wifi_state()["recent"] == []      # 失败不记入最近列表
+
+
+def test_wifi_connect_offline_gives_guidance(api, monkeypatch):
+    """设备已注册但 offline（连接未就绪）→ 给出 offline 提示。"""
+    def fake_run(cmd, **kw):
+        if len(cmd) > 1 and cmd[1] == "connect":
+            return _R("", "failed to connect to '172.20.2.35:5555': Connection refused")
+        if len(cmd) > 1 and cmd[1] == "devices":
+            return _R("List of devices attached\n172.20.2.35:5555\toffline\n")
+        return _R()
+    _patch_run(monkeypatch, fake_run)
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    res = api.wifi_connect("172.20.2.35:5555")
+    assert res["ok"] is False, res
+    assert "offline" in res["reason"].lower(), res
+    assert api.wifi_state()["recent"] == []
+
+
+def test_wifi_connect_genuine_failure_not_in_devices(api, monkeypatch):
+    """adb connect 失败且设备根本不在 adb devices → 真失败，不被误判成功。"""
+    def fake_run(cmd, **kw):
+        if len(cmd) > 1 and cmd[1] == "connect":
+            return _R("", "failed to connect to '172.20.2.35:5555': Connection refused")
+        if len(cmd) > 1 and cmd[1] == "devices":
+            # 列表里只有另一台无关设备，目标地址缺失
+            return _R("List of devices attached\n192.168.0.9:5555\tdevice\n")
+        return _R()
+    _patch_run(monkeypatch, fake_run)
+    monkeypatch.setattr(api.workers, "spawn", lambda *a, **k: None)
+
+    res = api.wifi_connect("172.20.2.35:5555")
+    assert res["ok"] is False, res
+    assert api.wifi_state()["recent"] == []
+    # 只有一条失败提示，不应重复（后端单一推送源）
+    fails = [t for t in _status_texts(api) if "连接失败" in t]
+    assert len(fails) == 1, fails
+
+
 def test_wifi_disconnect_passes_address(api, monkeypatch):
     calls = []
     _patch_run(monkeypatch, lambda cmd, **kw: calls.append(cmd) or _R(

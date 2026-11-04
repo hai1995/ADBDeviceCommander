@@ -3102,3 +3102,42 @@ adb shell rm -f /sdcard/x      ← 成败都清
 - `pytest`：**1290 passed / 1 skipped**（较上轮持平）。
 - `pyflakes backend core tools tests`：0。
 - 前端 **76 文件 0 失败**（较上轮 +1：新增 `tool_card_order.test.cjs`）。
+
+# 第三十四轮：无线调试「假失败 / 重复播报」修复
+
+## 现象
+用户反馈：对 USB 设备开好无线调试（tcpip 5555，已读出 IP）、填地址点「连接」后，
+日志同时出现「✓ 检测到新设备：172.20.2.35:5555」与「✗ 无线连接失败：failed to
+connect」，自相矛盾；且失败提示还重复弹了两条。
+
+## 根因（两处）
+1. **假失败**：`wifi_connect` 直接信任 `adb connect` 的 stderr。车机 / 手机上设备
+   常常已经注册进 `adb devices`（连接握手还在路上），`adb connect` 却打印
+   「failed to connect」。于是 device_service 的轮询先报「检测到新设备」，连接逻辑
+   又报「连接失败」——同一台设备、同一个地址，成功与失败并存。
+2. **重复播报**：`wifi_connect` 后端已 `_push_status` 了一条 `✗ 无线连接失败（addr）：`
+   （toast=True），前端 `wifiConnect` 拿到 `res.reason` 后又 `pushStatus` 一条
+   「✗ 无线连接失败：」，成功路径同理各弹两条。
+
+## 修复
+- 新增 `_wifi_device_state(addr)`：连接后查 `adb devices`，返回该地址的真实状态
+  （`device` / `unauthorized` / `offline` / ''）。
+- `wifi_connect` 改为**以 adb devices 实际状态对账**：
+  * 状态为 `device` → 判连上（纠正假失败）；
+  * `unauthorized` → 给「请在车机端允许 USB 调试」的准确提示；
+  * `offline` → 给「已注册但连接未就绪，稍后重试」；
+  * 地址根本不在列表 → 才是真失败，保留原报错文案；
+  * 成功收尾抽成 `_wifi_connect_ok`（记最近 + 推成功 + 刷设备列表）。
+- 前端 `wifiConnect` 去掉重复的 `pushStatus`：连接成功 / 失败 / 授权 / 离线的反馈
+  统一由后端推送（含对账说明），前端不再二次播报，避免与「检测到新设备」打架。
+- `shutting_down` 等末态分支也补上状态推送，保证「单一推送源」。
+
+## 回归测试
+- `test_backend_wifi_apk.py` 新增 4 条：假失败被纠偏为成功、unauthorized / offline
+  给准确提示、真失败（地址不在 adb devices）不误判；并锁「失败只播一条」
+  （后端单一推送源）。
+
+## 验证
+- `pytest`：**1294 passed / 1 skipped**（较上轮 +4）。
+- `pyflakes backend core tools tests`：0。
+- 前端 76 文件 0 失败。

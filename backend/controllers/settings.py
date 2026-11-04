@@ -6,6 +6,7 @@ from backend.controller import (
     prefs_path, resolve_save_dir, save_prefs_checked, subprocess,
     wifi
 )
+from core.devices import parse_devices
 
 class SettingsMixin:
     """设置、adb 状态、Wi-Fi 无线调试。"""
@@ -186,24 +187,70 @@ class SettingsMixin:
             r = subprocess.run([self._adb_argv(), "connect", addr],
                                **adb_kwargs(25))
         except Exception as e:
-            return {"ok": False, "reason": "执行 adb connect 失败：%s" % e}
+            self._push_status(
+                "err", "✗ 无线连接失败（%s）：执行 adb connect 失败：%s"
+                       % (addr, e), toast=True)
+            return {"ok": False, "reason": "执行 adb connect 失败：%s" % e,
+                    "address": addr}
         res = wifi.parse_connect_output(
             (r.stdout or "") + "\n" + (r.stderr or ""))
+        # 以 adb devices 的实际状态对账（见方法 docstring）。adb connect 报成功但
+        # 设备还没上线、报失败但设备其实已注册，都要在这里被纠偏，否则就是「假失败」。
+        state = self._wifi_device_state(addr)
+        if state == "device":
+            return self._wifi_connect_ok(addr)
+        if state == "unauthorized":
+            self._push_status(
+                "err", "✗ 无线连接失败（%s）：设备未授权——请在车机 / 手机端"
+                       "「允许 USB 调试吗」弹窗里点「允许」，再重新连接"
+                       % addr, toast=True)
+            return {"ok": False,
+                    "reason": "设备未授权，请在设备上点「允许 USB 调试」后重试",
+                    "address": addr}
+        if state == "offline":
+            self._push_status(
+                "err", "✗ 无线连接失败（%s）：设备已注册但连接未就绪（offline）——"
+                       "确认电脑与设备在同一网段后，稍等几秒再试" % addr,
+                toast=True)
+            return {"ok": False,
+                    "reason": "设备已注册但连接未就绪（offline），稍后重试",
+                    "address": addr}
         if not res["ok"]:
             self._push_status("err", "✗ 无线连接失败（%s）：%s"
                               % (addr, res["message"]), toast=True)
             return {"ok": False, "reason": res["message"], "address": addr}
+        # adb connect 成功且设备已在列表（状态非上述三类，理论不会到这）：兜底仍按
+        # 成功处理，避免「连上了却报失败」。
+        return self._wifi_connect_ok(addr)
+
+    def _wifi_connect_ok(self, addr):
+        """连接成功的统一收尾：记最近、推成功、刷设备列表。"""
         recent = self._wifi_remember(addr)
         self._push_status("ok", "✓ 无线调试已连接：%s" % addr, toast=True)
-        # 连上不代表 `adb devices` 立刻可见（首次连接要等设备完成认证），
-        # 但刷新一次能让已就绪的设备马上出现在左侧列表里。
-        # key 独立于常规刷新（refresh）：那个 key 被自动刷新循环与手动刷新
-        # 共用，撞上就会「复用存活线程」而这次刷新被静默吞掉——表现是
-        # 「提示已连接，但左边列表里没有这台设备」。
+        # 连上不代表 `adb devices` 立刻可见（首次连接要等设备完成认证），但刷新一次
+        # 能让已就绪的设备马上出现在左侧列表里。key 独立于常规刷新（refresh）：
+        # 那个 key 被自动刷新循环与手动刷新共用，撞上就会「复用存活线程」而这次
+        # 刷新被静默吞掉——表现是「提示已连接，但左边列表里没有这台设备」。
         self.workers.spawn("refresh_wifi", self.devices.refresh,
                            self._adb_argv(), True)
-        return {"ok": True, "address": addr, "message": res["message"],
+        return {"ok": True, "address": addr, "message": "连接成功",
                 "recent": recent}
+
+    def _wifi_device_state(self, addr):
+        """查 `adb devices`，看 addr 当前在不在列表、是什么状态。
+
+        用于无线连接后对账：`adb connect` 的输出（尤其失败）常常不准。
+        返回 'device' / 'unauthorized' / 'offline' / ... 或 ''（不在列表）。
+        """
+        try:
+            r = subprocess.run([self._adb_argv(), "devices"], **adb_kwargs(10))
+        except Exception:
+            return ""
+        text = ((r.stdout or "") + "\n" + (r.stderr or ""))
+        for serial, state, _ in parse_devices(text):
+            if serial == addr:
+                return state
+        return ""
 
     def wifi_disconnect(self, address):
         """`adb disconnect <ip:port>`；也接受 mDNS 序列号原样传入。"""
