@@ -8,8 +8,10 @@
 1. **token 不能落进版本库**。常见做法是把 token 写进 remote URL
    （`https://user:token@github.com/...`），但那样 token 会明文躺在 `.git/config`，
    而且 `git push` 出错时会把**整条 URL 连同 token** 打回控制台 —— 随手截图发群里就泄了。
-   这里改用 `http.extraHeader` 只在**本次命令**注入认证头，remote 保持干净 URL，
-   git 回显与报错里都不会出现 token。
+    这里改用 `http.extraHeader` 只在**本次命令**注入认证头，remote 保持干净 URL，
+   git 回显与报错里都不会出现 token。此外 `--status` 与推送成功提示打印的远端地址，
+   也先用 `_mask_url` 把 `user:token@` 打码——防止 clone 时万一写进 URL 的 token
+   在这些地方漏出来。
 
 2. **凭证要有固定的读取顺序**，否则换台机器就得改代码。优先级：
      命令行 --token  >  环境变量 GH_TOKEN / GITHUB_TOKEN  >  .git-credential 文件
@@ -37,6 +39,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -92,6 +95,28 @@ def _mask(tok):
     if len(tok) <= 12:
         return tok[:2] + "*" * (len(tok) - 2)
     return "%s…%s（%d 位）" % (tok[:10], tok[-4:], len(tok))
+
+
+def _mask_url(url):
+    """远端地址若混入了 `user:token@`，只留 `scheme://user:***@host/…`，避免截图泄密。
+
+    正常的 remote 是干净的（`https://github.com/...`），原样返回即可；但若有人 clone
+    时把 token 写进了 URL（正是本脚本要避免、却拦不住别人这么做的写法），`--status`
+    与推送成功提示会把整条 URL 原样打回控制台——这正是要堵的坑。这里在**显示**前先把
+    凭据段打码；remote 的读写逻辑仍用原始地址，不受影响。
+    """
+    if not url:
+        return url
+    m = re.match(r"^(https?://)([^@/]+)@(.+)$", url)
+    if not m:
+        return url
+    cred = m.group(2)
+    if ":" in cred:
+        user, _pw = cred.split(":", 1)
+        cred = "%s:***" % user
+    else:
+        cred = "***"
+    return "%s%s@%s" % (m.group(1), cred, m.group(3))
 
 
 # --------------------------------------------------------------------------- #
@@ -178,12 +203,12 @@ def remote_url():
 def _ensure_remote(url):
     cur = remote_url()
     if cur == url:
-        return True, "远端已是 %s" % url
+        return True, "远端已是 %s" % _mask_url(url)
     if cur:
         _git("remote", "set-url", "origin", url)
-        return True, "远端改指 %s（原 %s）" % (url, cur)
+        return True, "远端改指 %s（原 %s）" % (_mask_url(url), _mask_url(cur))
     _git("remote", "add", "origin", url)
-    return True, "已添加远端 %s" % url
+    return True, "已添加远端 %s" % _mask_url(url)
 
 
 def _ensure_identity():
@@ -270,7 +295,7 @@ def main(argv=None):
             return 0
         branch, items = repo_state()
         _out("分支：%s" % (branch or "(未知)"))
-        _out("远端：%s" % (remote_url() or "(未设置)"))
+        _out("远端：%s" % _mask_url(remote_url() or "(未设置)"))
         if not items:
             _out("工作区：干净，没有待提交的改动")
         else:
@@ -355,7 +380,7 @@ def main(argv=None):
     if rc2 == 0:
         _rc3, s = _git("log", "-1", "--pretty=%s")
         subject = s.strip()
-    steps.append("已推送 %s → %s（%s）" % (hash_.strip(), args.branch, remote_url()))
+    steps.append("已推送 %s → %s（%s）" % (hash_.strip(), args.branch, _mask_url(remote_url())))
     for s in steps:
         _out("· %s" % s)
     if committed and subject:

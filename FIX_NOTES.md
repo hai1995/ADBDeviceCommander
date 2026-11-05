@@ -3864,3 +3864,51 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 - 令牌化 CSS：括号配平 660/660，浅色覆盖层存在，深色块与旧值逐字一致。
 - `sanitize_prefs` 的 theme 校验：非法字符串 `neon` / 数字 `123` 均回落 `dark`
   并告警，合法 `dark/light/system` 保留，`default_prefs` 含 `"theme": "dark"`。
+
+# 第四十九轮（`tools/push_github.py`：堵上「远端地址回显 token」的漏点）
+
+## 一、这轮在补什么
+
+脚本的立身之本是「token 绝不出现在控制台」。文档与测试都反复强调这一点：推送走
+`http.extraHeader`（不写进 remote URL），失败时报文先打码再翻译。但 `remote_url()`
+在**三处被原样打印**了：
+
+- `_ensure_remote` 的提示（`远端已是 …` / `远端改指 …`）；
+- `--status` 的「远端：…」；
+- 推送成功提示「已推送 …（…）」里的 remote。
+
+正常 remote 是干净的（`https://github.com/...`），所以历史测试桩成干净地址后一切
+正常——**恰恰漏掉了**「有人 clone 时把 token 写进了 URL」这一真实路径。那个 URL 形如
+`https://x-access-token:github_pat_…@github.com/...`，原样打印就等于把明文 token
+打回控制台，正是脚本声称要堵的坑。
+
+`tests/test_tools_push_github.py` 的 `test_push_url_stays_clean` 只桩了**干净** remote，
+所以这个泄漏在回归测试里一直没被抓到——这是既有测试真正的盲区。
+
+## 二、改法
+
+新增 `_mask_url(url)`：用正则识别 `scheme://user:pass@host/path`，只把凭据段换成
+`user:***`（`user@` 形式则整体换成 `***`），scheme / host / path 原样保留。仅用于
+**显示**，remote 的读写逻辑仍用原始地址。三处打印统一改用 `_mask_url(remote_url())`。
+
+测试补齐：给 `_stub_git` 加 `remote_url` 参数（默认仍是干净地址，既有测试零改动），
+新增两条断言——桩成「内嵌 token 的远端地址」后，`--status` 与推送成功提示的回显里
+`TOKEN` 不得出现、且必须含 `***`。这样无论 remote 里有没有 token，控制台都不会泄密。
+
+## 三、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `tools/push_github.py` | 新增 `_mask_url`；`_ensure_remote` / `--status` / 推送成功提示三处远端地址打印改走 `_mask_url`；模块文档补一句说明；`import re` |
+| `tests/test_tools_push_github.py` | `_stub_git` 加 `remote_url` 参数；新增 `test_status_masks_token_leaked_into_remote_url` / `test_success_line_masks_token_in_remote_url` |
+| `README.md` | 「推送到 GitHub」的「为什么」blockquote 补一句：远端地址显示时也会打码 |
+| `FIX_NOTES.md` | 本轮 |
+
+## 四、验证
+
+- `python -m pytest tests/test_tools_push_github.py -q`：**31 passed**（原 29 + 新 2），零回归。
+- 真实仓库（remote 确实内嵌了 token）跑 `tools/push_github.py --status`：
+  远端行显示 `https://x-access-token:***@github.com/hai1995/ADBDeviceCommander.git`，
+  `grep` 全文 token 命中 **0 行**——确认不再回显明文。
+- `pyflakes tools/push_github.py`：零输出。
+

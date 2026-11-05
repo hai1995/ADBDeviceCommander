@@ -203,7 +203,9 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 > 而且 `git push` 一旦失败会把**整条 URL 连同 token** 打回控制台——随手截图发群里就泄了。
 > `push_github.py` 改用 `http.extraHeader` 只在本次命令注入认证头：
 > remote 保持干净地址，git 的回显与报错里都不含 token；连推送失败时打印的
-> git 原文都会先把 token 换成 `***`。
+> git 原文都会先把 token 换成 `***`。另外 `--status` 与推送成功提示里打印的远端地址，
+> 也会先用 `_mask_url` 把 `user:token@` 打码——万一 clone 时把 token 写进了 URL，
+> 也不会在这里原样漏出来。
 
 推送失败的提示是翻译过的，直接说下一步：
 
