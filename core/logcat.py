@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-core.logcat —— logcat 行分类 / 异常识别（纯逻辑，与 UI 无关）。
+core.logcat —— logcat 行分类 / 异常识别 / 时间戳解析（纯逻辑，与 UI 无关）。
 供 Logcat 监控实时渲染与抓取共用。
 
 逻辑与 旧 Tk 版（已移除） 中的 _logcat_classify 同源（见 tests/test_logcat_capture.py）。
 """
+import datetime
+import os
+
 from core.constants import LOGCAT_EXC_RE, LOGCAT_RE
 
 # 直接判为异常的 tag（AndroidRuntime 打 Java 崩溃、libc 打 native crash）。
@@ -112,3 +115,122 @@ def classify_line(line: str):
         "msg": msg,
         "exc": _is_exception_like(tag, msg),
     }
+
+
+# ---------------------------------------------------------------------------
+# threadtime 行首时间戳：「MM-DD HH:MM:SS.mmm」（18 字符，不含年份）
+# ---------------------------------------------------------------------------
+TS_LEN = 18
+
+
+def ts_prefix(raw: str) -> str:
+    """取 threadtime 行首的「MM-DD HH:MM:SS.mmm」，不像日志行则返回 ""。
+
+    只做切片 + 两个字符位判断，不跑正则：抓取是全量落盘的，满缓冲场景每秒
+    可上万行，每行再匹配一次正则没有意义。
+    """
+    if not raw or len(raw) < TS_LEN or raw[2] != "-" or raw[5] != " ":
+        return ""
+    return raw[:TS_LEN]
+
+
+def ts_epoch(ts: str, ref=None):
+    """把「MM-DD HH:MM:SS.mmm」解析为 epoch 秒（本地时区）；失败返回 None。
+
+    logcat 的 threadtime 里**没有年份**，只能推断：以 ref（默认现在）的年份为
+    基准，若算出来的时刻比 ref 晚了半年以上，说明那一行发生在上一年。
+
+    为什么不能用字符串比较代替（旧实现在重连去重时就是直接比字符串）：
+    「12-31 23:59」在字符串上大于「01-01 00:00」，跨年录制一夜之后，新日志会
+    被整体判成「比断点更早的重放」而全部丢弃 —— 日志从零点起彻底停住。设备
+    校时回退同理。故凡是「看起来时间在倒流」的地方都必须落到这里算精确时间。
+    """
+    if not ts or len(ts) < TS_LEN:
+        return None
+    try:
+        mon = int(ts[0:2])
+        day = int(ts[3:5])
+        hh = int(ts[6:8])
+        mm = int(ts[9:11])
+        ss = int(ts[12:14])
+        ms = int(ts[15:18])
+    except (ValueError, TypeError):
+        return None
+    ref = ref if isinstance(ref, (int, float)) else None
+    if ref is None:
+        import time
+        ref = time.time()
+    year = datetime.datetime.fromtimestamp(ref).year
+    for y in (year, year - 1):
+        try:
+            dt = datetime.datetime(y, mon, day, hh, mm, ss, ms * 1000)
+        except ValueError:
+            return None
+        v = dt.timestamp()
+        # 比 ref 晚半年以上 => 那一行其实是去年的（跨年续写靠这一条纠正）
+        if v - ref <= 183 * 86400:
+            return v
+    return None
+
+
+def _ts_of_bytes(raw: bytes) -> str:
+    """从一行原始字节里取时间戳（容错：非法字节替换，不抛异常）。"""
+    try:
+        text = raw.decode("utf-8", "replace")
+    except Exception:
+        return ""
+    return ts_prefix(text)
+
+
+def read_time_bounds(path, head_bytes=128 * 1024, tail_bytes=128 * 1024):
+    """读抓取文件的 (首条, 末条) threadtime 时间戳；取不到则对应位置为 None。
+
+    只读文件头尾各若干字节：日志文件动辄上百 MB，为了两个时间戳整份读一遍
+    既慢又占内存；而首末两条必然落在头/尾附近（缺口标记行、adb 横幅不算
+    时间戳，会被跳过）。
+
+    用途是录屏收尾时校验「配套日志到底跟到什么时候」——见
+    backend.controllers.record.RecordMixin._logcat_coverage_notes。
+    """
+    if not path:
+        return None, None
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None, None
+    if size <= 0:
+        return None, None
+    try:
+        with open(path, "rb") as f:
+            head = f.read(min(head_bytes, size))
+    except OSError:
+        return None, None
+    first = ""
+    for raw in head.split(b"\n"):
+        first = _ts_of_bytes(raw)
+        if first:
+            break
+    else:
+        first = ""
+    parts = None
+    if size <= len(head):
+        parts = head.split(b"\n")
+    else:
+        try:
+            with open(path, "rb") as f:
+                f.seek(max(0, size - tail_bytes))
+                tail = f.read()
+        except OSError:
+            return (first or None), None
+        parts = tail.split(b"\n")
+        # seek 可能落在一行中间：丢掉第一段残行（它不是完整行，时间戳不可信）
+        if len(parts) > 1:
+            parts = parts[1:]
+    last = ""
+    for raw in reversed(parts or []):
+        last = _ts_of_bytes(raw)
+        if last:
+            break
+    else:
+        last = ""
+    return (first or None), (last or None)

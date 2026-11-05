@@ -930,22 +930,28 @@ def test_reap_dead_recordings_skips_unknown_serial(monkeypatch, tmp_path):
 
 def test_device_present_true_only_when_get_state_device(monkeypatch):
     """get-state 决定可达性：device→True；offline / 非零退出→False（确认掉线）；
-    adb 本身不可达（缺失 / 超时抛异常）→ None（无法判定，未知）。"""
+    adb 本身不可达（缺失 / 超时抛异常）→ None（无法判定，未知）。
+
+    假件必须按 `text=True` 语义返回 **str**（真 adb_kwargs 就是文本模式）：
+    旧实现既传了 capture_output=True 又显式传 stdout=/stderr=（subprocess 直接
+    抛 ValueError），还按 bytes 比对 —— 两个错叠加，`device_present` 在真机上
+    恒返回 None，掉线永远判不出来。
+    """
     class _FakeRun:
         def __init__(self, stdout, rc):
             self.stdout = stdout
             self.returncode = rc
-            self.stderr = b""
+            self.stderr = ""
 
-    def fake_run(stdout=b"device\n", rc=0):
+    def fake_run(stdout="device\n", rc=0):
         def _run(*a, **k):
             return _FakeRun(stdout, rc)
         return _run
-    monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"device\n", 0))
+    monkeypatch.setattr(screen_service.subprocess, "run", fake_run("device\n", 0))
     assert device_present("adb", "A1") is True
-    monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"offline\n", 0))
+    monkeypatch.setattr(screen_service.subprocess, "run", fake_run("offline\n", 0))
     assert device_present("adb", "A1") is False
-    monkeypatch.setattr(screen_service.subprocess, "run", fake_run(b"", 1))
+    monkeypatch.setattr(screen_service.subprocess, "run", fake_run("", 1))
     assert device_present("adb", "A1") is False
     # adb 本身不可达（不存在 / 超时抛异常）→ 无法判定状态，返回 None（未知），
     # 且不得向上抛。调用方据此把「查不到」与「确认掉线」区分开（logcat 重连不会
@@ -954,6 +960,35 @@ def test_device_present_true_only_when_get_state_device(monkeypatch):
         raise FileNotFoundError("adb")
     monkeypatch.setattr(screen_service.subprocess, "run", boom)
     assert device_present("adb", "A1") is None
+
+
+def test_device_present_passes_valid_subprocess_kwargs(monkeypatch):
+    """回归：探测参数不能和 adb_kwargs 自带的 capture_output 冲突。
+
+    旧写法 `subprocess.run([...], stdout=PIPE, stderr=PIPE, **adb_kwargs(5))`
+    每次都会抛 `ValueError: stdout and stderr arguments may not be used with
+    capture_output.`，异常被 `except Exception: return None` 吞掉 —— 函数在
+    真机上**恒为 None**。后果不是一句日志：logcat 抓取的掉线判定
+    （`device_present(...) is False`）永远不成立，设备真掉线也走不成「等重连
+    续写」；重连轮询又把 None 当「还没回来」，只能一路等到窗口耗尽；录屏中断
+    原因也永远被说成「设备连接已断开」。
+    """
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["kw"] = kw
+        # 复刻 subprocess.run 的参数冲突检查（真机上一次都没跑通过，正因如此）
+        if kw.get("capture_output") and (kw.get("stdout") is not None
+                                         or kw.get("stderr") is not None):
+            raise ValueError("stdout and stderr arguments may not be used "
+                             "with capture_output.")
+        raise FileNotFoundError("adb-not-installed-in-ci")
+
+    monkeypatch.setattr(screen_service.subprocess, "run", spy)
+    assert device_present("adb", "A1") is None
+    assert seen["kw"].get("capture_output") is True
+    assert "stdout" not in seen["kw"] and "stderr" not in seen["kw"], \
+        "显式 stdout/stderr 会和 adb_kwargs 的 capture_output 冲突：%r" % (seen["kw"],)
 
 
 def test_death_message_says_connection_lost_when_device_gone(monkeypatch):

@@ -8,7 +8,31 @@ from backend.controller import (
     plan_size, probe_player, safe_name, scrcpy_probe_info,
     ThreadPoolExecutor, time, zipfile
 )
+from backend.screen_service import device_epoch
 from backend.video_join import join_segments
+from core.constants import LOGCAT_COVERAGE_WARN_S
+from core.logcat import read_time_bounds, ts_epoch
+
+
+def _fmt_span(sec):
+    """把秒数说成人话：「24 分钟」「1 分 30 秒」「45 秒」。
+
+    告警文案里塞一个「1440 秒」用户还得自己换算，而他要判断的恰恰是
+    「我录了 34 分钟、日志只跟了 10 分钟」这种量级关系。
+    """
+    try:
+        sec = int(max(0, sec))
+    except (TypeError, ValueError):
+        return "未知时长"
+    if sec >= 3600:
+        h, rest = divmod(sec, 3600)
+        m = rest // 60
+        return ("%d 小时 %d 分钟" % (h, m)) if m else ("%d 小时" % h)
+    if sec >= 60:
+        m, s = divmod(sec, 60)
+        return ("%d 分 %d 秒" % (m, s)) if s else ("%d 分钟" % m)
+    return "%d 秒" % sec
+
 
 class RecordMixin:
     """录屏、投屏（scrcpy/备用）、麦克风。"""
@@ -450,6 +474,7 @@ class RecordMixin:
                 self._push_toast(
                     "ok", "✓ 录屏已完成%s：%d 个文件已保存到 %s"
                     % (seg_tip, len(files), sess.get("dir") or "保存目录"))
+            self._push_logcat_notes(sess)
             return {"ok": True}
         except Exception as ex:
             self._push_toast("err", "⚠ 录屏收尾出现异常：%s" % ex)
@@ -766,6 +791,11 @@ class RecordMixin:
                 continue
             if os.path.exists(p):
                 rec_files.append(p)
+        # 覆盖度校验必须放在打包之前：打包会删源 txt，之后就没法再读时间戳了。
+        # 结论只进内存（sess["logcat_notes"]），由调用方在「✓ 录屏已完成」之后
+        # 逐条播报 —— 从这里直接弹 toast 会被后面那条成功提示盖掉。
+        sess["logcat_notes"] = self._logcat_coverage_notes(
+            sess, sess.get("logcat_captures") or {})
         # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
         zpath = None
         if sess.get("with_zip") and rec_files:
@@ -774,6 +804,94 @@ class RecordMixin:
                 zpath = z
                 self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
         return rec_files, zpath
+
+    def _logcat_coverage_notes(self, sess, cap_map):
+        """录屏收尾时校验「同步日志到底跟到什么时候」，返回 [(级别, 文案)]。
+
+        为什么非做不可：用户实况是视频录到 11:14，配套 logcat 的最后一条却停在
+        10:50 —— 后 24 分钟一条日志都没有，而收尾只弹了一句「✓ 录屏已完成」。
+        直到事后拿视频时间轴去对日志才发现日志是残缺的，那时既补不回来、也
+        说不清断在哪。所以收尾时就必须把「日志比视频短了多久」讲到脸上。
+
+        判据只用**设备自己的钟**（`adb shell date +%s`）：视频与日志都发生在
+        设备时间轴上，拿设备当前时刻减日志最后一条的时间戳，得到的差值既不受
+        主机时钟影响，也不会把「设备时钟比本机慢」误判成「日志丢了 24 分钟」
+        ——后者顺带单独提示，因为它同样会让用户对着两个时间轴怀疑人生。
+
+        任何一步取不到（设备已拔、shell 被拦截、文件里没有时间戳）都安静跳过：
+        这是增强提示，不是判定成功/失败的依据，宁可不说也不给错结论。
+        """
+        jobs = [(s, p) for s, p in (cap_map or {}).items() if p]
+        if not jobs:
+            return []
+        host_now = time.time()
+
+        def _one(job):
+            s, p = job
+            out = []
+            try:
+                if not os.path.isfile(p):
+                    # 文件不在了（保存目录被删 / 同名文件被移走）：说明本次日志
+                    # 根本没落盘，别让用户以为包里那份是完整的。
+                    return [("warn", "⚠ %s 的配套 logcat 文件不存在（%s），"
+                                      "本次录制产物里没有该设备的日志" % (s, p))]
+                _first, last = read_time_bounds(p)
+                if not last:
+                    return [("warn", "⚠ %s 的配套 logcat 文件里没有任何日志行"
+                                      "（抓取可能一开始就被中断），"
+                                      "本次日志不可用" % s)]
+                dev_now = device_epoch(self.state.adb_path, s, timeout=3)
+                if dev_now is None:
+                    return []
+                last_ep = ts_epoch(last, ref=dev_now)
+                if last_ep is None:
+                    return []
+                gap = dev_now - last_ep
+                if gap >= LOGCAT_COVERAGE_WARN_S:
+                    out.append((
+                        "warn",
+                        "⚠ %s 的 logcat 只跟到 %s，距录屏结束还有约 %s 没有日志："
+                        "后段日志已丢失（文件内有 [logcat] 标记说明断点，"
+                        "状态栏有中断原因）" % (s, last, _fmt_span(gap))))
+                # 设备时钟与本机不一致：视频文件名（本机时间）与日志时间戳
+                # （设备时间）会天然差出这一段，按时间轴对照时极易被当成「日志
+                # 丢了一段」。只在偏差超过告警阈值时说一句，正常录屏不会出现。
+                skew = dev_now - host_now
+                if abs(skew) >= LOGCAT_COVERAGE_WARN_S:
+                    out.append((
+                        "info",
+                        "ℹ %s 的设备时钟与本机相差 %s（%s），视频与日志对照时请"
+                        "统一按设备时间看" % (
+                            s, _fmt_span(abs(skew)),
+                            "设备偏快" if skew > 0 else "设备偏慢")))
+            except Exception:
+                return out
+            return out
+
+        if len(jobs) == 1:
+            results = [_one(jobs[0])]
+        else:
+            # 每台一次 adb shell，串行在台数多时会把「已停止」拖出好几秒；
+            # 各设备彼此独立，直接并行。
+            with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+                results = list(pool.map(_one, jobs))
+        notes = []
+        for r in results:
+            notes.extend(r or [])
+        return notes
+
+    def _push_logcat_notes(self, sess):
+        """播报收尾阶段算出的「配套日志覆盖度」结论（见 _logcat_coverage_notes）。
+
+        必须排在「✓ 录屏已完成」之后：用户视线停在最后几条提示上，先报成功、
+        再报「日志其实少了 24 分钟」，他才不会把后者漏掉。warn 级同时弹 toast
+        （用户可能已经切去别的页签），并一律写进状态栏便于事后回看。
+        """
+        for level, text in (sess or {}).get("logcat_notes") or []:
+            if level == "warn":
+                self._push_toast("warn", text)
+            else:
+                self._push_status(level, text)
 
     def _merged_stem(self, vlist):
         """多段录制的「基名」（不含扩展名）。

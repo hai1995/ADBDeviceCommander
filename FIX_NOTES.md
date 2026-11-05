@@ -3424,3 +3424,122 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 - 受影响用例全过：file_* 8 个文件、chip_menu_layer 26、rec_cancel 64、ws_tabs 47、
   tool_card_order 55、main_tab_memory 16、file_input_modal 27。
 - 后端 `pytest`：1299 passed / 1 skipped；`pyflakes` 干净。
+
+---
+
+# 第四十四轮：录屏配套 logcat「后段日志整段丢失」——根因是两处真 bug 叠加
+
+**现象（用户实报）**：录屏停止后，视频最后时间点是 11:14，同一场录制的
+`logcat_*.txt` 最后一条却停在 10:50 —— 后 24 分钟一条日志都没有。界面全程只弹过
+「✓ 录屏已完成」，没有任何「日志断了」的提示，直到事后拿视频时间轴去对日志才发现。
+
+## 一、根因（两个 bug 叠在一起，缺一不可）
+
+### 1. `device_present()` 在真机上恒返回 `None`（`backend/screen_service.py`）
+
+```python
+subprocess.run([...], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+               **adb_kwargs(timeout))     # adb_kwargs 自带 capture_output=True
+```
+
+`subprocess.run` 明确禁止 `capture_output` 与显式 `stdout=/stderr=` 同时出现，每次
+调用都抛 `ValueError: stdout and stderr arguments may not be used with
+capture_output.`，又被 `except Exception: return None` 吞掉 —— **函数从来没成功执行
+过一次**。第二处错还叠在上面：`adb_kwargs` 是 `text=True`，比较却写成
+`r.stdout.strip() == b"device"`，即便跑通也永远不等。
+
+它不是一句日志的问题，而是三个判断的输入：
+
+| 使用点 | 旧行为（恒 None） | 后果 |
+|---|---|---|
+| `LogcatCapture._worker` 掉线判定 | `device_present(...) is False` 永假 | 设备**真掉线**也走不成「等重连续写」，一律落到「设备在线」分支 |
+| `LogcatCapture._wait_reconnect` | 轮询永远读到 None | 一旦进了重连等待，必然耗满 900 秒窗口才结束 |
+| `_build_death_message` | `not None` 恒真 | 录屏中断原因永远被说成「设备连接已断开」 |
+
+### 2. 「设备仍在线、`adb logcat` 自己退了」这一档，只报一句就收工
+
+连接存活时 `adb logcat` 不会自己退出，它退出了说明是被外力打断的（logd 重启 /
+adb 内部错误 / 别的工具 kill-server / **满缓冲全级别日志 + 录屏把 USB 带宽拉满**）。
+旧实现 `if lines > 0: eof_unexpected = True; break` —— 就此结束，不再拉起。
+
+两处叠起来正好是用户的现场：`adb logcat` 被 USB 带宽挤断 → `device_present` 恒 None
+判不出掉线 → 走「设备在线 EOF」→ 直接收尾。而 device 端 `screenrecord` 是独立进程、
+写入发生在设备本地（不占 USB），照旧录到 11:14。日志与视频就此分叉 24 分钟。
+
+## 二、修法
+
+### 1. `device_present()` 只传 `**adb_kwargs(...)`，按 `text=True` 比字符串
+顺带新增 `device_epoch(adb, serial)`：读设备当前 Unix 时间（`shell date +%s`），
+供收尾校验用。
+
+### 2. 非用户停止的 EOF 一律「自动重启」（`LOGCAT_CAP_RESTART_*`）
+与「设备掉线」同一套通道：写缺口标记 → 退避（0.4s 起、翻倍、上限 5s，用 Event
+等待，**用户点停止立刻生效**）→ 重新拉起 → 继续写同一个文件。三个出口防止无限拉起：
+
+- **连续 2 次重启都没带来任何新日志**（`LOGCAT_CAP_RESTART_NO_PROGRESS`）→ 停，
+  按「意外退出、文件在此处截断」报错；
+- 单次抓取最多重启 60 次（`LOGCAT_CAP_RESTART_MAX`，小时级录制里的偶发抖动够用）；
+- 文件一行都没写进去时不重启（重启换不来内容）。
+
+重启期间 `is_running()` 仍为 True（会话没结束），界面不会误切「空闲」。
+
+### 3. 续写时把「缺失时段」写进文件（`LOGCAT_CAP_HOLE_WARN_S`）
+设备环形缓冲区会滚：中断几分钟后，断连期间产生的日志已被新日志挤掉，新起的
+`adb logcat` 只能从缓冲区里现存最早的那条开始重放。旧实现只写一句「恢复连接」，
+文件看着是连续的 —— 这正是用户「丢了一大段却看不出」的原因。现在续写的第一条新
+日志离断点超过 5 秒，就写一条明确标记：
+
+```
+--------- [logcat] 日志缺失：10:50:12.000 ~ 11:10:03.000 之间（约 1191 秒）的日志未能取回（中断期间产生的日志已滚出设备缓冲区） ---------
+```
+
+### 4. 跨天 / 设备校时：去重不再比字符串
+重放去重原来直接比时间戳**字符串**：`"12-31 23:59" > "01-01 00:00"`，跨年录一整夜
+之后，零点起的日志会被整体判成「比断点更早的重放」全部跳过 —— 文件就那么停在
+23:59。现在凡是「看起来时间在倒流」都落到 `core.logcat.ts_epoch()` 比精确时刻
+（threadtime 没有年份，按基准时间推断、晚半年以上判为上一年）；另设
+`LOGCAT_CAP_REPLAY_SKIP_MAX` 兜底：跳过量远超缓冲区重放量级时，判定为设备时钟整体
+回退，停止去重并写标记，而不是把之后的日志全扔掉。
+
+### 5. 启动窗口内的「设备已消失」也要终止进程
+`notice_device_gone` 若落在 `_starting` 窗口（Popen 还没返回）只加了 `_gone`，
+worker 随后登记进程时并不检查它 —— 设备真拔掉、`adb logcat` 又迟迟不退出时，抓取
+既停不下来也走不到掉线判定，界面永远停在「采集中」。现在登记进程时一并看 `_gone`。
+
+### 6. 录屏收尾当场校验「日志跟到什么时候」
+`_session_teardown` 打包**之前**读日志文件首尾时间戳（只读头尾各 128KB，不整文件扫描），
+再用 `adb shell date +%s` 取设备当前时刻作参照 —— 双方都在设备时间轴上，不掺主机
+时钟，也不会把「设备时钟比本机慢」误判成「日志丢了 24 分钟」。差值超 60 秒就播报：
+
+> ⚠ A1 的 logcat 只跟到 10:50:12.000，距录屏结束还有约 24 分钟没有日志：
+> 后段日志已丢失（文件内有 [logcat] 标记说明断点，状态栏有中断原因）
+
+设备时钟与本机相差超 60 秒时另给一条 info（这种偏差会让视频文件名与日志时间戳
+天然差出一截，极易被当成「日志丢了一段」）。结论排在「✓ 录屏已完成」**之后**播报
+—— 用户视线停在最后几条，反过来的话他会以为这次录得完美无缺。
+
+### 7. 前端 reconnecting 文案
+这一档现在同时覆盖「设备掉线」与「抓取被中断后自动重启」，状态行不再写死
+「设备掉线，等待重连」，改为「采集中…（已中断，正在自动重连）」，具体原因由后端
+的 `text` 给出（状态栏）。
+
+## 三、回归测试
+
+- 新增 `tests/test_core_logcat_time.py`（11 条）：`ts_prefix` / `ts_epoch` 的正常、
+  跨年回退、单调性、垃圾输入；`read_time_bounds` 的小文件、大文件（> 256KB，只读
+  头尾）、尾部标记行不算时间戳、缺失 / 空文件。
+- 新增 `tests/test_backend_record_logcat_coverage.py`（8 条）：24 分钟缺口告警、
+  正常场景静默、文件无日志行 / 文件不存在的告警、设备时钟偏差提示、读不到设备时间
+  与 adb 异常时安静跳过、收尾把结论带进会话并由「停止」播报。
+- `test_backend_logcat.py` 改写并新增：设备在线 EOF 自动重启并续写、重启无进展时
+  报「已截断」、续写跨空洞写缺失标记、跨天续写不丢行（固定「现在」为 2026-02-06
+  让年份推断确定）、**退避期间点停止必须秒级收尾**（退避拉长到 30 秒仍要求 <1 秒
+  结束，只有被唤醒才可能通过）。
+- `test_backend_controller.py`：`device_present` 用例改按 `text=True` 语义给假件，
+  新增一条**参数合法性**回归（复刻 `subprocess.run` 的 `capture_output` 冲突检查）。
+- `test_backend_logcat_ratelimit.py`：抓取写完 3000 行后让后续重启立刻 EOF，并按
+  「真日志行」计数（文件里还会有 `[logcat]` 标记行）。
+- `logcat_capture_reconnect.test.cjs`：断言改为「自动重连」。
+
+后端 `pytest`：**1323 passed / 1 skipped**；`pyflakes` 干净。
+前端 `node tests/frontend/run-all.cjs`：**81 个文件、0 失败**。

@@ -907,7 +907,8 @@ def test_capture_reconnects_and_continues_after_device_drop(tmp_path, monkeypatc
     成功后继续往同一文件追加。
 
     可控假件：第一批日志 -> EOF（模拟掉线）-> device_present 先 False 后 True
-    （模拟重连）-> 第二批日志 -> EOF（设备仍在，正常收尾）。
+    （模拟重连）-> 第二批日志 -> EOF（设备仍在，本次抓取被外力打断）。
+    此后每轮都立刻 EOF 且没有新行，触发「连续无进展」退出（不会无限重启）。
     """
     first = ["08-29 10:00:00.000  1  1 I Tag: before-drop-%d\n" % i
              for i in range(3)]
@@ -918,8 +919,11 @@ def test_capture_reconnects_and_continues_after_device_drop(tmp_path, monkeypatc
     def fake_popen(cmd, **kw):
         call["n"] += 1
         if "logcat" in " ".join(cmd):
-            lines = first if call["n"] == 1 else second
-            return _EofProc(list(lines))
+            if call["n"] == 1:
+                return _EofProc(list(first))
+            if call["n"] == 2:
+                return _EofProc(list(second))
+            return _EofProc([])     # 之后立刻 EOF 且无新行 -> 「无进展」收尾
         return _FakeLogcatProc([])
     monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
 
@@ -929,8 +933,9 @@ def test_capture_reconnects_and_continues_after_device_drop(tmp_path, monkeypatc
         present["n"] += 1
         return present["n"] > 2
     monkeypatch.setattr(ls, "device_present", fake_present)
-    # 缩短重连轮询，让测试秒级完成
+    # 缩短重连轮询与重启退避，让测试秒级完成
     monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 0.02)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 
     bus = _FakeBus()
     path = str(tmp_path / "cap_drop.txt")
@@ -1155,8 +1160,13 @@ def test_capture_resume_skips_replayed_backlog(tmp_path, monkeypatch):
     # 重连后的会话：先重放缓冲区里的三行，再接着输出新的一行
     ses2 = ses1 + ["08-29 10:00:09.000  1  1 I Tag: d\n"]
     procs = [_EofProc(ses1), _EofProc(ses2)]
-    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: procs.pop(0))
+    # 之后的每一轮都立刻 EOF 且无新行（设备仍在，抓取被外力打断但拉不起来），
+    # 触发「连续无进展」收尾 —— 否则自动重启逻辑会一直往下拉。
+    monkeypatch.setattr(
+        ls.subprocess, "Popen",
+        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
     calls = {"n": 0}
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 
     def fake_present(adb, serial):
         calls["n"] += 1
@@ -1243,27 +1253,164 @@ def test_capture_flushes_below_1000_lines(tmp_path, monkeypatch):
         assert _wait_not_running(cap, "F")
 
 
-def test_eof_while_device_still_present_is_not_clean_success(tmp_path, monkeypatch):
-    """设备还在、adb logcat 却自己退了：必须报「已截断」，不能报「✓ 抓取完毕」。
+def test_eof_while_device_still_present_restarts_and_keeps_logging(tmp_path, monkeypatch):
+    """设备还在、adb logcat 却自己退了：必须自动重启并续写，不能就此收工。
 
-    回归：连接存活时 `adb logcat` 不会自己退出，此时文件在断点处截断，之后产生
-    的日志再也不会进来。旧逻辑只区分「设备掉线 / 用户停止」，这一档落到「正常
-    收尾」，前端弹「✓ 抓取完毕：N 行」—— 分析师照着视频回查时会以为时间线是
-    连续的，缺的那一段永远发现不了。
+    这是用户实况对应的主场景：录屏（设备端 screenrecord）+ 满缓冲全级别 logcat
+    同时跑，USB 带宽被打满 / adb 抖动时，`adb logcat` 会在设备**仍然在线**的
+    情况下自己退出。旧实现只在断点处报一句「意外退出」就结束，于是录屏继续到
+    11:14、配套日志的最后一条停在 10:50 —— 后 24 分钟一条不剩，直到事后拿
+    时间轴比对才发现，此时已无从补救。
+
+    新行为：写缺口标记 → 退避 → 重新拉起 → 继续写同一文件；stopped 带 gap，
+    前端不会弹「✓ 抓取完毕」。
     """
-    lines = ["08-29 10:00:00.%03d  1  1 I Tag: line %d\n" % (i, i)
+    first = ["08-29 10:00:00.%03d  1  1 I Tag: before-%d\n" % (i, i)
              for i in range(3)]
-    proc = _EofProc(lines)
-    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: proc)
+    second = ["08-29 10:05:00.%03d  1  1 I Tag: after-%d\n" % (i, i)
+              for i in range(3)]
+    procs = [_EofProc(first), _EofProc(second)]
+    monkeypatch.setattr(
+        ls.subprocess, "Popen",
+        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
     monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 
     bus = _FakeBus()
     cap = ls.LogcatCapture(bus, adb_path="adb")
     path = str(tmp_path / "logcat_E_001.txt")
     assert cap.start("E", path, ["main"]) is True
 
-    payload = _wait_payload(bus, "logcat_capture", "stopped")
+    payload = _wait_payload(bus, "logcat_capture", "stopped", timeout=8)
+    assert payload is not None, _statuses(bus, "logcat_capture")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for i in range(3):
+        assert "before-%d" % i in text, "中断前的日志不能丢：%r" % text
+        assert "after-%d" % i in text, (
+            "重启后的日志必须续写进同一个文件（旧实现就此停住）：%r" % text)
+    assert "意外中断" in text, "文件里必须留下中断标记，否则时间线看着是连续的"
+    # 中断过就必须如实标记，不能报「✓ 抓取完毕」
+    assert payload.get("gap") is True, payload
+
+
+def test_eof_restart_gives_up_when_no_new_lines(tmp_path, monkeypatch):
+    """重试也换不来任何新日志时：明确收尾并说明「已截断」，不无限重启。
+
+    自动重启必须有出口：设备 logd 出问题 / adb 每次都秒退时，无限拉起只会
+    把 CPU 和 adb 通道占满，而日志一行也不会多。连续无进展即停，并按
+    「意外退出、文件在此处截断」报错。
+    """
+    lines = ["08-29 10:00:00.%03d  1  1 I Tag: line %d\n" % (i, i)
+             for i in range(3)]
+    proc = _EofProc(lines)
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "logcat_E_002.txt")
+    assert cap.start("E", path, ["main"]) is True
+
+    payload = _wait_payload(bus, "logcat_capture", "stopped", timeout=8)
     assert payload is not None, _statuses(bus, "logcat_capture")
     err = payload.get("error") or ""
     assert "意外退出" in err and "截断" in err, (
-        "设备在线时 logcat 自己退出必须报截断，而不是干净成功：%r" % (payload,))
+        "重启也拿不到新日志时必须报截断，而不是干净成功：%r" % (payload,))
+    with open(path, encoding="utf-8") as f:
+        assert "line 0" in f.read()
+
+
+def test_capture_restart_writes_hole_marker_when_backlog_rolled_over(tmp_path, monkeypatch):
+    """续写起点离断点太远时，必须写下「缺失时段」标记。
+
+    设备缓冲区是环形的：中断几分钟后，断连期间产生的日志已经被新日志挤掉，
+    新起的 `adb logcat` 只能从缓冲区里现存最早的那条开始重放。此时若只写一句
+    「恢复连接」，文件看上去是连续的 —— 只有事后按视频对时间轴才会发现「这里
+    少了一大段」，而那时既补不回来也说不清断在哪。
+    """
+    first = ["08-29 10:50:00.000  1  1 I Tag: head\n"]
+    # 断点 10:50，续写起点已经是 11:10（中间 20 分钟已被缓冲区滚掉）
+    second = ["08-29 11:10:00.000  1  1 I Tag: tail\n"]
+    procs = [_EofProc(first), _EofProc(second)]
+    monkeypatch.setattr(
+        ls.subprocess, "Popen",
+        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "hole.txt")
+    assert cap.start("H", path, ["main"]) is True
+    assert _wait_payload(bus, "logcat_capture", "stopped", timeout=8) is not None
+
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    assert "日志缺失" in text, "续写跨越空洞时必须写缺失时段标记：%r" % text
+    assert "10:50:00.000" in text and "11:10:00.000" in text, text
+
+
+def test_capture_cross_day_timestamp_is_not_treated_as_replay(tmp_path, monkeypatch):
+    """跨年/跨天续写不能被当成「重放」整体丢掉。
+
+    旧实现在重连去重时直接比时间戳**字符串**：「12-31 23:59」>「01-01 00:00」，
+    于是跨年录一整夜之后，零点起的日志会被判成「比断点更早的重放」全部跳过，
+    文件就那么停在 23:59。这里用跨年的两批行验证新逻辑（比精确时刻）不丢数据。
+    """
+    first = ["12-31 23:59:50.000  1  1 I Tag: y1\n",
+             "12-31 23:59:59.000  1  1 I Tag: y2\n"]
+    second = ["01-01 00:00:05.000  1  1 I Tag: y3\n",
+              "01-01 00:00:06.000  1  1 I Tag: y4\n"]
+    procs = [_EofProc(first), _EofProc(second)]
+    monkeypatch.setattr(
+        ls.subprocess, "Popen",
+        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "crossday.txt")
+    # 固定「现在」为 2026-02-06，让年份推断确定（否则跨年用例的结果会随运行日期变化）
+    import datetime as _dt
+    _ref = _dt.datetime(2026, 2, 6, 12, 0, 0).timestamp()
+    _real = ls.ts_epoch
+    monkeypatch.setattr(ls, "ts_epoch",
+                        lambda ts, ref=None: _real(ts, ref=_ref))
+    assert cap.start("Y", path, ["main"]) is True
+    assert _wait_payload(bus, "logcat_capture", "stopped", timeout=8) is not None
+
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for tag in ("y1", "y2", "y3", "y4"):
+        assert "Tag: " + tag in text, "跨天后的日志被当成重放丢掉了：%r" % text
+
+
+def test_stop_during_restart_backoff_takes_effect_immediately(tmp_path, monkeypatch):
+    """自动重启的退避期间点停止，必须立刻收尾（不能干等一个退避间隔）。
+
+    「录屏停 → 日志同步停」靠的就是这一点：退避本来是为了错开 USB 带宽尖峰，
+    但它绝不能把用户的停止请求一起等掉 —— 那会让日志比视频多跑几十秒，
+    拿两边时间轴对照时恰好错在案发现场上。
+    """
+    lines = ["08-29 10:00:00.%03d  1  1 I Tag: a\n" % i for i in range(3)]
+    proc = _EofProc(lines)
+    monkeypatch.setattr(ls.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
+    # 退避拉长到 30 秒：只有「被唤醒」才可能秒级收尾
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 30)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_MAX_S", 30)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("B1", str(tmp_path / "backoff.txt"), ["main"]) is True
+    assert _wait_payload(bus, "logcat_capture", "reconnecting", timeout=5) is not None
+
+    t0 = time.time()
+    assert cap.stop("B1", zip_on_stop=False) is True
+    stopped = _wait_payload(bus, "logcat_capture", "stopped", timeout=3.0)
+    dt = time.time() - t0
+    assert stopped is not None, _statuses(bus, "logcat_capture")
+    assert dt < 1.0, "退避期间停止耗时 %.2fs，说明还在傻等而不是被唤醒" % dt

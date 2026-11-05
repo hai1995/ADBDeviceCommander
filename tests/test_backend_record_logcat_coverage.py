@@ -1,0 +1,159 @@
+# -*- coding: utf-8 -*-
+"""录屏收尾时对「配套 logcat 覆盖到哪」的校验（backend.controllers.record）。
+
+用户实况：视频录到 11:14，同步抓的 logcat 最后一条却停在 10:50 —— 后 24 分钟
+一条日志都没有，而收尾只弹了一句「✓ 录屏已完成」。直到事后拿视频时间轴对日志
+才发现日志是残缺的，那时既补不回来也说不清断在哪。这组用例锁定：收尾必须把
+「日志比视频短了多少」讲到脸上，且不能用主机时钟误判。
+"""
+import time
+
+from backend.controller import WebApi
+from backend.controllers import record as rec_mod
+
+
+def _make_api():
+    api = WebApi()
+    api.state.adb_path = "adb"
+    return api
+
+
+def _ts(at_epoch):
+    """把 epoch 秒转成 logcat 的 'MM-DD HH:MM:SS.mmm'。"""
+    return time.strftime("%m-%d %H:%M:%S", time.localtime(at_epoch)) + ".000"
+
+
+def _write_log(path, stamps):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("--------- beginning of main\n")
+        for s in stamps:
+            f.write("%s  1234  1234 I Tag: hi\n" % s)
+
+
+def test_notes_warn_when_log_stops_24_minutes_before_recording_ends(tmp_path, monkeypatch):
+    """日志比录屏早结束 24 分钟：必须给出 warn，并带上具体时刻与时长。"""
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 1500), _ts(now - 1440)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: now)
+
+    notes = api._logcat_coverage_notes({}, {"A1": p})
+    warns = [t for lvl, t in notes if lvl == "warn"]
+    assert warns, notes
+    msg = warns[0]
+    assert "只跟到" in msg and "24 分钟" in msg, msg
+    assert _ts(now - 1440)[:8] in msg, "要写明日志停在哪一刻：%s" % msg
+
+
+def test_notes_silent_when_log_covers_recording(tmp_path, monkeypatch):
+    """日志跟到最后一刻（差几秒）：正常场景一句都不该说，别制造噪音。"""
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 600), _ts(now - 2)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: now)
+
+    assert api._logcat_coverage_notes({}, {"A1": p}) == []
+
+
+def test_notes_warn_when_file_has_no_log_lines(tmp_path, monkeypatch):
+    """文件里一条 threadtime 都没有：说明整场录制都没抓到日志，必须说清。"""
+    api = _make_api()
+    p = str(tmp_path / "logcat_A1.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("--------- beginning of main\n")
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: int(time.time()))
+
+    notes = api._logcat_coverage_notes({}, {"A1": p})
+    assert notes and notes[0][0] == "warn"
+    assert "没有任何日志行" in notes[0][1], notes
+
+
+def test_notes_warn_when_file_missing(tmp_path, monkeypatch):
+    """抓取登记了路径、文件却不存在（目录被删 / 被移走）：产物里没有日志。"""
+    api = _make_api()
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: int(time.time()))
+    notes = api._logcat_coverage_notes(
+        {}, {"A1": str(tmp_path / "gone.txt")})
+    assert notes and notes[0][0] == "warn"
+    assert "文件不存在" in notes[0][1], notes
+
+
+def test_notes_report_device_clock_skew(tmp_path, monkeypatch):
+    """设备时钟与本机差 30 分钟：要把这个事实点出来。
+
+    这种场景下视频（按本机时间命名）与日志（设备时间戳）天然差出半小时，
+    用户很容易把它当成「日志丢了一段」。说清是时钟偏差，比让他去猜有用。
+    """
+    api = _make_api()
+    now = int(time.time())
+    dev_now = now + 1800
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(dev_now - 600), _ts(dev_now - 2)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: dev_now)
+
+    notes = api._logcat_coverage_notes({}, {"A1": p})
+    infos = [t for lvl, t in notes if lvl == "info"]
+    assert infos, notes
+    assert "设备时钟" in infos[0] and "偏快" in infos[0], infos
+    # 日志本身是跟到最后一刻的，不该误报「后段日志丢失」
+    assert not [t for lvl, t in notes if lvl == "warn"], notes
+
+
+def test_notes_skip_quietly_when_device_time_unavailable(tmp_path, monkeypatch):
+    """读不到设备时间（已拔线 / shell 被拦）：安静跳过，不给基于猜测的结论。"""
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 900)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: None)
+    assert api._logcat_coverage_notes({}, {"A1": p}) == []
+
+
+def test_notes_survive_adb_exception(tmp_path, monkeypatch):
+    """探测过程抛异常也不能影响收尾：返回空列表即可。"""
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 900)])
+
+    def boom(*a, **k):
+        raise RuntimeError("adb 炸了")
+
+    monkeypatch.setattr(rec_mod, "device_epoch", boom)
+    assert api._logcat_coverage_notes({}, {"A1": p}) == []
+
+
+def test_teardown_records_notes_and_stop_broadcasts_them(tmp_path, monkeypatch):
+    """收尾把结论存进会话，由「停止」在成功提示之后播报出来。
+
+    顺序很关键：先「✓ 录屏已完成」再「日志少了 24 分钟」—— 用户视线停在最后
+    几条提示上，反过来的话他会以为这次录得完美无缺。
+    """
+    api = _make_api()
+    now = int(time.time())
+    log_path = str(tmp_path / "logcat_A1.txt")
+    _write_log(log_path, [_ts(now - 1500), _ts(now - 1440)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: now)
+
+    api._rec_session = {
+        "ts": "20260101_000000", "dir": str(tmp_path), "with_zip": False,
+        "videos": {}, "devaudio": {}, "logcat_captures": {"A1": log_path},
+        "pointer_location_prev": {}, "show_touches_prev": {},
+    }
+    monkeypatch.setattr(api.logcat_capture, "stop", lambda *a, **k: True)
+    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: False)
+    monkeypatch.setattr(api.video, "is_recording", lambda s: False)
+    monkeypatch.setattr(api, "_zip_paths", lambda *a, **k: None)
+
+    files, zpath = api._session_teardown(api._rec_session)
+    assert log_path in files
+    notes = api._rec_session.get("logcat_notes") or []
+    assert notes, "收尾必须算出覆盖度结论"
+
+    api.bus.take()                     # 清掉收尾过程中的明细播报
+    api._push_logcat_notes(api._rec_session)
+    texts = [e["payload"].get("text") or "" for e in api.bus.take()
+             if e["kind"] == "status"]
+    assert any("只跟到" in t for t in texts), texts

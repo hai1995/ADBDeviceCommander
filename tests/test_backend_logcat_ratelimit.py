@@ -135,9 +135,17 @@ def test_capture_not_rate_limited(monkeypatch, tmp_path):
             return self._line
 
     def fake_popen(cmd, **kw):
-        return _CountingProc(line, n_lines)
+        # 第一轮吐满 3000 行后 EOF；之后每轮立刻 EOF 且无新行 —— 设备仍在线时
+        # 抓取会自动重启（见 logcat_service 的 LOGCAT_CAP_RESTART_*），这里让
+        # 重启走「连续无进展」出口，几毫秒内正常收尾。
+        if seen["n"] == 0:
+            seen["n"] += 1
+            return _CountingProc(line, n_lines)
+        return _CountingProc(line, 0)
 
+    seen = {"n": 0}
     monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.005)
 
     assert cap.start("A1", path, ["main"]) is True
     # 等 worker 把 3000 行写完并收尾（_CountingProc 吐完即 EOF）
@@ -154,6 +162,8 @@ def test_capture_not_rate_limited(monkeypatch, tmp_path):
     import os
     assert os.path.exists(path), "抓取文件不存在"
     with open(path, "r", encoding="utf-8") as f:
-        written = sum(1 for _ in f)
+        # 只数真日志行：文件里还会有 [logcat] 缺口标记（中断/续写时写入的），
+        # 它们不是被限流丢掉的日志，不该算进「全量」口径。
+        written = sum(1 for ln in f if "Tag: flood" in ln)
     assert written == n_lines, (
         "抓取模式被误限流：写入 %d 行，应为全量 %d 行" % (written, n_lines))

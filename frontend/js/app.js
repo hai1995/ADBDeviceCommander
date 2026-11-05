@@ -2361,15 +2361,17 @@
   }
   function onLogcatCapture(p) {
     if (p.status === "running") { lcCapRunning = true; els.lcCapStatus.textContent = "采集中…"; els.lcCapStop.disabled = false; els.lcCapStart.disabled = true; }
-    // 设备掉线、抓取正在等待重连：保持「采集中」，**不要**复位成空闲。否则界面会
-    // 错误地切回「空闲」、用户以为抓取已结束（实际在等重连并续写同一文件）。
-    // 这是「录屏+满缓冲全级别 logcat 同时跑、设备掉线也不丢日志」的关键 UI 不变量。
+    // 设备掉线 / 抓取被意外中断、正在自动重连：保持「采集中」，**不要**复位成
+    // 空闲。否则界面会错误地切回「空闲」、用户以为抓取已结束（实际在等重连并
+    // 续写同一文件）。这是「录屏+满缓冲全级别 logcat 同时跑也不丢日志」的关键
+    // UI 不变量 —— 用户实况就是日志在录屏中途断掉却毫无察觉，事后才发现少了
+    // 一大段。文案要能同时覆盖「掉线」与「被中断」两种原因，故不再写死掉线。
     if (p.status === "reconnecting") {
       lcCapRunning = true;
-      els.lcCapStatus.textContent = "采集中…（设备掉线，等待重连）";
+      els.lcCapStatus.textContent = "采集中…（已中断，正在自动重连）";
       els.lcCapStop.disabled = false;
       els.lcCapStart.disabled = true;
-      pushStatus("warn", p.text || "⚠ logcat 抓取设备掉线，正在等待重连…");
+      pushStatus("warn", p.text || "⚠ logcat 抓取已中断，正在自动重连…");
       return;
     }
     // 无勾选设备时才禁用「开始抓取」（取反写反过：有设备反而点不了）

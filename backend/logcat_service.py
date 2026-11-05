@@ -24,8 +24,12 @@ import zipfile
 from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
                             LOGCAT_DROP_NOTICE_MIN, LOGCAT_DROP_NOTICE_SEC,
                             LOGCAT_CAP_RECONNECT_MAX_S, LOGCAT_CAP_RECONNECT_POLL_S,
+                            LOGCAT_CAP_RESTART_MAX, LOGCAT_CAP_RESTART_NO_PROGRESS,
+                            LOGCAT_CAP_RESTART_BACKOFF_S,
+                            LOGCAT_CAP_RESTART_BACKOFF_MAX_S,
+                            LOGCAT_CAP_HOLE_WARN_S, LOGCAT_CAP_REPLAY_SKIP_MAX,
                             adb_popen_kwargs)
-from core.logcat import classify_line
+from core.logcat import classify_line, ts_epoch, ts_prefix as _ts_prefix
 from backend.screen_service import device_present
 
 
@@ -52,15 +56,18 @@ _BATCH_MAX = 400          # 单次 append 事件最多携带行数
 _FLUSH_MS = 0.05          # 批量刷新间隔（秒）
 
 
-def _ts_prefix(raw):
-    """取 threadtime 行首的「MM-DD HH:MM:SS.mmm」，不像日志行则返回 ""。
+def _write_marker(f, text):
+    """往抓取文件里写一条 「--------- [logcat] xxx ---------」分隔标记。
 
-    只做切片 + 两个字符位判断，不跑正则：抓取是全量落盘的，满缓冲场景每秒
-    可上万行，每行再匹配一次正则没有意义。
+    写不进去也不外抛：标记只是给人看的，它失败不该把整场抓取带崩。
+    返回是否写成功（调用方据此决定要不要把 gap 标记算数）。
     """
-    if len(raw) < 18 or raw[2] != "-" or raw[5] != " ":
-        return ""
-    return raw[:18]
+    try:
+        f.write("\n--------- [logcat] %s ---------\n" % text)
+        f.flush()
+        return True
+    except Exception:
+        return False
 
 
 def _logcat_cmd(adb, serial, buffers):
@@ -533,7 +540,19 @@ class LogcatCapture:
         # 注意别用 resume_ts 这个名字：下面写「恢复连接」标记时它装的是墙上
         # 时间字符串，撞在一起会把续写会话的每一行都误判成重放而全部跳过。
         last_log_ts = ""
+        # last_log_ts 对应的精确时刻（epoch 秒）。字符串比较只在「同一天内」
+        # 成立，跨年 / 设备校时回退时会判错，凡是走到「时间像是倒流」的分支才
+        # 落到 ts_epoch() 精确比较，正常路径（时间向前）完全不付这份开销。
+        last_log_epoch = None
+        # 本次续写是否已检查过「断点与续写起点之间的空洞」。只在新会话的第一条
+        # 新日志上检查一次：缺口只会出现在续写开头。
+        hole_checked = False
         skipped = 0                # 本次会话跳过的重放行数（仅用于提示）
+        # 「设备仍在线、logcat 自己退了」的自动重启计数（见 LOGCAT_CAP_RESTART_*）
+        restarts = 0
+        no_progress = 0            # 连续多少次重启没有任何新日志
+        lines_at_restart = 0       # 上一次重启时的累计行数（判断有没有进展）
+        restart_ts = ""            # 最近一次意外中断的墙上时间（写标记用）
         f = None
 
         session = 0
@@ -541,6 +560,9 @@ class LogcatCapture:
         try:
             while True:
                 session += 1
+                # 每进入一轮新会话就重置「续写空洞」检查位：缺口只会出现在
+                # 续写的最前面一条新日志上（见读循环里的 hole_checked）。
+                hole_checked = False
                 try:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -555,6 +577,12 @@ class LogcatCapture:
                 with self._lock:
                     self._starting.discard(serial)
                     self._procs[serial] = proc
+                    # 启动期间就被告知「设备已从设备列表消失」（拔线 / USB 复位恰好
+                    # 撞上拉起 adb 的瞬间）：必须主动终止，让读循环立刻结束并走
+                    # 「掉线」通道。不终止的话，设备端没有日志可读时
+                    # `for raw in proc.stdout` 会一直阻塞 —— 抓取既停不下来、
+                    # 也永远走不到掉线判定，界面就一直停在「采集中」。
+                    gone_now = serial in self._gone
                 if session == 1:
                     # 「启动瞬间点停止」必须在 open 文件之前判定：stop() 在 Popen 返回前
                     # （_starting 窗口内）调用时，此处已能看到 _stopreq，从而跳过建文件、
@@ -606,6 +634,10 @@ class LogcatCapture:
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "running",
                                    "path": path})
+                if gone_now:
+                    # 见上方 gone_now 的取值处：终止进程，把阻塞的读循环放出来，
+                    # 让它走掉线判定而不是无限挂着。
+                    _terminate(proc)
                 # ---- 读循环：把日志写入同一文件（重连后继续追加）----
                 try:
                     for raw in proc.stdout:
@@ -629,12 +661,54 @@ class LogcatCapture:
                             # 行早就写进文件了，再写一遍会让时间线上出现整段重复
                             # （对照视频找日志时以为同一段发生了两次），文件也白白
                             # 翻倍。按行首 threadtime 时间戳跳过断点之前的部分。
-                            skipped += 1
-                            continue
+                            #
+                            # 这里先做字符串比较是因为它零成本：同一天内字符串序
+                            # 就是时间序。但跨年（12-31 → 01-01）和设备校时回退会
+                            # 让它判错方向 —— 一律落到 ts_epoch() 比精确时刻，否则
+                            # 跨年录制一夜之后，零点起的日志会被整体当成「重放」
+                            # 全部丢掉，文件就那么停在 23:59。
+                            if last_log_epoch is None:
+                                last_log_epoch = ts_epoch(last_log_ts)
+                            cur_epoch = ts_epoch(ts)
+                            if (cur_epoch is not None and last_log_epoch is not None
+                                    and cur_epoch < last_log_epoch
+                                    and skipped < LOGCAT_CAP_REPLAY_SKIP_MAX):
+                                skipped += 1
+                                continue
+                            if skipped >= LOGCAT_CAP_REPLAY_SKIP_MAX:
+                                # 跳过量已远超「缓冲区重放」的量级：这不是重放，
+                                # 是设备时钟整体回退（校时 / 换电池 / 时区）。
+                                # 继续跳过等于把之后的日志全扔掉，故接受并标记。
+                                _write_marker(
+                                    f, "设备时间发生回退（%s → %s），已停止按"
+                                       "时间戳去重、按实际顺序继续记录"
+                                       % (last_log_ts, ts))
+                                gap_written = True
+                                skipped = 0
+                                last_log_ts = ""
+                                last_log_epoch = None
+                        if session > 1 and not hole_checked and ts and last_log_ts:
+                            # 续写的第一条新日志：若它离断点太远，说明断连期间产生的
+                            # 日志已经滚出设备环形缓冲区、永远取不回来了。必须写下
+                            # 缺失区间 —— 否则文件看着是连续的，只有事后按视频对
+                            # 时间轴才会发现「这里少了一大段」，而那时已无从补救。
+                            hole_checked = True
+                            prev = (last_log_epoch if last_log_epoch is not None
+                                    else ts_epoch(last_log_ts))
+                            cur = ts_epoch(ts)
+                            if (prev is not None and cur is not None
+                                    and cur - prev > LOGCAT_CAP_HOLE_WARN_S):
+                                _write_marker(
+                                    f, "日志缺失：%s ~ %s 之间（约 %d 秒）的日志"
+                                       "未能取回（中断期间产生的日志已滚出设备"
+                                       "缓冲区）" % (last_log_ts, ts, cur - prev))
+                                gap_written = True
                         f.write(raw)
                         lines += 1
                         if ts:
                             last_log_ts = ts
+                            # 基准变了，下次走慢路径时重新算精确时刻
+                            last_log_epoch = None
                         # 落盘由文件对象的行缓冲负责（见上面的 buffering=1）：
                         # 这里不再做「攒够多少行再 flush」，否则尾部落盘不及时。
                 except Exception as e:
@@ -725,14 +799,77 @@ class LogcatCapture:
                 # device_present 为 True / None：设备还在，或 adb 查不出结论。
                 # 但连接存活时 `adb logcat` 不会自己退出 —— 它在这里 EOF，
                 # 说明这次抓取是被外力打断的（logd 重启 / adb 内部错误 /
-                # 别的工具 kill-server）。文件已在断点处截断，之后产生的日志
-                # 不会再进来，因此**不能报「✓ 抓取完毕」**：分析师拿着这份
-                # 文件对照视频回查，会以为时间线是连续的。
-                # （过滤后一行都没写时不必提示：文件本来就是空的，那不是截断。）
-                if lines > 0:
+                # 别的工具 kill-server / 满缓冲全级别日志 + 录屏把 USB 带宽拉满）。
+                #
+                # **必须自动拉起**：旧实现只报一句「意外退出」就收尾，于是录屏
+                # 还在继续、日志却从此刻停住 —— 用户实况正是视频录到 11:14、
+                # 配套日志的最后一条停在 10:50，后 24 分钟一条不剩，而且直到事后
+                # 拿时间轴比对才发现。这里与「设备掉线」同等对待：写缺口标记、
+                # 退避、重启，继续往同一文件续写。
+                if not lines:
+                    # 一行都没写进去（用户取消了全部级别 / 从未收到日志行）：
+                    # 重启也换不来内容，按正常收尾处理，不制造无谓的重启循环。
+                    break
+                if restarts >= LOGCAT_CAP_RESTART_MAX:
+                    outcome_error = (
+                        "logcat 抓取连续 %d 次被意外中断（设备仍在线），已停止"
+                        "自动重启。文件存在时间缺口：最后一次日志停在 %s。"
+                        "常见诱因是 USB 带宽被占满（录屏 + 满缓冲全级别日志同时"
+                        "运行）、设备 logd 重启或其它工具重启了 adb server。"
+                        % (restarts, last_log_ts or "未知"))
+                    break
+                if lines <= lines_at_restart:
+                    no_progress += 1
+                else:
+                    no_progress = 0
+                lines_at_restart = lines
+                if no_progress >= LOGCAT_CAP_RESTART_NO_PROGRESS:
+                    # 连着重启都不产出任何新日志：不是「偶发中断」，重启只会
+                    # 无限空转（每次都要新起一个 adb 进程）。明确收尾并说清原因。
                     eof_unexpected = True
                     eof_ts = time.strftime("%H:%M:%S")
-                break
+                    break
+                restarts += 1
+                restart_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                _write_marker(
+                    f, "抓取进程于 %s 意外中断（设备仍在线），第 %d 次自动重连…"
+                       % (restart_ts, restarts))
+                gap_written = True
+                self.bus.push("logcat_capture",
+                              {"serial": serial, "status": "reconnecting",
+                               "path": path,
+                               "text": "设备 %s 的 logcat 抓取被意外中断"
+                                       "（设备仍在线），正在第 %d 次自动重连，"
+                                       "已抓到的日志不会丢"
+                                       % (serial, restarts)})
+                self.bus.push("status",
+                              {"type": "warn",
+                               "text": "⚠ %s 的 logcat 抓取被意外中断（设备仍在"
+                                       "线），正在自动重连（第 %d/%d 次）"
+                                       % (serial, restarts,
+                                          LOGCAT_CAP_RESTART_MAX)})
+                # 退避：立刻重连往往撞上同一个诱因（USB 带宽尖峰），退一步再拉起。
+                # 等待必须能被打断 —— 用 Event + 200ms 小步轮询，而不是一次
+                # sleep 满整个退避：用户点「停止」要立刻生效，不能让录屏收尾干等
+                # 一个退避间隔（「录屏停、日志同步停」靠的就是这一点）。单次 wait
+                # 也不能太长：stop() 在 set 之后才被 clear 掉的情况会丢掉那次唤醒。
+                with self._lock:
+                    wake = self._reconn_wake.setdefault(serial, threading.Event())
+                deadline = time.time() + min(
+                    LOGCAT_CAP_RESTART_BACKOFF_S * (2 ** (restarts - 1)),
+                    LOGCAT_CAP_RESTART_BACKOFF_MAX_S)
+                while True:
+                    with self._lock:
+                        if serial in self._stopreq:
+                            break
+                    left = deadline - time.time()
+                    if left <= 0:
+                        break
+                    wake.wait(min(0.2, left))
+                with self._lock:
+                    if serial in self._stopreq:
+                        break
+                continue
         finally:
             # 关文件句柄（之后才打包/量大小）：Windows 上开着的句柄会让 zip 失败。
             if f is not None:
@@ -821,10 +958,11 @@ class LogcatCapture:
                         "adb logcat 在设备仍在线时意外退出（%s），文件在此处截断，" 
                         "之后的日志没有抓到" % eof_ts)
                 if gap_written:
-                    # 文件里有缺口标记：即便用户主动停止，也要把「期间掉过线」说清楚，
-                    # 否则分析师对照视频流找日志时会误以为时间线是连续的。
+                    # 文件里有缺口标记：即便用户主动停止，也要把「期间掉过线 /
+                    # 中断过」说清楚，否则分析师对照视频流找日志时会误以为
+                    # 时间线是连续的。
                     payload["gap"] = True
-                    note = "（注意：抓取期间设备曾掉线，文件含时间缺口标记，"
+                    note = "（注意：抓取期间曾掉线或中断，文件含时间缺口标记，"
                     payload["text"] = (note + "缺失时段见文件内 [logcat] 标记）")
                 if zip_err:
                     payload["zip_error"] = zip_err

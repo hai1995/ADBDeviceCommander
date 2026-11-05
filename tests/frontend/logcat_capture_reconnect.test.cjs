@@ -81,8 +81,11 @@ async function bootBatched(batches) {
     const startBtn = doc.getElementById("lc-cap-start");
     const stopBtn = doc.getElementById("lc-cap-stop");
 
-    ok(await waitFor(() => capStatus.textContent.indexOf("等待重连") >= 0, 4000, "reconnecting 文案"),
-       "状态文案显示「等待重连」");
+    // 文案不再写死「设备掉线，等待重连」：这一档现在同时覆盖「设备掉线」与
+    // 「设备仍在线、抓取被外力打断后自动重启」（录屏 + 满缓冲日志把 USB 带宽
+    // 拉满时的常见后果）。状态行只要求说清「在自动重连、还在抓」。
+    ok(await waitFor(() => capStatus.textContent.indexOf("自动重连") >= 0, 4000, "reconnecting 文案"),
+       "状态文案显示「自动重连」");
     ok(await waitFor(() => startBtn.disabled === true, 4000, "开始禁用"),
        "重连等待期间「开始抓取」仍禁用（仍在抓）");
     ok(await waitFor(() => stopBtn.disabled === false, 4000, "停止可用"),

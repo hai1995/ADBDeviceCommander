@@ -65,10 +65,14 @@ def device_present(adb, serial, timeout=5):
     里本工具根本不会重启 adbd（overlay 用 settings put，不碰 adbd）。
     """
     try:
+        # 只传 **adb_kwargs(...)：它自带 capture_output=True，再显式写
+        # stdout=/stderr= 会被 subprocess.run 判为参数冲突并抛 ValueError。
+        # 旧写法正是这么写的 —— 于是每次探测都抛 ValueError 被下面 except 吞掉，
+        # 函数**恒定返回 None**：logcat 抓取的掉线判定（`is False`）永远不成立，
+        # 设备真掉线也走不成「等重连续写」；重连轮询又把 None 当「没回来」，
+        # 只能一路等到窗口耗尽。录屏配套日志丢一大段，根子就在这里。
         r = subprocess.run(
-            [adb, "-s", serial, "get-state"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            **adb_kwargs(timeout))
+            [adb, "-s", serial, "get-state"], **adb_kwargs(timeout))
     except Exception:
         # adb 本身不可达（缺失 / 超时 / 异常）：无法判定设备状态，返回 None（未知）
         # 而非 False（确认掉线）。这样调用方（logcat 重连等待）才不会把「adb 暂
@@ -77,7 +81,37 @@ def device_present(adb, serial, timeout=5):
         return None
     if r.returncode != 0:
         return False
-    return (r.stdout or b"").strip().lower() == b"device"
+    # text=True 已解码（见 adb_kwargs），这里比的是字符串而不是 bytes。
+    return (r.stdout or "").strip().lower() == "device"
+
+
+def device_epoch(adb, serial, timeout=5):
+    """读设备当前的 Unix 时间（秒）；读不到返回 None。
+
+    用途单一但关键：录屏收尾时校验「配套 logcat 到底跟到什么时候」。
+    视频与日志都发生在设备时间轴上，拿设备自己的钟作参照，既不掺主机时钟，
+    也不会把「设备时钟比本机慢」误判成「日志丢了 24 分钟」。
+
+    `date +%s` 是 POSIX 标准用法，Android 全版本可用；个别车机 shell 有拦截
+    时会返回非零或空输出，此时返回 None，调用方据此跳过校验（宁可不提示，
+    也不给一个基于猜测的结论）。
+    """
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "shell", "date", "+%s"], **adb_kwargs(timeout))
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    # 某些 shell 会把 \r\n / BOM 一起带回来，逐 token 取第一个纯数字
+    for tok in (r.stdout or "").split():
+        tok = tok.strip()
+        if tok.isdigit() and len(tok) >= 9:
+            try:
+                return int(tok)
+            except ValueError:
+                continue
+    return None
 
 # `settings put` 被系统拒绝时，报错文本里必然出现的片段（见 set_system_setting_ex）。
 # 只收明确表示「被拒」的措辞：正常写入时这两路都是空的，不会误报。
