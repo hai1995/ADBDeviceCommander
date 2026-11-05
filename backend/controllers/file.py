@@ -6,12 +6,64 @@ from backend.controller import (
 )
 
 
+def _build_browse_info(title):
+    """构造 SHBrowseForFolder 用的 BROWSEINFO，返回 ``(bi, display_buf)``。
+
+    单独抽出来是为了能在**非 Windows** 上回归这段 ctypes —— 它曾经这样写：
+
+        bi.pszDisplayName = ctypes.create_unicode_buffer(2048)
+
+    `pszDisplayName` 的字段类型是 `c_wchar_p`，而 `create_unicode_buffer` 返回的
+    是 `c_wchar_Array_2048`，ctypes 直接拒绝赋值：
+
+        TypeError: incompatible types, c_wchar_Array_2048 instance instead of
+        c_wchar_p instance
+
+    这行抛出的异常被 `_win_select_folder` 外层的 `except Exception: return None`
+    吞成「用户取消」。于是后端回 `{"ok": false, "reason": "cancelled"}`，前端按
+    取消静默处理 —— 用户看到的就是「保存目录的『选择』按钮点了没反应」，而且
+    在 Windows 上**每次**都这样。必须 cast 成指针后再赋。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    BIF_RETURNONLYFSDIRS = 0x0001
+    BIF_USENEWUI = 0x0040          # 新版 UI：带可粘贴路径的输入框
+    BIF_NONEWFOLDERBUTTON = 0x0200  # 不显示「新建文件夹」
+
+    class BROWSEINFO(ctypes.Structure):
+        _fields_ = [
+            ("hwndOwner", wintypes.HWND),
+            ("pidlRoot", ctypes.c_void_p),
+            ("pszDisplayName", ctypes.c_wchar_p),
+            ("lpszTitle", ctypes.c_wchar_p),
+            ("ulFlags", wintypes.UINT),
+            ("lpfn", ctypes.c_void_p),
+            ("lParam", ctypes.c_void_p),
+            ("iImage", wintypes.INT),
+        ]
+
+    display = ctypes.create_unicode_buffer(wintypes.MAX_PATH + 1)
+    bi = BROWSEINFO()
+    bi.pidlRoot = None
+    # 关键：cast 成 wchar 指针，不能直接赋 buffer（见上方说明）
+    bi.pszDisplayName = ctypes.cast(display, ctypes.c_wchar_p)
+    bi.lpszTitle = title or "选择文件夹"
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI | BIF_NONEWFOLDERBUTTON
+    bi.lpfn = None
+    bi.lParam = None
+    bi.iImage = 0
+    return bi, display
+
+
 def _win_select_folder(title):
     """Windows 原生「选择文件夹」对话框（SHBrowseForFolder + BIF_USENEWUI）。
 
     返回选中的绝对路径；用户取消或当前平台不支持（非 Windows）时返回 None。
-    不预选目录：SHBrowseForFolder 没有可靠的「选中」入参，预选回调在不同
-    Windows 版本上行为不一，为稳妥起见直接打开在桌面根，由用户点选。
+
+    这是 pywebview 拿不到窗口时的兜底（正常路径见 `_pick_folder`）。对话框必须
+    设 owner 为当前前台窗口：`hwndOwner = None` 时它不受本窗口约束，会跑到
+    其它窗口后面去 —— 表现同样是「点了没反应」。
     """
     if not sys.platform.startswith("win"):
         return None
@@ -21,36 +73,15 @@ def _win_select_folder(title):
     except Exception:
         return None
     try:
-        BIF_RETURNONLYFSDIRS = 0x0001
-        BIF_USENEWUI = 0x0040          # 新版 UI：带可粘贴路径的输入框
-        BIF_NONEWFOLDERBUTTON = 0x0200  # 不显示「新建文件夹」
-
-        class BROWSEINFO(ctypes.Structure):
-            _fields_ = [
-                ("hwndOwner", wintypes.HWND),
-                ("pidlRoot", ctypes.c_void_p),
-                ("pszDisplayName", ctypes.c_wchar_p),
-                ("lpszTitle", ctypes.c_wchar_p),
-                ("ulFlags", wintypes.UINT),
-                ("lpfn", ctypes.c_void_p),
-                ("lParam", ctypes.c_void_p),
-                ("iImage", wintypes.INT),
-            ]
-
+        bi, _display = _build_browse_info(title)
         shell32 = ctypes.windll.shell32
         ole32 = ctypes.windll.ole32
         ole32.CoInitialize.argtypes = [ctypes.c_void_p]
         ole32.CoInitialize.restype = wintypes.HRESULT
-
-        bi = BROWSEINFO()
-        bi.hwndOwner = None
-        bi.pidlRoot = None
-        bi.pszDisplayName = ctypes.create_unicode_buffer(2048)
-        bi.lpszTitle = title or "选择文件夹"
-        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI | BIF_NONEWFOLDERBUTTON
-        bi.lpfn = None
-        bi.lParam = None
-        bi.iImage = 0
+        try:
+            bi.hwndOwner = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            bi.hwndOwner = None
 
         ole32.CoInitialize(None)
         try:
@@ -65,6 +96,51 @@ def _win_select_folder(title):
             ole32.CoUninitialize()
     except Exception:
         return None
+
+
+def _pick_folder(initial=None):
+    """弹出「选择文件夹」对话框，返回 ``(路径, 失败原因)``。
+
+    优先走 pywebview 的原生对话框（Windows 下是 WinForms 的 FolderBrowserDialog，
+    自带 owner 窗口与置前行为，也可定位到初始目录）。路径非空即成功；否则
+    reason ∈ {"cancelled", "unsupported", "error:<详情>"}。
+
+    区分这三档不是为了好看：把「用户点了取消」和「对话框根本没打开」都揉成
+    一个 None，前台就只能一律静默 —— 那正是「按钮点了没反应」的成因。
+    """
+    try:
+        import webview
+    except Exception:
+        return None, "unsupported"
+    win = None
+    try:
+        if hasattr(webview, "active_window"):
+            win = webview.active_window()
+    except Exception:
+        win = None
+    if win is None or not hasattr(win, "create_file_dialog"):
+        return None, "unsupported"
+    directory = initial if (initial and os.path.isdir(initial)) else ""
+    try:
+        res = win.create_file_dialog(webview.FOLDER_DIALOG, directory=directory)
+    except TypeError:
+        # 各版本签名略有差异（与 _open_dialog 同一套位置参数兜底）
+        try:
+            res = win.create_file_dialog(webview.FOLDER_DIALOG, directory)
+        except TypeError:
+            try:
+                res = win.create_file_dialog(webview.FOLDER_DIALOG)
+            except Exception as e:
+                return None, "error:%s" % e
+        except Exception as e:
+            return None, "error:%s" % e
+    except Exception as e:
+        return None, "error:%s" % e
+    if not res:
+        return None, "cancelled"
+    path = res[0] if isinstance(res, (list, tuple)) else str(res)
+    path = (path or "").strip()
+    return (path, "") if path else (None, "cancelled")
 
 
 class FileMixin:
@@ -110,17 +186,28 @@ class FileMixin:
             return {"ok": False, "text": str(e)}
 
     def select_save_dir(self, current=None):
-        """弹出系统「选择文件夹」对话框，返回用户选中的目录。
+        """弹出「选择文件夹」对话框，返回用户选中的目录。
 
-        用于代替手动输入保存目录。仅 Windows 支持（其它平台没有原生 GUI 对话框）；
-        用户点取消也返回 cancelled。
+        优先 pywebview 原生对话框，Windows 上窗口拿不到时退到 SHBrowseForFolder。
+        三种结果要分清（前端据此决定说还是不说）：
+          · 选中 → {"ok": True, "path": ...}
+          · 取消 → {"ok": False, "reason": "cancelled"}（静默，谁都不想被取消烦到）
+          · 打不开 → {"ok": False, "reason": "unsupported"/"error"} + 状态栏播报
+        旧实现把后两者都揉成 cancelled，前端一律不吭声 —— 按钮点下去就像没接线。
         """
-        path = _win_select_folder("选择保存目录")
-        if not path:
-            if sys.platform.startswith("win"):
-                return {"ok": False, "reason": "cancelled"}
-            return {"ok": False, "reason": "unsupported"}
-        return {"ok": True, "path": path}
+        path, why = _pick_folder(current)
+        if not path and why == "unsupported" and sys.platform.startswith("win"):
+            # pywebview 拿不到活动窗口（极少见）：退到系统原生对话框
+            path = _win_select_folder("选择保存目录")
+            why = "" if path else "cancelled"
+        if path:
+            return {"ok": True, "path": path}
+        if why.startswith("error:"):
+            msg = why[len("error:"):]
+            self._push_status(
+                "err", "⚠ 打开「选择文件夹」失败：%s（可直接手动输入路径）" % msg)
+            return {"ok": False, "reason": "error", "text": msg}
+        return {"ok": False, "reason": why or "unsupported"}
 
     @staticmethod
     def _parent_dir(path):

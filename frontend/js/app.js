@@ -6090,20 +6090,33 @@
     els.toolOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
     els.lcOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
     els.fileOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
-    // 「选择」：弹出系统文件夹对话框代替手动输入路径（仅 Windows 原生支持）
+    // 「选择」：弹出系统文件夹对话框代替手动输入路径
+    // 三档结果必须分开处理：选中 → 写输入框并落盘；取消 → 静默（不打扰）；
+    // 打不开 → 必须说一句。旧实现把后两者都当「取消」吞掉，于是按钮点下去
+    // 毫无反应 —— 用户只能反复点，还以为程序卡了。
+    // 点击瞬间先禁用：Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上。
     [["lcPick", els.lcDir], ["toolPick", els.toolDir], ["filePick", els.fileDir]]
       .forEach(([key, input]) => {
-        if (els[key] && input) {
-          els[key].addEventListener("click", async () => {
-            const cur = (input.value || "").trim();
-            const res = await callApi(api.select_save_dir(cur));
+        if (!els[key] || !input) return;
+        els[key].addEventListener("click", async () => {
+          const btn = els[key];
+          if (btn.disabled) return;
+          btn.disabled = true;
+          try {
+            const res = await callApi(api.select_save_dir((input.value || "").trim()));
             if (res && res.ok && res.path) {
               input.value = res.path;
               // 复用现有 change 逻辑：镜像到另两处输入 + 落盘 + 状态提示
               input.dispatchEvent(new window.Event("change", { bubbles: true }));
+            } else if (res && res.reason === "unsupported") {
+              pushStatus("warn",
+                "当前环境无法弹出文件夹选择框，请直接输入保存目录路径");
             }
-          });
-        }
+            // cancelled：用户自己取消，不提示；error：后端已播报原因，不重复
+          } finally {
+            btn.disabled = false;
+          }
+        });
       });
     // 截图开关「同步至粘贴板」：布尔值直接随截图动作下发（即时生效，不依赖
     // settings.json 是否写成功），同时落盘到 settings.json 供下次启动沿用。

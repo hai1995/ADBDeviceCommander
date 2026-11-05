@@ -3702,3 +3702,91 @@ adb -s <serial> shell date +%s%z      # -> "1793850520+0800"
   机器时区不是 +0800 时会莫名其妙失败（本地过、CI 挂的经典形态）。
 
 后端 `pytest`：**1335 passed / 1 skipped**；`pyflakes` 干净。
+
+---
+
+# 第四十七轮：保存目录「选择」按钮点了没反应——异常被吞成「用户取消」
+
+**用户实报**：保存目录旁的「选择」按钮点下去毫无反应，连报错都没有。
+
+## 一、根因：一行 ctypes 赋值，每次调用都抛
+
+`backend/controllers/file.py` 里原本这么写：
+
+```python
+bi.pszDisplayName = ctypes.create_unicode_buffer(2048)
+```
+
+`BROWSEINFO.pszDisplayName` 的字段类型是 `c_wchar_p`，而 `create_unicode_buffer`
+返回的是 `c_wchar_Array_2048`。ctypes 不做隐式转换，赋值当场抛：
+
+```
+TypeError: incompatible types, c_wchar_Array_2048 instance instead of
+           c_wchar_p instance
+```
+
+这行在 `SHBrowseForFolder()` 之前，等于函数**永远走不到真正弹框那一步**。异常又被
+外层的 `except Exception: return None` 吞掉，于是：
+
+```
+_win_select_folder -> None
+select_save_dir    -> {"ok": false, "reason": "cancelled"}
+前端               -> if (res.ok && res.path) 不成立 → 什么也不做
+```
+
+用户看到的正是「点了没反应」。而且这不是偶发 —— 在 Windows 上**每一次**都这样。
+
+第二处隐患：`bi.hwndOwner = None`。对话框没有 owner 窗口就不受主窗口约束，会跑到
+其它窗口后面去，表现同样是「点了没反应」。即便弹出来了，用户也看不见。
+
+## 二、修法
+
+### 1. 主路径改用 pywebview 的原生文件夹对话框
+
+```python
+win.create_file_dialog(webview.FOLDER_DIALOG, directory=<当前目录>)
+```
+
+Windows 下底层是 WinForms 的 FolderBrowserDialog：自带 owner 窗口（不会再被主窗口
+盖住）、能定位到初始目录、返回值语义与项目里已有的 `_open_dialog`（选文件）一致。
+签名差异沿用同一套位置参数兜底。
+
+顺带把 `current` 参数真正用起来：对话框直接打开在当前保存目录，不用从「此电脑」
+一层层点进去。
+
+### 2. ctypes 兜底修好，保留为 fallback
+
+pywebview 拿不到活动窗口时（极少见）仍走 `SHBrowseForFolder`：
+
+- `bi.pszDisplayName = ctypes.cast(display, ctypes.c_wchar_p)` —— 先 cast 再赋；
+- `bi.hwndOwner = GetForegroundWindow()` —— 有 owner 才会弹在本窗口之上；
+- 构造 BROWSEINFO 抽成 `_build_browse_info()`，这样**在 Linux 上也能回归这段
+  ctypes**（结构体字段赋值是跨平台行为，正是它坏了）。
+
+### 3. 三种结果分开，别再糊成一个
+
+| 结果 | 后端 | 前端 |
+|---|---|---|
+| 选中 | `{ok: true, path}` | 写入输入框 + 复用 change 逻辑落盘 |
+| 用户取消 | `{ok: false, reason: "cancelled"}` | 静默（谁都不想被取消烦到） |
+| 打不开 | `{ok: false, reason: "unsupported"/"error"}`，error 另播一条状态 | unsupported 提示「请直接输入路径」 |
+
+旧实现把后两者都揉成 `cancelled`，前端只能一律静默 —— 这正是「按钮像没接线」的
+由来。区分之后，同样的故障下次会在状态栏里明说。
+
+### 4. 点击期间禁用按钮
+
+Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上而连点，反而叠出好几个
+对话框。现在点击即禁用，返回后恢复（`try/finally`，异常路径也不会把按钮锁死）。
+
+## 三、测试
+
+- `tests/test_backend_file.py` 重写为 10 条：`_build_browse_info` 不再抛 TypeError
+  （**核心回归**，直接在 Linux 上跑）、pywebview 路径的选中 / 取消 / 异常、
+  拿不到窗口时的 unsupported、Windows 兜底、error 必须播报且给出退路。
+- 新增 `tests/frontend/save_dir_pick.test.cjs`（15 条）：写入 + 落盘、取消静默、
+  打不开必须提示、点击期间禁用并在结束后恢复、三个入口（Logcat / 工具区 /
+  文件页）行为一致。
+
+后端 `pytest`：**1341 passed / 1 skipped**；`pyflakes` 干净。
+前端 `node tests/frontend/run-all.cjs`：**83 个文件、0 失败**。
