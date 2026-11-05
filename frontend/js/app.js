@@ -1140,6 +1140,10 @@
     // persist:false —— 启动回填不该再写一次盘。
     switchToolTab(typeof s.tool_active_tab === "string" && s.tool_active_tab
       ? s.tool_active_tab : "shot", { persist: false });
+    // Logcat 子 tab（落盘抓取 / 实时监控）：恢复到上次停留项；没记过 / key 已失效
+    // 则回退落盘抓取。persist:false —— 启动回填不写盘。
+    switchLcTab(typeof s.lc_active_tab === "string" && s.lc_active_tab
+      ? s.lc_active_tab : "capture", { persist: false });
     // ---- APK 安装选项（默认值只写在 core/prefs.py 一处，此处仅回填）----
     if (els.apkReplace && typeof s.apk_replace === "boolean") {
       els.apkReplace.checked = s.apk_replace;
@@ -1771,6 +1775,7 @@
      落盘 tool_tab_order（顺序）与 tool_active_tab（上次停留项），下次启动照旧。 */
   let toolTabOrder = [];                // 手动排过序的子 tab key（按先后）
   let toolActiveTab = "";               // 当前停留的子 tab key（用于「值没变就不写盘」）
+  let lcActiveTab = "";                 // Logcat 子 tab（落盘抓取 / 实时监控）当前项
   let toolTabDrag = null;               // 拖动会话：{tab, x, y, timer, active}
   let toolTabClickGuard = 0;            // 拖动结束后压制紧随其后的 click（避免既换位又切换）
   const TOOL_LONGPRESS_MS = 400;        // 与指令卡一致：按住多久算「要拖」
@@ -3052,6 +3057,70 @@
         else next = (idx + step + tabs.length) % tabs.length;
         const nb = tabs[next];
         if (nb) { switchToolTab(nb.dataset.toolTab); nb.focus(); }
+      });
+    });
+  }
+
+  /* Logcat 子 tab（落盘抓取 / 实时监控）：与工具页同一套子 tab 视觉，但只有两项、
+     顺序固定（无需长按拖动排序）。点击切换 + 方向键 / Enter / Space 激活；上次停留项
+     记在 lc_active_tab（与 tool_active_tab 同一套「只记 key、失效回退」约定）。
+     tab 的 key 一律从 DOM 推导（data-lc-tab 只在 index.html 写一份）。 */
+  function lcTabKeys() {
+    const bar = document.getElementById("lc-subtabs");
+    if (!bar) return [];
+    return Array.from(bar.querySelectorAll(".tool-subtab"))
+      .map((b) => b.dataset.lcTab).filter(Boolean);
+  }
+  function lcTabBtn(key) {
+    return document.querySelector('#lc-subtabs .tool-subtab[data-lc-tab="' + key + '"]');
+  }
+  function lcTabPane(key) {
+    return document.querySelector('#lc-panes .tool-pane[data-lc-pane="' + key + '"]');
+  }
+
+  /* 切换子 tab：只显示对应面板，其余 hidden；按钮 active / aria-selected 同步。
+     persist 默认 true（用户点击 / 方向键切换都记）；启动回填时传 false，
+     避免「打开就写一次盘」。 */
+  function switchLcTab(key, opts) {
+    const keys = lcTabKeys();
+    if (!keys.length) return;
+    // 配置里存的是已删除的 tab（版本变动）→ 回退到当前顺序里的第一项
+    if (keys.indexOf(key) === -1) key = keys[0];
+    keys.forEach((k) => {
+      const active = k === key;
+      const btn = lcTabBtn(k), pane = lcTabPane(k);
+      if (btn) {
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+        // roving tabindex：Tab 键只停在当前子 tab 上，切换用方向键（ARIA tabs 规范）
+        btn.tabIndex = active ? 0 : -1;
+      }
+      if (pane) pane.hidden = !active;
+    });
+    const changed = lcActiveTab !== key;
+    lcActiveTab = key;
+    // 值没变就不写盘：连点同一个子 tab、方向键绕一圈回到原项时都省一次「读-合并-写」
+    if (changed && (!opts || opts.persist !== false)) {
+      persistPref("lc_active_tab", key);
+    }
+  }
+
+  function bindLcSubtabs() {
+    lcTabKeys().forEach((k) => {
+      const btn = lcTabBtn(k);
+      if (!btn) return;
+      btn.addEventListener("click", () => switchLcTab(k));
+      btn.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); switchLcTab(k); return; }
+        // 方向键在子 tab 间移动并激活；顺序取 DOM（固定两项，capture → monitor）
+        const step = ev.key === "ArrowRight" ? 1 : ev.key === "ArrowLeft" ? -1 : 0;
+        if (!step) return;
+        ev.preventDefault();
+        const tabs = Array.from(document.querySelectorAll("#lc-subtabs .tool-subtab"));
+        if (!tabs.length) return;
+        const idx = tabs.indexOf(btn);
+        const nb = tabs[(idx + step + tabs.length) % tabs.length];
+        if (nb) { switchLcTab(nb.dataset.lcTab); nb.focus(); }
       });
     });
   }
@@ -6154,6 +6223,8 @@
     // 工具区子 tab：点击切换 + 长按拖动排序（与指令卡同一套长按手势）
     bindToolSubtabs();
     bindToolTabDrag();
+    // Logcat 子 tab：落盘抓取 / 实时监控（顺序固定，无需拖动排序）
+    bindLcSubtabs();
     // ---- 应用安装（APK）----
     if (els.apkPick) els.apkPick.addEventListener("click", pickApk);
     if (els.apkInstall) els.apkInstall.addEventListener("click", installApk);

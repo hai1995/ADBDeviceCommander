@@ -131,6 +131,9 @@ PREFS_DEFAULTS = {
     "lc_only_exc": False,
     "lc_autoscroll": True,
     "lc_buffer": "",
+    # Logcat 子 tab（落盘抓取 / 实时监控）上次停留项。
+    # 与 tool_active_tab 同一套「只记 key、失效回退」约定；留空 = 落盘抓取。
+    "lc_active_tab": "",
     # Logcat 落盘抓取
     "lc_cap_zipstop": True,
     "lc_cap_levels": list(VALID_LEVELS),

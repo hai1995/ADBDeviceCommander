@@ -1201,6 +1201,15 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 /* 一个面板里只有一张卡：卡自身留给「下一张卡」的 14px 下边距在这里是纯空白
    （滚动到底会多出一截），去掉它。 */
 .tool-pane > .tool-card { margin-bottom: 0; }
+/* ---------------- Logcat 子 tabs（与工具页 .tool-subtabs 同一套视觉）----------------
+   与工具页不同：实时监控面板的日志视图要撑满剩余高度（而非整页滚动），故 logcat 的
+   panes 是 flex 列、吃满高度；落盘抓取面板（卡无 .grow）保持自然高度贴顶，实时监控
+   面板（.lc-card.grow）撑满。两个面板共享上方缓冲区 / 保存目录行，那一行留在 tab 之外。 */
+#lc-panes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#lc-panes > .tool-pane { flex: 1; min-height: 0; }
+#lc-panes > .tool-pane:not([hidden]) { display: flex; flex-direction: column; }
+#lc-panes > .tool-pane > .lc-card { margin-bottom: 0; }
+#lc-panes > .tool-pane:not([hidden]) > .lc-card.grow { flex: 1; min-height: 0; }
 /* 投屏卡：探测结果一行文字（成功=青、失败=橙） */
 .scrcpy-state {
   font: 400 var(--fs-sm)/1.5 var(--font-mono); color: var(--faint);

@@ -173,12 +173,22 @@
             <option selected>全部（main+system+events+crash）</option>
           </select>
         </div>
-        <!-- 落盘抓取卡：把日志写成本地 txt（与监控相互独立、可同时进行）。
-             唯一打包开关默认开启，且只在点「停止抓取」时生效——抓取过程中
-             不打包、不中断。级别过滤只决定「哪些级别的行写进文件」，与实时
-             监控卡的级别过滤互不影响（监控管视图，抓取管落盘）。
-             放在监控卡**上方**：抓取是更高频的操作（留证据 / 发同事），
-             监控是排障时的深读场景，一屏内先够着高频的。 -->
+        <!-- 子 tab 条：与工具页同一套视觉语言（截图 / 录屏 / 投屏 …）。
+             落盘抓取与实时监控互不挤压——原先靠「上下堆叠」并让监控卡吃满高度，
+             现在交给子 tab 切换（一次只看一项）。两个面板共享上方缓冲区与保存
+             目录，因此那一行留在 tab 之外。 -->
+        <div class="tool-subtabs" id="lc-subtabs" role="tablist" aria-orientation="horizontal">
+          <button class="tool-subtab active" id="lc-tab-capture" data-lc-tab="capture" role="tab"
+                  aria-selected="true" aria-controls="lc-pane-capture" tabindex="0">落盘抓取</button>
+          <button class="tool-subtab" id="lc-tab-monitor" data-lc-tab="monitor" role="tab"
+                  aria-selected="false" aria-controls="lc-pane-monitor" tabindex="-1">实时监控</button>
+        </div>
+        <div class="tool-panes" id="lc-panes">
+          <!-- 落盘抓取面板：把日志写成本地 txt（与监控相互独立、可同时进行）。
+               唯一打包开关默认开启，且只在点「停止抓取」时生效——抓取过程中
+               不打包、不中断。级别过滤只决定「哪些级别的行写进文件」，与实时
+               监控面的级别过滤互不影响（监控管视图，抓取管落盘）。 -->
+          <div class="tool-pane" id="lc-pane-capture" role="tabpanel" aria-labelledby="lc-tab-capture" data-lc-pane="capture">
         <div class="lc-card">
           <div class="lc-card-h">落盘抓取<span class="lc-card-sub">CAPTURE · 写入本地 txt，可同时监控</span></div>
           <div class="lc-ctrls lc-cap">
@@ -199,8 +209,10 @@
             </span>
           </div>
         </div>
-        <!-- 实时监控卡：只把日志流渲染上屏（不写文件），过滤仅作用于本卡视图；
-             吃满剩余高度，日志视图在卡内生长。 -->
+          </div>
+          <!-- 实时监控面板：只把日志流渲染上屏（不写文件），过滤仅作用于本面板视图；
+               吃满剩余高度，日志视图在卡内生长。 -->
+          <div class="tool-pane" id="lc-pane-monitor" role="tabpanel" aria-labelledby="lc-tab-monitor" data-lc-pane="monitor" hidden>
         <div class="lc-card grow">
           <div class="lc-card-h">实时监控<span class="lc-card-sub">MONITOR · 仅查看，不写文件</span></div>
           <div class="lc-ctrls">
@@ -228,6 +240,8 @@
             <label class="chk"><input type="checkbox" id="lc-autoscroll" checked>自动滚动</label>
           </div>
           <div id="lc-view" class="lc-view"></div>
+        </div>
+          </div>
         </div>
       </section>
 
