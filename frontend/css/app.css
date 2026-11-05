@@ -125,6 +125,67 @@
   /* 动效 */
   --ease-out: cubic-bezier(.16, 1, .3, 1);
   --dur-fast: 160ms; --dur-base: 320ms; --dur-slow: 560ms;
+
+  /* 主题扩展令牌：浅色主题在 :root[data-theme="light"] 覆盖（见文件末尾）。
+     把组件里几处写死的深色表面抽成变量，避免「浅色主题下深色块翻车」。
+     dark 默认值与旧写死值完全一致，等价于原实现，深色主题零回归。 */
+  --on-soft: #fff;                  /* 压在浅青悬浮渐变上的文字（深色主题为白） */
+  --media-bg: #000;                /* 截图预览底（深色主题为黑，框住图片） */
+  --scroll-thumb: #3a4c63;         /* 滚动条滑块（html scrollbar-color 兜底） */
+  --scroll-thumb-a: #46596f;       /* 滑块渐变起 */
+  --scroll-thumb-b: #2c3a4c;       /* 滑块渐变止 */
+  --scroll-thumb-hover-a: #5b7290;
+  --scroll-thumb-hover-b: #3a4c63;
+  --popup-a: #1e2a39;              /* 右键 / 芯片弹出菜单实底渐变起 */
+  --popup-b: #151d27;              /* 渐变止 */
+  --soft-hover-a: #26364a;         /* × 关闭钮悬浮渐变起（配 --on-soft 文字） */
+  --rail-a: #1b2532;               /* 性能「选应用」弹层实底渐变起 */
+  --rail-b: #131b24;               /* 渐变止 */
+  --overlay-center: #121a25;       /* 信号丢失遮罩径向中心 */
+}
+
+/* ---------------- 浅色主题 ----------------
+   默认深色；<html data-theme="light"> 时套用。token 化配色让组件零改动即适配，
+   仅上面几处写死的深色表面用扩展令牌覆盖。对比度按 WCAG AA 取（faint 对 surface
+   ≥ 4.5:1）。强调色压暗一档（#0a9aa8）保证白字可读、链接可辨；system 模式由前端
+   matchMedia 解析后同样落到这两档之一。 */
+:root[data-theme="light"] {
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --surface-3: #e4e9f0;
+  --inset: #e9eef4;
+  --line: rgba(20, 40, 70, .12);
+  --line-strong: rgba(20, 40, 70, .22);
+  --text: #0e1620;
+  --text-2: #3a4858;
+  --muted: #5b6b7e;
+  --faint: #6f83a0;
+  --accent: #0a9aa8;
+  --accent-deep: #07818d;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(10, 154, 168, .14);
+  --accent-glow: rgba(10, 154, 168, .30);
+  --ok: #1a9e57;
+  --warn: #b5700a;
+  --err: #cf3540;
+  --ok-soft: rgba(26, 158, 87, .14);
+  --warn-soft: rgba(181, 112, 10, .14);
+  --err-soft: rgba(207, 53, 64, .12);
+  --on-soft: #0e1620;
+  --media-bg: #e6ebf1;
+  --scroll-thumb: #9fb0c2;
+  --scroll-thumb-a: #9fb0c2;
+  --scroll-thumb-b: #8499af;
+  --scroll-thumb-hover-a: #7e96ad;
+  --scroll-thumb-hover-b: #6b85a0;
+  --popup-a: #ffffff;
+  --popup-b: #f1f4f8;
+  --soft-hover-a: #dbe3ec;
+  --rail-a: #ffffff;
+  --rail-b: #eef2f7;
+  --overlay-center: #dbe3ec;
+  color-scheme: light;
 }
 
 /* ---------------- 基础重置 + 氛围背景 ----------------
@@ -164,15 +225,15 @@ body::after {
    细轨 + 嵌轨药丸滑块；hover 泛磷光、按压点亮主题青。WebView2 基于
    Chromium，::-webkit-scrollbar* 即最终呈现；scrollbar-width/color 放
    html 上供标准引擎兜底。 */
-html { scrollbar-width: thin; scrollbar-color: #3a4c63 transparent; }
+html { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: rgba(126, 166, 204, .05); border-radius: 8px; }
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, #46596f 0%, #2c3a4c 100%);
+  background: linear-gradient(180deg, var(--scroll-thumb-a) 0%, var(--scroll-thumb-b) 100%);
   border: 2px solid transparent; background-clip: content-box; border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(180deg, #5b7290 0%, #3a4c63 100%);
+  background: linear-gradient(180deg, var(--scroll-thumb-hover-a) 0%, var(--scroll-thumb-hover-b) 100%);
   background-clip: content-box; box-shadow: 0 0 10px rgba(52, 224, 234, .30);
 }
 ::-webkit-scrollbar-thumb:active {
@@ -229,6 +290,26 @@ html { scrollbar-width: thin; scrollbar-color: #3a4c63 transparent; }
   background: currentColor; box-shadow: 0 0 8px currentColor;
 }
 .pill.ok { color: var(--ok); border-color: rgba(61, 220, 132, .42); background: var(--ok-soft); }
+/* 主题切换分段控件（深 / 浅 / 随系统）：贴近状态胶囊放在顶栏右侧，纯令牌化配色，
+   浅色主题下自动随 :root[data-theme="light"] 换色，无需单独适配。 */
+.theme-switch {
+  align-self: center; display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: 999px;
+}
+.theme-opt {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 30px; height: 24px; padding: 0 9px;
+  background: transparent; color: var(--muted);
+  border: none; border-radius: 999px; cursor: pointer;
+  font: 600 var(--fs-sm)/1 var(--font-display); letter-spacing: .04em;
+  transition: color var(--dur-fast) ease, background var(--dur-fast) ease;
+}
+.theme-opt:hover { color: var(--text); background: var(--accent-soft); }
+.theme-opt.active {
+  color: var(--accent-ink); background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow);
+}
 .pill.err { color: var(--err); border-color: rgba(255, 95, 107, .42); background: var(--err-soft); }
 /* 就绪灯的缓慢呼吸，一眼确认链路活着 */
 .pill.ok::before { animation: led-pulse 2.2s ease-in-out infinite; }
@@ -396,7 +477,7 @@ input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
   content: "";
   position: absolute; top: 50%; left: 50%;
   width: 4px; height: 8px;
-  border: solid var(--accent-ink, #04252b);
+  border: solid var(--accent-ink);
   border-width: 0 2px 2px 0;
   border-radius: 0;
   background: none; box-shadow: none;
@@ -975,7 +1056,7 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   transition: background .15s ease, color .15s ease, box-shadow .15s ease;
 }
 .clear-x:hover {
-  background: linear-gradient(180deg, #26364a, var(--surface-3)); color: #fff;
+  background: linear-gradient(180deg, var(--soft-hover-a), var(--surface-3)); color: var(--on-soft);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 3px 10px rgba(3, 8, 14, .45),
               0 0 14px rgba(52, 224, 234, .22);
 }
@@ -1050,7 +1131,7 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .ctx-menu {
   position: fixed; z-index: 60; min-width: 128px;
   display: flex; flex-direction: column; gap: 1px; padding: 4px;
-  background: linear-gradient(180deg, #1e2a39 0%, #151d27 100%);
+  background: linear-gradient(180deg, var(--popup-a) 0%, var(--popup-b) 100%);
   border: 1px solid var(--line-strong); border-radius: 8px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, .55);
 }
@@ -1231,12 +1312,12 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
    没拖过（is-sized 缺失）则完全交给下面 img 的 max-* 自适应。 */
 .mirror-frame {
   position: relative; display: inline-block; line-height: 0;
-  max-width: 100%; border-radius: var(--r-sm); background: #000;
+  max-width: 100%; border-radius: var(--r-sm); background: var(--media-bg);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, .04);
 }
 .mirror-frame img {
   display: block; max-width: 100%; max-height: 280px;
-  border-radius: var(--r-sm); background: #000;
+  border-radius: var(--r-sm); background: var(--media-bg);
 }
 /* 拖出了明确尺寸：画面按 contain 等比铺满，多出来的部分留黑边，
    而不是被拉变形（拉长的人脸远比留黑边难接受）。 */
@@ -1269,11 +1350,11 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .shot-preview-frame {
   position: relative; display: block; line-height: 0;
   width: 100%; max-width: 100%; border-radius: var(--r-sm);
-  background: #000; box-shadow: 0 0 0 1px rgba(255, 255, 255, .04);
+  background: var(--media-bg); box-shadow: 0 0 0 1px rgba(255, 255, 255, .04);
 }
 .shot-preview-frame img {
   display: block; width: 100%; height: auto;
-  border-radius: var(--r-sm); background: #000;
+  border-radius: var(--r-sm); background: var(--media-bg);
 }
 .shot-preview-frame.is-sized { width: auto; height: auto; }
 .shot-preview-frame.is-sized img {
@@ -1474,7 +1555,7 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .th-row .th-on::after {
   content: ""; position: absolute; top: 50%; left: 50%;
   width: 4px; height: 8px; border-radius: 0;
-  border: solid #04252b; border-width: 0 2px 2px 0;
+  border: solid var(--accent-ink); border-width: 0 2px 2px 0;
   background: none; box-shadow: none;
   transform: translate(-50%, -50%) rotate(45deg);
   transform-origin: 50% 50%;
@@ -1708,7 +1789,7 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   transition: background .15s ease, color .15s ease, box-shadow .15s ease;
 }
 .modal-x:hover {
-  background: linear-gradient(180deg, #26364a, var(--surface-3)); color: #fff;
+  background: linear-gradient(180deg, var(--soft-hover-a), var(--surface-3)); color: var(--on-soft);
   box-shadow: 0 3px 8px rgba(3, 8, 14, .50), 0 0 14px rgba(52, 224, 234, .28);
 }
 .modal-x:active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .45); }
@@ -1716,7 +1797,7 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
 /* ---------------- 未检测到 pywebview 遮罩（信号丢失终端屏） ---------------- */
 .overlay {
   position: fixed; inset: 0; z-index: 100;
-  background: radial-gradient(60rem 40rem at 50% 38%, #121a25, var(--bg));
+  background: radial-gradient(60rem 40rem at 50% 38%, var(--overlay-center), var(--bg));
   display: flex; align-items: center; justify-content: center;
 }
 .overlay-box { text-align: center; color: var(--text-2); font-family: var(--font-mono); }
@@ -1890,7 +1971,7 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   position: absolute; right: -4px; top: calc(100% - 2px);
   min-width: 96px; display: none; flex-direction: column; gap: 1px;
   /* 实色不透明背景：此前误用未定义的 --surface-1 导致背景透明、被下层卡片穿透 */
-  background: linear-gradient(180deg, #1e2a39 0%, #151d27 100%);
+  background: linear-gradient(180deg, var(--popup-a) 0%, var(--popup-b) 100%);
   border: 1px solid var(--line-strong);
   border-radius: 8px; padding: 4px; box-shadow: 0 10px 28px rgba(0, 0, 0, .55); z-index: 20;
 }
@@ -1967,7 +2048,7 @@ body.tool-sorting, body.tool-sorting * {
   width: 340px; max-width: 80vw; padding: 9px;
   display: flex; flex-direction: column; gap: 8px;
   /* 实色背景 + 抬升面：弹层要压住下面的指标卡与曲线，透明会糊成一片 */
-  background: linear-gradient(180deg, #1b2532 0%, #131b24 100%);
+  background: linear-gradient(180deg, var(--rail-a) 0%, var(--rail-b) 100%);
   border: 1px solid var(--line-strong); border-radius: var(--r-md);
   box-shadow: 0 14px 38px rgba(0, 0, 0, .62);
 }

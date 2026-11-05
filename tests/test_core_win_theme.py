@@ -179,3 +179,71 @@ def test_attach_gives_up_quietly_after_timeout(monkeypatch):
     monkeypatch.setattr(wt, "find_window", lambda *a, **k: 0)
     res = wt.attach(None, timeout=0.05, interval=0.01)
     assert res["ok"] is False and res["reason"] == "no_window"
+
+
+# --------------------------------------------------------------------------- #
+# apply_for_mode（dark / light / system 三态入口）
+# --------------------------------------------------------------------------- #
+def test_apply_for_mode_off_windows_is_unsupported():
+    """非 Windows 上 apply_for_mode 恒返回 unsupported（标题栏只有 Windows 绘制）。"""
+    res = wt.apply_for_mode("light", pid=1)
+    assert res["ok"] is False and res["reason"] == "unsupported"
+
+
+def test_apply_for_mode_uses_light_colors(monkeypatch):
+    """light 模式把标题栏底色 / 边框套成浅色常量（与界面浅色主题镜像）。"""
+    monkeypatch.setattr(sys, "platform", "win32")
+    rec = _Recorder()
+    monkeypatch.setattr(wt, "_dwm_setter", lambda: rec)
+    monkeypatch.setattr(wt, "find_window", lambda *a, **k: 555)
+    res = wt.apply_for_mode("light", pid=1)
+    assert res["ok"] is True
+    vals = {a: v for _h, a, v in rec.calls}
+    assert vals[wt.DWMWA_CAPTION_COLOR] == wt.colorref(wt.TITLE_BG_LIGHT)
+    assert vals[wt.DWMWA_BORDER_COLOR] == wt.colorref(wt.TITLE_BORDER_LIGHT)
+    # 浅色模式须写沉浸式浅色位（值 0），而非深色位
+    assert vals[wt.DWMWA_USE_IMMERSIVE_DARK_MODE] == 0
+
+
+def test_apply_for_mode_system_resolves_via_registry(monkeypatch):
+    """system 在 Windows 上读注册表解析为实际深浅；这里伪造系统浅色。"""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(wt, "_resolve_system_mode", lambda: "light")
+    rec = _Recorder()
+    monkeypatch.setattr(wt, "_dwm_setter", lambda: rec)
+    monkeypatch.setattr(wt, "find_window", lambda *a, **k: 555)
+    res = wt.apply_for_mode("system", pid=1)
+    assert res["ok"] is True
+    vals = {a: v for _h, a, v in rec.calls}
+    assert vals[wt.DWMWA_CAPTION_COLOR] == wt.colorref(wt.TITLE_BG_LIGHT)
+
+
+def test_apply_for_mode_invalid_mode_falls_back_dark(monkeypatch):
+    """非法 mode（既不是 dark/light/system）回落 dark 且不崩溃。"""
+    monkeypatch.setattr(sys, "platform", "win32")
+    rec = _Recorder()
+    monkeypatch.setattr(wt, "_dwm_setter", lambda: rec)
+    monkeypatch.setattr(wt, "find_window", lambda *a, **k: 555)
+    res = wt.apply_for_mode("neon", pid=1)
+    assert res["ok"] is True
+    vals = {a: v for _h, a, v in rec.calls}
+    assert vals[wt.DWMWA_CAPTION_COLOR] == wt.colorref(wt.TITLE_BG)
+
+
+def test_attach_passes_mode_through(monkeypatch):
+    """attach 把 mode 透传给 apply_to_hwnd（覆盖老的「永远深色」行为）。"""
+    seq = {"n": 0}
+
+    def fake_hwnd(_native):
+        seq["n"] += 1
+        return 0 if seq["n"] < 2 else 555
+
+    rec = _Recorder()
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(wt, "_hwnd_of", fake_hwnd)
+    monkeypatch.setattr(wt, "_dwm_setter", lambda: rec)
+    res = wt.attach(object(), mode="light", timeout=2.0, interval=0.01)
+    assert res["ok"] is True
+    vals = {a: v for _h, a, v in rec.calls}
+    assert vals[wt.DWMWA_CAPTION_COLOR] == wt.colorref(wt.TITLE_BG_LIGHT)
+    assert vals[wt.DWMWA_USE_IMMERSIVE_DARK_MODE] == 0

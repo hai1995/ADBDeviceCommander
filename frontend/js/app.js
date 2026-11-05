@@ -23,6 +23,8 @@
     cmdInput: $("cmd-input"), overlay: $("overlay"),
     keepInput: $("keep-input"),
     tabs: $("tabs"),
+    // 主题切换（深 / 浅 / 随系统）：三态分段控件，落盘 config.json 的 theme
+    themeSwitch: $("theme-switch"),
     // logcat
     lcStart: $("lc-start"), lcStop: $("lc-stop"),
     lcClear: $("lc-clear"), lcSave: $("lc-save"), lcStatus: $("lc-status"),
@@ -1198,6 +1200,11 @@
     if (typeof s.perf_metric === "string" && PERF_METRICS[s.perf_metric]) {
       setPerfMetric(s.perf_metric, false);
     }
+    // ---- 主题（深 / 浅 / 随系统）----
+    // 还原上次选择的模式：HTML 默认深色（与 :root 默认一致，无闪白），浅色 /
+    // system 在这里才真正套上。persist:false —— 启动回填不该再写一次盘；
+    // 原生标题栏已由 main.py 的 _theme_window 在窗口就绪时按 config.theme 套好。
+    setTheme(THEME_MODES.includes(s.theme) ? s.theme : "dark", { persist: false });
   }
 
   // 级别复选框组同步：只勾 levels 里的（空数组 = 全不勾，合法语义）。
@@ -1229,6 +1236,66 @@
   }
 
   // 级别复选框组当前勾选的值数组（顺序固定 V/D/I/W/E/F，与后端 VALID_LEVELS 对齐）
+  // ------------------------------------------------------------------ //
+  // 主题（dark / light / system）：落盘的是「模式」而非「解析后的颜色」——
+  // system 模式要跟随系统 prefers-color-scheme，所以这里只存模式，真正写到
+  // <html data-theme> 的颜色由 resolveThemeAttr 在每次切换 / 系统变化时解析。
+  // 原生标题栏联动交后端 set_theme（仅 Windows 生效，其它平台静默返回）。
+  // ------------------------------------------------------------------ //
+  const THEME_MODES = ["dark", "light", "system"];
+  let _themeMql = null;          // 系统主题 MediaQuery，只挂一次监听
+  let _themeMode = "dark";       // 当前模式（深 / 浅 / 随系统）
+
+  function resolveThemeAttr(mode) {
+    // 把模式解析成真正写到 <html data-theme> 的值（dark / light）
+    if (mode === "system") {
+      const mql = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+      return mql && mql.matches ? "dark" : "light";
+    }
+    return mode === "light" ? "light" : "dark";
+  }
+
+  function applyThemeAttr() {
+    const attr = resolveThemeAttr(_themeMode);
+    if (attr === "light") document.documentElement.dataset.theme = "light";
+    else if (document.documentElement.dataset.theme) delete document.documentElement.dataset.theme;
+  }
+
+  function syncThemeSwitch() {
+    if (!els.themeSwitch) return;
+    els.themeSwitch.querySelectorAll(".theme-opt").forEach((b) => {
+      const active = b.dataset.themeMode === _themeMode;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  function bindSystemThemeListener() {
+    // 只挂一次：系统主题变化时，仅当当前模式为 system 才重新解析应用。
+    if (!window.matchMedia || _themeMql) return;
+    _themeMql = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => { if (_themeMode === "system") applyThemeAttr(); };
+    if (_themeMql.addEventListener) _themeMql.addEventListener("change", handler);
+    else if (_themeMql.addListener) _themeMql.addListener(handler); // 旧版 Safari
+  }
+
+  function setTheme(mode, opts) {
+    if (!THEME_MODES.includes(mode)) mode = "dark";
+    _themeMode = mode;
+    applyThemeAttr();
+    syncThemeSwitch();
+    bindSystemThemeListener();
+    opts = opts || {};
+    // 落盘模式（不是解析值），下次启动 applyBootSettings 还原同一模式
+    if (opts.persist !== false) {
+      try { persistPref("theme", mode); } catch (e) {}
+    }
+    // 联动原生标题栏（仅 Windows 生效，其它平台后端静默返回，不影响切换）
+    if (opts.syncNative !== false && api && api.set_theme) {
+      try { api.set_theme(mode); } catch (e) {}
+    }
+  }
+
   function levelsOf(container) {
     if (!container) return null;
     return Array.from(container.querySelectorAll("input:checked")).map((c) => c.value);
@@ -5971,6 +6038,12 @@
     els.tabs.querySelectorAll(".tab-btn").forEach((btn) => {
       btn.addEventListener("click", () => switchMainTab(btn.dataset.tab));
     });
+    // 主题切换（深 / 浅 / 随系统）：点击即对应当前模式套色并落盘 + 联动原生标题栏
+    if (els.themeSwitch) {
+      els.themeSwitch.querySelectorAll(".theme-opt").forEach((b) => {
+        b.addEventListener("click", () => setTheme(b.dataset.themeMode));
+      });
+    }
     // 设备指令
     els.btnRefresh.addEventListener("click", () => callApi(api.refresh_devices()));
     els.btnAll.addEventListener("click", () => callApi(api.toggle_all()));

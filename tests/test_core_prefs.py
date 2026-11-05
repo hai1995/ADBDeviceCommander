@@ -203,6 +203,38 @@ def test_sanitize_rejects_non_object():
     assert warnings and "不是对象" in warnings[0]
 
 
+def test_sanitize_theme_choice_enforced():
+    """主题 theme 只能取 dark/light/system，非法值（含 STR 分支会放过的字符串 /
+    数字）必须回落 dark 并告警——这是浅色主题功能落地的配置闸门。"""
+    clean, warns = prefs.sanitize_prefs({"theme": "light"})
+    assert clean["theme"] == "light"
+    assert not any("theme" in w for w in warns)
+
+    clean, warns = prefs.sanitize_prefs({"theme": "system"})
+    assert clean["theme"] == "system"
+    assert not any("theme" in w for w in warns)
+
+    # 字符串但不在白名单：CHOICE 校验分支（在 STR 之前）必须拦下，而非被 STR
+    # 分支当成普通文本放过
+    clean, warns = prefs.sanitize_prefs({"theme": "neon"})
+    assert clean["theme"] == "dark"
+    assert any("theme" in w for w in warns)
+
+    clean, warns = prefs.sanitize_prefs({"theme": 123})
+    assert clean["theme"] == "dark"
+    assert any("theme" in w for w in warns)
+
+    # 缺省不补写：缺失项保持界面默认，不替用户落一个 theme 进文件
+    clean, _ = prefs.sanitize_prefs({})
+    assert "theme" not in clean
+
+
+def test_default_prefs_contains_theme_dark():
+    """默认配置带 theme=dark（单一来源在 PREFS_DEFAULTS，前端 HTML 默认深色与之对齐）。"""
+    d = prefs.default_prefs()
+    assert d.get("theme") == "dark"
+
+
 def test_sanitize_level_list_non_string_elements():
     """列表里混进非字符串（null / 数字）按整项回退，不静默吞掉。"""
     clean, warnings = prefs.sanitize_prefs({"lc_levels": ["I", None, 3]})

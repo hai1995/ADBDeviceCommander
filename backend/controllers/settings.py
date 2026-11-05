@@ -6,6 +6,7 @@ from backend.controller import (
     prefs_path, resolve_save_dir, save_prefs_checked, subprocess,
     wifi
 )
+from core import win_theme
 from core.devices import parse_devices
 
 class SettingsMixin:
@@ -46,6 +47,25 @@ class SettingsMixin:
             merged["_persist_note"] = note
             self._push_toast("err", "⚠ " + note)
         return {"ok": True, "settings": merged}
+
+    def set_theme(self, mode):
+        """切换界面主题时联动原生标题栏（只有 Windows 才绘制标题栏，非 Windows 静默）。
+
+        mode: "dark" / "light" / "system"。前端已负责把主题落盘、给 <html> 套
+        data-theme、并解析 system → 实际深浅；这里只管让原生标题栏配色跟上。
+        system 在 Windows 上读注册表解析为实际深浅。返回里带上 win_theme 的实际
+        结果便于排查，但「非 Windows 不支持」是预期内，不当作失败。
+        """
+        if mode not in ("dark", "light", "system"):
+            return {"ok": False, "reason": "invalid_mode", "mode": mode}
+        try:
+            res = win_theme.apply_for_mode(mode, pid=os.getpid())
+        except Exception as e:  # 标题栏配色是锦上添花，任何异常都不能影响切换
+            return {"ok": False, "reason": "apply_failed", "mode": mode,
+                    "error": str(e)}
+        # 非 Windows 上 win_theme 恒返回 unsupported —— 那是预期内，不算失败。
+        applied = bool(res.get("ok")) or res.get("reason") == "unsupported"
+        return {"ok": applied, "mode": mode, "title_bar": res}
 
     def config_info(self):
         """配置文件信息（关于页展示用）。

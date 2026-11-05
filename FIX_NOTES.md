@@ -1278,6 +1278,11 @@ id 在下次落盘时自动剔除，配置不会越滚越长。
 常量，跟着主题走需要先把浅色主题本身做出来；单做「标题栏跟随系统」会在深色界面
 配浅色标题栏，比现在更割裂。等有浅色主题时一起做。
 
+> 已于 **第四十八轮** 补齐：浅色主题（CSS 令牌化覆盖 + `:root[data-theme="light"]`）、
+> `prefs.theme` 偏好（dark/light/system 三态 + 白名单校验）、原生标题栏三态联动
+> （`win_theme.apply_for_mode` / `set_theme`）、顶栏三态切换控件 + 系统主题监听。
+> 详见第四十八轮。
+
 # 第十六轮：修「执行含 powershell / exit 的命令序列后整程序卡死」
 
 ## 现象
@@ -3790,3 +3795,72 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 
 后端 `pytest`：**1341 passed / 1 skipped**；`pyflakes` 干净。
 前端 `node tests/frontend/run-all.cjs`：**83 个文件、0 失败**。
+
+# 第四十八轮：浅色主题 + 标题栏配色联动（按 FIX_NOTES「仍未做」补齐）
+
+## 一、为什么做
+
+`FIX_NOTES` 第四十七轮之前的「仍未做」一节明确写着：标题栏配色联动界面主题
+（`prefers-color-scheme` / 浅色主题）是已知功能缺口——「配色目前是写死的三个常量，
+等有浅色主题时一起做」。本轮把它落地，作为对现行项目的功能点审查与完善：让用户
+在深色 / 浅色 / 跟随系统之间切换，且原生（Windows DWM）标题栏配色一并跟上，不割裂。
+
+设计上坚持两条硬约束，确保零回归：
+- **深色主题体验完全不变**（默认 = 现有行为）；
+- **前端组件零改动适配**：走「语义令牌 + 主题覆盖层」路线，而非给每个组件加
+  `data-theme` 判断。
+
+## 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `frontend/css/app.css` | 在 `:root` 注入「主题扩展令牌」（深色默认值与旧硬编码**逐字一致**，深色零回归）；新增 `:root[data-theme="light"]` 覆盖层（浅色配色）。再用脚本把 11 条规则共 15 处硬编码表面色替换为变量（弹窗渐变 / 媒体预览底 / 滚动条 / 外框 / 选区中心 / 设备栏轨道等），括号配平校验 660/660。 |
+| `core/prefs.py` | `PREFS_DEFAULTS` 新增 `"theme": "dark"`；新增枚举白名单 `THEME_CHOICES` 与 `CHOICE_KEYS`；`sanitize_prefs` 把 CHOICE 校验分支**放在 STR 之前**（否则非法字符串会被 STR 分支当成普通文本放过）。`theme` 仅接受 `dark/light/system`。 |
+| `core/win_theme.py` | 新增浅色常量 `TITLE_BG_LIGHT/TITLE_TEXT_LIGHT/TITLE_BORDER_LIGHT`；`title_attributes(mode)` 支持 `light`（写沉浸式浅色位 0 + 浅色配色）；`apply_to_hwnd` 已支持 mode 透传；新增 `_resolve_system_mode()`（读注册表 `AppsUseLightTheme`，非 Windows / 读不到回退 dark）；新增 `apply_for_mode(mode, native, pid, ...)` 统一入口（system 解析为实际深浅、优先取 native 句柄否则按 pid 查找、全程 silent）；`attach` 增加 `mode` 参数并透传（保留启动期轮询重试）。 |
+| `backend/controllers/settings.py` | `SettingsMixin` 新增 `set_theme(mode)`：校验 ∈ {dark,light,system} → `win_theme.apply_for_mode(mode, pid=getpid())`；非 Windows 的 `unsupported` 视为成功，任何异常静默返回 `apply_failed`。 |
+| `main.py` | `_theme_window()` 改为先读 `config.json` 的 `theme`，再 `win_theme.attach(native, mode=mode)` 套色（启动期按偏好联动原生标题栏，非 Windows / 句柄缺失静默）。 |
+| `frontend/index.html` | 顶栏 pill 之后插入 `.theme-switch` 三态分段控件（深 / 浅 / 随系统）。 |
+| `frontend/js/app.js` | 新增 `setTheme(mode)`：解析 system→`matchMedia`、写 `data-theme`、持久化 `persistPref("theme")`、`api.set_theme` 联动原生标题栏、监听系统主题变化；`applyBootSettings` 按 `theme` 还原（默认 dark）；`bindUI` 绑定三态点击；`els.themeSwitch` 登记。 |
+| `tests/frontend/theme.test.cjs` | **新增** 20 条：控件三态齐全、默认深色、启动按 config 还原（含非法值回落）、点击切换套色 + 持久化 + 联动后端、随系统实时跟随。 |
+| `tests/frontend/ui_style_card_tabs.test.cjs` | 样式审计白名单加入 `theme-opt`（顶栏主题分段按钮，刻意自成一体的胶囊造型，已样式化）。 |
+| `tests/test_core_prefs.py` | 新增 2 条：`theme` 白名单校验（非法字符串 / 数字回落 dark 并告警、缺省不补写）、默认含 `theme=dark`。 |
+| `tests/test_core_win_theme.py` | 新增 6 条：`apply_for_mode` 非 Windows unsupported、`light` 用浅色常量、`system` 经注册表解析、非法 mode 回落 dark、`attach` 透传 mode。 |
+| `tests/test_backend_settings_theme.py` | **新增** 4 条：`set_theme` 三态调用 `apply_for_mode`、非法 mode 拒绝、unsupported 视为成功、异常被捕获。 |
+| `README.md` | 新增「主题（深色 / 浅色 / 跟随系统）」小节与偏好项说明。 |
+
+## 三、关键设计点
+
+### 1. CSS 令牌化，深色零回归
+
+`:root` 默认令牌维持原深色值，`[data-theme="light"]` 只覆盖与主题相关的令牌。
+新增的「主题扩展令牌」（`--popup-a/b`、`--scroll-thumb*`、`--rail-a/b`、
+`--overlay-center` 等）默认值**逐字等于**旧硬编码，确保旧组件在深色下像素不变。
+浅色块改的是这些令牌的取值，组件靠 `var()` 自动适配——这是改动能覆盖全站而
+不逐一碰组件的前提。
+
+### 2. 偏好只存「模式」不存「解析色」
+
+`config.json` 里存的是 `theme: "system"` 这种**模式**，不是解析后的 `light`。
+真正写到 `<html data-theme>` 的颜色由 `setTheme` 在每次切换 / 系统主题变化时
+解析。这样用户在 system 模式下改了系统主题，界面能实时跟随，而不必重启。
+
+### 3. 后端只管原生标题栏，且永不阻塞切换
+
+`set_theme` 是锦上添花：标题栏配色失败（非 Windows / DWM 不可写 / 句柄缺失）
+一律静默，绝不把界面主题切换本身搞失败。system 在 Windows 上读注册表解析为
+实际深浅——这与前端的 `matchMedia` 解析是两条独立路径，但结论保持一致。
+
+### 4. 启动期联动
+
+`main.py` 的 `_theme_window`（在 `webview.start(func=...)` 线程里、窗口就绪后跑）
+读取 `config.theme` 调用 `win_theme.attach(mode=...)`；前端 `applyBootSettings`
+按同一 `theme` 还原界面。两条路径收敛到同一偏好，互不冲突。
+
+## 四、验证
+
+- 后端 `pytest`：**1341 passed / 1 skipped**（与改动前基线完全一致，零回归）。
+- 前端 `node tests/frontend/run-all.cjs`：**84 个文件、0 失败**（新增 1 个文件 /
+  20 条断言，并把 `theme-opt` 补进样式审计白名单）。
+- 令牌化 CSS：括号配平 660/660，浅色覆盖层存在，深色块与旧值逐字一致。
+- `sanitize_prefs` 的 theme 校验：非法字符串 `neon` / 数字 `123` 均回落 `dark`
+  并告警，合法 `dark/light/system` 保留，`default_prefs` 含 `"theme": "dark"`。
