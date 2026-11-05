@@ -115,7 +115,10 @@ console.log("\n[C] 结构完整性：按钮/tab 类名未被改动");
   // （下拉弹层里的模式切换与刷新，尺寸与 .btn 差一档，套 .btn 反而挤爆弹层）。
   // about-subtab 是关于页二级子 tab（概览 / 使用说明），有 .about-subtab 专属样式。
   // tool-subtab 是工具页二级子 tab（截图 / 录屏 / 投屏 / 安装 / 诊断），有 .tool-subtab 专属样式。
-  const STYLE_CLASS = /\b(btn|tab-btn|clear-x|toast-close|modal-x|ticker|pkg-mode|pkg-refresh|about-subtab|tool-subtab)\b/;
+  // theme-opt 是顶栏主题切换（深 / 浅 / 随系统）的分段控件按钮，有 .theme-opt
+  // 专属样式（app.css 中段），刻意不做成 .btn 的按键块（胶囊分段造型），同样属于
+  // 「已样式化」，故列入审计白名单。
+  const STYLE_CLASS = /\b(btn|tab-btn|clear-x|toast-close|modal-x|ticker|theme-opt|pkg-mode|pkg-refresh|about-subtab|tool-subtab)\b/;
   const bare = (html.match(/<button\b[^>]*>/g) || [])
     .filter((tag) => {
       const m = tag.match(/class="([^"]*)"/);

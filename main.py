@@ -355,16 +355,31 @@ def main():
 
 
 def _theme_window(window):
-    """窗口就绪后把原生标题栏改成与界面一致的深色（非 Windows / 失败静默）。
+    """窗口就绪后把原生标题栏改成与界面一致的主题（非 Windows / 失败静默）。
 
     标题栏是系统绘制的（本程序用原生标题栏，没有自绘），默认跟随 Windows 的
     「应用主题」：系统是浅色时，深色界面顶着一根近白的标题栏，割裂感很强。
     具体的 DWM 调用在 core/win_theme.py（可 headless 单测），这里只负责在
-    合适的时机（窗口对象已经存在）把它叫起来。
+    合适的时机（窗口对象已经存在）把它叫起来，并按 config.json 的 theme
+    （dark / light / system）决定标题栏上色方案——浅色界面配浅色标题栏，
+    深/浅才不割裂。
+
+    设置页运行时切换主题走 WebApi.set_theme → win_theme.apply_for_mode（同一套
+    上色逻辑，只是按 pid 回退找句柄），与这里的启动期上色共用底层实现。
     """
     try:
         from core import win_theme
-        win_theme.attach(getattr(window, "native", None))
+        from core.prefs import load_prefs
+        mode = "dark"
+        try:
+            m = load_prefs().get("theme")
+            if m in ("dark", "light", "system"):
+                mode = m
+        except Exception:
+            pass
+        # attach 会轮询等待窗口句柄就绪（start(func=) 的线程里窗口可能尚未建出），
+        # 再按 mode 上色；非 Windows / 句柄拿不到都静默返回。
+        win_theme.attach(getattr(window, "native", None), mode=mode)
     except Exception:
         pass                      # 配色是锦上添花，任何异常都不能挡住启动
 

@@ -100,6 +100,9 @@ PREFS_DEFAULTS = {
     "shot_save_file": True,
     "keep_input": True,
     "cmd_filter": "",
+    # 界面主题：dark / light / system（跟随系统 prefers-color-scheme）。落盘后重启恢复，
+    # 切换实时生效（前端设 <html data-theme> 并联动原生标题栏）。非法值回退 dark。
+    "theme": "dark",
     # 指令台卡片的手动排序（长按拖动后落盘）：逗号分隔的命令 id，按「先后」
     # 依次排列。只有被拖过的分组里的 id 会写进来 —— 没拖过的分组仍按点击
     # 频次自动排（常用靠前），不会因为顺手拖了一张卡就把自动排序整体冻住。
@@ -255,6 +258,10 @@ LEVEL_LIST_KEYS = frozenset(k for k, v in PREFS_DEFAULTS.items()
 INT_KEYS = frozenset(k for k, v in PREFS_DEFAULTS.items()
                      if isinstance(v, int) and not isinstance(v, bool))
 
+# 取值白名单键：只允许枚举内的值，非法值回退默认（不静默接受陌生字符串）。
+THEME_CHOICES = ("dark", "light", "system")
+CHOICE_KEYS = {"theme": THEME_CHOICES}
+
 
 def _as_int(v, default, lo, hi):
     """宽松整数转换：只认 int / 纯数字字符串，且必须落在 [lo, hi]。
@@ -350,6 +357,12 @@ def sanitize_prefs(raw):
                 if _as_bool(v, None) is None:
                     warnings.append("%s 的值 %r 不是有效的开关，已恢复为 %s"
                                     % (k, v, "开" if nv else "关"))
+        elif k in CHOICE_KEYS:
+            allowed = CHOICE_KEYS[k]
+            if v not in allowed:
+                clean[k] = dv
+                warnings.append("%s 的值 %r 不是合法选项（%s），已恢复为 %r"
+                                % (k, v, "/".join(allowed), dv))
         elif k in STR_KEYS:
             if not isinstance(v, str):
                 clean[k] = dv

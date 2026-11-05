@@ -44,6 +44,12 @@ TITLE_BG = "#0b0f14"        # --bg
 TITLE_TEXT = "#e9f0f8"      # --text
 TITLE_BORDER = "#1b2532"    # 比 --surface-2 略深：外框要能看出边界，又不能抢眼
 
+# 浅色主题下的标题栏配色（与 frontend/css/app.css 的 :root[data-theme="light"]
+# 镜像；改主题色时两处一起改）。浅色界面配浅色标题栏，深/浅才不割裂。
+TITLE_BG_LIGHT = "#eef1f5"
+TITLE_TEXT_LIGHT = "#0e1620"
+TITLE_BORDER_LIGHT = "#c2ccd8"
+
 # DWM 属性编号（见 dwmapi.h）。19 是 Windows 10 1809~1903 的旧编号，
 # 20 从 1909 起沿用；两个都试，写不进去的那个会被忽略。
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
@@ -76,12 +82,18 @@ def colorref(hex_color):
     return (b << 16) | (g << 8) | r
 
 
-def title_attributes(bg=TITLE_BG, text=TITLE_TEXT, border=TITLE_BORDER):
+def title_attributes(mode="dark", bg=None, text=None, border=None):
     """要写入的 (属性, 值) 列表；颜色非法时跳过对应项。
 
-    顺序有意为之：深色模式先写（老系统只有它生效），颜色后写。
+    mode: "dark"（默认）/ "light"。dark 写沉浸式深色模式（值 1），
+    light 关掉它（值 0）；颜色缺省按主题取上面的 TITLE_* / TITLE_*_LIGHT。
+    顺序有意为之：深色模式属性先写（老系统只有它生效），颜色后写。
     """
-    out = [(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)]
+    if mode == "light":
+        dark, bg, text, border = 0, bg or TITLE_BG_LIGHT, text or TITLE_TEXT_LIGHT, border or TITLE_BORDER_LIGHT
+    else:
+        dark, bg, text, border = 1, bg or TITLE_BG, text or TITLE_TEXT, border or TITLE_BORDER
+    out = [(DWMWA_USE_IMMERSIVE_DARK_MODE, dark)]
     for attr, color in ((DWMWA_CAPTION_COLOR, bg),
                         (DWMWA_TEXT_COLOR, text),
                         (DWMWA_BORDER_COLOR, border)):
@@ -118,9 +130,9 @@ def _dwm_setter():
     return _set
 
 
-def apply_to_hwnd(hwnd, bg=TITLE_BG, text=TITLE_TEXT, border=TITLE_BORDER,
+def apply_to_hwnd(hwnd, mode="dark", bg=None, text=None, border=None,
                   setter=None):
-    """把深色标题栏属性写到窗口句柄上。
+    """把标题栏配色属性写到窗口句柄上（mode 决定深/浅，见 title_attributes）。
 
     返回 {"ok": bool, "applied": [属性], "failed": [属性], "reason": str}。
     ok 的判据是「至少写进去一项」：Win10 只认 20，Win11 认全套，两者都算成功。
@@ -131,7 +143,7 @@ def apply_to_hwnd(hwnd, bg=TITLE_BG, text=TITLE_TEXT, border=TITLE_BORDER,
     if setter is None:
         return {"ok": False, "applied": [], "failed": [], "reason": "unsupported"}
     applied, failed = [], []
-    for attr, val in title_attributes(bg, text, border):
+    for attr, val in title_attributes(mode, bg, text, border):
         try:
             setter(hwnd, attr, val)
             applied.append(attr)
@@ -218,15 +230,22 @@ def find_window(pid=None, title_hint=""):
 
 
 def attach(native=None, timeout=4.0, interval=0.12, pid=None,
-           title_hint="ADB"):
-    """等待窗口出现后套用深色标题栏（阻塞至多 timeout 秒）。
+           title_hint="ADB", mode="dark"):
+    """等待窗口出现后按主题上色标题栏（阻塞至多 timeout 秒，mode 支持 system）。
 
     在 pywebview 的 start(func=...) 线程里调用：那一刻 GUI 循环刚起，
     窗口对象可能还没建出来，所以要轮询。整体 silent —— 配色是锦上添花，
     任何异常都不该影响启动（最坏情况：标题栏保持系统默认色）。
+
+    mode: "dark"（默认）/ "light" / "system"。system 在 Windows 上读注册表
+    解析为实际深浅；非 Windows 或读不到时回退 dark。
     """
     if not sys.platform.startswith("win"):
         return {"ok": False, "reason": "unsupported"}
+    if mode == "system":
+        mode = _resolve_system_mode()
+    if mode not in ("dark", "light"):
+        mode = "dark"
     deadline = time.time() + max(0.1, float(timeout))
     last = {"ok": False, "reason": "no_window"}
     while time.time() < deadline:
@@ -238,8 +257,55 @@ def attach(native=None, timeout=4.0, interval=0.12, pid=None,
         if not hwnd:
             hwnd = find_window(pid, title_hint)
         if hwnd:
-            last = apply_to_hwnd(hwnd)
+            last = apply_to_hwnd(hwnd, mode=mode)
             if last.get("ok"):
                 return last
         time.sleep(max(0.02, float(interval)))
     return last
+
+
+def _resolve_system_mode():
+    """解析系统主题（仅 Windows 有意义）：读注册表 AppsUseLightTheme。
+
+    非 Windows / 读不到时回退 dark——原生标题栏只有 Windows 才绘制，且启动期
+    拿不到系统主题时以深色兜底最安全（深色界面配深色标题栏永远成立）。
+    """
+    if not sys.platform.startswith("win"):
+        return "dark"
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "light" if val == 1 else "dark"
+    except Exception:
+        return "dark"
+
+
+def apply_for_mode(mode="dark", native=None, pid=None, title_hint="ADB",
+                  setter=None):
+    """按主题模式给原生标题栏上色：dark / light / system。
+
+    system 在 Windows 上读注册表解析为实际深浅；非 Windows 或读不到时回退 dark。
+    窗口句柄优先取 native，取不到再按 pid 在进程内查找（运行时切换主题、
+    拿不到 window 对象时用）。全程 silent：任何异常都不该影响启动或界面。
+    """
+    if not sys.platform.startswith("win"):
+        return {"ok": False, "reason": "unsupported"}
+    if mode == "system":
+        mode = _resolve_system_mode()
+    if mode not in ("dark", "light"):
+        mode = "dark"
+    hwnd = 0
+    if native is not None:
+        try:
+            hwnd = _hwnd_of(native)
+        except Exception:
+            hwnd = 0
+    if not hwnd:
+        hwnd = find_window(pid, title_hint)
+    if not hwnd:
+        return {"ok": False, "reason": "no_window"}
+    return apply_to_hwnd(hwnd, mode=mode, setter=setter)

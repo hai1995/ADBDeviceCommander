@@ -24,6 +24,15 @@
       <button class="tab-btn" data-tab="about">关于</button>
     </nav>
     <div class="pill idle" id="pill">连接中…</div>
+    <!-- 主题切换（深 / 浅 / 随系统 三态）：落盘 config.json 的 theme，
+         浅色配色由 :root[data-theme="light"] 提供；联动原生标题栏交给后端
+         set_theme（仅 Windows 生效，其它平台静默）。放在 tab 区右侧、状态胶囊旁，
+         不挤占左侧 .tabs（flex:1）。 -->
+    <div class="theme-switch" id="theme-switch" role="group" aria-label="界面主题">
+      <button type="button" class="theme-opt" data-theme-mode="dark" title="深色" aria-pressed="false">深</button>
+      <button type="button" class="theme-opt" data-theme-mode="light" title="浅色" aria-pressed="false">浅</button>
+      <button type="button" class="theme-opt" data-theme-mode="system" title="跟随系统" aria-pressed="false">随</button>
+    </div>
     <!-- 核心运行信息（全局唯一状态入口，跨 tab 常驻）：横向跑马灯，悬停暂停、
          点击弹出完整历史。原先的底部常驻状态栏已并入此处（#status 直接住在弹窗里）。 -->
     <button class="ticker" id="status-ticker" type="button" title="点击查看完整状态信息">
