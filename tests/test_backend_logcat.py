@@ -696,6 +696,35 @@ def _statuses(bus, kind):
             for e in bus.events if e["kind"] == kind]
 
 
+def _for_serial(cmd, serial):
+    """这条 adb 命令是否属于本用例的设备。
+
+    为什么假 Popen 里要加这层过滤：上一个用例的抓取 worker 可能还在自动重启
+    循环里（stopped 事件推完，还要清理 _procs / 退避 Event），它调到的是**本
+    用例**刚 patch 进去的 Popen。按 `call["n"]` 或 `procs.pop(0)` 计数的假件
+    会被它抢走一个批次，本用例就少一段日志 —— 表现为「跨天用例 / 空洞用例偶发
+    失败」，而单跑这条永远复现不了（没有遗留线程）。按 serial 分流后，别人的
+    worker 拿到的是空 EOF（立刻无进展退出），不再动本用例的批次。
+    """
+    return serial in cmd
+
+
+def _popen_by_serial(serial, batches):
+    """按 serial 分流的假 Popen：按顺序吐出 batches（每批是行列表），之后空 EOF。
+
+    batches 用完之后的空 EOF 是给本用例的「无进展」出口（见 _EofProc 的说明）；
+    别的用例遗留的 worker 同样拿空 EOF，不会消耗本用例的批次。
+    """
+    q = list(batches)
+
+    def _popen(cmd, **kw):
+        if not _for_serial(cmd, serial):
+            return _EofProc([])
+        return _EofProc(q.pop(0)) if q else _EofProc([])
+
+    return _popen
+
+
 def test_capture_offline_device_is_an_error_not_an_empty_success(tmp_path, monkeypatch):
     """设备离线：必须报错，不能报「✓ 抓取完毕：0 行」。
 
@@ -917,8 +946,10 @@ def test_capture_reconnects_and_continues_after_device_drop(tmp_path, monkeypatc
 
     call = {"n": 0}
     def fake_popen(cmd, **kw):
-        call["n"] += 1
+        if not _for_serial(cmd, "D1"):
+            return _EofProc([])         # 别的用例遗留的 worker：一句都不给
         if "logcat" in " ".join(cmd):
+            call["n"] += 1
             if call["n"] == 1:
                 return _EofProc(list(first))
             if call["n"] == 2:
@@ -973,6 +1004,8 @@ def test_capture_gap_on_reconnect_timeout(tmp_path, monkeypatch):
              for i in range(3)]
 
     def fake_popen(cmd, **kw):
+        if not _for_serial(cmd, "T1"):
+            return _EofProc([])         # 别的用例遗留的 worker：一句都不给
         if "logcat" in " ".join(cmd):
             return _EofProc(list(first))
         return _FakeLogcatProc([])
@@ -1159,12 +1192,10 @@ def test_capture_resume_skips_replayed_backlog(tmp_path, monkeypatch):
             "08-29 10:00:03.000  1  1 I Tag: c\n"]
     # 重连后的会话：先重放缓冲区里的三行，再接着输出新的一行
     ses2 = ses1 + ["08-29 10:00:09.000  1  1 I Tag: d\n"]
-    procs = [_EofProc(ses1), _EofProc(ses2)]
+    procs = [ses1, ses2]
     # 之后的每一轮都立刻 EOF 且无新行（设备仍在，抓取被外力打断但拉不起来），
     # 触发「连续无进展」收尾 —— 否则自动重启逻辑会一直往下拉。
-    monkeypatch.setattr(
-        ls.subprocess, "Popen",
-        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
+    monkeypatch.setattr(ls.subprocess, "Popen", _popen_by_serial("A1", procs))
     calls = {"n": 0}
     monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 
@@ -1269,10 +1300,8 @@ def test_eof_while_device_still_present_restarts_and_keeps_logging(tmp_path, mon
              for i in range(3)]
     second = ["08-29 10:05:00.%03d  1  1 I Tag: after-%d\n" % (i, i)
               for i in range(3)]
-    procs = [_EofProc(first), _EofProc(second)]
-    monkeypatch.setattr(
-        ls.subprocess, "Popen",
-        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
+    procs = [first, second]
+    monkeypatch.setattr(ls.subprocess, "Popen", _popen_by_serial("E", procs))
     monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
     monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 
@@ -1333,10 +1362,8 @@ def test_capture_restart_writes_hole_marker_when_backlog_rolled_over(tmp_path, m
     first = ["08-29 10:50:00.000  1  1 I Tag: head\n"]
     # 断点 10:50，续写起点已经是 11:10（中间 20 分钟已被缓冲区滚掉）
     second = ["08-29 11:10:00.000  1  1 I Tag: tail\n"]
-    procs = [_EofProc(first), _EofProc(second)]
-    monkeypatch.setattr(
-        ls.subprocess, "Popen",
-        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
+    procs = [first, second]
+    monkeypatch.setattr(ls.subprocess, "Popen", _popen_by_serial("H", procs))
     monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
     monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 
@@ -1363,10 +1390,8 @@ def test_capture_cross_day_timestamp_is_not_treated_as_replay(tmp_path, monkeypa
              "12-31 23:59:59.000  1  1 I Tag: y2\n"]
     second = ["01-01 00:00:05.000  1  1 I Tag: y3\n",
               "01-01 00:00:06.000  1  1 I Tag: y4\n"]
-    procs = [_EofProc(first), _EofProc(second)]
-    monkeypatch.setattr(
-        ls.subprocess, "Popen",
-        lambda *a, **k: procs.pop(0) if procs else _EofProc([]))
+    procs = [first, second]
+    monkeypatch.setattr(ls.subprocess, "Popen", _popen_by_serial("Y", procs))
     monkeypatch.setattr(ls, "device_present", lambda *a, **k: True)
     monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
 

@@ -2528,6 +2528,37 @@ def test_merge_failure_keeps_every_segment(monkeypatch, tmp_path):
                if t.startswith("✓")), "完成 toast 要说明「几段未合并」"
 
 
+def test_zip_failure_is_reported_not_silently_skipped(monkeypatch, tmp_path):
+    """勾了「结束后打包」但打包失败：必须说清「没有 zip」。
+
+    用户是按按钮的勾选状态去目录里找 zip 的。失败时若只报「✓ 录屏已完成」，
+    他会以为打包还在进行，或者以为程序把文件弄丢了 —— 文件其实一个不少，
+    只是没压缩。这类「产物和界面预期不一致」不能静默过去。
+    """
+    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg（用例替身）")
+    api = _make_api()
+    s1 = tmp_path / "record_A1_ts1.mp4"
+    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": True,
+        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    monkeypatch.setattr(api, "_stop_video", lambda s: (True, [str(s1)], None))
+    monkeypatch.setattr(api, "_zip_paths", staticmethod(lambda *a, **k: None))
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    assert s1.exists(), "打包失败绝不能删源文件"
+    statuses = _events_by_kind(api).get("status", [])
+    hits = [p for p in statuses if "打包失败" in (p.get("text") or "")]
+    assert hits, "打包失败必须播报，不能只报「✓ 录屏已完成」：%r" % (
+        [p.get("text") for p in statuses],)
+    assert hits[0].get("toast"), "这条要弹 toast（用户会去目录里找 zip）：%r" % (hits[0],)
+
+
 def test_all_segments_are_kept_and_zipped(monkeypatch, tmp_path):
     """自动分段的每一段都要落盘并进包 —— 只留最后一段等于把前几段扔掉。
 

@@ -677,6 +677,10 @@
               <li><b>文件</b>：类 Device Explorer 的远程文件管理——浏览 / 上传 / 下载 / 删除 / 重命名 / 新建 / 查看内容。
                 单设备，随左侧受控设备自动联动。</li>
               <li><b>全局共享</b>：左侧设备栏跨 tab 常驻可见；顶栏右上角「状态信息」跑马灯跨 tab 常驻，滚动显示最新的刷新 / 执行 / 停止等运行状态，鼠标悬停可暂停细看，点击即弹出完整历史（可复制 / 清空）。</li>
+              <li><b>提示分两档</b>：操作结果与普通错误走右上角 toast（4~8 秒自动消退）；
+                <b>「产物已经残缺、但界面看不出异常」这一类必须弹窗</b>（如录屏收尾发现配套日志没跟到最后：
+                toast 一闪而过，人不在屏幕前就等于没说），要点「我知道了」才关闭，
+                多条合并成一个窗口，底部可直达完整原因。</li>
               <li><b>受控设备</b>：左侧勾选即「受控设备」——多设备功能（指令 / 工具）对其广播；
                 单设备功能（Logcat / 文件）自动以第一个受控设备为当前目标。</li>
             </ul>
@@ -797,6 +801,34 @@
       <div class="modal-foot">
         <button id="input-no" class="btn" type="button">取消</button>
         <button id="input-yes" class="btn accent" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 关键告警弹窗（必须用户手动关闭）。
+       为什么还需要它 —— toast 是「看一眼就没了」的：真实场景里用户录屏 20 分钟，
+       中途 USB 带宽被占满把 logcat 挤断，收尾弹了一堆 toast（录屏已完成 / 已打包 /
+       日志少了 24 分钟），几秒后全部自动消失。用户当时正在做别的事，一条都没记住，
+       直到事后拿视频对日志才发现后段是空的。这类「产物残缺但程序不报错」的结论
+       不能靠一条会自己消失的提示：把它放进一个不点就不走的弹窗里，才叫「第一时间
+       知道」。多条告警合并进同一个弹窗（多设备同时出问题时不必连点 5 次），
+       每条都能在「查看状态信息」里找到完整过程。 -->
+  <div id="alert-modal" class="modal confirm-modal alert-modal hidden" role="alertdialog"
+       aria-modal="true" aria-labelledby="alert-title" aria-describedby="alert-body">
+    <div class="modal-box confirm-box alert-box">
+      <div class="modal-head">
+        <span id="alert-title" class="alert-title">⚠ 需要确认的重要提示</span>
+        <div class="modal-actions">
+          <button id="alert-x" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="alert-body" class="confirm-text alert-body"></div>
+        <div id="alert-hint" class="alert-hint dim"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="alert-more" class="btn" type="button">查看状态信息</button>
+        <button id="alert-ok" class="btn warn" type="button">我知道了</button>
       </div>
     </div>
   </div>

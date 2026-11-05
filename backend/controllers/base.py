@@ -499,18 +499,36 @@ class WebApiBase:
             payload["ws"] = wid
         self.bus.push("console", payload)
 
-    def _push_status(self, type_, text, toast=False):
+    def _push_status(self, type_, text, toast=False, alert=False, alert_title=""):
         """下发一条状态。toast=True 时前端会额外弹 toast 强提醒（高优先级提示语）。
 
         默认 toast=False：绝大多数状态只写到底部状态栏日志；仅错误级（err）
         与显式 toast 标记的提示才会触发前端弹窗（见 frontend/js/app.js pushStatus）。
+
+        alert=True 再多走一层：前端弹一个**必须手动关闭**的告警弹窗（showAlert）。
+        toast 几秒后自己就没了，而「本次产物可能已经残缺」这种事必须挡在人面前，
+        让他亲手关掉才算看见（实况：日志少了 24 分钟，收尾只弹过会消失的 toast，
+        用户直到事后对时间轴才发现）。
         """
-        self.bus.push("status", {
-            "type": type_, "text": text, "toast": bool(toast)})
+        payload = {"type": type_, "text": text, "toast": bool(toast)}
+        if alert:
+            payload["alert"] = True
+            if alert_title:
+                payload["alert_title"] = alert_title
+        self.bus.push("status", payload)
 
     def _push_toast(self, type_, text):
         """高优先级提示语：状态栏照常记录，同时强制前端弹 toast。"""
         self._push_status(type_, text, toast=True)
+
+    def _push_alert(self, type_, text, title=""):
+        """关键告警：状态栏 + toast + 不点不消失的弹窗。
+
+        只用在「产物已经残缺、但流程本身没失败」的情形 —— 录屏配套日志跟不上
+        视频、抓取文件带时间缺口这类。普通错误（截图失败、命令未找到）继续走
+        _push_toast：那些当场就有结论，不需要用户再确认一次。
+        """
+        self._push_status(type_, text, toast=True, alert=True, alert_title=title)
 
     def _ws_status(self, type_, text, toast=False):
         """命令执行流程里的状态播报：多工作区时带上工作区名做前缀。

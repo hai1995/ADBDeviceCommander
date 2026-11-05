@@ -803,6 +803,13 @@ class RecordMixin:
             if self._zip_paths(rec_files, z):
                 zpath = z
                 self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
+            else:
+                # 勾了「结束后打包」却没打成（磁盘满 / 目录被删 / 被占用）：
+                # 用户会照着按钮的勾选状态去目录里找 zip。必须说清「没有 zip」，
+                # 否则他会以为打包还在进行、或者以为程序把文件弄丢了。
+                self._push_toast(
+                    "warn", "⚠ 录制产物打包失败（文件已单独保存，可直接使用）：%s"
+                            % sess.get("dir"))
         return rec_files, zpath
 
     def _logcat_coverage_notes(self, sess, cap_map):
@@ -884,12 +891,18 @@ class RecordMixin:
         """播报收尾阶段算出的「配套日志覆盖度」结论（见 _logcat_coverage_notes）。
 
         必须排在「✓ 录屏已完成」之后：用户视线停在最后几条提示上，先报成功、
-        再报「日志其实少了 24 分钟」，他才不会把后者漏掉。warn 级同时弹 toast
-        （用户可能已经切去别的页签），并一律写进状态栏便于事后回看。
+        再报「日志其实少了 24 分钟」，他才不会把后者漏掉。
+
+        warn 级走 `_push_alert`：状态栏 + toast + **不点就不消失的弹窗**。为什么
+        非这样不可 —— 用户实况里这条结论当时是 toast，6 秒后自动消失，而人正
+        在录屏之外的事上；等他回来只看得到「✓ 录屏已完成」，日志塌了 24 分钟
+        这件事就这么过去了，直到事后对时间轴才发现，那时已经补不回来。数据
+        残缺属于「必须让用户亲手确认一次」的结论，不能指望一条会自己消失的提示。
         """
         for level, text in (sess or {}).get("logcat_notes") or []:
             if level == "warn":
-                self._push_toast("warn", text)
+                self._push_alert("warn", text,
+                                 title="⚠ 本次录制的日志不完整")
             else:
                 self._push_status(level, text)
 

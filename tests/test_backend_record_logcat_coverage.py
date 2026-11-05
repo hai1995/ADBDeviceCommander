@@ -157,3 +157,74 @@ def test_teardown_records_notes_and_stop_broadcasts_them(tmp_path, monkeypatch):
     texts = [e["payload"].get("text") or "" for e in api.bus.take()
              if e["kind"] == "status"]
     assert any("只跟到" in t for t in texts), texts
+
+
+def test_warn_notes_are_broadcast_as_must_close_alert(tmp_path, monkeypatch):
+    """「日志残缺」这类结论必须带 alert 标记（前端弹不点就不消失的弹窗）。
+
+    回归用户实况：这条结论当时是 toast，6 秒后自动消失，人正在别处，等他回来
+    只看得到「✓ 录屏已完成」—— 日志塌了 24 分钟这件事就这么过去了。数据残缺
+    不能依赖一条会自己消失的提示。
+    """
+    api = _make_api()
+    now = int(time.time())
+    log_path = str(tmp_path / "logcat_A1.txt")
+    _write_log(log_path, [_ts(now - 1500), _ts(now - 1440)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: now)
+
+    api._rec_session = {"logcat_captures": {"A1": log_path}}
+    api._rec_session["logcat_notes"] = api._logcat_coverage_notes(
+        api._rec_session, {"A1": log_path})
+    api.bus.take()
+    api._push_logcat_notes(api._rec_session)
+
+    warns = [e["payload"] for e in api.bus.take()
+             if e["kind"] == "status"
+             and (e["payload"].get("text") or "").find("只跟到") >= 0]
+    assert warns, "必须播报「日志只跟到几点」"
+    p = warns[0]
+    assert p.get("alert") is True, "数据残缺必须弹「不点不消失」的弹窗：%r" % (p,)
+    assert p.get("toast") is True, "toast 也要保留（此刻正看着屏幕的人先看到）"
+    assert p.get("alert_title"), "弹窗要有标题说清是哪一类问题：%r" % (p,)
+
+
+def test_info_notes_do_not_open_alert_popup(tmp_path, monkeypatch):
+    """设备时钟偏差是「说明」而非「告警」：只写状态栏，不弹窗。
+
+    否则每条收尾提示都要点一次「我知道了」，用户很快就会盲点 —— 那时真正要紧
+    的那条也就没人看了。
+    """
+    api = _make_api()
+    now = int(time.time())
+    dev_now = now + 1800                 # 设备快 30 分钟
+    log_path = str(tmp_path / "logcat_A1.txt")
+    _write_log(log_path, [_ts(dev_now - 600), _ts(dev_now - 2)])
+    monkeypatch.setattr(rec_mod, "device_epoch", lambda *a, **k: dev_now)
+
+    api._rec_session = {"logcat_captures": {"A1": log_path}}
+    api._rec_session["logcat_notes"] = api._logcat_coverage_notes(
+        api._rec_session, {"A1": log_path})
+    api.bus.take()
+    api._push_logcat_notes(api._rec_session)
+    events = [e["payload"] for e in api.bus.take() if e["kind"] == "status"]
+    clock = [p for p in events if "设备时钟" in (p.get("text") or "")]
+    assert clock, events
+    assert not [p for p in events if p.get("alert")], \
+        "时钟偏差不该弹窗（状态栏说清就够了）：%r" % (events,)
+
+
+def test_push_alert_marks_payload_while_push_toast_does_not():
+    """两个播报入口的分工：只有 _push_alert 带 alert 标记。
+
+    这条守的是「别把所有 toast 都升级成弹窗」—— 一旦弹窗满天飞，用户会连看都
+    不看就关，那时真正要紧的那条也一起被关掉了。
+    """
+    api = _make_api()
+    api.bus.take()
+    api._push_toast("warn", "⚠ 普通警告")
+    api._push_alert("warn", "⚠ 数据残缺", title="⚠ 本次录制的日志不完整")
+    got = [e["payload"] for e in api.bus.take() if e["kind"] == "status"]
+    plain, alert = got[0], got[1]
+    assert plain.get("toast") is True and not plain.get("alert"), plain
+    assert alert.get("toast") is True and alert.get("alert") is True, alert
+    assert alert.get("alert_title") == "⚠ 本次录制的日志不完整", alert

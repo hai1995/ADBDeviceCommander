@@ -1257,13 +1257,15 @@ def test_pull_gives_up_at_once_on_permission_denied(monkeypatch, tmp_path):
     """
     sleeps = []
     armed = threading.Event()
+    me = threading.current_thread()
 
     def fake_sleep(s):
-        # 只统计 _pull_and_finish **执行期间**的 sleep：`ss.time` 是共享模块，
-        # 其它线程（上一条用例遗留的收尾、后台 watcher）的 sleep 也会打进来。
-        # CI 上调度慢一点就会被误判成「这条路径在退避」—— 本地快、CI 慢，
-        # 正是这类 flaky 的典型形态。
-        if armed.is_set():
+        # 只统计 _pull_and_finish **执行期间**、且发生在**当前线程**的 sleep。
+        # `ss.time` 是共享模块，其它线程（上一条用例遗留的收尾、后台 watcher）
+        # 的 sleep 也会打进来；只靠 armed 这个全局开关挡不住它们 —— 整套跑时
+        # 那些线程正好在这段窗口里睡，就会被误判成「这条路径在退避」。
+        # 本地单跑快、整套跑慢，正是这类 flaky 的典型形态。
+        if armed.is_set() and threading.current_thread() is me:
             sleeps.append(s)
 
     monkeypatch.setattr(ss.time, "sleep", fake_sleep)

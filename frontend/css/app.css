@@ -1826,6 +1826,30 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   color: var(--muted); word-break: normal; overflow-wrap: break-word;
 }
 
+/* ============ 关键告警弹窗（不点「我知道了」不消失） ============
+   比确认弹窗（60）再高一层：它可能在确认弹窗之上被叫起来（例如删除途中设备
+   掉线、日志被截断），压在下面等于没提示。比 toast（40）更高同理。
+   弹窗本身不做进场动画的「自动淡出」—— 这类提示的价值全在「一直都在」，
+   任何自动消失的路径都是把用户的注意力当默认存在的。 */
+.alert-modal { z-index: 65; }
+.alert-box { width: 560px; }
+.alert-title { color: var(--warn); letter-spacing: .02em; }
+/* 多条告警竖排：条数多时自己滚动，不把弹窗撑出屏幕（笔记本 768 高很常见） */
+.alert-body { display: flex; flex-direction: column; gap: 8px; max-height: 44vh; overflow-y: auto; }
+/* 每条左侧一道语义色竖线 —— 扫一眼就知道有几件事、哪几条是错误 */
+.alert-item {
+  padding: 8px 10px; border-radius: 6px; color: var(--text-2);
+  border-left: 3px solid var(--warn); background: var(--warn-soft);
+  line-height: 1.65; word-break: normal; overflow-wrap: break-word;
+}
+.alert-item--err { border-left-color: var(--err); background: var(--err-soft); }
+.alert-item--info { border-left-color: var(--accent); background: var(--accent-soft); }
+.alert-hint:empty { display: none; }
+.alert-hint {
+  margin-top: 11px; font-size: var(--fs-sm); line-height: 1.5;
+  word-break: normal; overflow-wrap: break-word;
+}
+
 /* ============ 命令卡片右侧 kebab 菜单（复制 / 修改 / 删除） ============ */
 .cmd-chip { position: relative; padding-right: 20px; }
 .cmd-chip .chip-label { pointer-events: none; }

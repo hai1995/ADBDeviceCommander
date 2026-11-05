@@ -136,6 +136,10 @@
     inputLabel: $("input-label"), inputField: $("input-field"),
     inputHint: $("input-hint"), inputYes: $("input-yes"),
     inputNo: $("input-no"), inputX: $("input-x"),
+    // 关键告警弹窗（不点「我知道了」不消失，见 showAlert）
+    alertModal: $("alert-modal"), alertTitle: $("alert-title"),
+    alertBody: $("alert-body"), alertHint: $("alert-hint"),
+    alertOk: $("alert-ok"), alertX: $("alert-x"), alertMore: $("alert-more"),
     // 命令编辑弹窗
     cmdEdit: $("cmd-edit-modal"),
     cmdEditModal: $("cmd-edit-modal"), cmdEditTitle: $("cmd-edit-title"),
@@ -385,6 +389,12 @@
     pushTicker(text, cls);
     // 高优先级提示语：错误级一律弹 toast；后端显式 toast 标记的警告也弹
     if (type === "err" || (opts && opts.toast)) showToast(type, text);
+    // 关键告警：**不点就不消失**的弹窗。与 toast 并存 —— toast 负责「此刻在看屏幕」
+    // 的那部分注意力，弹窗负责「人不在、或正在别处点」的那部分。少任何一层都会
+    // 重演「录屏好好的、日志少了 24 分钟却没人知道」。
+    if (opts && opts.alert) {
+      showAlert({ title: opts.alertTitle || "", items: [{ level: type, text: text }] });
+    }
   };
 
   /* ---------------- 顶栏状态跑马灯（全局运行信息概览） ----------------
@@ -717,6 +727,109 @@
     try { items[next].focus(); } catch (_) { /* 同上 */ }
   }
 
+  /* ---------------- 关键告警弹窗（不点「我知道了」不消失） ----------------
+     出发点是一次真实的坏结果：用户录屏 20 多分钟，中途 USB 带宽被满缓冲 logcat
+     占满、抓取被断开，收尾时「✓ 录屏已完成」和「日志只跟到 10:50」一前一后弹了
+     toast —— 每条 6 秒自动消失。人当时在别的地方，一条都没记住，直到事后拿视频
+     时间轴去对日志，才发现后 24 分钟是空的，那时既补不回来也说不清断在哪。
+
+     结论就是：**「产物可能已经残缺」这类事不能靠会自己消失的提示**。toast 适合
+     「顺带说一声」，而这种提示必须挡在用户面前、由他亲手关掉。几条设计取舍：
+
+       · 不自动消失（没有计时器），也没有「淡出」路径；
+       · 多条合并进**同一个**弹窗：多台设备同时出问题时连弹 5 个窗口，用户只会
+         一顿乱点，等于没看；合并后他能一次看完再关。
+       · 「查看状态信息」把完整过程摆出来（哪台设备、断在哪、为什么），弹窗里
+         只放结论 —— 正文太长就没人读了。
+       · Esc / × / 点遮罩都能关：误触不该让人以为界面卡住；关掉也只是少看一眼，
+         状态栏里那条记录还在，不会丢。 */
+  const alertItems = [];        // 当前弹窗里正在展示的条目 {level, text}
+  let alertTitle = "";          // 首个触发者的标题（后来的不覆盖：先到的更贴近主因）
+  let alertDropped = 0;         // 超出上限未展开的条数（底部小字说清，不静默丢）
+  const ALERT_MAX_ITEMS = 12;   // 上限：再多也不是「一条条读」，不如去看状态信息
+
+  function showAlert(opts) {
+    const o = opts || {};
+    const incoming = (o.items || (o.text ? [{ level: o.level, text: o.text }] : []))
+      .filter((it) => it && it.text);
+    if (!incoming.length) return false;
+    if (!els.alertModal || !els.alertBody || !els.alertOk) {
+      // 界面里没有这个弹窗（裁剪过的 HTML / 版本错配）：退回 toast，
+      // 绝不能一声不响 —— 这正是本功能要消灭的那种「静默」。
+      incoming.forEach((it) => showToast(it.level || "warn", it.text));
+      return false;
+    }
+    if (!alertItems.length) alertTitle = o.title || "⚠ 需要确认的重要提示";
+    incoming.forEach((it) => {
+      // 同一句话不重复列（后端可能在收尾与播报两处都带同一条结论）
+      if (alertItems.some((x) => x.text === it.text)) return;
+      // 超上限不再往弹窗里塞（正文太长就没人读了），但也不静默丢掉：
+      // 记下来在底部小字里说「还有 N 条见状态信息」，否则用户会以为就这些。
+      if (alertItems.length >= ALERT_MAX_ITEMS) { alertDropped += 1; return; }
+      alertItems.push({ level: it.level || "warn", text: it.text });
+    });
+    const wasOpen = alertOpen();
+    renderAlert();
+    els.alertModal.classList.remove("hidden");
+    // 焦点落在唯一主动作上：Tab 出去不会落到背后的界面上，回车也只是关掉它。
+    // 只在「弹窗本来没开」时抢一次：多条告警连续到达时反复 focus 会把用户
+    // 正在读的位置顶回按钮上（他自己滚下去看第 5 条，下一台设备一报又跳回顶部）。
+    if (!wasOpen) {
+      try { els.alertOk.focus(); } catch (_) { /* 个别环境没有 focus */ }
+    }
+    return true;
+  }
+
+  function renderAlert() {
+    if (!els.alertBody) return;
+    if (els.alertTitle) els.alertTitle.textContent = alertTitle;
+    els.alertBody.textContent = "";
+    alertItems.forEach((it, i) => {
+      const row = document.createElement("div");
+      row.className = "alert-item alert-item--" + it.level;
+      // 多条时才编号：一条时前面挂个「1.」纯属噪音
+      row.textContent = (alertItems.length > 1 ? (i + 1) + ". " : "") + it.text;
+      els.alertBody.appendChild(row);
+    });
+    if (els.alertHint) {
+      const more = alertDropped
+        ? "另有 " + alertDropped + " 条未在此展开，见状态信息。" : "";
+      els.alertHint.textContent = (alertItems.length > 1
+        ? "共 " + alertItems.length + " 条。" + more
+        : "原因与处理过程都记在状态信息里（点击顶栏跑马灯也能打开）。" + more);
+    }
+  }
+
+  function closeAlert() {
+    if (!els.alertModal) return;
+    els.alertModal.classList.add("hidden");
+    alertItems.length = 0;
+    alertTitle = "";
+    alertDropped = 0;
+    // 顺手把列表清空：留着旧条目虽然看不见（弹窗隐藏），但下一次打开若某条
+    // 因为去重被跳过，屏幕上就会混进上一轮的残留 —— 那种「我没看到的告警
+    // 怎么还在」比多清一次 DOM 难查得多。
+    if (els.alertBody) els.alertBody.textContent = "";
+    if (els.alertHint) els.alertHint.textContent = "";
+  }
+
+  function alertOpen() {
+    return !!els.alertModal && !els.alertModal.classList.contains("hidden");
+  }
+
+  function trapAlertTab(e) {
+    if (!alertOpen()) return;
+    const items = [els.alertMore, els.alertOk, els.alertX]
+      .filter((el) => el && !el.disabled);
+    if (!items.length) return;
+    e.preventDefault();
+    const cur = items.indexOf(document.activeElement);
+    const next = e.shiftKey
+      ? (cur <= 0 ? items.length - 1 : cur - 1)
+      : (cur === items.length - 1 ? 0 : cur + 1);
+    try { items[next].focus(); } catch (_) { /* 同上 */ }
+  }
+
   /* ---------------- 事件路由 ----------------
      逐条兜底：pollOnce 用递归 setTimeout 续约，任何一个 handler 抛异常都会让
      那一次续约**根本执行不到** —— 事件轮询从此彻底停止，界面表现为「日志不
@@ -760,12 +873,16 @@
       }
       case "status":
         if (p.type === "clear") clearStatus();
-        else pushStatus(p.type, p.text || "", p.toast ? { toast: true } : undefined);
+        else pushStatus(p.type, p.text || "", {
+          toast: !!p.toast, alert: !!p.alert, alertTitle: p.alert_title || "",
+        });
         break;
       case "tool":
         if (p.type === "clear") clearStatus();
         else if (["ok", "info", "err", "warn"].includes(p.type))
-          pushStatus(p.type, p.text || "", p.toast ? { toast: true } : undefined);
+          pushStatus(p.type, p.text || "", {
+            toast: !!p.toast, alert: !!p.alert, alertTitle: p.alert_title || "",
+          });
         else if (p.type === "diag" && p.path) {
           // 诊断包产物：卡片里留一行指向结果 —— 状态栏/toast 会被后面的消息刷走，
           // 而「刚才那个包到底存哪了」是紧接着要用的信息。
@@ -2391,14 +2508,20 @@
         // 会误以为时间线连续、漏掉的那段正好在案发现场上。
         const gapMsg = "⚠ Logcat 抓取结束，文件存在时间缺口：" +
           (p.text || "缺失时段见文件内 [logcat] 标记");
-        pushStatus("warn", gapMsg);
+        // 缺口 = 产物残缺，且这个文件事后要拿去对时间轴：光一条会自己消失的
+        // toast 不够，必须让用户亲手关一次（见 showAlert）。
+        pushStatus("warn", gapMsg, {
+          alert: true, alertTitle: "⚠ Logcat 日志存在时间缺口",
+        });
         showToast("warn", "⚠ logcat 存在时间缺口，详见文件内 [logcat] 标记");
       } else if (p.error) {
         // 写盘中途失败（磁盘满 / 目录被删 / 权限）：文件只有半截，甚至一行
         // 都没进去。后端在 stopped 上带了 error，这里绝不能再报「✓ 抓取完毕」——
         // 那会把前一条 err 提示盖掉，用户拿着半截文件去分析问题。
         const bad = "⚠ Logcat 抓取已中断：" + p.error + (name ? " → " + name : "");
-        pushStatus("err", bad);
+        pushStatus("err", bad, {
+          alert: true, alertTitle: "⚠ 日志抓取被中断，文件不完整",
+        });
         showToast("err", "⚠ Logcat 抓取中断，导出的文件不完整");
       } else if (!p.packaged) {
         const done = "✓ Logcat 抓取完毕：" + (p.lines || 0) + " 行"
@@ -6573,8 +6696,28 @@
         });
       }
     }
+    /* 关键告警弹窗：四个出口都只是「知道了」，不做任何动作 —— 它只负责让用户
+       真的看见一次。唯一有副作用的是「查看状态信息」：先把弹窗关掉再开状态
+       面板，两层弹窗叠着会让人以为面板被弹窗盖住了（它确实会被盖住）。 */
+    if (els.alertModal) {
+      if (els.alertOk) els.alertOk.addEventListener("click", closeAlert);
+      if (els.alertX) els.alertX.addEventListener("click", closeAlert);
+      els.alertModal.addEventListener("click", (e) => {
+        if (e.target === els.alertModal) closeAlert();
+      });
+      if (els.alertMore) {
+        els.alertMore.addEventListener("click", () => {
+          closeAlert();
+          openStatusModal();
+        });
+      }
+    }
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
+      // 关键告警弹窗在最上层（z-index 最高）：Esc 只关它，不能顺手把底下的
+      // 确认框 / 状态面板一起关掉 —— 那会让用户以为「按 Esc 拒绝了删除」，
+      // 而实际上那个确认框被悄悄回答了。
+      if (alertOpen()) { e.preventDefault(); closeAlert(); return; }
       // 输入弹窗最优先：它开着时 Esc 只关它。输入弹窗与确认弹窗不会同时开，
       // 但顺序仍按「后开的在上面」写，免得将来叠用时关错那一层。
       if (els.inputModal && !els.inputModal.classList.contains("hidden")) {
@@ -6598,6 +6741,7 @@
     // Tab 焦点圈在确认 / 输入弹窗内（与上面那条 Escape 分开：那条一进来就把非 Esc 滤掉了）
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Tab") return;
+      if (alertOpen()) { trapAlertTab(e); return; }
       if (els.inputModal && !els.inputModal.classList.contains("hidden")) { trapInputTab(e); return; }
       trapConfirmTab(e);
     });
