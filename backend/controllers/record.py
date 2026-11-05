@@ -8,7 +8,7 @@ from backend.controller import (
     plan_size, probe_player, safe_name, scrcpy_probe_info,
     ThreadPoolExecutor, time, zipfile
 )
-from backend.screen_service import device_epoch
+from backend.screen_service import device_clock
 from backend.video_join import join_segments
 from core.constants import LOGCAT_COVERAGE_WARN_S
 from core.logcat import read_time_bounds, ts_epoch
@@ -847,14 +847,20 @@ class RecordMixin:
                     return [("warn", "⚠ %s 的配套 logcat 文件里没有任何日志行"
                                       "（抓取可能一开始就被中断），"
                                       "本次日志不可用" % s)]
-                dev_now = device_epoch(self.state.adb_path, s, timeout=3)
-                if dev_now is None:
+                dev = device_clock(self.state.adb_path, s, timeout=3)
+                if not dev:
                     return []
-                last_ep = ts_epoch(last, ref=dev_now)
-                if last_ep is None:
-                    return []
-                gap = dev_now - last_ep
-                if gap >= LOGCAT_COVERAGE_WARN_S:
+                dev_now, tz_off = dev
+                # 时区拿不到（个别老 shell 不支持 date +%z）：日志时间戳只能按
+                # 主机时区解释，两边时区不同就会算出整小时的**假**缺口。宁可
+                # 不报缺口，也不给一个按猜测得到的结论 —— 假告警会让用户之后
+                # 连真的那条都不信（时钟偏差那条仍可给，它只比 epoch）。
+                gap = None
+                if tz_off is not None:
+                    last_ep = ts_epoch(last, ref=dev_now, tz_offset=tz_off)
+                    if last_ep is not None:
+                        gap = dev_now - last_ep
+                if gap is not None and gap >= LOGCAT_COVERAGE_WARN_S:
                     out.append((
                         "warn",
                         "⚠ %s 的 logcat 只跟到 %s，距录屏结束还有约 %s 没有日志："

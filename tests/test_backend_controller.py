@@ -4756,3 +4756,68 @@ def test_screen_record_cancel_clears_session_even_on_exception(tmp_path):
     # 还能重新开始录屏（守卫不再误判）
     assert api.screen_record_start(None, save_dir=str(tmp_path)).get(
         "reason") != "recording"
+
+
+def _fake_clock_run(stdout, rc=0):
+    class _R:
+        def __init__(self):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = rc
+    return lambda *a, **k: _R()
+
+
+def test_device_clock_parses_epoch_and_timezone(monkeypatch):
+    """一次 shell 拿回「时刻 + 时区偏移」：日志时间戳只有配上时区才能算准。
+
+    threadtime 是设备本地墙上时间、不含时区，而收尾要拿它和设备此刻作差。
+    时区分不清时，主机 +0800、设备 UTC 会平白算出 8 小时缺口。
+    """
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("1793850520+0800\n"))
+    assert screen_service.device_clock("adb", "A1") == (1793850520, 8 * 3600)
+
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("1793850520-0500\n"))
+    assert screen_service.device_clock("adb", "A1") == (1793850520, -5 * 3600)
+
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("1793850520+0000\n"))
+    assert screen_service.device_clock("adb", "A1") == (1793850520, 0)
+
+
+def test_device_clock_tolerates_missing_tz(monkeypatch):
+    """老 shell 不认 %z（回显字面量或什么都没有）：时区留 None，时刻照给。
+
+    调用方据此跳过「按时间戳算缺口」的判定 —— 猜出来的差值恰好是整小时，
+    没法与真缺口区分，宁可不报。
+    """
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("1793850520%z\n"))
+    assert screen_service.device_clock("adb", "A1") == (1793850520, None)
+
+    # 有些 shell 把 \r\n / BOM 一起带回来，仍要能取到
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run(" 1793850520 \r\n"))
+    assert screen_service.device_clock("adb", "A1") == (1793850520, None)
+
+
+def test_device_clock_returns_none_when_unavailable(monkeypatch):
+    """命令失败 / adb 异常：返回 None（未知），调用方跳过校验而不是给错结论。"""
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("", 1))
+    assert screen_service.device_clock("adb", "A1") is None
+
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("date: not found\n", 127))
+    assert screen_service.device_clock("adb", "A1") is None
+
+    # 退出码 0 但输出里根本没有数字（车机 shell 要授权码时就是这种表现）
+    monkeypatch.setattr(screen_service.subprocess, "run",
+                        _fake_clock_run("Permission denied\n", 0))
+    assert screen_service.device_clock("adb", "A1") is None
+
+    def boom(*a, **k):
+        raise FileNotFoundError("adb")
+    monkeypatch.setattr(screen_service.subprocess, "run", boom)
+    assert screen_service.device_clock("adb", "A1") is None

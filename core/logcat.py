@@ -134,11 +134,18 @@ def ts_prefix(raw: str) -> str:
     return raw[:TS_LEN]
 
 
-def ts_epoch(ts: str, ref=None):
-    """把「MM-DD HH:MM:SS.mmm」解析为 epoch 秒（本地时区）；失败返回 None。
+def ts_epoch(ts: str, ref=None, tz_offset=None):
+    """把「MM-DD HH:MM:SS.mmm」解析为 epoch 秒；失败返回 None。
 
     logcat 的 threadtime 里**没有年份**，只能推断：以 ref（默认现在）的年份为
     基准，若算出来的时刻比 ref 晚了半年以上，说明那一行发生在上一年。
+
+    时区（`tz_offset`，秒）默认 None = 按**本机**本地时区解释，这对
+    logcat_service 是够用的：那里比的是同一台设备的两条日志，两边的时区误差
+    完全抵消。但跨机器对照就不能这么算了 —— 录屏收尾要拿「日志最后一条」和
+    「设备此刻」作差，两个时刻都来自设备，必须都按**设备**的时区解释。传
+    `tz_offset` 即为设备偏移（见 backend.screen_service.device_clock），
+    否则主机 +0800、设备 UTC 时会被算成平白少了 8 小时。
 
     为什么不能用字符串比较代替（旧实现在重连去重时就是直接比字符串）：
     「12-31 23:59」在字符串上大于「01-01 00:00」，跨年录制一夜之后，新日志会
@@ -160,10 +167,17 @@ def ts_epoch(ts: str, ref=None):
     if ref is None:
         import time
         ref = time.time()
-    year = datetime.datetime.fromtimestamp(ref).year
+    if tz_offset is None:
+        # 本机时区（logcat_service 的去重走这条：同设备两条日志，误差自相抵消）
+        tz = None
+        year = datetime.datetime.fromtimestamp(ref).year
+    else:
+        tz = datetime.timezone(datetime.timedelta(seconds=tz_offset))
+        # 年份也要按设备时区推：跨年那一夜，主机与设备的「今年」可能差一年
+        year = datetime.datetime.fromtimestamp(ref, tz).year
     for y in (year, year - 1):
         try:
-            dt = datetime.datetime(y, mon, day, hh, mm, ss, ms * 1000)
+            dt = datetime.datetime(y, mon, day, hh, mm, ss, ms * 1000, tzinfo=tz)
         except ValueError:
             return None
         v = dt.timestamp()

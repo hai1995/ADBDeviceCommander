@@ -85,33 +85,56 @@ def device_present(adb, serial, timeout=5):
     return (r.stdout or "").strip().lower() == "device"
 
 
-def device_epoch(adb, serial, timeout=5):
-    """读设备当前的 Unix 时间（秒）；读不到返回 None。
+def device_clock(adb, serial, timeout=5):
+    """读设备当前时刻，返回 ``(epoch, tz_offset_seconds)``；读不到返回 None。
 
-    用途单一但关键：录屏收尾时校验「配套 logcat 到底跟到什么时候」。
-    视频与日志都发生在设备时间轴上，拿设备自己的钟作参照，既不掺主机时钟，
-    也不会把「设备时钟比本机慢」误判成「日志丢了 24 分钟」。
+    `epoch` 是设备自报的 Unix 秒（`date +%s`），`tz_offset` 是设备本地时区
+    相对 UTC 的偏移（`date +%z`，如 +0800 → 28800）。两段一次取回：分两次
+    调 adb shell 会让收尾多一次往返，而这两项本来就是同一行输出里的。
 
-    `date +%s` 是 POSIX 标准用法，Android 全版本可用；个别车机 shell 有拦截
-    时会返回非零或空输出，此时返回 None，调用方据此跳过校验（宁可不提示，
-    也不给一个基于猜测的结论）。
+    为什么非要时区不可：logcat 的 threadtime 是**设备本地墙上时间**（没有年份、
+    也没有时区）。把它解析成 epoch 时必须知道「这台设备的 11:14 是 UTC 的几点」，
+    否则会按主机的时区去解释。主机是 +0800、设备是 UTC（车机、部分定制 ROM
+    出厂默认）时，日志里的 11:14 会被算成比设备当前时刻早 8 小时 —— 录屏收尾
+    就会弹「日志丢了 8 小时」，而实际一条没少。假告警比不告警更糟：它会让用户
+    之后连真的那条都不信。
+
+    `%z` 在 toybox（Android 6+）上都支持；个别老 shell 会返回字面量或 %z 原样，
+    此时 tz_offset 为 None，调用方据此**跳过**基于日志时间戳的缺口判定（宁可
+    不说，也不给一个按主机时区猜出来的结论）。
     """
     try:
+        # 一次 shell 取两段：+%s%z 输出形如 "1793850520+0800"，无空格好解析
         r = subprocess.run(
-            [adb, "-s", serial, "shell", "date", "+%s"], **adb_kwargs(timeout))
+            [adb, "-s", serial, "shell", "date", "+%s%z"],
+            **adb_kwargs(timeout))
     except Exception:
         return None
     if r.returncode != 0:
         return None
-    # 某些 shell 会把 \r\n / BOM 一起带回来，逐 token 取第一个纯数字
     for tok in (r.stdout or "").split():
         tok = tok.strip()
-        if tok.isdigit() and len(tok) >= 9:
-            try:
-                return int(tok)
-            except ValueError:
-                continue
+        # 手工切「数字 + 时区」两段，不引正则：这里每台设备一次，且要容忍
+        # %z 不被支持时冒出来的 "1793850520%z" 这类字面量（切出来 tz 不合法，
+        # 就当只有 epoch，offset 留 None）。
+        i = 0
+        while i < len(tok) and tok[i].isdigit():
+            i += 1
+        head, tz = tok[:i], tok[i:]
+        if len(head) < 9:
+            continue
+        try:
+            epoch = int(head)
+        except ValueError:
+            continue
+        offset = None
+        if len(tz) == 5 and tz[0] in "+-" and tz[1:].isdigit():
+            hh, mm = int(tz[1:3]), int(tz[3:5])
+            if hh <= 14 and mm < 60:      # 现实时区最大 +14:00
+                offset = (hh * 3600 + mm * 60) * (-1 if tz[0] == "-" else 1)
+        return epoch, offset
     return None
+
 
 # `settings put` 被系统拒绝时，报错文本里必然出现的片段（见 set_system_setting_ex）。
 # 只收明确表示「被拒」的措辞：正常写入时这两路都是空的，不会误报。

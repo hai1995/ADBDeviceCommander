@@ -3631,3 +3631,74 @@ Logcat 抓取侧同步升级：`stopped` 带 `gap`（时间缺口）或 `error`�
 
 后端 `pytest`：**1327 passed / 1 skipped**；`pyflakes` 干净。
 前端 `node tests/frontend/run-all.cjs`：**82 个文件、0 失败**。
+
+---
+
+# 第四十六轮：覆盖度校验的时区陷阱——差 8 小时的「假丢日志」
+
+上一轮刚把「日志比视频短」做成了不点不消失的弹窗。这一轮修的是**它会误报**。
+
+## 一、问题
+
+logcat 的 threadtime 是**设备本地墙上时间**（`03-01 03:14:00.123`，没有年份、
+没有时区）。`ts_epoch()` 把它解析成 epoch 时，用的是**主机的本地时区**：
+
+```python
+dt = datetime.datetime(y, mon, day, hh, mm, ss, ms * 1000)   # naive -> 主机时区
+v = dt.timestamp()
+```
+
+而收尾校验的另一端 `device_epoch()` 拿的是 `adb shell date +%s`，是**绝对时刻**。
+两端不同源：主机 +0800、设备 UTC（车机与部分定制 ROM 出厂默认）时，设备写的
+`03:14` 会被当成「+0800 的 03:14」，即 UTC 前一天 19:14 —— 比设备此刻整整早
+8 小时。
+
+结果是每次录屏收尾都弹：
+
+> ⚠ A1 的 logcat 只跟到 03:14:00.000，距录屏结束还有约 8 小时没有日志…
+
+而实际一条没少。**假告警比不告警更糟**：用户被坑两次之后，真丢日志那一次他也
+会直接点掉 —— 上一轮为了让用户看见而做的弹窗，就被这一点废掉了。
+
+顺带还有反向风险：设备 +0800、主机 UTC 时差值变负，真缺口反而漏报。
+
+## 二、修法
+
+### 1. `device_clock()`：一次 shell 取回时刻 + 时区（`backend/screen_service.py`）
+
+```python
+adb -s <serial> shell date +%s%z      # -> "1793850520+0800"
+```
+
+返回 `(epoch, tz_offset_seconds)`。分两次 shell 会多一次往返，而这两段本来就在
+同一行输出里。`%z` 在 toybox（Android 6+）上都支持；不认它的老 shell 会回显
+`%z` 字面量，此时 `tz_offset` 留 `None`。
+
+`device_epoch()` 随之成为无引用的薄封装，一并删掉。
+
+### 2. `ts_epoch(ts, ref, tz_offset)`：按设备时区解析（`core/logcat.py`）
+
+传 `tz_offset` 就构造带时区的 `datetime`，年份也用设备时区的「今年」推断
+（跨年那一夜，主机与设备的「今年」可能差一年）。不传则维持原样（主机时区）
+—— logcat 抓取的重连去重走的正是这条：那里比的是**同一台设备**的两条日志，
+时区误差自相抵消，不受影响。
+
+### 3. 时区拿不到时，宁可不说（`backend/controllers/record.py`）
+
+`tz_offset` 为 `None` 就跳过「按时间戳算缺口」这一段。猜出来的差值必然是
+15 分钟的整数倍（时区差一定是），与真缺口无法区分 —— 与其给一个错结论，
+不如不说。设备时钟偏差那条仍然给：它只比 epoch，与时区无关。
+
+## 三、测试
+
+- `test_core_logcat_time.py` 新增 2 条：同一时刻在 UTC / +0800 / -0500 三种设备
+  上写出不同墙上时间，解析结果必须相同；跨年 + 设备时区的年份推断。
+- `test_backend_controller.py` 新增 3 条：`device_clock` 的 `+0800` / `-0500` /
+  `+0000`、`%z` 不支持与带 `\r\n` 的输出、命令失败 / adb 异常 / 输出无数字。
+- `test_backend_record_logcat_coverage.py` 新增 3 条：**设备 UTC + 主机 +0800
+  不得产生缺口告警**（核心回归）、同一修复下 UTC 设备真少 24 分钟仍要报、
+  时区未知时不猜缺口但时钟偏差照说。
+- 测试里的时间戳生成改成按 `tz_offset` 用 `gmtime`：原先用 `localtime`，跑测
+  机器时区不是 +0800 时会莫名其妙失败（本地过、CI 挂的经典形态）。
+
+后端 `pytest`：**1335 passed / 1 skipped**；`pyflakes` 干净。

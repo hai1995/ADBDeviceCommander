@@ -93,3 +93,31 @@ def test_read_time_bounds_missing_or_empty(tmp_path):
     q = tmp_path / "only_markers.txt"
     q.write_text("--------- beginning of main\n", encoding="utf-8")
     assert read_time_bounds(str(q)) == (None, None)
+
+
+def test_ts_epoch_uses_device_timezone_offset():
+    """给定 tz_offset 时按设备时区解析：设备在 UTC 还是东八区，同一时刻必须
+    算出同一个 epoch。
+
+    录屏收尾拿「日志最后一条」和「设备此刻」作差，两个时刻都来自设备。若把
+    日志时间戳按主机时区解释，主机 +0800、设备 UTC 时会平白多出 8 小时缺口，
+    于是每次收尾都弹「日志丢了 8 小时」—— 一条没少。
+    """
+    utc = datetime.timezone.utc
+    ref = datetime.datetime(2026, 3, 1, 3, 14, tzinfo=utc).timestamp()
+    # 同一时刻：UTC 设备写 03:14，东八区设备写 11:14
+    assert ts_epoch("03-01 03:14:00.000", ref=ref, tz_offset=0) == ref
+    assert ts_epoch("03-01 11:14:00.000", ref=ref, tz_offset=8 * 3600) == ref
+    # 西五区设备写的是前一天 22:14
+    assert ts_epoch("02-28 22:14:00.000", ref=ref, tz_offset=-5 * 3600) == ref
+
+
+def test_ts_epoch_cross_year_with_device_timezone():
+    """跨年那一刻按设备时区推年份，零点之后不能倒回上一年。"""
+    utc = datetime.timezone.utc
+    ref = datetime.datetime(2026, 1, 1, 0, 0, 5, tzinfo=utc).timestamp()
+    prev = ts_epoch("12-31 23:59:50.000", ref=ref, tz_offset=0)
+    assert prev == datetime.datetime(2025, 12, 31, 23, 59, 50,
+                                     tzinfo=utc).timestamp()
+    # 东八区设备此刻已是 08:00:05，前一条 07:59:50 仍是当天
+    assert ts_epoch("01-01 07:59:50.000", ref=ref, tz_offset=8 * 3600) < ref
