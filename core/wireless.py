@@ -93,7 +93,7 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
             raw = raw[len(pre):]
             low = raw.lower()
     # 去掉粘贴带来的尾部路径 / 查询串
-    raw = re.split(r"[/?#]", raw, 1)[0].strip()
+    raw = re.split(r"[/?#]", raw, maxsplit=1)[0].strip()
 
     host, port = raw, default_port
     is_v6 = False

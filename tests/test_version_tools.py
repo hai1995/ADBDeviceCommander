@@ -126,6 +126,14 @@ def test_project_version_files_are_in_sync():
     assert bv.read_version(ROOT)  # 不一致会抛 VersionError
 
 
+def test_project_readme_title_carries_current_version():
+    """README 架构标题必须能被 bump_version 的正则匹配，否则发版时会静默漏更新。"""
+    ver = bv.read_version(ROOT)
+    readme = (ROOT / bv.README_FILE).read_text(encoding="utf-8")
+    assert bv.README_TITLE_RE.search(readme), "README 缺少「## 架构（v… Web 版）」标题"
+    assert f"## 架构（v{ver} Web 版）" in readme
+
+
 def test_packaged_zip_is_flat_and_named_by_version(tmp_path):
     """用真实工程打一个临时包，校验：扁平结构 + 命名带版本号。"""
     from tools import package as pkg

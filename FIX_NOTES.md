@@ -3972,3 +3972,27 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 
 后端 `pytest`：**1341 passed / 1 skipped**（基线无变化；`lc_active_tab` 仅加进 PREFS_DEFAULTS）；
 `pyflakes` 干净。前端 `node tests/frontend/run-all.cjs`：**85 个文件、0 失败**（基线 83 + 本轮新增 1 个文件）。
+
+# 第五十二轮（文档与工程一致性清理）
+- 背景：代码已到第 51 轮，README / 使用说明仍停在「工具五张可折叠卡片」「内置 40 余条」
+  「dist 要带 commands.json / assets」等第 17~24 轮前的描述；测试数量、CI 注释、
+  `core/__init__.py` 模块清单也与实际脱节。本轮只做「让文档说真话」+ 两处低风险工程修正。
+- `README.md`：架构树补全 `backend/controllers/`、`mirror/scrcpy/perf/video_join`、
+  `builtin_commands/prefs/clipboard/...` 等模块与实际多 tab；测试数量改为
+  **1355 项 Python + 86 个 jsdom 测试文件**；分发改为「只发 exe，commands.json /
+  config.json 首次运行自动生成」；工具页描述统一为子 tab，删除「卡片收起」残留；
+  设备栏按钮改为实际顺序「无线 / 全选 / 刷新」；架构标题恢复为
+  `## 架构（v<版本> Web 版）`，使 `bump_version.py` 的 README 正则真正命中。
+- `使用说明.txt`：工具页改为五个子 tab（拖动排序 / 键盘切换 / 记住上次）；
+  内置命令 40 余条 → **49 条**；配置项清单补全（主题、工具子 tab、工作区、Logcat 子 tab、
+  性能阈值、cmd_timeout、main_active_tab 等），删除五张卡的 `*_collapsed`；
+  删除「程序自带 config.json、删了会重新生成」的错误说法，改为「首次运行不落盘，
+  改动设置后生成，删掉恢复默认」。
+- `core/__init__.py` / `frontend/index.html` / `.github/workflows/build.yml`：同步模块清单、
+  tab 清单、测试文件数、版本号维护方式（`core/constants.py` 为准 + `main.py` 同值副本）。
+- `core/wireless.py`：`re.split(..., 1)` 改为 `maxsplit=1`，消除 Python 3.13+ 的
+  DeprecationWarning。
+- `tests/test_version_tools.py`：新增 README 架构标题与当前版本一致性的断言，
+  防止以后标题格式漂移导致发版时静默漏更新。
+- 验证：`pytest` **1355 passed / 1 skipped**；`pyflakes` 干净；
+  `node tests/frontend/run-all.cjs` **86 个文件 0 失败**。

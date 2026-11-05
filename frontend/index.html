@@ -9,8 +9,8 @@
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-  <!-- 多 tab Web 版：设备指令 / Logcat / 工具 / 文件 / 关于。
-       设备栏为全局共享左侧栏（跨 tab 常驻），与旧 Tk 版「设备栏跨页签共享」对齐。
+  <!-- 多 tab Web 版：设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于。
+       设备栏为全局共享左侧栏（跨 tab 常驻）。
        后端逻辑在 backend/* + core/*，事件经 bus 推到本页 take_events 轮询。 -->
   <header class="topbar">
     <!-- 应用名由原生标题栏展示，此处不再重复（v2026.1014.1545 去重）；

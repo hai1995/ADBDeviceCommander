@@ -15,9 +15,10 @@
 #   pull_request      → 只跑测试（省一台 Windows 机器）
 #   手动 workflow_dispatch → 同 main
 #
-# 发版只需两步（版本号单一来源在 core/constants.py）：
+# 发版只需两步（版本号以 core/constants.py 为准，main.py 保留同值副本，
+# tools/bump_version.py 会把两处一起写回）：
 #   python tools/bump_version.py --apply     # 递增版本号并写回源码
-#   git commit -am "第二十四轮：..." && git tag v<新版本> && git push --tags
+#   git commit -am "第五十二轮：..." && git tag v<新版本> && git push --tags
 #
 # 注意：tag 必须与源码里的 VERSION 一致，否则下面的「版本号一致性」步骤会失败。
 # 这不是洁癖 —— Release 标题、zip 文件名、程序自报版本号三处一旦不一致，
@@ -35,7 +36,7 @@
 # pull_request，多跳一级只多一份无收益的回归面。真要再升，先在本文件把
 # 触发方式看清楚，别跟着 dependabot 盲跳。
 #
-# 前端用的 Node 同步从 20 提到 22：Node 20 已于 2026-04 EOL，jsdom 侧 63 个
+# 前端用的 Node 同步从 20 提到 22：Node 20 已于 2026-04 EOL，jsdom 侧 86 个
 # 测试文件在 22 上本地全绿（版本与本机一致，出问题能就地复现）。
 name: build
 
