@@ -41,6 +41,7 @@
     shotSaveFile: $("shot-save-file"),
     shotPreview: $("shot-preview"), shotPreviewFrame: $("shot-preview-frame"),
     shotPreviewImg: $("shot-preview-img"), shotPreviewGrip: $("shot-preview-grip"),
+    shotPreviewLoading: $("shot-preview-loading"),
     shotPreviewName: $("shot-preview-name"),
     toolRec: $("tool-rec"),
     toolRecStop: $("tool-rec-stop"),
@@ -590,6 +591,18 @@
       pushStatus("err", "调用后端失败：" + (e && e.message ? e.message : e));
       return null;
     }
+  }
+
+  /* 通用按钮等待态：耗时操作点击后，除了禁用之外再给一个看得见的转圈。
+     只负责视觉与 aria，**不改 disabled** —— 各业务的禁用/恢复各有自己的
+     状态机（截图 shot_state、安装 apk_state…），这里若顺手放开会把状态冲掉。
+     幂等：重复 set true/false 都安全。 */
+  function markBtnBusy(btn, busy) {
+    if (!btn) return;
+    const on = !!busy;
+    btn.classList.toggle("is-loading", on);
+    if (on) btn.setAttribute("aria-busy", "true");
+    else btn.removeAttribute("aria-busy");
   }
 
   /* ---------------- 二次确认弹窗（应用内自绘） ----------------
@@ -2549,7 +2562,7 @@
     });
   }
   function onLogcatCapture(p) {
-    if (p.status === "running") { lcCapRunning = true; els.lcCapStatus.textContent = "采集中…"; els.lcCapStop.disabled = false; els.lcCapStart.disabled = true; }
+    if (p.status === "running") { lcCapRunning = true; els.lcCapStatus.textContent = "采集中…"; els.lcCapStop.disabled = false; els.lcCapStart.disabled = true; markBtnBusy(els.lcCapStart, false); markBtnBusy(els.lcCapStop, false); }
     // 设备掉线 / 抓取被意外中断、正在自动重连：保持「采集中」，**不要**复位成
     // 空闲。否则界面会错误地切回「空闲」、用户以为抓取已结束（实际在等重连并
     // 续写同一文件）。这是「录屏+满缓冲全级别 logcat 同时跑也不丢日志」的关键
@@ -2560,12 +2573,15 @@
       els.lcCapStatus.textContent = "采集中…（已中断，正在自动重连）";
       els.lcCapStop.disabled = false;
       els.lcCapStart.disabled = true;
+      markBtnBusy(els.lcCapStart, false);
+      markBtnBusy(els.lcCapStop, false);
       pushStatus("warn", p.text || "⚠ logcat 抓取已中断，正在自动重连…");
       return;
     }
     // 无勾选设备时才禁用「开始抓取」（取反写反过：有设备反而点不了）
     if (p.status === "stopped") {
       lcCapRunning = false; lcCapSerial = null; els.lcCapStatus.textContent = "空闲"; els.lcCapStop.disabled = true; els.lcCapStart.disabled = !checkedDevices().length;
+      markBtnBusy(els.lcCapStop, false);
       // 抓取完毕强提醒（用户可能已切去别的页签，只看得到 toast）。
       // 已打包的场景由下面的 zipped 分支弹「已打包」，这里不重复。
       const name = String(p.path || "").split(/[\\/]/).pop() || "";
@@ -2609,11 +2625,12 @@
     }
     if (p.status === "zipped") {
       els.lcCapStatus.textContent = "已打包";
+      markBtnBusy(els.lcCapStop, false);
       const zip = "✓ Logcat 抓取完毕，已打包: " + String(p.path || "").split(/[\\/]/).pop();
       pushStatus("ok", "✓ " + (p.text || "已打包"));
       showToast("ok", zip);
     }
-    if (p.status === "error") { lcCapRunning = false; lcCapSerial = null; els.lcCapStatus.textContent = "错误"; els.lcCapStop.disabled = true; els.lcCapStart.disabled = !checkedDevices().length; pushStatus("err", "⚠ " + (p.text || "抓取错误")); }
+    if (p.status === "error") { lcCapRunning = false; lcCapSerial = null; els.lcCapStatus.textContent = "错误"; els.lcCapStop.disabled = true; els.lcCapStart.disabled = !checkedDevices().length; markBtnBusy(els.lcCapStop, false); pushStatus("err", "⚠ " + (p.text || "抓取错误")); }
   }
   function bufToText(serial) {
     const buf = lcBuffers[serial]; if (!buf) return "";
@@ -2658,6 +2675,7 @@
     // 截图在途（shot_state running=true）时保持禁用：在途中改勾选不能把它
     // 放出来，恢复时也同样尊重当前勾选态（shotInFlight 与 !any 取或）。
     els.toolShot.disabled = !any || shotInFlight;
+    markBtnBusy(els.toolShot, shotInFlight);
     // 投屏同样要有受控设备才可点（scrcpy 是「一台设备一个窗口」）
     if (els.toolScrcpy) els.toolScrcpy.disabled = !any;
     // 备用投屏同理；「停止」只在真的有会话时可点
@@ -2667,11 +2685,14 @@
     }
     // 应用安装：需要「有受控设备 + 已选安装包 + 不在安装中」
     if (els.apkInstall) els.apkInstall.disabled = !any || !apkPath || apkInFlight;
+    if (els.apkInstall) markBtnBusy(els.apkInstall, apkInFlight);
     // 诊断包：有受控设备、且没有一批正在收集（收集中再点会排队出两个时间点
     // 不同的包，后端也直接拒绝，这里把按钮一起锁上是更清楚的反馈）
     if (els.diagCollect) els.diagCollect.disabled = !any || diagInFlight;
+    if (els.diagCollect) markBtnBusy(els.diagCollect, diagInFlight);
     // 无线调试的「开启 5555」同样要有受控设备（首次必须走 USB）
     if (els.wifiTcpip) els.wifiTcpip.disabled = !any || wifiBusy;
+    if (els.wifiTcpip) markBtnBusy(els.wifiTcpip, wifiBusy);
     // 录制中不打断：setRecRunning 已经按 running 锁定了录屏区按钮与选项，
     // 设备列表刷新时也不要在这里把它们再回拨回去。
     // 请求在途同样不打断：开始/停止都是重操作，点击后已整体禁用，
@@ -2701,6 +2722,9 @@
     // 取消同样要锁：它背后是「停设备端 → 删文件」，几秒级的重操作，连点两次
     // 第二次会撞上已清空的会话，用户看到的是「没有进行中的录屏」这种莫名其妙的话。
     if (els.toolRecCancel) els.toolRecCancel.disabled = busy;
+    markBtnBusy(els.toolRec, busy);
+    markBtnBusy(els.toolRecStop, busy);
+    markBtnBusy(els.toolRecCancel, busy);
   }
 
   /* 录屏态：录制中把「停止」按钮切成红色实心并带轻微呼吸光晕，空闲时恢复灰。
@@ -2819,10 +2843,12 @@
     if (!addr) return pushStatus("warn", "请填写设备 IP（形如 192.168.1.23:5555）");
     wifiBusy = true;
     els.wifiConnect.disabled = true;
+    markBtnBusy(els.wifiConnect, true);
     const old = els.wifiConnect.textContent;
     els.wifiConnect.textContent = "连接中…";
     const res = await callApi(api.wifi_connect(addr));
     els.wifiConnect.disabled = false;
+    markBtnBusy(els.wifiConnect, false);
     els.wifiConnect.textContent = old;
     wifiBusy = false;
     if (res && res.ok) {
@@ -2835,9 +2861,9 @@
   }
 
   async function wifiDisconnect(addr, btn) {
-    if (btn) btn.disabled = true;
+    if (btn) { btn.disabled = true; markBtnBusy(btn, true); }
     const res = await callApi(api.wifi_disconnect(addr));
-    if (btn) btn.disabled = false;
+    if (btn) { btn.disabled = false; markBtnBusy(btn, false); }
     if (res && res.ok) refreshWifi();
     else if (res && res.reason) pushStatus("err", "✗ 断开失败：" + res.reason);
   }
@@ -2847,10 +2873,12 @@
     if (!checkedDevices().length) return pushStatus("warn", "请先在左侧勾选设备");
     wifiBusy = true;
     els.wifiTcpip.disabled = true;
+    markBtnBusy(els.wifiTcpip, true);
     els.wifiTcpipState.textContent = "处理中…（需要几秒）";
     const res = await callApi(api.wifi_enable(null, null));
     wifiBusy = false;
     els.wifiTcpip.disabled = checkedDevices().length === 0;
+    markBtnBusy(els.wifiTcpip, false);
     els.wifiTcpipState.textContent = "";
     if (!res) return;
     if (res.address) els.wifiAddr.value = res.address;
@@ -2881,6 +2909,7 @@
     diagInFlight = !!running;
     if (els.diagCollect) els.diagCollect.disabled = diagInFlight
       || checkedDevices().length === 0;
+    if (els.diagCollect) markBtnBusy(els.diagCollect, diagInFlight);
     if (!diagInFlight && els.diagLines) els.diagLines.disabled = false;
     // 收尾时如果卡片上还停在「正在收集…」，说明这一批没有任何产物（失败 /
     // 关闭窗口），把它复位；有产物时 tool 事件已经先把文件名写上去了。
@@ -2898,6 +2927,7 @@
     const lines = els.diagLines ? Number(els.diagLines.value) || 0 : 0;
     diagInFlight = true;
     if (els.diagCollect) els.diagCollect.disabled = true;
+    markBtnBusy(els.diagCollect, true);
     if (els.diagResult) {
       els.diagResult.textContent = "正在收集…（单台约 3~6 秒）";
       els.diagResult.classList.remove("dim");
@@ -2929,14 +2959,17 @@
   }
 
   async function pickApk() {
+    if (els.apkPick) markBtnBusy(els.apkPick, true);
     const res = await callApi(api.apk_pick());
-    if (!res) return;
+    if (!res) { if (els.apkPick) markBtnBusy(els.apkPick, false); return; }
     if (res.ok === false) {
+      if (els.apkPick) markBtnBusy(els.apkPick, false);
       if (res.reason && res.reason !== "cancelled") {
         pushStatus("warn", "⚠ 选择安装包失败：" + res.reason);
       }
       return;
     }
+    if (els.apkPick) markBtnBusy(els.apkPick, false);
     apkPath = res.path || "";
     setApkFile(res.name, res.size_text);
     syncToolButtons();
@@ -2986,9 +3019,14 @@
     // 把后一台的弹窗内容覆盖成前一台的（标题是 B、内容是 A，最容易被当成
     // 「设备信息读错了」）。回包时对不上就直接丢弃。
     const serial = devInfoSerial;
+    if (els.devinfoRefresh) markBtnBusy(els.devinfoRefresh, true);
     const res = await callApi(api.device_info(serial));
-    if (!res || serial !== devInfoSerial) return;
+    if (!res || serial !== devInfoSerial) {
+      if (els.devinfoRefresh) markBtnBusy(els.devinfoRefresh, false);
+      return;
+    }
     if (res.ok === false) {
+      if (els.devinfoRefresh) markBtnBusy(els.devinfoRefresh, false);
       els.devinfoRows.innerHTML = "";
       const p = document.createElement("div");
       p.className = "devinfo-empty err";
@@ -3018,6 +3056,7 @@
       p.textContent = "没有读到任何信息：设备可能已断开，或系统命令被限制";
       els.devinfoRows.appendChild(p);
     }
+    if (els.devinfoRefresh) markBtnBusy(els.devinfoRefresh, false);
   }
 
   function closeDevInfo() {
@@ -3512,17 +3551,46 @@
      右下角手柄可拖动改变大小、双击恢复自适应（复用备用投屏预览的手感）。 */
   const SHOT_PREVIEW_MIN_W = 160, SHOT_PREVIEW_MIN_H = 120, SHOT_PREVIEW_MAX_H = 1400;
   let shotPreviewSize = { w: 0, h: 0 };
+  let shotPreviewSeq = 0;   // 多设备连拍时只认最后一次请求，防止旧响应覆盖新图
+
+  function setShotPreviewLoading(loading) {
+    const frame = els.shotPreviewFrame;
+    if (!frame) return;
+    const busy = !!loading;
+    frame.classList.toggle("is-loading", busy);
+    if (busy) frame.setAttribute("aria-busy", "true");
+    else frame.removeAttribute("aria-busy");
+    if (els.shotPreviewLoading) els.shotPreviewLoading.hidden = !busy;
+  }
 
   async function showShotPreview(path) {
     if (!els.shotPreview || !els.shotPreviewImg) return;
+    const seq = ++shotPreviewSeq;
+    const nameOfPath = String(path || "").split(/[\\/]/).pop() || String(path || "");
+    // 先亮出预览块与转圈，再去读盘：读盘 + base64 传输是秒级操作，
+    // 若等结果回来才显示，用户会看到卡片下方空一块、没有任何「在做事」的迹象。
+    els.shotPreview.hidden = false;
+    setShotPreviewLoading(true);
+    if (els.shotPreviewName) {
+      els.shotPreviewName.textContent = "正在生成预览…" + (nameOfPath ? "（" + nameOfPath + "）" : "");
+      els.shotPreviewName.title = path;
+    }
     const res = await callApi(api.screenshot_data(path));
-    if (!res || !res.ok || !res.data) return;
+    if (seq !== shotPreviewSeq) return;   // 已有更新的一次预览请求，丢弃旧结果
+    setShotPreviewLoading(false);
+    if (!res || !res.ok || !res.data) {
+      if (els.shotPreviewName) {
+        els.shotPreviewName.textContent = "预览生成失败：" + nameOfPath;
+        els.shotPreviewName.classList.add("err");
+      }
+      return;
+    }
+    if (els.shotPreviewName) els.shotPreviewName.classList.remove("err");
     els.shotPreviewImg.src = "data:image/png;base64," + res.data;
     if (els.shotPreviewName) {
       els.shotPreviewName.textContent = res.name || path;
       els.shotPreviewName.title = path;
     }
-    els.shotPreview.hidden = false;
   }
 
   function applyShotPreviewSize(w, h) {
@@ -5099,7 +5167,7 @@
       const actBtn = t.closest("[data-act]");
       if (actBtn) {
         fileRunAction(actBtn.dataset.act, tr.dataset.path || "",
-                      tr.dataset.name || "");
+                      tr.dataset.name || "", actBtn);
         return;
       }
       if (!t.closest("td.name")) return;        // 只认「名称」列
@@ -5145,12 +5213,16 @@
   }
 
   /* 行内操作按钮（委托到 #file-body，见 bindFileBodyEvents）。 */
-  function fileRunAction(act, path, name) {
+  async function fileRunAction(act, path, name, btn) {
     if (!path) return;
     if (act === "download") {
-      callApi(api.file_download(fileSerial, path, null));
+      if (btn) { btn.disabled = true; markBtnBusy(btn, true); }
+      await callApi(api.file_download(fileSerial, path, null));
+      if (btn) { markBtnBusy(btn, false); btn.disabled = false; }
     } else if (act === "view") {
-      callApi(api.file_view(fileSerial, path));
+      if (btn) { btn.disabled = true; markBtnBusy(btn, true); }
+      await callApi(api.file_view(fileSerial, path));
+      if (btn) { markBtnBusy(btn, false); btn.disabled = false; }
     } else if (act === "rename") {
       // 目标必须是「当前目录 + 新名」：早前用 dirOf(filePath)（当前目录的
       // **父目录**）拼接，在 /sdcard/Download 里改名会把文件搬到 /sdcard，
@@ -5300,6 +5372,7 @@
     updateChecking = !!on;
     if (els.aboutUpdateCheck) {
       els.aboutUpdateCheck.disabled = updateChecking;
+      markBtnBusy(els.aboutUpdateCheck, updateChecking);
       els.aboutUpdateCheck.textContent = updateChecking ? "检查中…" : "检查";
     }
   }
@@ -6239,17 +6312,29 @@
     els.lcCapLevels.addEventListener("change", () => {
       persistPref("lc_cap_levels", levelsOf(els.lcCapLevels));
     });
-    els.lcCapStart.addEventListener("click", () => {
+    els.lcCapStart.addEventListener("click", async () => {
       const s = firstSelected(); if (!s) return pushStatus("warn", "请先勾选设备");
       lcCapSerial = s;   // 记下抓取目标：停止时必须停这一台，不能用当前监控设备
+      // 启动要 adb 建进程 + 打开文件；先给「启动中」转圈，running 事件到达后收掉。
+      // 不立刻禁用：后端 already_running / 启动失败时不会有 running 事件，
+      // 禁用后按钮就再也点不动了；重复点由后端幂等拒绝。
+      markBtnBusy(els.lcCapStart, true);
       // 级别过滤：V/D/I/W/E/F 全勾（默认）= 全量抓取；只勾一部分则只落盘
       // 对应级别的行（非 threadtime 格式行始终原样写盘，避免丢元信息）
-      callApi(api.logcat_capture_start(s, saveDir(), buffers(), levelsOf(els.lcCapLevels)));
+      const res = await callApi(api.logcat_capture_start(s, saveDir(), buffers(), levelsOf(els.lcCapLevels)));
+      if (!res || res.ok === false) markBtnBusy(els.lcCapStart, false);
     });
-    els.lcCapStop.addEventListener("click", () => {
+    els.lcCapStop.addEventListener("click", async () => {
       const s = lcCapSerial || lcSerial;
       if (!s) return pushStatus("warn", "当前没有正在抓取的设备");
-      callApi(api.logcat_capture_stop(s, els.lcCapZipstop.checked));
+      // 停止要等进程收尾 + 可能打包，秒级；在 stopped / zipped / error 事件里收掉转圈。
+      els.lcCapStop.disabled = true;
+      markBtnBusy(els.lcCapStop, true);
+      const res = await callApi(api.logcat_capture_stop(s, els.lcCapZipstop.checked));
+      if (!res || res.ok === false) {
+        markBtnBusy(els.lcCapStop, false);
+        els.lcCapStop.disabled = !lcCapRunning;
+      }
     });
     // tools
     els.toolOpen.addEventListener("click", () => callApi(api.open_save_dir(saveDir())));
@@ -6267,6 +6352,7 @@
           const btn = els[key];
           if (btn.disabled) return;
           btn.disabled = true;
+          markBtnBusy(btn, true);
           try {
             const res = await callApi(api.select_save_dir((input.value || "").trim()));
             if (res && res.ok && res.path) {
@@ -6279,6 +6365,7 @@
             }
             // cancelled：用户自己取消，不提示；error：后端已播报原因，不重复
           } finally {
+            markBtnBusy(btn, false);
             btn.disabled = false;
           }
         });
@@ -6293,6 +6380,7 @@
       // 按钮永久锁死。
       if (els.toolShot.disabled) return;
       els.toolShot.disabled = true;
+      markBtnBusy(els.toolShot, true);
       const res = await callApi(api.screenshot(
         null, !!(els.shotClipboard && els.shotClipboard.checked),
         !!(els.shotSaveFile && els.shotSaveFile.checked)));
@@ -6377,6 +6465,7 @@
       els.toolScrcpy.addEventListener("click", async () => {
         // 先在途禁用：scrcpy 启动要等 START_SETTLE 确权，连点会开出重复窗口
         els.toolScrcpy.disabled = true;
+        markBtnBusy(els.toolScrcpy, true);
         setScrcpyState("", "启动中…");
         const res = await callApi(api.scrcpy_start(null));
         if (res && res.ok) {
@@ -6392,6 +6481,7 @@
         } else if (res) {
           setScrcpyState("err", "投屏未启动");
         }
+        markBtnBusy(els.toolScrcpy, false);
         syncToolButtons();   // 恢复按钮可用性（无受控设备时仍保持禁用）
       });
     }
@@ -6412,6 +6502,7 @@
     if (els.toolMirror) {
       els.toolMirror.addEventListener("click", async () => {
         els.toolMirror.disabled = true;
+        markBtnBusy(els.toolMirror, true);
         setMirrorState("", "启动中…");
         const res = await callApi(api.mirror_start(null, "pipe"));
         const label = { pipe: "播放器窗口（screenrecord）", snap: "低帧率预览（screencap）",
@@ -6436,13 +6527,18 @@
         } else {
           setMirrorState("err", "投屏未启动");
         }
+        markBtnBusy(els.toolMirror, false);
         syncToolButtons();
       });
     }
     if (els.toolMirrorStop) {
       els.toolMirrorStop.addEventListener("click", async () => {
+        if (els.toolMirrorStop.disabled) return;
+        els.toolMirrorStop.disabled = true;
+        markBtnBusy(els.toolMirrorStop, true);
         stopMirrorPreview();
         await callApi(api.mirror_stop(null));
+        markBtnBusy(els.toolMirrorStop, false);
         setMirrorState("", "已停止");
       });
     }
@@ -6823,7 +6919,12 @@
       if (!paths.length) return;
       if (!fileSerial) return pushStatus("warn", "请先勾选设备");
       const dir = saveDir();
-      paths.forEach((p) => callApi(api.file_download(fileSerial, p, dir)));
+      els.fileBatchDl.disabled = true;
+      markBtnBusy(els.fileBatchDl, true);
+      Promise.all(paths.map((p) => callApi(api.file_download(fileSerial, p, dir)))).then(() => {
+        markBtnBusy(els.fileBatchDl, false);
+        updateFileSel();   // 按当前勾选数恢复可用性
+      });
       pushStatus("info", "已发起下载 " + paths.length + " 个文件" + (dir ? " 到 " + dir : ""));
     });
     els.fileBatchDel.addEventListener("click", () => {

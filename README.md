@@ -237,7 +237,7 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 
 | job | 运行环境 | 触发 | 做什么 |
 | --- | --- | --- | --- |
-| `test` | ubuntu-24.04 | 每次 push / PR | `pytest` 全量（1355 项）+ 前端 86 个 jsdom 测试文件 |
+| `test` | ubuntu-24.04 | 每次 push / PR | `pytest` 全量（1355 项）+ 前端 87 个 jsdom 测试文件 |
 | `windows` | windows-latest | push 到 main / 打 tag / 手动 | 装依赖 → 校验 tag 与源码 `VERSION` 一致 → `build.py --package --zip` → 生成 `sha256sums.txt` → 上传 artifact → tag 时发 Release |
 
 打 tag 之后的两三分钟，Releases 页面就有 `ADBDeviceCommander_v<版本>_win64.zip`
@@ -353,6 +353,11 @@ git commit -am "第五十二轮：…" && git tag v2026.1105.1200 && git push --
 - **截图进行中的按钮态**：点「立即截图」后按钮立即禁用（截图 = 设备采集 +
   USB 传输 + 落盘，耗时以秒计），完成 / 失败后自动恢复；期间重复点击被拦截，
   不会重复下发。后端未受理（如未勾选设备）时按钮即刻恢复，不会卡在禁用态。
+- **耗时操作的统一等待态**：预览图要后端读盘 + base64 传输，生成期间预览框
+  立即占位并显示「正在生成预览…」遮罩与转圈，数据到达再换成图片；截图、录屏启停、
+  应用安装、诊断包收集、scrcpy / 备用投屏启动、Logcat 落盘抓取启停、选择 APK /
+  目录、检查更新、文件下载等按钮在操作期间统一加转圈与 `aria-busy`。
+  等待态只加视觉、不擅自改 `disabled`，禁用时机仍由各业务状态机掌握。
 - **指令台多工作区（子 tab，最多 8 个）**：设备指令页顶部一排子 tab，点
   「＋ 新建工作区」就多出一套**完整的**「指令台 + 指令输出」。每个工作区各有一条
   **独立的持久会话**，因此能真的同时跑 —— 在工作区 2 里挂着一条十几分钟的抓取时，

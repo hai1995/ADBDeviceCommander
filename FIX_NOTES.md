@@ -3996,3 +3996,25 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   防止以后标题格式漂移导致发版时静默漏更新。
 - 验证：`pytest` **1355 passed / 1 skipped**；`pyflakes` 干净；
   `node tests/frontend/run-all.cjs` **86 个文件 0 失败**。
+
+# 第五十三轮（耗时操作等待态）
+- 背景：截图预览需要后端读盘 + base64 传输（大图以秒计），但界面在结果回来前
+  只把预览块置为可见 —— 用户点完「立即截图」看到下方空一块、没有任何动静，
+  容易误判没生效而重复点击；安装 / 诊断 / 投屏 / Logcat 抓取 / 更新等按钮也有同样问题。
+- `frontend/index.html` / `frontend/css/app.css`：
+  - 预览框新增 `.shot-preview-loading` 遮罩（转圈 + 「正在生成预览…」），
+    加载时 `min-height: 220px` 占住高度、隐藏旧图，避免版面塌陷后突然弹出；
+  - 通用 `.btn.is-loading::after` 转圈（`btn-spin` 关键帧）与 `aria-busy`，
+    只加视觉、**不擅自改 disabled**，禁用仍由各业务状态机掌握。
+- `frontend/js/app.js`：
+  - 新增 `markBtnBusy(btn, busy)`（幂等，只切 class/aria）；
+  - `showShotPreview` 先亮遮罩再请求，生成中显示文件名，失败标记 `.err`；
+    新增请求序号，多设备连拍时丢弃过期响应，防止旧图覆盖新图；
+  - 接入等待态：截图 / 录屏启停 / 应用安装 / 诊断包 / scrcpy / 备用投屏启停 /
+    Logcat 落盘抓取启停 / 选择 APK·目录 / 检查更新 / 文件下载 / 设备信息刷新；
+  - Logcat 启动不立即禁用（后端 `already_running` 或启动失败时不会有 running 事件，
+    禁用后按钮会永久点不动），重复点由后端幂等拒绝。
+- `tests/frontend/loading_states.test.cjs`（新增）：锁定 CSS 转圈、预览遮罩先于数据、
+  多事件驱动的按钮等待态与收尾。
+- 验证：`node tests/frontend/run-all.cjs` **87 个文件 0 失败**；
+  `pytest` 1355 passed / 1 skipped；`pyflakes` 干净。

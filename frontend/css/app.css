@@ -345,6 +345,18 @@ html { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; 
   background: var(--surface); color: var(--faint);
   border-color: var(--line); box-shadow: none; transform: none; cursor: default;
 }
+/* 等待态：按钮文字不变（用户仍知道刚才点的是什么），右侧补一颗小转圈。
+   只加视觉与 aria，不碰 disabled —— 禁用时机由各业务状态机掌握，
+   避免「等待结束时把本该禁用的按钮又放开」。 */
+.btn.is-loading { cursor: progress; }
+.btn.is-loading::after {
+  content: ""; width: 11px; height: 11px; flex: none; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: btn-spin .75s linear infinite; opacity: .95;
+}
+.btn.is-loading:disabled { color: var(--muted); cursor: progress; }
+.btn.is-loading:hover { box-shadow: none; }
+@keyframes btn-spin { to { transform: rotate(360deg); } }
 .btn.tiny { min-height: 24px; padding: 3px 9px; font-size: var(--fs-sm); border-radius: var(--r-sm); }
 
 /* 主操作（执行 / 截图 / 保存…）：磷光青实心键 + 深色字 */
@@ -1371,6 +1383,21 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   object-fit: contain;
 }
 .shot-preview-frame.is-resizing { outline: 1px solid var(--accent); }
+/* 预览生成中：占住高度、隐藏旧图，中间转圈 + 文案，避免等几秒后突然弹出。 */
+.shot-preview-frame.is-loading { min-height: 220px; }
+.shot-preview-frame.is-loading img { visibility: hidden; }
+.shot-preview-loading {
+  position: absolute; inset: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  border-radius: var(--r-sm); background: var(--media-bg);
+  color: var(--muted); font: 400 var(--fs-sm)/1.2 var(--font-display);
+  letter-spacing: .06em; line-height: 1;
+}
+.shot-preview-loading .spinner {
+  width: 14px; height: 14px; flex: none; border-radius: 50%;
+  border: 2px solid var(--accent); border-right-color: transparent;
+  animation: btn-spin .8s linear infinite;
+}
 .shot-preview-grip {
   position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
   cursor: nwse-resize; touch-action: none; opacity: .55;
