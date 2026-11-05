@@ -100,7 +100,7 @@ const watchdog = setTimeout(() => {
     ok(btns[0].dataset.tab === "cmd" && btns[0].classList.contains("active"),
       "第一个页签是设备指令且默认激活");
     ok(activeKey(doc) === "cmd", "默认显示设备指令页");
-    ok(doc.querySelectorAll(".tool-pane").length === 5, "工具页五个子 tab 面板都在（顺带确认页内结构未被改坏）");
+    ok(doc.querySelectorAll("#tool-panes .tool-pane").length === 5, "工具页五个子 tab 面板都在（顺带确认页内结构未被改坏）");
   }
 
   console.log("\n[1] 按 main_active_tab 恢复上次停留页");

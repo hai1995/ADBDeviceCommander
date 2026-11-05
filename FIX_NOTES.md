@@ -3950,3 +3950,25 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   `layout_resizable` 21、`ui_style_card_tabs` 36、`checkbox_switch_style` 59）：全过。
 - 全量前端套件：**84 个测试文件 0 失败**（main 基线 83 + 本轮新增 1 个文件）。
 - `node --check frontend/js/app.js`：语法通过。
+
+# 第五十一轮（Logcat 卡片布局改为与工具页一致的子 tabs 风格）
+- 需求：Logcat 原本上下堆叠「落盘抓取 / 实时监控」两张 `.lc-card`，改为与工具页同款的
+  **子 tabs 风格**——一条 `.tool-subtabs` 子 tab 条 + 两个 `.tool-pane`（tabpanel），
+  一次只看一项；两个面板共享上方缓冲区 / 保存目录行（那一行留在 tab 之外）。
+- 复用工具页视觉：`index.html` 套 `.tool-subtabs` / `.tool-subtab` / `.tool-panes` /
+  `.tool-pane`（与工具页同一套 ARIA tabs 语义：tablist / tab / tabpanel、
+  `aria-selected`、`roving tabindex`）；面板内仍是 `.lc-card`，四角括号与工具卡一致。
+- 监控卡撑满高度保留：`.lc-card.grow`（实时监控）在激活面板内 `flex:1`，日志视图
+  `.lc-view` 继续吃满剩余高度，不被整页滚动替代（与工具页 `overflow:auto` 的取舍相反，
+  因为 Logcat 监控视图就是要占满屏幕高）。`#lc-panes` 为 flex 列、吃满剩余高度。
+- 状态落盘：新增 `lc_active_tab`（PREFS_DEFAULTS 默认 `""`，与 `tool_active_tab`
+  同套「只记 key、失效回退」约定）；`switchLcTab` 点击切换 + 方向键 / Enter / Space
+  激活，`applyBootSettings` 回填（persist:false，启动不写盘），`bindLcSubtabs` 在
+  `bindUI` 绑定。非法 key 回退「落盘抓取」。未引入工具页的「长按拖动排序」（仅两项、顺序固定）。
+- 测试：`tests/frontend/logcat_subtabs.test.cjs`（23 条：默认态 / 切换面板 / 落盘键名 /
+  启动回填 monitor / 非法 key 回退 / CSS 布局）；`main_tab_memory.test.cjs` 的
+  面板计数由 `doc.querySelectorAll(".tool-pane")`（全文档，现已 7 个）收紧到
+  `#tool-panes .tool-pane`（工具页 5 个），避免 Logcat 复用 `.tool-pane` 后误判。
+
+后端 `pytest`：**1341 passed / 1 skipped**（基线无变化；`lc_active_tab` 仅加进 PREFS_DEFAULTS）；
+`pyflakes` 干净。前端 `node tests/frontend/run-all.cjs`：**85 个文件、0 失败**（基线 83 + 本轮新增 1 个文件）。
