@@ -5,7 +5,10 @@ backend.logcat_service —— Logcat 实时监控 + 抓取服务（与 UI 无关
 两套能力，共用 `adb logcat -v threadtime`，差异在「去向」：
   * LogcatMonitor   实时推给前端渲染（按级别/关键字/仅异常过滤，批量事件推送）；
   * LogcatCapture   落盘为本地 txt（单文件一路写到底，可按级别过滤写盘，
-                    停止时可选打包 zip）。
+                    停止时可选打包 zip）。设备掉线、或设备仍在线而 `adb logcat`
+                    被外力打断，都会**自动重连/重启并续写同一文件**，断点与缺失
+                    时段以 `[logcat]` 标记行写入文件 —— 录屏配套的日志是事后按
+                    时间轴复现问题的唯一物证，绝不能悄悄停在半路。
 
 事件协议（经 BackendBus 推送，前端 take_events 消费）：
   logcat        {serial, status, lines?, total?, exc?, text?}
@@ -812,7 +815,7 @@ class LogcatCapture:
                     break
                 if restarts >= LOGCAT_CAP_RESTART_MAX:
                     outcome_error = (
-                        "logcat 抓取连续 %d 次被意外中断（设备仍在线），已停止"
+                        "logcat 抓取累计 %d 次被意外中断（设备仍在线），已停止"
                         "自动重启。文件存在时间缺口：最后一次日志停在 %s。"
                         "常见诱因是 USB 带宽被占满（录屏 + 满缓冲全级别日志同时"
                         "运行）、设备 logd 重启或其它工具重启了 adb server。"
