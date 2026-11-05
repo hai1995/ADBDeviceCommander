@@ -1834,13 +1834,21 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
 .alert-modal { z-index: 65; }
 .alert-box { width: 560px; }
 .alert-title { color: var(--warn); letter-spacing: .02em; }
+/* 正文区自己滚，不要让 .modal-body 也滚：两层滚动容器叠在一起时，外层会按
+   内容高度撑开、内层又各自裁切，视觉上就是「标题下面一大块空白、第三条被切
+   一半」。这里把外层的滚动与 pre-wrap 关掉，只留内层一条滚动条。 */
+.alert-box .modal-body {
+  padding: 14px 16px; overflow: hidden;
+  white-space: normal; word-break: normal;
+}
+.alert-body { display: flex; flex-direction: column; gap: 8px; max-height: 42vh; overflow-y: auto; }
 /* 多条告警竖排：条数多时自己滚动，不把弹窗撑出屏幕（笔记本 768 高很常见） */
-.alert-body { display: flex; flex-direction: column; gap: 8px; max-height: 44vh; overflow-y: auto; }
 /* 每条左侧一道语义色竖线 —— 扫一眼就知道有几件事、哪几条是错误 */
 .alert-item {
   padding: 8px 10px; border-radius: 6px; color: var(--text-2);
   border-left: 3px solid var(--warn); background: var(--warn-soft);
   line-height: 1.65; word-break: normal; overflow-wrap: break-word;
+  white-space: normal;
 }
 .alert-item--err { border-left-color: var(--err); background: var(--err-soft); }
 .alert-item--info { border-left-color: var(--accent); background: var(--accent-soft); }
