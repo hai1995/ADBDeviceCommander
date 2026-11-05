@@ -3790,3 +3790,44 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 
 后端 `pytest`：**1341 passed / 1 skipped**；`pyflakes` 干净。
 前端 `node tests/frontend/run-all.cjs`：**83 个文件、0 失败**。
+
+---
+
+# 第四十九轮（设备栏折叠铭牌随勾选联动：「已选中 N 个设备」）
+
+## 一、这轮在补什么
+
+设备栏收起成 48px 窄轨后，底部铭牌（徽章 + 竖排文字）恒显「N / 已连接设备」。
+但收起态下用户的每一发操作都作用于**受控（勾选）**设备——此时「选中几台」比
+「连了几台」更有用，而勾选状态在窄轨里恰恰一点都看不到。用户反馈：折叠时下方
+文字应改为「已选中 X 个设备」。
+
+## 二、设计取舍
+
+- **有勾选才切**：折叠 + 有勾选设备 → 徽章显示勾选数、竖排文字改「已选中设备」；
+  一台没选时回落「N / 已连接设备」——否则收起态永远「已选中0」，信息量为零。
+- **展开态不受勾选影响**：列表就摊在旁边，勾选一目了然，铭牌恒为「N 台 +
+  已连接设备」，与旧行为逐字一致（展开态零回归）。
+- **两条触发路径收敛到一个函数**：`refreshSidebarNameplate()` 同时被
+  `renderDevices()`（设备事件 / 勾选广播到达）与 `applySidebarCollapsed()`
+  （收起 / 展开，含 boot 恢复）调用，徽章数字与竖排文字永远同源，不会出现
+  「数字是选中数、文字还是已连接」的错位。
+- 文字仍走原 `.sidebar-title-text` 节点（只换 textContent），竖排 CSS、
+  column-reverse 布局、徽章隐藏单位等零改动；两条文案都是 5 字，窄轨高度不变。
+
+## 三、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `frontend/js/app.js` | 新增 `refreshSidebarNameplate()`；`renderDevices()` 原两行计数写入改为调它；`applySidebarCollapsed()` 切换 class 后同步刷新铭牌 |
+| `tests/frontend/sidebar_nameplate.test.cjs` | **新增** 14 条：展开恒「已连接 N 台」/ 折叠 + 有勾选切「已选中 N」/ 折叠 + 全取消回落 / 勾选数联动 / 重新展开恢复 |
+| `README.md` | 「设备栏收起 / 展开」一条补铭牌随勾选联动的说明 |
+| `FIX_NOTES.md` | 本轮 |
+
+## 四、验证
+
+- `node tests/frontend/sidebar_nameplate.test.cjs`：**14 通过 / 0 失败**。
+- 相关既有测试抽查（`device_card_toggle` 9、`device_incremental_render` 15、
+  `layout_resizable` 21、`ui_style_card_tabs` 36、`checkbox_switch_style` 59）：全过。
+- 全量前端套件：**84 个测试文件 0 失败**（main 基线 83 + 本轮新增 1 个文件）。
+- `node --check frontend/js/app.js`：语法通过。

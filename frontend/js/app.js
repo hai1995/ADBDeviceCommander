@@ -1311,11 +1311,11 @@
   }
 
   function renderDevices() {
-    // 计数只写数字，「台」是独立的 .count-unit span：收起态下 CSS 把它藏掉，
-    // 窄轨里只剩等宽数字徽章；展开态两者合起来仍是「N 台」。0 台时单位
-    // 一并隐藏，避免徽章空了还挂个「台」字。
-    els.devCount.textContent = devices.length ? String(devices.length) : "";
-    if (els.devCountUnit) els.devCountUnit.hidden = devices.length === 0;
+    // 铭牌（徽章 + 标题文字）统一走 refreshSidebarNameplate：展开态恒显
+    // 「N 台 + 已连接设备」；折叠态若勾选了设备则改显「N + 已选中设备」
+    // （见 sidebar 区的同名函数）。0 台时单位一并隐藏，避免徽章空了还挂
+    // 个「台」字。
+    refreshSidebarNameplate();
     const usable = devices.filter((d) => d.ok);
     const allChecked = usable.length > 0 && usable.every((d) => d.checked);
     els.btnAll.textContent = allChecked ? "取消选择" : "全选";
@@ -5353,10 +5353,33 @@
     const row = document.querySelector(".main-row");
     return !!(row && row.classList.contains("sidebar-collapsed"));
   }
+  /* 折叠态铭牌随勾选联动：窄轨底部是「徽章 + 竖排文字」的小铭牌，默认显示
+     「N / 已连接设备」。但收起后用户的每一发操作都作用于**受控（勾选）**
+     设备，此时「选中几台」比「连了几台」更值得贴在铭牌上——所以有勾选时
+     改显「N / 已选中设备」，一台没选时回落「已连接设备」（否则收起态永远
+     「已选中0」，信息量为零）。展开态列表就摊在旁边，勾选状态一目了然，
+     铭牌恒为「N 台 + 已连接设备」，不受勾选影响。
+     renderDevices（设备事件 / 勾选广播）与 applySidebarCollapsed（收起 /
+     展开）都调这里，保证两条触发路径收敛到同一份显示逻辑。 */
+  function refreshSidebarNameplate() {
+    const collapsed = sidebarCollapsed();
+    const sel = devices.filter((d) => d.checked).length;
+    const showSel = collapsed && sel > 0;
+    const n = showSel ? sel : devices.length;
+    if (els.devCount) els.devCount.textContent = n ? String(n) : "";
+    if (els.devCountUnit) els.devCountUnit.hidden = n === 0;
+    const label = els.deviceSidebar
+      && els.deviceSidebar.querySelector(".sidebar-title-text");
+    if (label) {
+      const want = showSel ? "已选中设备" : "已连接设备";
+      if (label.textContent !== want) label.textContent = want;
+    }
+  }
   function applySidebarCollapsed(collapsed, persist = true) {
     const row = document.querySelector(".main-row");
     if (!row || !els.deviceSidebar) return;
     row.classList.toggle("sidebar-collapsed", !!collapsed);
+    refreshSidebarNameplate();   // 收起 / 展开都要重算铭牌（选中态只在折叠态显出）
     if (collapsed) {
       _sidebarPreCollapseW = els.deviceSidebar.style.width;   // "350px" 或 ""
       els.deviceSidebar.style.width = "";
