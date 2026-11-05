@@ -102,6 +102,7 @@
     fileDevNow: $("file-dev-now"), filePath: $("file-path"), fileUp: $("file-up"),
     fileRefresh: $("file-refresh"), fileMkdir: $("file-mkdir"),
     fileTouch: $("file-touch"), fileUpload: $("file-upload"),
+    fileUploadBtn: $("file-upload-btn"),
     fileBody: $("file-body"),
     fileDir: $("file-dir"), fileOpen: $("file-open"), filePick: $("file-pick"),
     fileSelAll: $("file-sel-all"), fileBatchDl: $("file-batch-dl"),
@@ -4967,9 +4968,11 @@
     updatePerfStats();
     queuePerfDraw();
     setPerfState("启动中…");
+    markBtnBusy(els.perfStart, true);
     // 第一个参数传 null：交给后端取「全部受控设备」，多台即进入对比模式
     const res = await callApi(api.perf_start(
       null, ms, perfPkg));
+    markBtnBusy(els.perfStart, false);
     if (!res || res.ok === false) {
       const why = (res && (res.error || res.reason)) || "未知原因";
       setPerfState("启动失败", "err", why);
@@ -5004,6 +5007,7 @@
   }
 
   async function stopPerf() {
+    markBtnBusy(els.perfStop, true);
     await callApi(api.perf_stop());
     setPerfRunning(false);
     // 收尾再拉一次：把停止瞬间还在路上的采样点补齐，别让最后几秒缺口
@@ -5014,13 +5018,16 @@
     setPerfState("已停止 · " + perfTotalPoints() + " 个采样点");
     updatePerfStats();
     queuePerfDraw();
+    markBtnBusy(els.perfStop, false);
   }
 
   async function exportPerf() {
     if (!perfTotalPoints()) { showToast("warn", "还没有采样数据，先开始监控"); return; }
     els.perfExport.disabled = true;
+    markBtnBusy(els.perfExport, true);
     setPerfState("正在生成报告…");
     const res = await callApi(api.perf_export());
+    markBtnBusy(els.perfExport, false);
     els.perfExport.disabled = false;
     if (!res || res.ok === false) {
       setPerfState("导出失败", "err", (res && res.reason) || "");
@@ -5238,8 +5245,11 @@
     } else if (act === "delete") {
       askConfirm({ title: "删除文件",
                    text: "确定删除以下项目？此操作不可恢复。\n" + path,
-                   yes: "删除", danger: true }).then((yes) => {
-        if (yes) callApi(api.file_remove(fileSerial, [path]));
+                   yes: "删除", danger: true }).then(async (yes) => {
+        if (!yes) return;
+        if (btn) { btn.disabled = true; markBtnBusy(btn, true); }
+        await callApi(api.file_remove(fileSerial, [path]));
+        if (btn) { markBtnBusy(btn, false); btn.disabled = false; }
       });
     }
   }
@@ -5287,7 +5297,11 @@
   // 目录路径归一化（去尾部斜杠，空则视为根），用于判断两次列目录请求是否同一目录。
   function normDir(s) { const t = (s || "/").replace(/\/+$/, ""); return t || "/"; }
   function sameDir(a, b) { return normDir(a) === normDir(b); }
-  function gotoPath() { callApi(api.file_list(fileSerial, els.filePath.value.trim() || "/")); }
+  function gotoPath() {
+    if (els.fileRefresh) markBtnBusy(els.fileRefresh, true);
+    const p = callApi(api.file_list(fileSerial, els.filePath.value.trim() || "/"));
+    Promise.resolve(p).then(() => { if (els.fileRefresh) markBtnBusy(els.fileRefresh, false); });
+  }
   function onFileView(p) {
     p = p || {};
     modalLocalPath = p.local || null;
@@ -5311,26 +5325,47 @@
     const dir = filePath;
     const pathOf = (nm) => (dir.replace(/\/$/, "") + "/" + nm);
     let n = 0;
+    // 一批文件的读取 / 传输可能在途多个；等到最后一个回来再收掉「上传」转圈。
+    let pending = 0;
+    const uploadBegin = () => {
+      if (pending++ === 0 && els.fileUploadBtn) markBtnBusy(els.fileUploadBtn, true);
+    };
+    const uploadEnd = () => {
+      if (pending > 0 && --pending === 0 && els.fileUploadBtn) {
+        markBtnBusy(els.fileUploadBtn, false);
+      }
+    };
     Array.from(files).forEach((f) => {
       const reader = new FileReader();
-      reader.onload = () => {
-        const b64 = (reader.result || "").split(",").pop() || "";
-        if (!b64) {
-          /* 读到的内容为空（文件在读取瞬间被删 / 被独占锁住 / 磁盘掉线）：
-             空串传到后端会写成一个 0 字节文件，然后照常报「✓ 上传完成」——
-             用户在设备上拿到一个空文件，还以为传成功了。 */
-          pushStatus("err", "⚠ 上传失败 " + f.name + "：读到的内容为空（文件被占用或已删除）");
-          return;
+      uploadBegin();
+      reader.onload = async () => {
+        try {
+          const b64 = (reader.result || "").split(",").pop() || "";
+          if (!b64) {
+            /* 读到的内容为空（文件在读取瞬间被删 / 被独占锁住 / 磁盘掉线）：
+               空串传到后端会写成一个 0 字节文件，然后照常报「✓ 上传完成」——
+               用户在设备上拿到一个空文件，还以为传成功了。 */
+            pushStatus("err", "⚠ 上传失败 " + f.name + "：读到的内容为空（文件被占用或已删除）");
+            return;
+          }
+          await callApi(api.file_upload_data(serial, f.name, b64, pathOf(f.name)));
+        } finally {
+          uploadEnd();
         }
-        callApi(api.file_upload_data(serial, f.name, b64, pathOf(f.name)));
       };
       /* 读取失败（被占用 / 无权限 / 文件已不在）时既不触发 onload 也不报错：
          旧实现下用户只看到「⬆ 已提交上传 N 个文件」，之后什么都不会发生。 */
       reader.onerror = () => {
         const why = (reader.error && reader.error.message) || "读取失败";
         pushStatus("err", "⚠ 无法读取 " + f.name + "：" + why);
+        uploadEnd();
       };
-      reader.readAsDataURL(f);
+      try {
+        reader.readAsDataURL(f);
+      } catch (e) {
+        pushStatus("err", "⚠ 无法读取 " + f.name + "：" + ((e && e.message) || e));
+        uploadEnd();
+      }
       n++;
     });
     pushStatus("info", "⬆ 已提交上传 " + n + " 个文件到 " + dir);
@@ -6939,7 +6974,13 @@
       askConfirm({ title: "批量删除",
                    text: "确定删除选中的 " + paths.length + " 个项？此操作不可恢复。\n" + preview,
                    yes: "删除", danger: true }).then((yes) => {
-        if (yes) callApi(api.file_remove(fileSerial, paths));
+        if (!yes) return;
+        els.fileBatchDel.disabled = true;
+        markBtnBusy(els.fileBatchDel, true);
+        Promise.resolve(callApi(api.file_remove(fileSerial, paths))).then(() => {
+          markBtnBusy(els.fileBatchDel, false);
+          updateFileSel();
+        });
       });
     });
     // modal

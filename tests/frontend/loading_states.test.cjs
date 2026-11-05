@@ -77,6 +77,16 @@ function mkEnv(overrides) {
     }),
   };
   Object.defineProperty(window.document, "readyState", { value: "complete", configurable: true });
+  // jsdom 无 canvas：性能页绘图会给 null 调 API；桩一个最小 2d 上下文。
+  window.HTMLCanvasElement.prototype.getContext = function () {
+    return {
+      setTransform() {}, clearRect() {}, beginPath() {}, closePath() {},
+      moveTo() {}, lineTo() {}, arc() {}, rect() {}, fillRect() {},
+      save() {}, restore() {}, stroke() {}, fill() {}, fillText() {},
+      measureText() { return { width: 24 }; },
+      createLinearGradient() { return { addColorStop() {} }; },
+    };
+  };
   window.eval(js);
   return { window, calls };
 }
@@ -198,6 +208,56 @@ function mkEnv(overrides) {
     resolveStart({ ok: true, started: ["A1"], skipped: [] });
     const done = await waitFor(() => !btn.classList.contains("is-loading"), 3000, "启动完成");
     ok(done, "返回后收掉转圈");
+  }
+
+  console.log("\n[6] 性能报告导出 / 文件上传：长任务按钮等待态");
+  {
+    let resolveExport = null;
+    const { window } = mkEnv({
+      perf_start: () => Promise.resolve({ ok: true, serial: "A1", interval: 1.0, info: {} }),
+      perf_poll: () => Promise.resolve({
+        running: true, seq: 1,
+        samples: [{ seq: 1, t: 1793200000, cpu: 21.5, mem_used: 4100.0, pss: 320.0,
+                    fps: 59.4, batt: 78, temp: 31.0 }],
+      }),
+      perf_export: () => new Promise((r) => { resolveExport = r; }),
+    });
+    const doc = window.document;
+    await waitFor(() => !doc.getElementById("perf-start").disabled, 3000, "设备就绪");
+    doc.getElementById("perf-start").dispatchEvent(new window.Event("click", { bubbles: true }));
+    await waitFor(() => !doc.getElementById("perf-export").disabled, 4000, "有采样点");
+    doc.getElementById("perf-export").dispatchEvent(new window.Event("click", { bubbles: true }));
+    const exp = doc.getElementById("perf-export");
+    ok(exp.classList.contains("is-loading"), "生成性能报告时按钮转圈");
+    ok(exp.disabled, "生成期间按钮禁用");
+    resolveExport({ ok: true, html: "/tmp/p.html", rows: 1, samples: 1 });
+    ok(await waitFor(() => !exp.classList.contains("is-loading"), 3000, "报告完成"),
+       "报告生成后收掉转圈");
+    window.close();
+  }
+
+  console.log("\n[7] 文件上传：一批文件传完才收起「上传」转圈");
+  {
+    let resolveUpload = null;
+    const { window, calls } = mkEnv({
+      file_upload_data: () => new Promise((r) => { resolveUpload = r; }),
+    });
+    const doc = window.document;
+    const label = doc.getElementById("file-upload-btn");
+    const input = doc.getElementById("file-upload");
+    await waitFor(() => /设备: A1/.test(doc.getElementById("file-dev-now").textContent),
+                   3000, "文件页设备就绪");
+    const file = new window.File(["hello"], "a.txt", { type: "text/plain" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    ok(await waitFor(() => label.classList.contains("is-loading"), 3000, "上传等待态"),
+       "选中文件后「上传」按钮转圈");
+    await waitFor(() => calls.some((c) => c.fn === "file_upload_data"), 4000, "上传调用");
+    resolveUpload({ ok: true });
+    ok(await waitFor(() => !label.classList.contains("is-loading"), 3000, "上传完成"),
+       "文件传完后收掉转圈");
+    ok(!label.hasAttribute("aria-busy"), "完成后移除 aria-busy");
+    window.close();
   }
 
   console.log("\n通过 " + pass + " / 失败 " + fail);

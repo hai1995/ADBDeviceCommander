@@ -4018,3 +4018,22 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   多事件驱动的按钮等待态与收尾。
 - 验证：`node tests/frontend/run-all.cjs` **87 个文件 0 失败**；
   `pytest` 1355 passed / 1 skipped；`pyflakes` 干净。
+
+# 第五十四轮（补齐剩余耗时操作等待态 + README 导航）
+- 背景：第 53 轮覆盖了截图/安装/诊断/投屏/Logcat/更新等高频操作，但性能报告导出
+  （多设备多份 HTML + 对比报告）、文件上传（FileReader + base64 逐文件传输）、
+  批量删除、目录刷新、单文件删除、性能监控启停仍是「点了没明显反馈」。
+- `frontend/js/app.js`：
+  - 性能监控：开始/停止、导出报告（`perf_start` / `perf_stop` / `perf_export`）
+    全程 `is-loading`；导出完成后才恢复按钮；
+  - 文件上传：用 `pending` 计数把一批文件的读取与传输聚合，最后一个回包才收转圈；
+    读取失败 / 空内容 / `readAsDataURL` 抛错路径也会正确 `uploadEnd`，不会卡死；
+  - 文件目录刷新（含返回上级 / 手动改路径）在 `file_list` 返回前转圈；
+  - 单文件删除、批量删除在确认后、`file_remove` 返回前转圈，完成按勾选数恢复。
+- `frontend/index.html`：上传标签补 `id="file-upload-btn"`，供等待态定位。
+- `README.md`：新增「文档导航」目录（架构用显式 `<a id="arch">` 锚点，避免版本号
+  变化后锚点失效），长文档可直接跳转；界面说明同步补全等待态覆盖范围。
+- `使用说明.txt`：耗时操作清单补上「性能报告导出 / 文件上传下载」。
+- `tests/frontend/loading_states.test.cjs`：补性能报告导出（延迟回包期间转圈）与
+  文件上传（一批传完才收圈）两段断言。
+- 验证：前端 **87 个文件 0 失败**；`pytest` 1355 passed / 1 skipped。
