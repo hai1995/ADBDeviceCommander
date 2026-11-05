@@ -3352,3 +3352,75 @@ connect」，自相矛盾；且失败提示还重复弹了两条。
 - `ws_rename.test.cjs` 扩到 50 条：新增「改名当前工作区 → cmd_active_ws 同步」。
 - 全量前端套件：79 个文件 0 失败（`run-all.cjs`，3m53s）；后端 `pytest` 1299 passed/1 skipped；
   `pyflakes` 干净。
+
+# 第四十三轮：主 tab 记忆停留项 + 其他模块扫出的四个真实问题
+
+## 一、主 tab 记住上次停留页（需求 1）
+- 新增 `main_active_tab`（config.json）：重启回到上次那一页（设备指令 / 工具 /
+  性能监控 / Logcat / 文件 / 关于），没记过或那一页已不存在则回退「设备指令」。
+- 抽 `switchMainTab(key, opts)`：点击与启动恢复走同一条路径（性能页切回时的
+  `renderPerfDev + queuePerfDraw` 因此只有一份），合法 key 从 DOM 派生，
+  值没变不写盘、启动回填 `persist:false`（打开就写一次盘的问题同样避开）。
+- 恢复点位于 `onBooted` 的 `renderCommands` 之后：切到性能页要按已勾选设备渲染
+  目标设备条，切到设备指令页要求指令卡已画好；设备勾选态晚到也没关系，
+  `devices` 事件里的 `renderPerfDev` 会补一次。
+
+## 二、扫其他模块查出并修掉的真问题（需求 2）
+
+### 1. 五处 `window.confirm` / `window.prompt`（最严重）
+项目早就知道 pywebview 各版本对这两个原生方法支持不一致（`askConfirm` 的注释里
+写着「部分版本里它是空函数，`!confirm(...)` 恒为 true」），但仍有五处直接用原生：
+
+| 位置 | 后果 |
+|---|---|
+| 文件行「删除」 | `if (confirm(...))` → 恒 false，**单文件删除永远无效**（点了没反应） |
+| 批量「删除选中」 | `if (!confirm(...)) return` → 恒 true，**跳过确认直接删多个文件**（不可恢复） |
+| 命令「删除」 | 同上，**删命令没有确认** |
+| 文件「重命名」 | `prompt` 返回 null，**重命名永远无效** |
+| 文件「新建文件夹 / 新建文件」 | 同上，**两个入口永远无效** |
+
+修法：新增应用内输入弹窗 `askInput(opts) → Promise<string|null>`（与确认弹窗同一
+套骨架：遮罩 / × / 取消 / Esc 四个出口都是 null，空白名等同取消，回车提交，
+默认聚焦并全选，Tab 焦点圈在弹窗内）。三处危险操作改走 `askConfirm`，
+三处输入改走 `askInput`。**全仓已无原生 confirm / prompt 调用。**
+
+### 2. 父目录行（`..`）带「重命名 / 删除」按钮
+`..` 行是导航入口，却和其它行一样渲染了操作按钮：
+- 重命名 = `mv /sdcard/Download/.. /sdcard/Download/x` —— **把父目录整个搬走**；
+- 删除 = `rm -rf /sdcard/Download/..` —— 删上一级；
+- 而它永远排在**第一行**，是最容易误点的一行。
+现在 `..` 行只保留空的 `td.act`（列宽不错位），导航点击照旧。
+
+### 3. 文件名校验：只改名，不搬家
+`mv` 的语义是移动，所以重命名 / 新建的名称**不允许含 `/` 或 `\`**（`validateEntryName`），
+空名与 `.` / `..` 一并拒绝；与原名相同则静默跳过。之前输入 `sub/x.txt` 会把文件
+搬到子目录，输入 `/x` 还可能拼出 `//x`。
+
+### 4. 两处异步竞态
+- **上传目录**：`FileReader` 是异步的，原实现在 `onload` 里读 `fileSerial` / `filePath`，
+  读完时用户可能已经切了设备或目录 → 「提示说传到 A，实际传到了 B」。
+  现在进入函数时快照设备与目录，提示语也用同一份快照。
+- **列目录失败事件**：`onFile` 的成功分支一直有 `p.serial !== fileSerial` 的迟到丢弃，
+  错误分支却没有 —— 切设备时上一台迟到的 `ls` 失败会**清空当前设备的文件表格**、
+  把路径栏回退。补上同样的校验。
+
+### 5. 子 tab 拖动后的焦点竞态（测试暴露）
+`applyToolTabOrder()` 用 `appendChild` 移动节点，浏览器会在「节点被移出文档」那一刻
+丢焦点，这次复位与紧随的 `focus()` 谁先谁后没有保证（jsdom 下实测约一半概率被复位
+回 body，`tool_card_order` 因此 6 次跑挂 3 次）。新增 `restoreToolTabFocus(tab)`：
+延后一帧再聚焦，且若这一帧里用户已经把焦点放到别处（不是 body）就不抢回来；
+拖动结束与 Esc 取消共用。
+
+## 三、回归测试
+- 新增 `main_tab_memory.test.cjs`（16 条）：默认页、按 `main_active_tab` 恢复、
+  点击落盘、重复点击不写盘、失效 key 回退且不写盘、启动不写盘、切性能页会渲染
+  目标设备条。
+- 新增 `file_input_modal.test.cjs`（27 条）：输入弹窗结构与聚焦全选、确定/空白名、
+  Esc/遮罩/取消三个出口、新建文件与新建文件夹、批量删除必须先确认、全程不碰原生
+  prompt/confirm、父目录行无操作按钮但仍可上翻。
+- `file_rename_target.test.cjs` 改写为走自绘弹窗（18 条），新增「带 / 的名称被拒绝」
+  与「取消不下发」两段。
+- `tool_card_order.test.cjs` 焦点断言改为等待一帧（55 条，连跑 6 次稳定）。
+- 受影响用例全过：file_* 8 个文件、chip_menu_layer 26、rec_cancel 64、ws_tabs 47、
+  tool_card_order 55、main_tab_memory 16、file_input_modal 27。
+- 后端 `pytest`：1299 passed / 1 skipped；`pyflakes` 干净。

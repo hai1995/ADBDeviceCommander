@@ -776,6 +776,31 @@
     </div>
   </div>
 
+  <!-- 输入弹窗（重命名 / 新建文件 / 新建文件夹）。
+       与上面的确认弹窗同一个理由：pywebview 各版本对 window.prompt 的支持也不一致，
+       部分版本直接返回 null —— 那样「重命名」「新建文件」会点了毫无反应，连报错
+       都没有。自绘还顺带能做输入校验（名称不能带 /）与默认全选。 -->
+  <div id="input-modal" class="modal confirm-modal hidden" role="dialog" aria-modal="true"
+       aria-labelledby="input-title" aria-describedby="input-label">
+    <div class="modal-box confirm-box">
+      <div class="modal-head">
+        <span id="input-title">输入</span>
+        <div class="modal-actions">
+          <button id="input-x" class="modal-x" type="button" title="关闭（等同「取消」）">×</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="confirm-text" id="input-label"></div>
+        <input id="input-field" class="inp" type="text" autocomplete="off" spellcheck="false">
+        <div id="input-hint" class="input-hint dim"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="input-no" class="btn" type="button">取消</button>
+        <button id="input-yes" class="btn accent" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Logcat 抓取 / 文件查看 等内容弹窗 -->
   <div id="modal" class="modal hidden">
     <div class="modal-box">

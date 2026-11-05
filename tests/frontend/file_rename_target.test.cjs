@@ -1,7 +1,12 @@
 /* jsdom 前端行为测试：文件页「重命名」的目标路径。
    回归：早前用 dirOf(filePath)（当前目录的**父目录**）拼目标路径，导致在
    /sdcard/Download 里重命名 a.txt 会把文件搬到 /sdcard/b.txt（等同于移动）；
-   在根目录下还会拼出 "//c.txt"。目标必须是「当前目录 + 新名」。 */
+   在根目录下还会拼出 "//c.txt"。目标必须是「当前目录 + 新名」。
+
+   另外锁两件事（都是「点了没反应 / 做了别的」这类静默失败）：
+     · 重命名走**自绘输入弹窗**而不是 window.prompt（pywebview 部分版本里 prompt
+       返回 null，点了毫无反应）；
+     · 新名带 / 时直接拒绝：`mv old new` 的语义等于移动，用户以为改名却把文件搬走。 */
 const fs = require("fs");
 const path = require("path");
 const { JSDOM } = require("jsdom");
@@ -35,6 +40,17 @@ function clickRename(doc, name) {
     if (btn) { btn.dispatchEvent(new doc.defaultView.Event("click", { bubbles: true })); return true; }
   }
   return false;
+}
+
+/** 在自绘输入弹窗里填值并点「确定」（替代原来的 window.prompt stub） */
+async function submitInput(doc, value) {
+  const modal = doc.getElementById("input-modal");
+  if (!modal || modal.classList.contains("hidden")) return false;
+  doc.getElementById("input-field").value = value;
+  doc.getElementById("input-yes")
+    .dispatchEvent(new doc.defaultView.Event("click", { bubbles: true }));
+  await sleep(60);
+  return true;
 }
 
 async function boot(events) {
@@ -73,11 +89,12 @@ async function boot(events) {
     ] } },
   ]);
   const doc = window.document;
-  window.prompt = () => "b.txt";
   await waitFor(() => doc.querySelectorAll("#file-body tr").length >= 2, 4000, "文件列表渲染");
 
   // 1) 子目录内重命名：必须是 /sdcard/Download/b.txt，而不是父目录 /sdcard/b.txt
   ok(clickRename(doc, "a.txt"), "找到并点击 a.txt 的「重命名」");
+  await sleep(40);
+  ok(await submitInput(doc, "b.txt"), "点「重命名」弹出应用内输入框并提交 b.txt");
   await sleep(80);
   const rn = calls.filter((c) => c.fn === "file_rename");
   ok(rn.length === 1, "重命名下发一次 file_rename");
@@ -94,14 +111,43 @@ async function boot(events) {
   ] } });
   await waitFor(() => Array.from(doc.querySelectorAll("#file-body .name"))
     .some((n) => n.textContent.includes("c.txt")), 4000, "根目录文件列表渲染");
-  window.prompt = () => "d.txt";
   ok(clickRename(doc, "c.txt"), "找到并点击 c.txt 的「重命名」");
+  await sleep(40);
+  ok(await submitInput(doc, "d.txt"), "提交新名 d.txt");
   await sleep(80);
   const rn2 = calls.filter((c) => c.fn === "file_rename");
   ok(rn2.length === 2, "第二次重命名也下发");
   if (rn2.length === 2) {
     ok(rn2[1].args[1] === "/c.txt", "根目录旧路径 = /c.txt（实得 " + rn2[1].args[1] + "）");
     ok(rn2[1].args[2] === "/d.txt", "根目录新路径 = /d.txt（实得 " + rn2[1].args[2] + "）");
+  }
+
+  console.log("\n[E] 新名带 / 时拒绝（mv 语义是移动，不是改名）");
+  {
+    ok(clickRename(doc, "d.txt") || clickRename(doc, "c.txt"),
+       "再点一次「重命名」（文件名已按上一步断言为准）");
+    await sleep(40);
+    const before = calls.filter((c) => c.fn === "file_rename").length;
+    ok(await submitInput(doc, "sub/e.txt"), "输入带 / 的新名并确定");
+    await sleep(80);
+    const after = calls.filter((c) => c.fn === "file_rename").length;
+    ok(after === before, "带 / 的名称不下发 file_rename（否则等于把文件搬到别的目录）");
+    const status = doc.getElementById("status").textContent || "";
+    ok(/不能包含 \/|不做移动/.test(status), "状态栏说明了为什么拒绝（实际：" +
+       status.split("\n").filter(Boolean).slice(-1)[0] + "）");
+  }
+
+  console.log("\n[F] 取消（Esc / 取消按钮）不下发任何改动");
+  {
+    // 上一步的重命名弹窗已被提交关掉；再点一次并取消
+    ok(clickRename(doc, "d.txt") || clickRename(doc, "c.txt"), "打开重命名弹窗");
+    await sleep(40);
+    const before = calls.filter((c) => c.fn === "file_rename").length;
+    doc.getElementById("input-no")
+      .dispatchEvent(new doc.defaultView.Event("click", { bubbles: true }));
+    await sleep(80);
+    ok(calls.filter((c) => c.fn === "file_rename").length === before, "点「取消」不下发 file_rename");
+    ok(doc.getElementById("input-modal").classList.contains("hidden"), "弹窗已关闭");
   }
 
   console.log("\n==============================================");

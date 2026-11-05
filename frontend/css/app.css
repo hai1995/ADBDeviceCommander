@@ -1817,6 +1817,14 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
 .confirm-box .modal-foot .btn:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
+/* 输入弹窗（重命名 / 新建文件 / 新建文件夹）：同一套确认框骨架，正文里多一个
+   文本框。宽度撑满、与上面那行说明留一点间距；提示行只在有内容时才有高度。 */
+#input-field { width: 100%; margin-top: 10px; }
+.input-hint:empty { display: none; }
+.input-hint {
+  margin-top: 8px; font-size: var(--fs-sm); line-height: 1.5;
+  color: var(--muted); word-break: normal; overflow-wrap: break-word;
+}
 
 /* ============ 命令卡片右侧 kebab 菜单（复制 / 修改 / 删除） ============ */
 .cmd-chip { position: relative; padding-right: 20px; }

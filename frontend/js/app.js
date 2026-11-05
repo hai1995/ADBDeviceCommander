@@ -131,6 +131,11 @@
     confirmModal: $("confirm-modal"), confirmTitle: $("confirm-title"),
     confirmText: $("confirm-text"), confirmYes: $("confirm-yes"),
     confirmNo: $("confirm-no"), confirmX: $("confirm-x"),
+    // 输入弹窗（应用内自绘，见 askInput）
+    inputModal: $("input-modal"), inputTitle: $("input-title"),
+    inputLabel: $("input-label"), inputField: $("input-field"),
+    inputHint: $("input-hint"), inputYes: $("input-yes"),
+    inputNo: $("input-no"), inputX: $("input-x"),
     // 命令编辑弹窗
     cmdEdit: $("cmd-edit-modal"),
     cmdEditModal: $("cmd-edit-modal"), cmdEditTitle: $("cmd-edit-title"),
@@ -193,6 +198,10 @@
   let allCommands = [];             // 全量快捷命令（供筛选/标签过滤使用）
   let mirrorFrameUrl = "";          // 低帧率预览的帧地址（非空 = 预览在跑）
   let mirrorTimer = null;           // 低帧率预览的刷新定时器
+
+  // 主 tab（设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于）当前停留项。
+  // 落盘 main_active_tab，下次启动由 restoreMainTab 恢复（与工具区子 tab 同一套约定）。
+  let mainActiveTab = "cmd";
 
   /* ---------------- 指令台工作区（子 tab / 多开） ----------------
      每个工作区是一套完整的「指令台 + 指令输出」，后端各自一条独立会话，
@@ -643,6 +652,71 @@
     try { items[next].focus(); } catch (_) { /* 同上 */ }
   }
 
+  /* ---------------- 输入弹窗（应用内自绘，替代 window.prompt） ----------------
+     与 confirm 同一个理由：pywebview 各版本对 prompt 的支持也不一致，部分版本直接
+     返回 null —— 那样「重命名 / 新建文件 / 新建文件夹」会点了毫无反应，连报错都没
+     有。askInput(opts) → Promise<string|null>：只有用户明确点「确定」且内容非空才给
+     字符串，其余出口（取消 / × / 遮罩 / Esc / 界面里没有这个弹窗）一律 null。 */
+  let inputResolve = null;      // 当前等待中的那次输入（同一时刻只允许一个）
+  const INPUT_MAX = 120;        // 输入长度上限（挡住误粘贴整段文本，不是业务限制）
+
+  function askInput(opts) {
+    const o = opts || {};
+    return new Promise((resolve) => {
+      if (!els.inputModal || !els.inputField || !els.inputYes || !els.inputNo) {
+        // 与确认弹窗同样的取舍：缺弹窗时**绝不当成用户输入了内容**，
+        // 但要吭一声，否则用户只会觉得按钮坏了。
+        pushStatus("warn", "⚠ 界面里缺少输入弹窗，已取消这次操作，未做任何改动");
+        resolve(null);
+        return;
+      }
+      // 已经有一个在等：先把上一个判取消收掉，否则它的调用方永远卡在 await 上
+      const prev = inputResolve;
+      inputResolve = null;
+      if (prev) prev(null);
+
+      if (els.inputTitle) els.inputTitle.textContent = o.title || "输入";
+      if (els.inputLabel) els.inputLabel.textContent = o.label || "";
+      if (els.inputHint) els.inputHint.textContent = o.hint || "";
+      els.inputYes.textContent = o.ok || "确定";
+      els.inputNo.textContent = o.cancel || "取消";
+      els.inputField.value = o.value || "";
+      els.inputField.placeholder = o.placeholder || "";
+      els.inputField.maxLength = o.maxLength || INPUT_MAX;
+
+      inputResolve = resolve;
+      els.inputModal.classList.remove("hidden");
+      // 默认聚焦并全选：重命名最常见的是「改个后缀 / 改一段」，全选后直接敲新的
+      try { els.inputField.focus(); els.inputField.select(); } catch (_) { /* 个别环境没有 focus */ }
+    });
+  }
+
+  /* 关闭输入弹窗并给出答案。重复关闭安全（后一次 no-op）：点了「确定」再按 Esc
+     不能让同一个 Promise 被 resolve 两次。 */
+  function settleInput(ok) {
+    if (!els.inputModal || els.inputModal.classList.contains("hidden")) return;
+    const raw = els.inputField ? els.inputField.value : "";
+    els.inputModal.classList.add("hidden");
+    const fn = inputResolve;
+    inputResolve = null;
+    if (!fn) return;
+    const text = String(raw == null ? "" : raw).trim();
+    fn(ok && text ? text : null);   // 空白名等同于取消，不让调用方去拼一个空路径
+  }
+
+  function trapInputTab(e) {
+    if (!els.inputModal || els.inputModal.classList.contains("hidden")) return;
+    const items = [els.inputField, els.inputNo, els.inputYes, els.inputX]
+      .filter((el) => el && !el.disabled);
+    if (!items.length) return;
+    e.preventDefault();
+    const cur = items.indexOf(document.activeElement);
+    const next = e.shiftKey
+      ? (cur <= 0 ? items.length - 1 : cur - 1)
+      : (cur === items.length - 1 ? 0 : cur + 1);
+    try { items[next].focus(); } catch (_) { /* 同上 */ }
+  }
+
   /* ---------------- 事件路由 ----------------
      逐条兜底：pollOnce 用递归 setTimeout 续约，任何一个 handler 抛异常都会让
      那一次续约**根本执行不到** —— 事件轮询从此彻底停止，界面表现为「日志不
@@ -845,6 +919,10 @@
     }
     renderCommands(p.commands || []);
     onAbout(p);
+    // 主 tab 回到上次停留项：必须排在 renderCommands 之后 —— 切到「性能监控」
+    // 要按已勾选的设备渲染目标设备条，切到「设备指令」要求指令卡已经画好。
+    // 设备勾选态若还没下发，devices 事件到达时 renderPerfDev 会再补一次。
+    restoreMainTab(p.settings && p.settings.main_active_tab);
     // 版本更新状态（开关 + 上次检查结果）。单独一次调用而不是塞进 booted 载荷：
     // 它是「可选的附加信息」，取不到也不该影响启动主流程。
     loadUpdateInfo();
@@ -1783,7 +1861,13 @@
   // 删除命令（同步回写文件）
   async function deleteCmd(c) {
     if (!c) return;
-    if (!confirm("确定删除命令「" + c.name + "」？")) return;
+    // 自绘确认（不是 window.confirm）：pywebview 部分版本里 confirm 是空函数，
+    // 返回 undefined → `!confirm(...)` 恒为 true，等于**删命令不确认**。
+    const yes = await askConfirm({
+      title: "删除命令", text: "确定删除命令「" + c.name + "」？此操作不可恢复。",
+      yes: "删除", danger: true,
+    });
+    if (!yes) return;
     const backup = allCommands.map((x) => ({ ...x }));
     const i = allCommands.findIndex((x) => x.id === c.id);
     if (i >= 0) allCommands.splice(i, 1);
@@ -2971,9 +3055,26 @@
     saveToolTabOrder();
     // 面板 DOM 跟着按钮一起重排：两者始终一一对应，后续按 key 查找也不会错位
     applyToolTabOrder();
-    // 重排会移动节点、可能把焦点丢掉：还给被拖的那颗，键盘用户能接着用方向键
-    if (tab && tab.focus) tab.focus();
+    // 重排会移动节点、把焦点丢掉：还给被拖的那颗，键盘用户能接着用方向键
+    restoreToolTabFocus(tab);
     pushStatus("info", "✓ 工具顺序已保存（长按子 tab 可再次调整）");
+  }
+
+  /* 重排后把焦点还给某颗子 tab。
+     为什么不直接 focus()：applyToolTabOrder 里是 appendChild 移动节点，浏览器
+     在「节点被移出文档」的那一刻会丢焦点，而这次复位与紧随的 focus() 谁先谁后
+     并不保证（jsdom 下实测约一半概率被复位回 body）。延后一帧再聚焦最稳，用户
+     无感；若这一帧里用户已经把焦点放到别处（不是 body），那就不抢回来。 */
+  function restoreToolTabFocus(tab) {
+    if (!tab) return;
+    const doFocus = () => {
+      if (!tab.isConnected) return;
+      const cur = document.activeElement;
+      if (cur && cur !== document.body) return;   // 用户已经去点别的控件了
+      tab.focus();
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(doFocus);
+    else setTimeout(doFocus, 0);
   }
 
   /* 拖动中按 Esc 取消：顺序还原成按下前的样子，且不落盘。 */
@@ -2984,7 +3085,7 @@
     const tab = d.tab;
     endToolTabDrag();
     if (prev.length) reorderToolTabs(prev);
-    if (tab && tab.focus) tab.focus();   // 还原后焦点仍留在原处
+    restoreToolTabFocus(tab);            // 还原后焦点仍留在原处（同上：延后一帧）
     // 松手后还会紧跟一个 click：一并压掉，免得取消完又切走一个子 tab
     toolTabClickGuard = Date.now() + 350;
     pushStatus("info", "已取消工具顺序调整");
@@ -4643,6 +4744,10 @@
   }
   function onFile(p) {
     if (p.error) {
+      // 迟到的「别人」的错误：用户已经切到另一台设备，这份错误与眼前的列表无关，
+      // 照它清空会把当前设备的文件区误判成「目录不可访问」（成功分支早就做了这个
+      // 校验，错误分支漏了 —— 设备切得越快越容易踩到）。
+      if (p.serial && fileSerial && p.serial !== fileSerial) return;
       pushStatus("err", "⚠ " + p.error);
       // 目录列不出来分两种，处理方式不同：
       //  · 失败的正是「当前正在浏览的目录」自身（刷新当前目录失败：车机无 root /
@@ -4702,12 +4807,19 @@
       const date = document.createElement("td"); date.textContent = e.date || "";
       const perm = document.createElement("td"); perm.textContent = e.perm || "";
       const act = document.createElement("td"); act.className = "act";
-      if (!e.is_dir) {
-        act.appendChild(mkAct("下载", "download", "download"));
-        act.appendChild(mkAct("查看", "view", "eye"));
+      /* 父目录行（".."）只作导航入口，不给操作按钮：
+         「重命名」= `mv /sdcard/Download/.. /sdcard/Download/x`，等于把**父目录
+         整个搬走**；「删除」= `rm -rf .../Download/..`，等于删掉上一级。对用户
+         毫无意义，却恰好是最容易被误点的一行（它永远排在第一行）。
+         留着空单元格，列的宽度与其它行对齐。 */
+      if (e.name !== "..") {
+        if (!e.is_dir) {
+          act.appendChild(mkAct("下载", "download", "download"));
+          act.appendChild(mkAct("查看", "view", "eye"));
+        }
+        act.appendChild(mkAct("重命名", "rename", "edit"));
+        act.appendChild(mkAct("删除", "delete", "trash"));
       }
-      act.appendChild(mkAct("重命名", "rename", "edit"));
-      act.appendChild(mkAct("删除", "delete", "trash"));
       tr.appendChild(sel); tr.appendChild(name); tr.appendChild(size); tr.appendChild(date); tr.appendChild(perm); tr.appendChild(act);
       frag.appendChild(tr);
     });
@@ -4755,6 +4867,22 @@
     }, true);   // 捕获阶段：真实 change 会冒泡，但捕获不依赖构造方是否传 bubbles
   }
 
+  /* 文件页「名称」输入的校验（重命名 / 新建文件夹 / 新建文件）。
+     只接受当前目录里的**一项**，不接受路径分隔符：
+      · 带 / 时 `mv old new` 的语义等于「移动到别处」，用户以为在改名，文件却搬走了；
+      · 根目录下再拼 "/x" 还会得到 "//x"（早前就有过这个 bug）。
+     返回 {ok, name, why}；与原名相同时 ok=false 且 why 为空（静默跳过，不打扰）。 */
+  function validateEntryName(raw, oldName) {
+    const name = String(raw == null ? "" : raw).trim();
+    if (!name) return { ok: false, why: "名称不能为空" };
+    if (name === "." || name === "..") return { ok: false, why: "「.」和「..」是目录保留名" };
+    if (name.indexOf("/") !== -1 || name.indexOf("\\") !== -1) {
+      return { ok: false, why: "名称不能包含 / 或 \\（这里只做改名，不做移动）" };
+    }
+    if (oldName && name === oldName) return { ok: false, why: "" };
+    return { ok: true, name: name };
+  }
+
   /* 行内操作按钮（委托到 #file-body，见 bindFileBodyEvents）。 */
   function fileRunAction(act, path, name) {
     if (!path) return;
@@ -4766,12 +4894,20 @@
       // 目标必须是「当前目录 + 新名」：早前用 dirOf(filePath)（当前目录的
       // **父目录**）拼接，在 /sdcard/Download 里改名会把文件搬到 /sdcard，
       // 根目录还会拼出 "//d.txt"。
-      const n = prompt("新名称：", name);
-      if (n) callApi(api.file_rename(fileSerial, path, fullPath(n)));
+      // 用自绘输入框：pywebview 部分版本里 window.prompt 返回 null，改名会点了没反应。
+      askInput({ title: "重命名", label: "新名称：", value: name, ok: "重命名",
+                 hint: "只改当前目录里的名字，不能带 /（不做移动）" }).then((n) => {
+        if (n === null) return;
+        const v = validateEntryName(n, name);
+        if (!v.ok) { if (v.why) pushStatus("err", "⚠ " + v.why); return; }
+        callApi(api.file_rename(fileSerial, path, fullPath(v.name)));
+      });
     } else if (act === "delete") {
-      if (confirm("确定删除 " + name + "？")) {
-        callApi(api.file_remove(fileSerial, [path]));
-      }
+      askConfirm({ title: "删除文件",
+                   text: "确定删除以下项目？此操作不可恢复。\n" + path,
+                   yes: "删除", danger: true }).then((yes) => {
+        if (yes) callApi(api.file_remove(fileSerial, [path]));
+      });
     }
   }
 
@@ -4834,6 +4970,13 @@
   function uploadFiles(files) {
     if (!files || !files.length) return;
     if (!fileSerial) { pushStatus("warn", "⚠ 请先在左侧勾选一台设备（文件上传需要目标设备）"); return; }
+    /* 目标设备与目录先快照：FileReader 是异步的，读完时用户完全可能已经切到
+       另一台设备 / 另一个目录。原实现在 onload 里读 fileSerial / filePath，于是
+       「提示写的是 /sdcard/Download，文件却传到了 /sdcard/DCIM」这种错位。
+       提示语也用它，保证「说的」和「做的」是同一个目录。 */
+    const serial = fileSerial;
+    const dir = filePath;
+    const pathOf = (nm) => (dir.replace(/\/$/, "") + "/" + nm);
     let n = 0;
     Array.from(files).forEach((f) => {
       const reader = new FileReader();
@@ -4846,7 +4989,7 @@
           pushStatus("err", "⚠ 上传失败 " + f.name + "：读到的内容为空（文件被占用或已删除）");
           return;
         }
-        callApi(api.file_upload_data(fileSerial, f.name, b64, fullPath(f.name)));
+        callApi(api.file_upload_data(serial, f.name, b64, pathOf(f.name)));
       };
       /* 读取失败（被占用 / 无权限 / 文件已不在）时既不触发 onload 也不报错：
          旧实现下用户只看到「⬆ 已提交上传 N 个文件」，之后什么都不会发生。 */
@@ -4857,7 +5000,7 @@
       reader.readAsDataURL(f);
       n++;
     });
-    pushStatus("info", "⬆ 已提交上传 " + n + " 个文件到 " + filePath);
+    pushStatus("info", "⬆ 已提交上传 " + n + " 个文件到 " + dir);
   }
   function fmtSize(n) {
     if (!n && n !== 0) return "";
@@ -5653,23 +5796,55 @@
     renderWsTabs();
   }
 
+  /* ---------------- 主 tab（设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于） ----------------
+     与工具区子 tab 同一套约定：合法 key 从 DOM 派生（增删一项只改 index.html），
+     上次停留项落盘 main_active_tab、启动按它恢复，值没变就不写盘。 */
+  function mainTabKeys() {
+    if (!els.tabs) return [];
+    return Array.from(els.tabs.querySelectorAll(".tab-btn"))
+      .map((b) => b.dataset.tab).filter(Boolean);
+  }
+
+  function switchMainTab(key, opts) {
+    const keys = mainTabKeys();
+    if (!keys.length) return;
+    // 配置里存的是已删除的 tab（版本变动删了某项 / 手改坏）→ 回退到第一项
+    if (keys.indexOf(key) === -1) key = keys[0];
+    els.tabs.querySelectorAll(".tab-btn").forEach((b) =>
+      b.classList.toggle("active", b.dataset.tab === key));
+    document.querySelectorAll(".tab").forEach((t) =>
+      t.classList.toggle("active", t.dataset.tab === key));
+    // 性能页的 canvas 在隐藏时尺寸为 0，切回来必须重画一次，
+    // 否则会留下一张空位图（监控仍在跑，但曲线一片空白）。
+    if (key === "perf") { renderPerfDev(); queuePerfDraw(); }
+    const changed = mainActiveTab !== key;
+    mainActiveTab = key;
+    // 值没变就不写盘：重复点当前 tab 时省一次「读-合并-写」；
+    // 启动回填（persist:false）只更新内存值，不会「一打开就写一次盘」。
+    if (changed && (!opts || opts.persist !== false)) {
+      persistPref("main_active_tab", key);
+    }
+  }
+
+  /* 启动时按 main_active_tab 回到上次那个主 tab（没记过 / 失效 → 设备指令）。
+     必须在 onBooted 里 renderCommands 之后调用：切到「性能监控」时要按已勾选的
+     设备渲染目标设备条，切到「设备指令」时指令卡得已经画好。 */
+  function restoreMainTab(key) {
+    if (typeof key !== "string" || !key) return;
+    if (mainTabKeys().indexOf(key) === -1) return;   // 失效就保持 HTML 默认（设备指令）
+    if (key === mainActiveTab) return;
+    switchMainTab(key, { persist: false });
+  }
+
   /* ---------------- UI 绑定 ---------------- */
   function bindUI() {
     // 采用原生标题栏（含 min/max/close），不再自绘窗口按钮与 Win32 拖拽。
     // （遗留代码随 v2026.0908.2228 清理，见 README。）
     renderTicker();          // 空态提示，先把跑马灯填上占位文案
 
-    // tab 切换
+    // tab 切换（实际切换收在 switchMainTab，启动恢复与点击走同一条路径）
     els.tabs.querySelectorAll(".tab-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const tab = btn.dataset.tab;
-        els.tabs.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
-        document.querySelectorAll(".tab").forEach((t) =>
-          t.classList.toggle("active", t.dataset.tab === tab));
-        // 性能页的 canvas 在隐藏时尺寸为 0，切回来必须重画一次，
-        // 否则会留下一张空位图（监控仍在跑，但曲线一片空白）。
-        if (tab === "perf") { renderPerfDev(); queuePerfDraw(); }
-      });
+      btn.addEventListener("click", () => switchMainTab(btn.dataset.tab));
     });
     // 设备指令
     els.btnRefresh.addEventListener("click", () => callApi(api.refresh_devices()));
@@ -6288,11 +6463,24 @@
     });
     els.fileMkdir.addEventListener("click", () => {
       if (!fileSerial) return pushStatus("warn", "请先勾选设备");
-      const n = prompt("文件夹名称："); if (n) callApi(api.file_mkdir(fileSerial, (filePath.replace(/\/$/, "") + "/" + n)));
+      // 自绘输入框（window.prompt 在 pywebview 部分版本里返回 null，点了没反应）
+      askInput({ title: "新建文件夹", label: "文件夹名称：", ok: "创建",
+                 hint: "建在当前目录 " + filePath + " 下" }).then((n) => {
+        if (n === null) return;
+        const v = validateEntryName(n);
+        if (!v.ok) { if (v.why) pushStatus("err", "⚠ " + v.why); return; }
+        callApi(api.file_mkdir(fileSerial, filePath.replace(/\/$/, "") + "/" + v.name));
+      });
     });
     els.fileTouch.addEventListener("click", () => {
       if (!fileSerial) return pushStatus("warn", "请先勾选设备");
-      const n = prompt("文件名称："); if (n) callApi(api.file_touch(fileSerial, (filePath.replace(/\/$/, "") + "/" + n)));
+      askInput({ title: "新建文件", label: "文件名称：", ok: "创建",
+                 hint: "建在当前目录 " + filePath + " 下（内容为空）" }).then((n) => {
+        if (n === null) return;
+        const v = validateEntryName(n);
+        if (!v.ok) { if (v.why) pushStatus("err", "⚠ " + v.why); return; }
+        callApi(api.file_touch(fileSerial, filePath.replace(/\/$/, "") + "/" + v.name));
+      });
     });
     els.fileUpload.addEventListener("change", (e) => {
       uploadFiles(e.target.files);
@@ -6337,8 +6525,16 @@
       const paths = fileCheckedPaths();
       if (!paths.length) return;
       if (!fileSerial) return pushStatus("warn", "请先勾选设备");
-      if (!confirm("确定删除选中的 " + paths.length + " 个项？此操作不可恢复")) return;
-      callApi(api.file_remove(fileSerial, paths));
+      // 自绘确认：pywebview 部分版本里 confirm 返回 undefined → `!confirm(...)`
+      // 恒为 true，批量删除（不可恢复）会**跳过确认直接执行**。
+      // 确认框里列出要删哪些，比一句笼统的「确定删 3 个项」有用得多。
+      const preview = paths.slice(0, 8).join("\n")
+        + (paths.length > 8 ? "\n…（共 " + paths.length + " 项）" : "");
+      askConfirm({ title: "批量删除",
+                   text: "确定删除选中的 " + paths.length + " 个项？此操作不可恢复。\n" + preview,
+                   yes: "删除", danger: true }).then((yes) => {
+        if (yes) callApi(api.file_remove(fileSerial, paths));
+      });
     });
     // modal
     els.modalClose.addEventListener("click", () => els.modal.classList.add("hidden"));
@@ -6360,9 +6556,31 @@
         if (e.target === els.confirmModal) settleConfirm(false);
       });
     }
+    /* 输入弹窗：出口同确认弹窗（取消 / × / 遮罩 / Esc 一律 null），
+       另外「确定」也可用回车提交（输入框里敲回车是最顺手的动作）。 */
+    if (els.inputModal) {
+      els.inputYes.addEventListener("click", () => settleInput(true));
+      els.inputNo.addEventListener("click", () => settleInput(false));
+      if (els.inputX) els.inputX.addEventListener("click", () => settleInput(false));
+      els.inputModal.addEventListener("click", (e) => {
+        if (e.target === els.inputModal) settleInput(false);
+      });
+      if (els.inputField) {
+        els.inputField.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); settleInput(true); }
+        });
+      }
+    }
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
-      // 确认弹窗最优先：它开着的时候，Esc 只回答这个弹窗（= 否）。
+      // 输入弹窗最优先：它开着时 Esc 只关它。输入弹窗与确认弹窗不会同时开，
+      // 但顺序仍按「后开的在上面」写，免得将来叠用时关错那一层。
+      if (els.inputModal && !els.inputModal.classList.contains("hidden")) {
+        e.preventDefault();
+        settleInput(false);
+        return;
+      }
+      // 确认弹窗次之：它开着的时候，Esc 只回答这个弹窗（= 否）。
       // 不能顺带把背后的状态面板也关掉 —— 用户会以为「Esc 关掉了删除确认」，
       // 直到下次想看状态才发现那个窗口也没了。
       if (els.confirmModal && !els.confirmModal.classList.contains("hidden")) {
@@ -6375,9 +6593,11 @@
       if (els.wifiModal && !els.wifiModal.classList.contains("hidden")) { wifiClose(); return; }
       if (els.devinfoModal && !els.devinfoModal.classList.contains("hidden")) closeDevInfo();
     });
-    // Tab 焦点圈在确认弹窗内（与上面那条 Escape 分开：那条一进来就把非 Esc 滤掉了）
+    // Tab 焦点圈在确认 / 输入弹窗内（与上面那条 Escape 分开：那条一进来就把非 Esc 滤掉了）
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Tab") trapConfirmTab(e);
+      if (e.key !== "Tab") return;
+      if (els.inputModal && !els.inputModal.classList.contains("hidden")) { trapInputTab(e); return; }
+      trapConfirmTab(e);
     });
     // 大文件「查看」：直接调系统默认程序打开已拉取到本地的临时文件
     els.modalOpenLocal.addEventListener("click", () => {

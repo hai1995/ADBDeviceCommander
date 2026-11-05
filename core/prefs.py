@@ -43,6 +43,8 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
               默认序：shot → rec → scrcpy → apk → diag）。长按拖动子 tab 后写入。
   * tool_active_tab 上次停留的工具区子 tab（留空 = 兜底到 shot）。只记 key，
               启动时若该 key 已不存在（版本删了某项）则回退到默认项。
+  * main_active_tab 上次停留的主 tab（cmd / tools / perf / logcat / files / about；
+              留空 = 兜底到 cmd「设备指令」）。同样只记 key，失效则回退第一项。
 
 跨设备同步的两条关键约定：
   * **旧文件自动迁移**：早期版本用 settings.json 存同样的内容。启动时若
@@ -147,6 +149,9 @@ PREFS_DEFAULTS = {
     # 未知键原样保留），只是不再读写，不影响启动。
     "tool_tab_order": "",
     "tool_active_tab": "",
+    # 主 tab（设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于）上次停留项。
+    # 与 tool_active_tab 同一套「只记 key、失效回退」约定；留空 = 设备指令。
+    "main_active_tab": "",
     # 无线调试（Wi-Fi ADB）：
     #   wifi_port    上次用的连接端口（默认 5555；adb tcpip 换过端口的话记住它）
     #   wifi_recent  最近连接过的地址，逗号分隔、最新在前（最多 5 条）
