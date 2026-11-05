@@ -260,6 +260,47 @@ function mkEnv(overrides) {
     window.close();
   }
 
+  console.log("\n[8] 设备刷新 / 监控启动 / 日志保存：按钮等待态");
+  {
+    let resolveRefresh = null, resolveLcStart = null, resolveSave = null;
+    const { window } = mkEnv({
+      refresh_devices: () => new Promise((r) => { resolveRefresh = r; }),
+      logcat_start: () => new Promise((r) => { resolveLcStart = r; }),
+      logcat_save: () => new Promise((r) => { resolveSave = r; }),
+    });
+    const doc = window.document;
+    const refresh = doc.getElementById("btn-refresh");
+    await waitFor(() => !refresh.disabled, 3000, "设备就绪");
+    refresh.dispatchEvent(new window.Event("click", { bubbles: true }));
+    ok(refresh.classList.contains("is-loading") && refresh.disabled,
+       "刷新设备时按钮转圈且防连点");
+    resolveRefresh({ ok: true });
+    ok(await waitFor(() => !refresh.classList.contains("is-loading"), 3000, "刷新完成"),
+       "刷新返回后收掉转圈并恢复按钮");
+    ok(!refresh.disabled, "刷新结束后按钮恢复可点");
+
+    const start = doc.getElementById("lc-start");
+    start.dispatchEvent(new window.Event("click", { bubbles: true }));
+    ok(start.classList.contains("is-loading"), "启动监控时按钮转圈");
+    resolveLcStart({ ok: true });
+    ok(await waitFor(() => !start.classList.contains("is-loading"), 3000, "监控启动"),
+       "监控启动后收掉转圈");
+
+    window.__push({ kind: "logcat", payload: {
+      serial: "A1", status: "append",
+      lines: [{ raw: "11-06 12:00:00.000 I/Test: hello", level: "I", exc: false }],
+    } });
+    await waitFor(() => doc.querySelectorAll("#lc-view .lc-line").length > 0,
+                   4000, "日志行到达");
+    const save = doc.getElementById("lc-save");
+    save.dispatchEvent(new window.Event("click", { bubbles: true }));
+    ok(save.classList.contains("is-loading"), "保存日志到文件时按钮转圈");
+    resolveSave({ ok: true, path: "/tmp/a.log" });
+    ok(await waitFor(() => !save.classList.contains("is-loading"), 3000, "保存完成"),
+       "保存返回后收掉转圈");
+    window.close();
+  }
+
   console.log("\n通过 " + pass + " / 失败 " + fail);
   clearTimeout(watchdog);
   process.exit(fail ? 1 : 0);

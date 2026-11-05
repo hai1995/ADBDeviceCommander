@@ -2657,7 +2657,10 @@
     }
     // 走后端写盘：前端的 a.click() + Blob 下载在 WebView2 下会被静默吞掉
     // （点了没反应）。后端落到保存目录并回传路径，前端据此给出明确成功提示。
+    // 整屏日志可能有几万行，写盘 + 编码是秒级操作，期间给按钮转圈。
+    markBtnBusy(els.lcSave, true);
     callApi(api.logcat_save(lcSerial, text)).then((res) => {
+      markBtnBusy(els.lcSave, false);
       if (res && res.ok) {
         pushStatus("ok", "✓ 日志已保存到 " + (res.path || "保存目录"));
       } else if (res && res.reason === "empty") {
@@ -6245,7 +6248,15 @@
       });
     }
     // 设备指令
-    els.btnRefresh.addEventListener("click", () => callApi(api.refresh_devices()));
+    els.btnRefresh.addEventListener("click", async () => {
+      if (els.btnRefresh.disabled) return;
+      // adb devices 在设备多 / 线不稳时要 1~3 秒，期间给转圈并锁按钮，避免连点。
+      els.btnRefresh.disabled = true;
+      markBtnBusy(els.btnRefresh, true);
+      await callApi(api.refresh_devices());
+      markBtnBusy(els.btnRefresh, false);
+      els.btnRefresh.disabled = false;
+    });
     els.btnAll.addEventListener("click", () => callApi(api.toggle_all()));
     // ---------- 指令台工作区（子 tab）----------
     // 默认工作区就是 HTML 里那套面板：注册后由 bindWorkspace 统一绑事件，
@@ -6290,7 +6301,9 @@
       lcSerial = s;
       // 后端可能因「已在监控中 / 设备不可用」返回 ok:false：此时必须回滚按钮态，
       // 否则界面永远停在「采集中」、开始按钮被锁死，用户无从恢复。
+      markBtnBusy(els.lcStart, true);
       const res = await startLc();
+      markBtnBusy(els.lcStart, false);
       if (!res || res.ok === false) {
         pushStatus("err", "⚠ 监控未能启动"
           + (res && res.reason ? "（" + res.reason + "）" : ""));
