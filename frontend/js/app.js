@@ -915,10 +915,12 @@
       case "stop_state": {
         // 停止按钮态按工作区同步：一个 tab 里点停止只该熄掉它自己那颗按钮。
         // 顺带把「该 tab 正在执行」的指示点一起同步 —— 用户切走后仍能看出
-        // 哪个工作区有活在跑。
+        // 哪个工作区有活在跑。运行按钮同步转圈：只认后端 stop_state 事件
+        // （每条命令开始/结束都会推），不做乐观猜测，永远不会卡住。
         const ws = wsOf(p.ws || "w1");
         if (!ws) break;
         if (ws.stopBtn) ws.stopBtn.disabled = !p.running;
+        markBtnBusy(ws.runBtn, p.running);
         ws.busy = !!p.running;
         markWsBusy(ws);
         break;
@@ -5756,7 +5758,13 @@
       });
     }
     if (ws.stopBtn) {
-      ws.stopBtn.addEventListener("click", () => callApi(api.stop_run(ws.id)));
+      ws.stopBtn.addEventListener("click", async () => {
+        if (ws.stopBtn.disabled) return;
+        // 终止进程要走一次 adb kill，秒级；stop_state 事件到达后自动恢复。
+        markBtnBusy(ws.stopBtn, true);
+        await callApi(api.stop_run(ws.id));
+        markBtnBusy(ws.stopBtn, false);
+      });
     }
     if (ws.clearConsoleBtn) {
       ws.clearConsoleBtn.addEventListener("click", () => callApi(api.clear_output(ws.id)));

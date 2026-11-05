@@ -4051,3 +4051,18 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   日志保存。
 - 验证：前端 **87 个文件 0 失败**。
 
+# 第五十六轮（指令台命令运行/终止等待态）
+- 背景：设备指令页输入命令回车后，后端 worker 异步执行；命令跑几秒时只有
+  tab 标题上的指示点会变，用户视线集中在输入框/运行按钮处，没有明显反馈。
+  「停止」点下去也要等后端 kill 一轮，期间按钮毫无变化，容易连点。
+- `frontend/js/app.js`：
+  - 运行按钮随 `stop_state` 事件转圈（running=true 转、false 收）——
+    只认后端事件，不做乐观猜测，不会出现「事件没到、转圈卡死」；
+  - 停止按钮在 `stop_run` 请求在途期间转圈，返回后收掉；点击前先查 disabled，
+    防连点。按工作区隔离：每个 tab 的 run/stop 只反映自己那条会话的状态。
+- `tests/frontend/loading_states.test.cjs`：补第 9 组断言（stop_state 驱动运行转圈、
+  停止请求在途转圈、结束后按钮态正确恢复）。
+- `README.md`：等待态覆盖清单补上「指令台命令运行与终止」。
+- 验证：`node tests/frontend/run-all.cjs` **87 个文件 0 失败**；
+  `loading_states.test.cjs` 45 项全过。
+

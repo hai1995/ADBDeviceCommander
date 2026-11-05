@@ -301,6 +301,33 @@ function mkEnv(overrides) {
     window.close();
   }
 
+  console.log("\n[9] 命令执行 / 终止：运行按钮随 stop_state 转圈");
+  {
+    let resolveStop = null;
+    const { window } = mkEnv({
+      stop_run: () => new Promise((r) => { resolveStop = r; }),
+    });
+    const doc = window.document;
+    const runBtn = doc.getElementById("btn-run");
+    const stopBtn = doc.getElementById("btn-stop");
+    await waitFor(() => !doc.getElementById("tool-shot").disabled, 3000, "设备就绪");
+    window.__push({ kind: "stop_state", payload: { running: true } });
+    ok(await waitFor(() => runBtn.classList.contains("is-loading"), 3000, "命令运行中"),
+       "命令开始执行后运行按钮转圈");
+    ok(runBtn.getAttribute("aria-busy") === "true", "运行中 aria-busy=true");
+    ok(!stopBtn.disabled, "运行中停止按钮可点");
+    stopBtn.dispatchEvent(new window.Event("click", { bubbles: true }));
+    ok(stopBtn.classList.contains("is-loading"), "点击停止后按钮转圈");
+    resolveStop({ ok: true });
+    ok(await waitFor(() => !stopBtn.classList.contains("is-loading"), 3000, "停止返回"),
+       "终止请求返回后收掉停止转圈");
+    window.__push({ kind: "stop_state", payload: { running: false } });
+    ok(await waitFor(() => !runBtn.classList.contains("is-loading"), 3000, "命令结束"),
+       "命令结束后收掉运行转圈");
+    ok(stopBtn.disabled, "命令结束后停止按钮禁用");
+    window.close();
+  }
+
   console.log("\n通过 " + pass + " / 失败 " + fail);
   clearTimeout(watchdog);
   process.exit(fail ? 1 : 0);
