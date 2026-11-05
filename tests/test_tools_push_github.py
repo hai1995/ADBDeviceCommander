@@ -180,12 +180,43 @@ def test_status_works_without_any_token(monkeypatch, tmp_path, capsys):
     assert "1 个文件有改动" in out and "core/a.py" in out
 
 
+def test_status_masks_token_leaked_into_remote_url(monkeypatch, tmp_path, capsys):
+    """即使 remote URL 里混进了 token（比如 clone 时写进去），--status 也不得回显它。"""
+    monkeypatch.setattr(pg, "CRED_FILE", tmp_path / "absent")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(pg, "_has_git_repo", lambda: True)
+    bad = "https://x-access-token:%s@github.com/hai1995/ADBDeviceCommander.git" % TOKEN
+    _stub_git(monkeypatch, status_lines=" M core/a.py\n", remote_url=bad)
+    assert pg.main(["--status"]) == 0
+    out = capsys.readouterr().out
+    assert TOKEN not in out, "远端地址里的 token 绝不能随 --status 回显"
+    assert "***" in out, "凭据段应当被打码"
+
+
+def test_success_line_masks_token_in_remote_url(monkeypatch, tmp_path, capsys):
+    """推送成功提示里的 remote 地址也不得回显 token（哪怕它就是 clone 时带进来的）。"""
+    monkeypatch.setattr(pg, "CRED_FILE", _cred(tmp_path, json.dumps({"token": TOKEN})))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    bad = "https://x-access-token:%s@github.com/hai1995/ADBDeviceCommander.git" % TOKEN
+    _stub_git(monkeypatch, remote_url=bad)
+    assert pg.main([]) == 0
+    out = capsys.readouterr().out
+    assert TOKEN not in out, "成功提示里的远端地址不得回显 token"
+    assert "***" in out, "凭据段应当被打码"
+
+
 # --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
 def _stub_git(monkeypatch, status_lines=" M core/a.py\n", push_rc=0,
-              push_out="", commit_rc=0, commit_out=""):
-    """把 git 调用换成记录器，返回被调用过的参数列表。"""
+              push_out="", commit_rc=0, commit_out="", remote_url=pg.DEFAULT_REMOTE):
+    """把 git 调用换成记录器，返回被调用过的参数列表。
+
+    `remote_url` 默认是干净地址；测试「远端地址里混进 token」时传一个带凭据的 URL，
+    用来覆盖 `--status` / 成功提示的打码逻辑（这正是历史测试漏掉的路径）。
+    """
     calls = []
 
     def fake_run(args, timeout=180, check=False):
@@ -198,7 +229,7 @@ def _stub_git(monkeypatch, status_lines=" M core/a.py\n", push_rc=0,
         if "symbolic-ref" in args:
             return 0, "main\n"
         if "remote" in args and "get-url" in args:
-            return 0, pg.DEFAULT_REMOTE + "\n"
+            return 0, remote_url + "\n"
         if "config" in args and "user.email" in args:
             return 0, "someone@example.com\n"
         if "commit" in args:
