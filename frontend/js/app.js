@@ -587,11 +587,32 @@
   function checkedDevices() { return devices.filter((d) => d.ok && d.checked); }
   function firstChecked() { const d = checkedDevices()[0]; return d ? d.serial : null; }
 
-  async function callApi(promise) {
-    try { return await promise; }
-    catch (e) {
+  /* 全局 API 调用超时（秒）。pywebview bridge 不一定支持 AbortController，
+     这里用 Promise.race 实现——超时后前端不再 await，按钮/等待态立即恢复；
+     后端请求仍可能在跑（对于 refresh 等后台操作，后端会通过事件总线推送
+     结果，不受超时影响）。某些长操作（如 take_events）应显式传 timeout=0
+     禁用超时（它只是从 deque 取事件，正常情况下微秒级返回）。 */
+  const API_TIMEOUT_S = 15;
+
+  async function callApi(promise, timeout = API_TIMEOUT_S) {
+    if (timeout === 0) {
+      try { return await promise; }
+      catch (e) {
+        pushStatus("err", "调用后端失败：" + (e && e.message ? e.message : e));
+        return null;
+      }
+    }
+    let timer;
+    const timeoutPromise = new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error(`请求超时（${timeout}s）`)), timeout * 1000);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } catch (e) {
       pushStatus("err", "调用后端失败：" + (e && e.message ? e.message : e));
       return null;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -994,7 +1015,7 @@
     const pollOnce = async () => {
       let flooded = false;
       try {
-        const events = await callApi(api.take_events());
+        const events = await callApi(api.take_events(), 0);   // 不超时：take_events 只是从 deque 取事件
         flooded = !!(events && events.length >= 200);
         if (events && events.length) {
           if (pollMs !== 400) pollMs = 400;
@@ -1010,7 +1031,17 @@
       }
     };
     setTimeout(pollOnce, pollMs);
-    setTimeout(() => { if (!booted) setPill("未就绪", "err"); }, 5000);
+    // boot() 返回后 5s 内没收到 booted 事件的兜底：强制启用设备按钮，
+    // 防止「boot 成功了但 booted 事件丢失/延迟」导致按钮永远 disabled。
+    setTimeout(() => {
+      if (!booted) {
+        booted = true;   // 防止 onBooted 后续被重复执行
+        setPill("已就绪（延迟）", "warn");
+        pushStatus("warn", "⚠ 启动初始化稍有延迟，已自动启用设备刷新按钮");
+        if (els.btnRefresh) els.btnRefresh.disabled = false;
+        if (els.btnAll) els.btnAll.disabled = false;
+      }
+    }, 5000);
   }
 
   /* 保存目录默认值：来自后端 WebApi.default_save_dir（= 后端 _default_save_dir），
@@ -6339,14 +6370,21 @@
       });
     }
     // 设备指令
+    // 设备刷新：防连点 + finally 兜底恢复（后端即使不返回，按钮也不会永久锁死）
     els.btnRefresh.addEventListener("click", async () => {
-      if (els.btnRefresh.disabled) return;
-      // adb devices 在设备多 / 线不稳时要 1~3 秒，期间给转圈并锁按钮，避免连点。
+      if (!els.btnRefresh || els.btnRefresh.disabled) return;
       els.btnRefresh.disabled = true;
       markBtnBusy(els.btnRefresh, true);
-      await callApi(api.refresh_devices());
-      markBtnBusy(els.btnRefresh, false);
-      els.btnRefresh.disabled = false;
+      try {
+        const res = await callApi(api.refresh_devices());
+        // 后端返回 running=true 表示已有刷新在进行（boot() 首轮刷新 / 自动轮询撞上）
+        if (res && res.running) {
+          pushStatus("info", "ℹ 设备刷新正在进行中，完成后列表会自动更新");
+        }
+      } finally {
+        els.btnRefresh.disabled = false;
+        markBtnBusy(els.btnRefresh, false);
+      }
     });
     els.btnAll.addEventListener("click", () => callApi(api.toggle_all()));
     // ---------- 指令台工作区（子 tab）----------

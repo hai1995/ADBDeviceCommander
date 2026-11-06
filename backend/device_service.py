@@ -49,6 +49,12 @@ from core.devices import parse_devices, plan_devices
 # 上限取 12s：比一轮正常轮询长得多，又不至于让用户对着按钮干等半分钟。
 BUSY_WAIT_S = 12.0
 
+# _busy 强制释放阈值（秒）。正常刷新最多 ~21s（2 次重试 × (10s timeout + 0.6s gap)），
+# 若 _busy 持续超过此值，要么是 adb 完全僵尸、要么 refresh 线程在某个异常分支
+# 没走到 finally（理论上不可能，但防一手）——此时强制释放，让下一次刷新能跑起来，
+# 而不是让「刷新正在进行中」这个假信号永远堵着所有手动刷新请求。
+BUSY_FORCE_RELEASE_S = 60.0
+
 
 class DeviceManager:
     """设备列表状态与刷新（可被 WebApi / 自动轮询 / 其它服务共享）。
@@ -67,6 +73,9 @@ class DeviceManager:
         self.device_model = {}     # serial -> model（含宽限内设备的最后已知型号）
         self._absent = {}          # serial -> int（宽限内「消失」的连续缺失计数）
         self._busy = False         # 刷新互斥（adb 卡顿时不叠加刷新线程）
+        self._busy_since = 0.0     # _busy 被占用的时间戳（强制释放用）
+        self._busy_owner = 0       # 持有 _busy 的 refresh 实例 id（防止僵死线程回来误释放）
+        self._next_owner = 1       # 下一次分配的 owner id
         # 与 _busy 配对：一轮刷新结束（finally）时 set，等待方据此立刻醒来，
         # 不必轮询 _busy 状态（轮询会引入 50ms 级别的最小延迟与额外 CPU）。
         self._idle = threading.Event()
@@ -116,6 +125,8 @@ class DeviceManager:
         """
         if not self._acquire(wait, verbose):
             return False
+        # 持有 _busy 的 owner id；finally 里用来防止僵死线程回来误释放新持有者
+        owner = self._busy_owner
         try:
             # adb 的 I/O 放在锁外：即便 adb 卡满 10s，用户勾选设备也不被阻塞
             raw = self._poll_devices(adb, verbose)
@@ -181,27 +192,56 @@ class DeviceManager:
                 return changed
         finally:
             with self._lock:
-                self._busy = False
+                # 只释放自己持有的那次；若已被强制释放 + 新持有者接管，
+                # 绝不能把新一轮刷新的 _busy 清掉
+                if self._busy_owner == owner:
+                    self._busy = False
+                    self._busy_since = 0.0
             self._idle.set()
 
     # ------------------------------------------------------------------
     # 刷新互斥
     # ------------------------------------------------------------------
     def _acquire(self, wait, verbose):
-        """尝试占用刷新互斥；占用成功返回 True。
+        """尝试占用刷新互斥；占用成功返回 owner id（>0），失败返回 0。
 
         wait=True 时若已被占用，就等上一轮结束（上限 BUSY_WAIT_S）再抢；
         等不到（或 wait=False 直接放弃）时，**手动刷新必须给出回音** ——
         否则用户点「刷新」看到的是彻底的静默，只能反复点。自动轮询
         （verbose=False）保持静默放弃，它下一秒还会再来。
+
+        强制释放：若 _busy 持续超过 BUSY_FORCE_RELEASE_S，认为上一轮
+        refresh 已经僵尸化（adb 卡死、进程异常退出等），强制解锁让下一轮
+        刷新能跑起来——而不是让「刷新正在进行中」这个假信号永远堵着。
+        强制释放时会分配新的 owner id，僵死线程回来后不会误释放新的
+        持有者（finally 里检查 owner 匹配才释放）。
         """
         deadline = time.time() + (BUSY_WAIT_S if wait else 0)
         while True:
+            now = time.time()
             with self._lock:
                 if not self._busy:
                     self._busy = True
+                    self._busy_since = now
+                    owner = self._next_owner
+                    self._next_owner += 1
+                    self._busy_owner = owner
                     self._idle.clear()
-                    return True
+                    return owner
+                # 强制释放：_busy 持续超阈值
+                if now - self._busy_since > BUSY_FORCE_RELEASE_S:
+                    if self.bus:
+                        self.bus.push("status", {
+                            "type": "warn",
+                            "text": "⚠ 上一轮设备刷新已超时卡死（%.0fs），"
+                                    "已强制解锁，本轮将重新执行刷新。"
+                                    % (now - self._busy_since)})
+                    owner = self._next_owner
+                    self._next_owner += 1
+                    self._busy_since = now
+                    self._busy_owner = owner
+                    self._idle.clear()
+                    return owner
             remain = deadline - time.time()
             if remain <= 0:
                 break
@@ -212,7 +252,7 @@ class DeviceManager:
                 "type": "warn",
                 "text": "设备刷新正在进行中（上一轮 adb devices 还没返回），"
                         "请稍后再点一次「刷新」。"})
-        return False
+        return 0
 
     # ------------------------------------------------------------------
     # 防误报断连：轮询 + 重试 + 自愈（I/O 均在锁外执行）

@@ -5,21 +5,19 @@ class DeviceMixin:
     """设备：刷新、开关、选中。"""
 
     def refresh_devices(self):
-        """手动刷新（后台执行，完成/失败以 status 事件回报）。"""
+        """手动刷新（后台执行，完成/失败以 status 事件回报）。
+
+        不再用 Workers.is_running 拦截——DeviceManager._acquire 内部已有
+        完善的「等待上一轮结束（12s）+ 超时强制解锁（60s）」机制。Workers.spawn
+        用 key=None（匿名线程），每次点击都能真正触发一轮刷新，DeviceManager
+        负责排队互斥。
+        """
         if self.state.shutting_down:
             return {"ok": False}
-        # 已有同名 worker 在跑时，Workers.spawn 会**复用存活线程**（不会真的
-        # 再刷一次），而这里照样返回 ok —— 用户点「刷新」看不到任何回音。
-        # 启动首刷（boot）用的也是 "refresh"，撞上的概率不低。
-        # 直接说明「有一轮正在跑、结果马上就来」，比静默丢弃诚实。
-        if self.workers.is_running("refresh"):
-            self._push_status(
-                "info", "ℹ 设备刷新正在进行中，完成后列表会自动更新。")
-            return {"ok": True, "running": True}
-        # 刷新完成后顺带回收「已移除设备」遗留的 logcat 监控 / 抓取（见
-        # _reap_gone_tools），避免设备热插拔时留下孤儿 adb 进程与卡死的界面态。
+        # spawn key=None：每次点击都真正启动一个 worker；DeviceManager._acquire
+        # 内部排队/强制释放保证不会并发执行
         self.workers.spawn(
-            "refresh", self._refresh_and_reap, self.state.adb_path, True)
+            None, self._refresh_and_reap, self.state.adb_path, True)
         return {"ok": True}
 
     def _refresh_and_reap(self, adb, verbose):

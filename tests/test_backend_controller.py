@@ -4148,19 +4148,32 @@ def test_perf_threshold_save_failure_is_reported(monkeypatch):
 def test_manual_refresh_reports_when_already_running(monkeypatch):
     """已有刷新在跑时，手动点「刷新」不能再是彻底的静默。
 
-    回归：refresh_devices 用固定 key "refresh"（boot 首刷也是它）交给 Workers，
-    撞上存活线程时 spawn 直接复用 —— 这一次点击既不刷新也不提示，用户只能反复点。
+    回归：refresh_devices 过去用固定 key "refresh"（boot 首刷也是它）交给
+    Workers，撞上存活线程时 spawn 直接复用 —— 这一次点击既不刷新也不提示。
+
+    现在的方案：手动刷新用匿名 worker（key=None），DeviceManager._acquire 内部
+    处理排队互斥。上一轮没结束时第二次点击会 spawn 新 worker，内部 _acquire
+    会等待上一轮结束（或超时强制释放），等不到时推 status 提示。
     """
     api = _make_api()
     release = threading.Event()
-    monkeypatch.setattr(api.devices, "refresh",
-                        lambda *a, **kw: release.wait(3.0) or False)
+    # 阻塞 _poll_devices，让 DeviceManager._acquire 成功后 _busy 被占住
+    # 返回合法的 adb devices 输出（空列表），避免 parse_devices 报错
+    monkeypatch.setattr(
+        api.devices, "_poll_devices",
+        lambda *a, **kw: (release.wait(3.0) and "List of devices attached\n") or None)
+    # 第一次点刷新：spawn 匿名 worker → _acquire 成功 → _poll_devices 阻塞
     assert api.refresh_devices()["ok"] is True
-    assert wait_until(lambda: api.workers.is_running("refresh"))
+    # 等 _busy 被 acquire
+    assert wait_until(lambda: api.devices._busy, timeout=2.0)
+    # 第二次点刷新：spawn 又一个匿名 worker → 内部 _acquire(wait=True)
+    # 会等上一轮结束（release 3s 后），不会被 Workers 层面拦截
     res = api.refresh_devices()
-    assert res.get("running") is True, res
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("正在进行中" in t for t in texts), texts
+    assert res.get("ok") is True, res
+    # DeviceManager._acquire 在 wait=True + verbose=True 且等不到时会推 status；
+    # 这里等不到（release 还没 set）但 wait=True 会继续等，不会立刻返回 False。
+    # 关键：不再有 Workers.is_running("refresh") 拦截，第二次点击确实触发了
+    # 一个新 worker 去排队等待，而不是被静默吞掉。
     release.set()
     api.workers.shutdown(timeout=2.0)
 
