@@ -778,6 +778,118 @@ def test_watch_exit_ignores_replaced_proc(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 录屏中途设备重启（车机重启 / adbd 重启）：等待 → 自动续录
+# ---------------------------------------------------------------------------
+def _sess_for_roll(vr, tmp_path, seg=1):
+    """补齐自动分段需要的会话字段（_recorder 的最小会话只是为停止路径准备的）。"""
+    sess = vr._sessions["A1"]
+    sess.update({
+        "started": 0, "ts": "20260101_000000", "extra": "20260101_000000",
+        "seg": seg, "dir": str(tmp_path), "segments": [],
+    })
+    return sess
+
+
+def test_watch_exit_enters_reboot_wait_when_device_clearly_gone(tmp_path, monkeypatch):
+    """设备明确掉线（重启中）：进等待，不能立刻判死。
+
+    判死的后果就是老毛病：已录段还躺在 /data/local/tmp 就被放弃，logcat 的
+    重连等待也被收尾一并掐断。
+    """
+    vr, proc = _recorder(tmp_path)
+    monkeypatch.setattr(vr, "_device_online", lambda s: False)
+    # 不真起等待线程，只验证状态翻转
+    monkeypatch.setattr(vr, "_wait_reboot_and_resume", lambda *a: None)
+    vr._watch_exit("A1", proc)
+    assert vr.died_serials() == [], "设备重启不该被当成录屏意外结束"
+    assert vr.reboot_wait_serials() == ["A1"]
+    assert vr.reboot_wait_notes() == ["A1"], "进入等待要播报一次"
+
+
+def test_watch_exit_still_marks_death_when_adb_probe_fails(tmp_path, monkeypatch):
+    """探测本身失败（adb 不可用）时按老行为判死，不能白等 5 分钟。"""
+    vr, proc = _recorder(tmp_path)
+    monkeypatch.setattr(vr, "_device_online", lambda s: None)
+    vr._watch_exit("A1", proc)
+    assert vr.died_serials() == ["A1"]
+
+
+def test_watch_exit_marks_death_when_device_still_online(tmp_path, monkeypatch):
+    """设备还在、只是 screenrecord 自己崩了：直接判死，不进入等待。"""
+    vr, proc = _recorder(tmp_path)
+    monkeypatch.setattr(vr, "_device_online", lambda s: True)
+    vr._watch_exit("A1", proc)
+    assert vr.died_serials() == ["A1"]
+
+
+def test_reboot_wait_resumes_next_segment_when_device_returns(tmp_path, monkeypatch):
+    """设备回来：先收好重启前那一段，再自动接下一段，整场录制不中断。"""
+    vr, proc = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    new_proc = _FakeProc()
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: new_proc)
+    monkeypatch.setattr(vr, "_pull_segment_bg", lambda seg: None)
+    monkeypatch.setattr(vr, "_confirm_segment", lambda *a: None)
+    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: True)
+    monkeypatch.setattr(ss.threading, "Thread",
+                        lambda *a, **k: type("T", (), {"start": lambda self: None})())
+
+    vr._wait_reboot_and_resume("A1", sess)
+
+    assert sess["seg"] == 2, "重启后必须接着录第 2 段"
+    assert sess["local"].endswith("_p2.mp4"), sess["local"]
+    assert sess["segments"] and sess["segments"][0]["n"] == 1
+    assert sess["segments"][0]["local"] == str(tmp_path / "record_A1_x.mp4")
+    assert vr.resumed_serials() == ["A1"], "恢复续录要播报一次"
+    assert vr.is_recording("A1") is True
+
+
+def test_reboot_wait_timeout_marks_died(tmp_path, monkeypatch):
+    """等满窗口设备仍未回来：才判死，交给正常收尾（已录段照样进包）。"""
+    vr, proc = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    sess["reboot_wait"] = True
+    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: False)
+
+    vr._wait_reboot_and_resume("A1", sess)
+
+    assert vr.died_serials() == ["A1"]
+    assert vr.reboot_wait_serials() == []
+    assert "等待重启超时" in (sess.get("seg_err") or "")
+
+
+def test_stop_during_reboot_wait_aborts_wait_immediately(tmp_path, monkeypatch):
+    """等待期间用户点停止：必须立刻退出等待，交给正常收尾（数据不丢）。"""
+    vr = ss.VideoRecorder(_Bus(), "adb")
+    monkeypatch.setattr(ss.subprocess, "run",
+                        lambda *a, **k: type("R", (), {
+                            "returncode": 1, "stdout": "",
+                            "stderr": "error: device 'A1' not found"})())
+    t0 = time.time()
+    ok = vr._wait_device_back(
+        "A1", max_wait_s=30, interval_s=1,
+        should_abort=lambda: time.time() - t0 > 0.6)
+    assert ok is False
+    assert time.time() - t0 < 4, "用户已停止却还要等满整个窗口"
+
+
+def test_stop_during_reboot_wait_keeps_session_for_teardown(tmp_path, monkeypatch):
+    """用户停止时若设备还没回来：不标 died（由 active-stop 收尾路径负责拉残片）。"""
+    vr, proc = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    sess["reboot_wait"] = True
+    # 模拟：等待线程正阻塞在 _wait_device_back，用户在此时点了停止
+    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: False)
+    sess["stopping"] = True
+
+    vr._wait_reboot_and_resume("A1", sess)
+
+    assert vr.died_serials() == [], "主动停止不该被报成意外中断"
+    assert sess.get("reboot_wait") is True, "主动停止时不改状态，交 stop_ex 收尾"
+
+
+# ---------------------------------------------------------------------------
 # 截图落盘的字节归一化（车机 screencap 会在 PNG 前吐杂字节）
 # ---------------------------------------------------------------------------
 def _tiny_png():

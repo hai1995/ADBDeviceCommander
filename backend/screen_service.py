@@ -23,7 +23,8 @@ import time
 from backend.device_proc import kill_device_process
 from core import imgbytes
 from core.constants import (
-    REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_SEGMENT_S,
+    REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
+    REC_REBOOT_WAIT_S, REC_SEGMENT_S,
     adb_kwargs, adb_popen_kwargs, no_window_flags, safe_name)
 
 # adb 明确表示「这台设备已经不在了」的报错片段（用于把「设备掉线」与
@@ -639,15 +640,123 @@ class VideoRecorder:
             elapsed = time.time() - float(sess.get("started") or 0)
             full = bool(sess.get("started")) and elapsed >= (
                 REC_SEGMENT_S - REC_MAX_TOLERANCE_S)
-            if not full:
-                sess["died"] = True
+        # 没到点就退出：需要区分「设备掉了（重启 / 拔线 / adbd 重启）」与
+        # 「设备还在、只是 screenrecord 自己崩了」。探测放在锁外——get-state
+        # 是一次 adb 往返，掉线时要等到超时，持锁做会把其它设备的收尾全部卡住。
+        online = True if full else self._device_online(serial)
+        # 只有**明确**判定设备不在线才进入等待；探测本身失败（adb 不可用/超时）
+        # 时按老行为直接判死，避免 adb 环境异常时把收尾拖上 5 分钟。
+        gone = online is False
+        with self._lock:
+            sess = self._sessions.get(serial)
+            if sess is None or sess.get("proc") is not proc:
                 return
-            if int(sess.get("seg") or 1) >= REC_MAX_SEGMENTS:
+            if sess.get("stopping"):
+                return
+            if not full:
+                if not gone:
+                    sess["died"] = True
+                    return
+                # 设备掉了：进入「等待重启」而不是直接判死。设备在窗口内回来
+                # 就先拉回这一段、再自动接续下一段（与录满一段同一条路径）。
+                sess["reboot_wait"] = True
+                sess["reboot_wait_note"] = True
+                waiter = True
+            elif int(sess.get("seg") or 1) >= REC_MAX_SEGMENTS:
                 # 到段数上限：这一段同样是正常收尾（moov 已写回），交给
                 # controller 按「录到头了」处理，不能报成意外中断。
                 sess["limit_hit"] = True
+                waiter = False
+            else:
+                self._roll_segment_locked(serial, sess)
+                waiter = False
+        if waiter:
+            threading.Thread(
+                target=self._wait_reboot_and_resume, args=(serial, sess),
+                daemon=True, name="rec-reboot-%s" % serial).start()
+
+    def _device_online(self, serial):
+        """这台设备现在是不是 state=device。
+
+        返回三态：True=在线；False=**明确**不在线（重启中 / 已拔出 / offline /
+        unauthorized）；None=探测本身失败（adb 不可用、命令超时）。调用方只有
+        在 False 时才该进入「等待重启」，None 时按老行为直接判死。
+        """
+        try:
+            r = subprocess.run(
+                [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
+        except Exception:
+            return None
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and out == "device":
+            return True
+        if out == "offline" or out == "unauthorized":
+            return False
+        low = ("%s\n%s" % (r.stdout or "", r.stderr or "")).lower()
+        for hint in _DEVICE_GONE_HINTS:
+            if hint in low:
+                return False
+        # 有输出但说不清（比如 get-state 早退的其它报错）：不冒险拖 5 分钟，
+        # 按「探测失败」处理。
+        return None
+
+    def _wait_reboot_and_resume(self, serial, sess):
+        """（后台）等掉线的设备回来；回来后自动接续下一段，整场录制不中断。
+
+        等待期间**不标 died**，controller 因此不会走收尾、也就不会把 logcat
+        的重连等待一并掐断。用户点「停止」时 stop() 会置 stopping，这里立刻
+        退出并把已录段交给正常收尾流程（数据照样进包）。窗口耗尽仍未回来，
+        才标 died 交由 controller 按「意外中断」收尾。
+        """
+        ok = self._wait_device_back(
+            serial, max_wait_s=REC_REBOOT_WAIT_S, interval_s=REC_REBOOT_POLL_S,
+            should_abort=lambda: (self._sessions.get(serial) is not sess
+                                  or bool(sess.get("stopping"))
+                                  or bool(sess.get("died")))
+        )
+        with self._lock:
+            if self._sessions.get(serial) is not sess:
                 return
+            if sess.get("stopping"):
+                return
+            sess["reboot_wait"] = False
+            if not ok:
+                sess["died"] = True
+                sess["seg_err"] = (
+                    "设备已断开，等待重启超时 %d 秒" % REC_REBOOT_WAIT_S)
+                return
+            # 设备回来了：先收好重启前那一段，再接下一段。走的就是「录满自动
+            # 分段」同一条路径 —— 段号继续累加（_p2 / _p3…），stop_ex 仍能
+            # 一次取回全部段，最终产物仍是同一场次的连续多个文件。
             self._roll_segment_locked(serial, sess)
+            # 续段失败时 _roll_segment_locked 会置 died/seg_err：这时不能谎报
+            # 「已自动继续录制」，交给收尾流程给出准确结论。
+            if not sess.get("died") and not sess.get("seg_err"):
+                sess["resumed"] = True
+
+    def reboot_wait_serials(self):
+        """正在等待设备重启后自动续录的设备列表（controller 据此豁免掉线强停）。"""
+        with self._lock:
+            return [s for s, v in self._sessions.items()
+                    if v.get("reboot_wait")]
+
+    def reboot_wait_notes(self):
+        """取走「刚进入等待重启」标记（一次性，供 controller 播报）。"""
+        out = []
+        with self._lock:
+            for s, v in self._sessions.items():
+                if v.pop("reboot_wait_note", False):
+                    out.append(s)
+        return out
+
+    def resumed_serials(self):
+        """取走「设备已回来、已自动续录」标记（一次性，供 controller 播报）。"""
+        out = []
+        with self._lock:
+            for s, v in self._sessions.items():
+                if v.pop("resumed", False):
+                    out.append(s)
+        return out
 
     def _roll_segment_locked(self, serial, sess):
         """（须持锁调用）收好刚录满的这一段，并在同一台设备上接起下一段。
@@ -1162,27 +1271,43 @@ class VideoRecorder:
         except Exception:
             return False
 
-    def _wait_device_back(self, serial, max_wait_s=60, interval_s=3):
+    def _wait_device_back(self, serial, max_wait_s=60, interval_s=3,
+                          should_abort=None):
         """等设备从 offline / reboot 回来。每 interval_s 秒 poll 一次 get-state。
 
         返回 True 表示设备已回到 state=device；False 表示等了 max_wait_s 仍未回来。
         给设备重启留足窗口（Android 冷启动一般 15~30 秒）。USB 拔线不会回来，
         这时也不会无限等——max_wait_s 到期就放弃。
+
+        should_abort：可选回调，返回 True 时立刻放弃等待（用于「等待重启续录」
+        期间用户点了停止——不能让他等满整个窗口才看到收尾）。
         """
         deadline = time.time() + max(1, max_wait_s)
+        next_poll = 0.0
         while time.time() < deadline:
-            try:
-                r = subprocess.run(
-                    [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
-                if r.returncode == 0 and (r.stdout or "").strip() == "device":
-                    return True
-            except Exception:
-                pass
-            # 用 deadline 减当前时间算出剩余，避免等过了 deadline
+            if should_abort is not None:
+                try:
+                    if should_abort():
+                        return False
+                except Exception:
+                    pass
+            now = time.time()
+            if now >= next_poll:
+                try:
+                    r = subprocess.run(
+                        [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
+                    if r.returncode == 0 and (
+                            r.stdout or "").strip() == "device":
+                        return True
+                except Exception:
+                    pass
+                next_poll = now + max(0.5, interval_s)
+            # 分小片睡，让 should_abort 能及时生效（否则最坏要等一个
+            # interval 才能响应「用户已点停止」）
             remain = deadline - time.time()
             if remain <= 0:
                 break
-            time.sleep(min(interval_s, remain))
+            time.sleep(min(0.5, remain))
         return False
 
     def _pull_and_finish(self, serial):

@@ -5,7 +5,8 @@ from backend.controller import (
     AUTO_REFRESH_MS, REC_DEATH_CHECK_S, time
 )
 from backend.screen_service import device_present
-from core.constants import REC_MAX_SEGMENTS, REC_SEGMENT_S
+from core.constants import (
+    REC_MAX_SEGMENTS, REC_REBOOT_WAIT_S, REC_SEGMENT_S)
 
 class AutoRefreshMixin:
     """自动轮询与孤儿回收（录屏/工具/录制）。"""
@@ -69,6 +70,22 @@ class AutoRefreshMixin:
             self._push_status(
                 "info", "⏱ %s 已录满一段，已自动接着录第 %d 段（无需操作）"
                         % (s, n))
+        # 设备掉线（典型是车机重启）→ 等待窗口内自动续录。进入等待和恢复
+        # 各有一次性标记，只在翻转的当口播报，不重复刷状态栏。
+        wait_fn = getattr(self.video, "reboot_wait_notes", None)
+        for s in (wait_fn() if wait_fn else []) or []:
+            self._push_status(
+                "warn",
+                "⏸ %s 连接中断（可能是设备重启），正在等待恢复（最长 %d 秒）："
+                "设备回来后会自动继续录制，重启前已录的片段不会丢失；"
+                "不想等可直接点「停止」，已录内容照样保存"
+                % (s, REC_REBOOT_WAIT_S))
+        resume_fn = getattr(self.video, "resumed_serials", None)
+        for s in (resume_fn() if resume_fn else []) or []:
+            self._push_status(
+                "info",
+                "▶ %s 已恢复连接，已自动继续录制（重启前那一段已保留，"
+                "停止时会一并合并）" % s)
         died = self.video.died_serials()
         # 「跑到分段上限后自己结束」与「被外力打断」在本地表现完全一样（adb 客户端
         # 自己退出），但结论相反：前者视频完整、只是录到头了，后者才需要重录。
@@ -211,9 +228,18 @@ class AutoRefreshMixin:
         # 故放到后台 worker，不堵自动轮询线程。
         with self._rec_lock:
             sess = self._rec_session or {}
-            rec_gone = [s for s in list(sess.get("videos", {}).keys())
-                        + list(sess.get("devaudio", {}).keys())
-                        if s not in known]
+            candidates = [s for s in list(sess.get("videos", {}).keys())
+                          + list(sess.get("devaudio", {}).keys())
+                          if s not in known]
+        # 正在「等待设备重启后自动续录」的设备绝不能在这里强停：它只是暂时
+        # 掉线（screenrecord 随重启被杀），录屏侧有专门的等待线程——窗口内
+        # 设备回来会先拉回重启前那一段、再自动接续下一段。这里强停会把整场
+        # 录制提前结束，正是「重启后视频和日志都丢」的老毛病。
+        try:
+            waiting = set(self.video.reboot_wait_serials())
+        except Exception:
+            waiting = set()
+        rec_gone = [s for s in candidates if s not in waiting]
         if rec_gone:
             self.workers.spawn(
                 "rec-reap", self._reap_gone_recording, set(rec_gone))

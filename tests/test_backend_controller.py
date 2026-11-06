@@ -764,6 +764,72 @@ def test_reap_gone_tools_stops_removed_recording(monkeypatch):
     assert api._rec_session["videos"].get("A1") == "v_a.mp4"
 
 
+def test_reap_gone_tools_keeps_device_waiting_for_reboot(monkeypatch):
+    """正在「等待重启后自动续录」的设备不能被「已移除」逻辑强停。
+
+    回归：车机重启期间设备会短暂从列表消失（超出宽限即被移除）。此时录屏侧
+    正处在等待窗口，强停会把整场录制提前结束 —— 重启后视频和日志双双丢失。
+    """
+    api = _make_api()
+    api.devices.device_state = {"A1": "device"}   # B2 已移除/重启中
+    api.devices.device_checked = {"A1": True}
+    api._rec_session = {
+        "videos": {"A1": "v_a.mp4", "B2": "v_b.mp4"},
+        "devaudio": {"B2": "a_b.wav"},
+        "logcat_captures": {}, "mic_path": None,
+    }
+    stopped_v, stopped_a = [], []
+
+    class FakeVideo:
+        def is_recording(self, s): return True
+        def reboot_wait_serials(self): return ["B2"]
+        def stop(self, s): stopped_v.append(s)
+
+    class FakeAudio:
+        def stop(self, s): stopped_a.append(s)
+
+    class FakeMon:
+        def running_serials(self): return []
+        def stop(self, s, **kw): pass
+
+    api.video = FakeVideo()
+    api.device_audio = FakeAudio()
+    api.logcat_monitor = FakeMon()
+    api.logcat_capture = FakeMon()
+
+    spawned = []
+    def fake_spawn(key, fn, *args, **kwargs):
+        spawned.append(key)
+        fn(*args, **kwargs)
+    monkeypatch.setattr(api.workers, "spawn", fake_spawn)
+
+    api._reap_gone_tools()
+    assert stopped_v == [], "等待重启的设备不能被强停"
+    assert stopped_a == []
+    assert "rec-reap" not in spawned, spawned
+
+
+def test_reap_dead_recordings_announces_reboot_wait_and_resume(monkeypatch):
+    """进入等待 / 恢复续录都要在状态栏说清楚，用户才知道「没丢、还在录」。"""
+    api = _make_api()
+
+    class FakeVideo:
+        def died_serials(self): return []
+        def limit_serials(self): return []
+        def rolled_serials(self): return []
+        def reboot_wait_notes(self): return ["A1"]
+        def resumed_serials(self): return ["B2"]
+
+    api.video = FakeVideo()
+    api._reap_dead_recordings()
+
+    texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
+    joined = "\n".join(texts)
+    assert "正在等待恢复" in joined, texts
+    assert "已自动继续录制" in joined, texts
+    assert "已录内容照样保存" in joined, "要明确告诉用户等待期间停止也能保住数据"
+
+
 # ---------------------------------------------------------------------------
 # 录屏进程意外死亡（adb root / adbd 重启）的自动收尾
 # ---------------------------------------------------------------------------
