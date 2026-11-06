@@ -1226,6 +1226,51 @@ def test_capture_resume_skips_replayed_backlog(tmp_path, monkeypatch):
     assert payload["lines"] in (4, 5), payload
 
 
+def test_capture_accepts_logs_after_device_reboot_with_unsynced_clock(
+        tmp_path, monkeypatch):
+    """设备重启后时钟没同步：时间戳倒退的新日志必须原样接收，不能当重放跳过。
+
+    重启会清空 logcat 缓冲区，重连时**不存在**「缓冲区重放」，此时的倒退只能
+    是车机时钟没校时。旧逻辑按行数盲跳（最多 2000 行），重启后这两千行日志是
+    真的丢了。这里用开机时长（uptime 重启后归零）做判据，直接按新日志接收。
+    """
+    first = ["08-29 10:00:01.000  1  1 I Tag: a\n",
+             "08-29 10:00:02.000  1  1 I Tag: b\n"]
+    # 重启后：缓冲区已清空，车机时钟没同步（09:xx），都是重启后新产生的日志
+    second = ["08-29 09:10:00.000  1  1 I Tag: c\n",
+              "08-29 09:10:01.000  1  1 I Tag: d\n"]
+    monkeypatch.setattr(
+        ls.subprocess, "Popen", _popen_by_serial("R1", [first, second]))
+    # 录制已进行 600 秒时遇到倒退；此时设备 uptime 只剩 30 秒 → 期间重启过
+    nows = iter([1000.0, 1600.0])
+    monkeypatch.setattr(ls, "_now_mono", lambda: next(nows, 1600.0))
+    monkeypatch.setattr(ls, "_device_uptime", lambda *a, **k: 30.0)
+    calls = {"n": 0}
+
+    def fake_present(adb, serial):
+        calls["n"] += 1
+        return False if calls["n"] == 1 else True    # 第一次：设备确实掉了
+
+    monkeypatch.setattr(ls, "device_present", fake_present)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RECONNECT_POLL_S", 0.01)
+    monkeypatch.setattr(ls, "LOGCAT_CAP_RESTART_BACKOFF_S", 0.01)
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "reboot.txt")
+    assert cap.start("R1", path, ["main"]) is True
+
+    payload = _wait_payload(bus, "logcat_capture", "stopped", timeout=8)
+    assert payload is not None, _statuses(bus, "logcat_capture")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for tag in ("a", "b", "c", "d"):
+        assert "Tag: " + tag in text, (
+            "重启后的日志被当成重放丢掉了（Tag: %s）：\n%r" % (tag, text))
+    assert "设备重启后时间回退" in text, "缺少重启后时钟回退的说明标记：%r" % (text,)
+    assert payload.get("gap") is True
+
+
 def test_stop_during_reconnect_takes_effect_immediately(tmp_path, monkeypatch):
     """等重连期间点停止必须立刻收尾，不能等满一个轮询间隔。
 

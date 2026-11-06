@@ -841,6 +841,13 @@ class VideoRecorder:
                 return
             if sess.get("stopping"):
                 return
+            if sess.get("reboot_wait"):
+                # 这一段的秒退是「设备离线」造成的：_watch_exit 已经把它转入
+                # 等待重启窗口。别再补一个 died —— controller 看到 died 会立刻
+                # 收尾，等待线程也会因 should_abort 退出，自动续录当场被掐断。
+                # （典型场景：刚好录满一段时车机重启，自动换段拉起的下一段
+                #   在还没连上的设备上秒退。）
+                return
             sess["died"] = True
             if not sess.get("seg_err"):
                 why = self._proc_err(proc)

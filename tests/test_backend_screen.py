@@ -822,6 +822,26 @@ def test_watch_exit_marks_death_when_device_still_online(tmp_path, monkeypatch):
     assert vr.died_serials() == ["A1"]
 
 
+def test_confirm_segment_does_not_kill_reboot_wait(tmp_path):
+    """新段秒退但设备已离线：watcher 转入等待重启后，confirm 不能再补一刀判死。
+
+    典型场景：刚好录满一段时车机重启，自动换段拉起的下一段在还没连上的设备上
+    立刻退出。此时若再标 died，controller 会马上收尾、等待线程也会 abort，
+    自动续录就被掐断了（数据虽在，但「设备回来后自动继续录制」的承诺失效）。
+    """
+    vr, _unused = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    dead = _FakeProc()
+    dead.poll = lambda: 0
+    sess["proc"] = dead
+    sess["reboot_wait"] = True
+
+    vr._confirm_segment("A1", dead, 2)
+
+    assert sess.get("died") is None, "等待重启期间不该判死"
+    assert not sess.get("seg_err"), "等待重启期间不该写「段启动后立即退出」"
+
+
 def test_reboot_wait_resumes_next_segment_when_device_returns(tmp_path, monkeypatch):
     """设备回来：先收好重启前那一段，再自动接下一段，整场录制不中断。"""
     vr, proc = _recorder(tmp_path)

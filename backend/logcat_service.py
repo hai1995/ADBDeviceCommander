@@ -31,6 +31,7 @@ from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
                             LOGCAT_CAP_RESTART_BACKOFF_S,
                             LOGCAT_CAP_RESTART_BACKOFF_MAX_S,
                             LOGCAT_CAP_HOLE_WARN_S, LOGCAT_CAP_REPLAY_SKIP_MAX,
+                            LOGCAT_CAP_REBOOT_UPTIME_SLACK_S, adb_kwargs,
                             adb_popen_kwargs)
 from core.logcat import classify_line, ts_epoch, ts_prefix as _ts_prefix
 from backend.screen_service import device_present
@@ -71,6 +72,32 @@ def _write_marker(f, text):
         return True
     except Exception:
         return False
+
+
+def _device_uptime(adb, serial):
+    """设备开机时长（秒），取不到返回 None。
+
+    `/proc/uptime` 是**开机时长**，与系统墙上时钟无关 —— 车机重启后时间没校时
+    也照样准。抓取据此判断「设备在本次录制期间有没有重启过」：重启过就说明
+    logcat 缓冲区已清空，重连时不存在「缓冲区重放」，时间戳倒退只能是时钟问题。
+    """
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "shell", "cat", "/proc/uptime"],
+            **adb_kwargs(5))
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return float((r.stdout or "").split()[0])
+    except Exception:
+        return None
+
+
+def _now_mono():
+    """抓取流程里的单调时钟（单独抽出来，方便单测把「录制已进行时长」打桩）。"""
+    return time.monotonic()
 
 
 def _logcat_cmd(adb, serial, buffers):
@@ -557,6 +584,11 @@ class LogcatCapture:
         lines_at_restart = 0       # 上一次重启时的累计行数（判断有没有进展）
         restart_ts = ""            # 最近一次意外中断的墙上时间（写标记用）
         f = None
+        # 重启判定：首次会话开始时记下单调时钟起点。之后遇到「时间戳倒退」再
+        # 惰性探一次开机时长 —— 录制期间重启过的话，uptime 必然小于录制已进行
+        # 的时长（因为它是从重启那一刻重新计数）。惰性探避免给正常启动路径
+        # 增加一次 adb 往返，也不影响没有时间回退的会话。
+        cap_started = None
 
         session = 0
         outcome_error = ""         # 重连窗口耗尽等原因导致的最终报错（区别于写盘异常）
@@ -566,6 +598,13 @@ class LogcatCapture:
                 # 每进入一轮新会话就重置「续写空洞」检查位：缺口只会出现在
                 # 续写的最前面一条新日志上（见读循环里的 hole_checked）。
                 hole_checked = False
+                # 时间戳倒退时才惰性探一次「设备是否在录制期间重启过」：
+                # 每轮会话最多探一次，避免逐行调用 adb。
+                boot_probed = False
+                reboot_seen = False
+                rollback_marked = False
+                if cap_started is None:
+                    cap_started = _now_mono()
                 try:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -673,12 +712,40 @@ class LogcatCapture:
                             if last_log_epoch is None:
                                 last_log_epoch = ts_epoch(last_log_ts)
                             cur_epoch = ts_epoch(ts)
-                            if (cur_epoch is not None and last_log_epoch is not None
-                                    and cur_epoch < last_log_epoch
-                                    and skipped < LOGCAT_CAP_REPLAY_SKIP_MAX):
+                            older = (cur_epoch is not None
+                                     and last_log_epoch is not None
+                                     and cur_epoch < last_log_epoch)
+                            if older and not boot_probed:
+                                # 第一次遇到倒退才探 uptime（每轮会话最多一次）。
+                                # 录制期间重启过 → uptime 从重启那刻重新计数，
+                                # 必然小于「录制已进行的时长」；没重启则 uptime
+                                # 一定大于这个时长。由此把「缓冲区重放」与
+                                # 「车机时钟没校时」彻底分开。
+                                boot_probed = True
+                                up = _device_uptime(adb, serial)
+                                reboot_seen = (
+                                    up is not None
+                                    and up + LOGCAT_CAP_REBOOT_UPTIME_SLACK_S
+                                    < _now_mono() - cap_started)
+                            if older and reboot_seen:
+                                # 设备在本次抓取期间重启过：缓冲区随重启清空，
+                                # 不可能出现「缓冲区重放」。此时的时间戳倒退只能
+                                # 是车机时钟没校时 / 校时回退，而这些日志都是**新
+                                # 产生**的 —— 原样接收并重置基准，一行都不丢。
+                                if not rollback_marked:
+                                    _write_marker(
+                                        f, "设备重启后时间回退（%s → %s），已停止"
+                                           "按时间戳去重、按实际顺序继续记录"
+                                        % (last_log_ts, ts))
+                                    rollback_marked = True
+                                    gap_written = True
+                                skipped = 0
+                                last_log_ts = ""
+                                last_log_epoch = None
+                            elif older and skipped < LOGCAT_CAP_REPLAY_SKIP_MAX:
                                 skipped += 1
                                 continue
-                            if skipped >= LOGCAT_CAP_REPLAY_SKIP_MAX:
+                            elif older:
                                 # 跳过量已远超「缓冲区重放」的量级：这不是重放，
                                 # 是设备时钟整体回退（校时 / 换电池 / 时区）。
                                 # 继续跳过等于把之后的日志全扔掉，故接受并标记。

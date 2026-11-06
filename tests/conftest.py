@@ -25,11 +25,27 @@ patch 会静默落空（表现为「假件没生效、代码走了真实分支�
 ``monkeypatch.setattr(ctrl.subprocess, "run", ...)``），由于所有模块共享同一个
 对象，直接 patch 即可，无需本函数。
 """
+import pytest
+
 import backend.controller as ctrl
 from backend.controllers import (
     base, device, commands, autorefresh, logcat, settings, apk, deviceinfo,
     update, screenshot, record, perf, file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_logcat_uptime_probe(monkeypatch):
+    """单元测试默认不真调 adb 探设备开机时长。
+
+    抓取器每次会话启动都会 `adb shell cat /proc/uptime`（判断设备是否在录制
+    期间重启过）。大量用例把 ``ls.subprocess.Popen`` 换成假进程，而
+    ``subprocess.run`` 内部走的正是同一个 Popen —— 探针会把用例排好的假批次
+    抢走，表现为「续写的日志凭空消失」。这里统一置空；需要 uptime 判定的
+    用例自行 monkeypatch 覆盖即可（在用例体内设置会盖过本夹具）。
+    """
+    import backend.logcat_service as ls
+    monkeypatch.setattr(ls, "_device_uptime", lambda *a, **k: None)
 
 # 所有承载 WebApi 方法的子模块（顺序即 WebApi 的 MRO 逆序，仅用于遍历）
 _MIXIN_MODS = [base, device, commands, autorefresh, logcat, settings, apk,
