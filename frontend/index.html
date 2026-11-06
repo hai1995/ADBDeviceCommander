@@ -117,6 +117,8 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12V3"/><path d="M8 7l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
                     导出</button>
+                  <button id="btn-cmd-toggle" class="btn tiny" data-icon="caret-left"
+                          title="收起指令台，给输出区更大空间" aria-label="收起指令台"></button>
                 </span>
                 <input id="cmd-import-file" type="file" accept=".json,.txt,application/json" hidden>
               </div>
@@ -137,8 +139,6 @@
             <section class="panel panel-right">
               <div class="panel-title">
                 指令输出<span class="panel-sub">CONSOLE</span>
-                <button id="btn-cmd-toggle" class="btn tiny" data-icon="caret-left"
-                        title="收起指令台，给输出区更大空间" aria-label="收起指令台"></button>
                 <button id="btn-clear-console" class="btn tiny" data-icon="trash">清空</button>
               </div>
               <div id="console" class="out console"></div>

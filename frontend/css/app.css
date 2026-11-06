@@ -1069,8 +1069,9 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .cmd-input-wrap { position: relative; flex: 1; display: flex; min-width: 180px; }
 /* cmd 风格 prompt：输入框左边显示当前会话路径，像 PowerShell 那样 */
 .cmd-prompt-wrap { background: var(--inset); border: 1px solid var(--line-strong);
-                   border-radius: var(--r-sm); padding: 0 30px 0 10px;
-                   box-sizing: border-box; align-items: center; gap: 6px; min-width: 0; }
+                   border-radius: var(--r-sm); padding: 8px 30px 8px 10px;
+                   box-sizing: border-box; align-items: center; gap: 6px; min-width: 0;
+                   min-height: 38px; }
 .cmd-prompt {
   flex: none; color: var(--accent); font-family: var(--font-mono);
   font-size: var(--fs-md); font-weight: 500; white-space: nowrap;
@@ -1091,6 +1092,8 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   background: transparent; border: none; border-radius: 0;
   padding: 0; flex: 1; min-width: 40px;
   box-shadow: none; outline: none;
+  color: var(--text); font-family: var(--font-mono); font-size: var(--fs-md);
+  line-height: 1.4; caret-color: var(--accent);
 }
 .cmd-prompt-wrap input::placeholder { color: var(--faint); opacity: .7; }
 /* 输入框清除按钮：立体圆形小键，与全局按钮同一套语言 */
