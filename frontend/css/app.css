@@ -350,7 +350,7 @@ html { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; 
               transform 120ms ease;
 }
 .btn:hover {
-  color: #fff; border-color: rgba(52, 224, 234, .48);
+  color: var(--on-soft); border-color: rgba(52, 224, 234, .48);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07),
               0 0 0 1px rgba(52, 224, 234, .12), 0 0 16px rgba(52, 224, 234, .18),
               var(--shadow-1);
@@ -1232,7 +1232,7 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   border: 0; background: none; border-radius: 6px; cursor: pointer;
   color: var(--text-2); font-size: var(--fs-sm); white-space: nowrap;
 }
-.ctx-menu-item:hover { background: var(--accent-soft); color: #fff; }
+.ctx-menu-item:hover { background: var(--accent-soft); color: var(--on-soft); }
 
 /* ---------------- Logcat 双卡：实时监控 / 落盘抓取 ----------------
    旧布局是「目录行 + 监控控制条 + 过滤条 + 抓取控制条 + 视图」五段平铺，
@@ -1857,7 +1857,7 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   display: flex; align-items: center; justify-content: center;
   transition: background .15s ease, color .15s ease, box-shadow .15s ease;
 }
-.toast-close:hover { color: #fff; background: var(--surface-3); box-shadow: 0 0 10px rgba(52, 224, 234, .22); }
+.toast-close:hover { color: var(--on-soft); background: var(--surface-3); box-shadow: 0 0 10px rgba(52, 224, 234, .22); }
 .toast-bar { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--muted); opacity: .5; }
 .toast--err  .toast-bar { background: var(--err); }
 .toast--warn .toast-bar { background: var(--warn); }
@@ -2104,7 +2104,7 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   display: flex; align-items: center; gap: 7px; padding: 6px 9px;
   border-radius: 6px; color: var(--text-2); font-size: var(--fs-sm); cursor: pointer; white-space: nowrap;
 }
-.cmd-chip .chip-popup-item:hover { background: var(--accent-soft); color: #fff; }
+.cmd-chip .chip-popup-item:hover { background: var(--accent-soft); color: var(--on-soft); }
 .cmd-chip .chip-popup-item .ic { width: 16px; display: inline-flex; align-items: center; justify-content: center; opacity: .9; }
 .cmd-chip .chip-popup-item .ic svg { width: 14px; height: 14px; display: block; }
 .cmd-chip .chip-popup-item--del:hover { background: rgba(255, 90, 90, .16); color: #ff8585; }
