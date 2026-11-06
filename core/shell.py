@@ -237,7 +237,15 @@ class ShellSession:
             if deadline and time.time() > deadline:
                 self.last_error = "命令执行超过 %s 秒，已自动终止" % timeout
                 self._emit("⏱ %s。" % self.last_error, "err")
-                self.kill()
+                # timeout 到了：温和中止当前命令，不 kill 整个会话。
+                # 发 Ctrl-C 尝试终止 PowerShell 里的当前脚本，会话本身继续存活——
+                # 后续命令不需要重新拉起 PowerShell。
+                self._abort.set()
+                try:
+                    self.proc.stdin.write("\x03\n")
+                    self.proc.stdin.flush()
+                except Exception:
+                    pass
                 break
             time.sleep(0.05)
         try:

@@ -3468,7 +3468,8 @@ def test_commands_after_exit_return_to_sentinel_mode():
     last = sess.calls[-1]
     assert last["script"].endswith("adb devices")
     assert last["interactive"] is False, "exit 之后必须恢复非交互"
-    assert last["timeout"] is not None, "恢复后也要带兜底超时"
+    # timeout 默认 None（不限制），可手动设正值启用自动保护；关键是 interactive=False
+    # 用 sentinel 标记判断完成与否（这点由 ShellSession 内部保证）
 
 
 def test_oneshot_powershell_stays_non_interactive():
@@ -3485,7 +3486,7 @@ def test_oneshot_powershell_stays_non_interactive():
         api = _make_api(session=sess)
         api._run_entries(_entries((cmd, 0)), None)
         assert sess.calls[0]["interactive"] is False, cmd
-        assert sess.calls[0]["timeout"] is not None, cmd
+        # 默认 timeout 为 None（不限制），可手动设正值启用自动保护
 
 
 def test_bare_cmd_and_bash_are_interactive():
@@ -3498,15 +3499,26 @@ def test_bare_cmd_and_bash_are_interactive():
 
 
 def test_non_interactive_command_gets_default_timeout():
-    """普通命令必须带兜底超时。
+    """普通命令默认不限制 timeout，但可通过 cmd_timeout 配置启用自动保护。
 
-    没有它，任何一条"哑"命令（读 stdin 的工具、卡住的 adb）都会永久占用
-    _user_lock，后续命令全部排队 —— 界面就是卡死、点不动。
+    停止按钮一直可用，用户随时可以手动 kill 会话；自动超时是可选的。
     """
     sess = FakeSession()
     api = _make_api(session=sess)
     api._run_entries(_entries(("adb devices", 0)), None)
-    assert sess.calls[0]["timeout"] == api.DEFAULT_CMD_TIMEOUT == 120
+    # 非交互式（带 sentinel），timeout 默认 None = 不限制
+    assert sess.calls[0]["interactive"] is False
+    assert sess.calls[0]["timeout"] is None
+    # 手动设置 cmd_timeout 后应生效
+    import core.prefs as prefs
+    prefs.save_prefs({"cmd_timeout": 30})
+    try:
+        sess2 = FakeSession()
+        api2 = _make_api(session=sess2)
+        api2._run_entries(_entries(("adb devices", 0)), None)
+        assert sess2.calls[0]["timeout"] == 30
+    finally:
+        prefs.save_prefs({"cmd_timeout": 0})
 
 
 def test_cmd_timeout_reads_prefs():

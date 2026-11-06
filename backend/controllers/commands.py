@@ -12,7 +12,7 @@ from backend.controller import (
 class CommandMixin:
     """快捷指令：执行、保存、导入导出、自定义、停止。"""
 
-    DEFAULT_CMD_TIMEOUT = 120
+    DEFAULT_CMD_TIMEOUT = 0   # 不限制；由 config.json 的 cmd_timeout 覆盖
 
     def run_command(self, cmd_id, ws=None):
         """下发一条快捷指令（可多设备循环，线程内执行）。

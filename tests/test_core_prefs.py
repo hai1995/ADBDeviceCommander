@@ -687,31 +687,32 @@ def test_mirror_view_size_persists_and_clamps(monkeypatch, tmp_path):
 
 
 def test_cmd_timeout_defaults_and_clamps(monkeypatch, tmp_path):
-    """命令兜底超时：默认 120 秒，0 = 不限制（合法值），越界/手写成字符串回退默认。
+    """命令兜底超时：默认 0 = 不限制（用户自己跑的命令不应被自动终止），
+    可设正值启用自动保护，越界/字符串回退默认 0。
 
-    这个键是「卡死」的唯一兜底：命令序列里任何一条读 stdin 的工具（裸
-    powershell、`adb logcat` 之类）都会永久占住执行锁，后续命令全部排队。
+    停止按钮一直可用，用户随时可以手动 kill 会话；自动超时是可选的兜底，
+    而不是默认强制行为。
     """
     p = _patch_path(monkeypatch, tmp_path)
-    assert prefs.PREFS_DEFAULTS["cmd_timeout"] == 120
+    assert prefs.PREFS_DEFAULTS["cmd_timeout"] == 0
 
     prefs.save_prefs({"cmd_timeout": 45})
     assert prefs.load_prefs()["cmd_timeout"] == 45
     with open(p, encoding="utf-8") as f:
         assert json.load(f)["cmd_timeout"] == 45
 
-    # 0 = 不限制：是用户显式选择，不能被当成「非法」退回 120
+    # 0 = 不限制：是用户显式选择，不能被当成「非法」退回默认
     clean, warns = prefs.sanitize_prefs({"cmd_timeout": 0})
     assert clean["cmd_timeout"] == 0
     assert warns == []
 
-    # 负数 / 超过 1 小时 / 字符串：回退默认
+    # 负数 / 超过 1 小时 / 字符串：回退默认（0）
     clean, warns = prefs.sanitize_prefs({"cmd_timeout": -5})
-    assert clean["cmd_timeout"] == 120
+    assert clean["cmd_timeout"] == 0
     clean, warns = prefs.sanitize_prefs({"cmd_timeout": 99999})
-    assert clean["cmd_timeout"] == 120
+    assert clean["cmd_timeout"] == 0
     clean, warns = prefs.sanitize_prefs({"cmd_timeout": "soon"})
-    assert clean["cmd_timeout"] == 120
+    assert clean["cmd_timeout"] == 0
 
 
 # ---------------------------------------------------------------------------
