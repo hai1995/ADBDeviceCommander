@@ -4165,3 +4165,17 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   `tests/test_backend_controller.py` 新增
   `test_reap_dead_does_not_consume_markers_while_teardown_running`。
 - 验证：`pytest` **1373 passed / 1 skipped**（前端未改动）。
+
+## 2026-11-07 — kill 后显式关闭会话 stdin（消除 BrokenPipeError 回收期噪音）
+
+- `core/shell.py`：`ShellSession.kill()` 终止进程后从不关闭父侧 `proc.stdin`。
+  终止瞬间的写入（`\x03`）flush 失败被吞、数据压在 TextIOWrapper 缓冲里，
+  GC 回收该文件对象时再 flush 一次，撞上半关闭管道抛 BrokenPipeError，变成
+  「Exception ignored while finalizing file」噪音（pytest 标成
+  PytestUnraisableExceptionWarning；生产环境 stderr 同样会偶发打印）。
+  现在 `wait()` 确认退出后显式 `proc.stdin.close()`（异常吞掉）。
+  `stdout` 刻意不关：reader 线程还在等旧管道真正 EOF，提前关闭有 fd 复用
+  风险（旧 reader 可能读到新会话输出）。
+- 测试：`tests/test_shell_session.py` 新增 `test_kill_closes_stdin_pipe`，
+  并把 PytestUnraisableExceptionWarning 升级为错误回归验证（13 passed）。
+- 验证：`pytest` **1374 passed / 1 skipped**，警告全部消除。

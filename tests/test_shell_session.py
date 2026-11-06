@@ -156,6 +156,21 @@ def test_kill_marks_aborted_and_clears_interactive(sess):
     assert sess.in_interactive_shell is False
 
 
+def test_kill_closes_stdin_pipe(sess):
+    """kill 后要显式关闭父侧 stdin。
+
+    进程终止瞬间的写入 flush 失败被吞后，未发出的数据仍压在 TextIOWrapper
+    缓冲里；不显式 close 时，GC 回收该文件对象会再 flush 一次，撞上半关闭
+    的管道抛 BrokenPipeError —— pytest 标成 PytestUnraisableExceptionWarning。
+    stdout 刻意不关：reader 线程还在等旧管道真正 EOF（fd 复用风险）。
+    """
+    sess.run("sh", interactive=True)
+    proc = sess.proc
+    sess.kill()
+    assert proc.stdin.closed
+    assert not proc.stdout.closed
+
+
 def test_leave_interactive_only_resets_flag(sess):
     """`exit` 只退出内层 shell，外层会话仍在：复位标志即可，不能顺手杀进程。"""
     sess.run("sh", interactive=True)

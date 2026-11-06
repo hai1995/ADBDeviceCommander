@@ -326,3 +326,16 @@ class ShellSession:
                 proc.kill()
             except Exception:
                 pass
+        # 进程已终止，主动关闭父侧 stdin：终止瞬间的写入（上面的 \x03）flush 失败
+        # 被吞后，未发出的数据仍压在 TextIOWrapper 缓冲里；不显式 close 的话，要等
+        # GC 回收这个文件对象时才再 flush 一次 —— 撞上半关闭的管道抛 BrokenPipeError，
+        # 变成「Exception ignored while finalizing file」的回收期噪音（pytest 会把它
+        # 标成 PytestUnraisableExceptionWarning）。
+        # stdout 刻意不关：reader 线程还在等旧管道真正 EOF（fd 若被新会话复用，
+        # 提前关闭会让旧 reader 读到新会话的输出，见 _kill_tree 的说明）；stdin
+        # 没有读方，关掉是安全的。
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except Exception:
+            pass
