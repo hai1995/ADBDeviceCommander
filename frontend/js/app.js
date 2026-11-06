@@ -12,8 +12,7 @@
     cmdFilter: $("cmd-filter"), cmdTags: $("cmd-tags"),
     cmdCount: $("cmd-count"), btnCmdClear: $("btn-cmd-clear"),
     btnCmdInputClear: $("btn-cmd-input-clear"),
-    btnCmdToggle: $("btn-cmd-toggle"), cmdPrompt: $("cmd-prompt"),
-    cmdLayout: document.querySelector(".cmd-layout"),
+    cmdPrompt: $("cmd-prompt"),
     status: $("status"), console: $("console"),
     btnCopyStatus: $("btn-copy-status"),
     // 状态信息：顶栏跑马灯（概览）+ 弹窗（全量历史，#status 就住在弹窗里）
@@ -166,7 +165,6 @@
     // 可拖动分隔条（设备栏 / 指令台 ↔ 指令输出）
     sidebarSplitter: $("sidebar-splitter"), deviceSidebar: $("device-sidebar"),
     sidebarCollapseBtn: $("btn-sidebar-collapse"),
-    cmdSplitter: $("cmd-splitter"), cmdPanelLeft: $("cmd-panel-left"),
     // toast
     toastWrap: $("toast-wrap"),
   };
@@ -233,6 +231,10 @@
   let wsSeq = 1;                    // 新建时用的序号（w2、w3…），不复用已关闭的
   let wsRenaming = null;            // 正在重命名的工作区 id（渲染让路，见 renderWsTabs）
   let wsRenameReplay = false;       // 重命名期间被跳过的渲染，结束后补一次
+  // 指令台左栏收起态（38px 窄轨 + 展开按钮）。偏好是全局的（config.json 里只有
+  // 一个 cmd_panel_collapsed），启动恢复与新建工作区都套同一份；每块面板收起前
+  // 的内联宽度各自记在自己的工作区对象上（只有被分隔条拖过才存在）。
+  let cmdPanelCollapsed = false;
 
   function wsRole(root, role) {
     if (!root) return null;
@@ -285,6 +287,10 @@
     // 应用安装包：盒子 + 向下的箭头
     "package": '<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/>',
     "x": '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>',
+    // 指令台收起 / 展开（窄轨里的那一个可点目标）：必须存在于图标表里，
+    // 否则 data-icon 注入时取不到图形，按钮就是一个看不见的空壳
+    "caret-left": '<path d="M15 5l-7 7 7 7"/>',
+    "caret-right": '<path d="M9 5l7 7-7 7"/>',
   };
   const SVG_NS = "http://www.w3.org/2000/svg";
   function makeIcon(name) {
@@ -1142,14 +1148,12 @@
     if (typeof s.sidebar_collapsed === "boolean") {
       applySidebarCollapsed(s.sidebar_collapsed, false);
     }
-    // 指令台左栏收起状态：老 config.json 缺此键 → 展开态不动
-    if (typeof s.cmd_panel_collapsed === "boolean"
-        && els.cmdLayout && els.btnCmdToggle) {
-      if (s.cmd_panel_collapsed) {
-        els.cmdLayout.classList.add("collapsed");
-        els.btnCmdToggle.dataset.icon = "caret-right";
-        els.btnCmdToggle.title = "展开指令台";
-      }
+    // 指令台左栏收起状态（跨会话记忆）：老 config.json 缺此键 → 保持展开。
+    // 多工作区共用这一个偏好，已注册的逐个套用；之后新建 / 恢复出来的工作区
+    // 由 bindWorkspace 末尾按 cmdPanelCollapsed 自动继承。
+    if (typeof s.cmd_panel_collapsed === "boolean") {
+      cmdPanelCollapsed = s.cmd_panel_collapsed;
+      wsMap.forEach((ws) => applyCmdCollapsed(ws, cmdPanelCollapsed, false));
     }
     if (typeof s.save_dir === "string" && s.save_dir) setSaveDirInputs(s.save_dir);
     if (typeof s.adb_dir === "string") els.aboutAdbDir.value = s.adb_dir;
@@ -5855,6 +5859,7 @@
       tagsEl: wsRole(root, "cmd-tags"),
       countEl: wsRole(root, "cmd-count"),
       clearFilterBtn: wsRole(root, "btn-cmd-clear"),
+      toggleBtn: wsRole(root, "btn-cmd-toggle"),
       keepEl: wsRole(root, "keep-input"),
       splitterEl: wsRole(root, "cmd-splitter"),
       leftPanelEl: wsRole(root, "cmd-panel-left"),
@@ -5880,6 +5885,45 @@
     bindWorkspace(ws);
     renderWsTabs();      // 注册即刷新 tab 条：新工作区的 tab 立刻可点
     return ws;
+  }
+
+  /* 指令台左栏收起 / 展开（38px 窄轨，见 CSS .cmd-layout.collapsed）。
+     两个关键约束：
+     1. 分隔条拖动写的是**内联** style.width，会压过一切 class 规则——收起时先把
+        内联宽度存起来并清空，展开时原样还回，窄轨宽度才能真的生效；
+     2. 按钮图标要跟着方向换。decorateIcons 是「只注入一次」的幂等逻辑，改
+        data-icon 不会重绘，所以这里直接替换按钮里的 svg。 */
+  function applyCmdCollapsed(ws, collapsed, persist = true) {
+    if (!ws || !ws.root || !ws.leftPanelEl) return;
+    collapsed = !!collapsed;
+    ws.root.classList.toggle("collapsed", collapsed);
+    if (collapsed) {
+      ws.preCollapseW = ws.leftPanelEl.style.width;
+      ws.leftPanelEl.style.width = "";
+    } else if (ws.preCollapseW !== undefined) {
+      ws.leftPanelEl.style.width = ws.preCollapseW;
+      ws.preCollapseW = undefined;
+      reclampSplitters();   // 恢复后按当前窗口宽度重钳，防止顶出右侧内容
+    }
+    cmdPanelCollapsed = collapsed;
+    const btn = ws.toggleBtn;
+    if (btn) {
+      setBtnIcon(btn, collapsed ? "caret-right" : "caret-left");
+      btn.title = collapsed ? "展开指令台" : "收起指令台，给输出区更大空间";
+      btn.setAttribute("aria-label", btn.title);
+      btn.setAttribute("aria-expanded", String(!collapsed));
+    }
+    if (persist) persistPref("cmd_panel_collapsed", collapsed);
+  }
+
+  function setBtnIcon(btn, name) {
+    if (!btn) return;
+    btn.dataset.icon = name;
+    const old = btn.querySelector("svg");
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    const svg = makeIcon(name);
+    if (svg) btn.insertBefore(svg, btn.firstChild);
+    btn.dataset.iconDone = "1";
   }
 
   /* 一个工作区里所有交互都在这儿绑一次（默认工作区与克隆体共用同一套代码，
@@ -5955,8 +5999,26 @@
     bindCmdDrag(ws.groupsEl);
     // 左右分栏：每个工作区各自一条分隔条、各自记宽度
     if (ws.splitterEl && ws.leftPanelEl) {
-      ws.splitterRec = bindSplitter(ws.splitterEl, ws.leftPanelEl, 280, 320);
+      ws.splitterRec = bindSplitter(ws.splitterEl, ws.leftPanelEl, 240, 360);
     }
+    // 指令台收起 / 展开：按钮住在左栏标题行里，收起后左栏就是那条 38px 窄轨，
+    // 按钮是轨内唯一的可点目标。整条轨也接一份 click（点空白 / 悬停都能展开）；
+    // 落在按钮上的点击必须跳过——按钮处理器先执行，事件再冒泡到这里，不跳过会
+    // 立刻又被展开，表现为「怎么也收不起来」（与设备栏同一处细节）。
+    if (ws.toggleBtn) {
+      ws.toggleBtn.addEventListener("click", () => {
+        applyCmdCollapsed(ws, !ws.root.classList.contains("collapsed"));
+      });
+    }
+    if (ws.leftPanelEl) {
+      ws.leftPanelEl.addEventListener("click", (e) => {
+        if (!ws.root.classList.contains("collapsed")) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        applyCmdCollapsed(ws, false);
+      });
+    }
+    // 新建 / 恢复工作区时继承当前的全局收起偏好（启动恢复的顺序不保证）
+    if (cmdPanelCollapsed) applyCmdCollapsed(ws, true, false);
   }
 
   /* 克隆默认工作区的面板。必须剥 id：留着就是一份文档里两个 #console。 */
@@ -7057,17 +7119,6 @@
         if (e.key === "Enter") { e.preventDefault(); els.aboutCmdTimeout.blur(); }
       });
     }
-    // ---- 指令台左栏收起 / 展开 ----
-    if (els.btnCmdToggle && els.cmdLayout) {
-      // 启动时的恢复已在 applyBootSettings 里做完（老 config.json 缺此键
-      // → 默认展开），这里只负责绑定事件
-      els.btnCmdToggle.addEventListener("click", () => {
-        const collapsed = els.cmdLayout.classList.toggle("collapsed");
-        els.btnCmdToggle.dataset.icon = collapsed ? "caret-right" : "caret-left";
-        els.btnCmdToggle.title = collapsed ? "展开指令台" : "收起指令台";
-        persistPref("cmd_panel_collapsed", collapsed);
-      });
-    }
     // ---- 版本更新（关于页一行 + 新版本弹窗）----
     if (els.aboutUpdateCheck) els.aboutUpdateCheck.addEventListener("click", checkUpdateManual);
     if (els.aboutUpdateAuto) {
@@ -7288,10 +7339,10 @@
       if (!modalLocalPath) return;
       callApi(api.open_local_file(modalLocalPath));
     });
-    // 可拖动分隔条：设备栏（最小 200px，右侧内容至少留 480px）/
-    // 指令台（最小 240px，指令输出至少留 360px）；双击分隔条重置默认宽度
+    // 可拖动分隔条：设备栏（最小 200px，右侧内容至少留 480px）。
+    // 指令台分隔条由 bindWorkspace 按工作区各绑一份（含默认工作区），这里不再
+    // 重复绑定——多绑一份会在拖动时写两次宽度、并在 _splitters 里留下重复记录。
     bindSplitter(els.sidebarSplitter, els.deviceSidebar, 200, 480);
-    bindSplitter(els.cmdSplitter, els.cmdPanelLeft, 240, 360);
     // 设备栏收起 / 展开：状态落盘 sidebar_collapsed，重启后由 applyBootSettings 恢复
     if (els.sidebarCollapseBtn) {
       els.sidebarCollapseBtn.addEventListener("click", () => {

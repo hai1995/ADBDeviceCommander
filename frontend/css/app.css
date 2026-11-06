@@ -278,6 +278,24 @@ html { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; 
   background: var(--accent); border-radius: 2px;
   box-shadow: 0 0 10px var(--accent-glow), 0 0 2px var(--accent);
 }
+/* 浅色主题下的顶栏：这里的深色渐变是全文唯一一处写死的表面色（其余组件都走
+   令牌），不覆盖的话白天主题顶上会压着一条黑边，与下方白底面板明显断层。
+   tab 的 hover / 选中态同理——它们用的 rgba(52,224,234,…) 是深色主题的磷光
+   青，白底上几乎看不见，换成浅色主题压暗后的强调色。 */
+:root[data-theme="light"] .topbar {
+  background: linear-gradient(180deg, #ffffff, #f2f5f9);
+  border-bottom-color: var(--line-strong);
+  box-shadow: 0 6px 18px rgba(20, 40, 70, .10), 0 1px 0 rgba(255, 255, 255, .9);
+}
+:root[data-theme="light"] .tab-btn:hover {
+  color: var(--text); background: rgba(10, 154, 168, .08);
+}
+:root[data-theme="light"] .tab-btn.active {
+  color: var(--accent);
+  background: linear-gradient(180deg, rgba(10, 154, 168, .16), rgba(10, 154, 168, .03));
+  border-color: var(--line-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), 0 -2px 12px rgba(10, 154, 168, .10);
+}
 /* 连接状态 LED 胶囊：点亮的灯 + 等宽文案 */
 .pill {
   display: inline-flex; align-items: center; gap: 8px; align-self: center;
@@ -1007,23 +1025,43 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 .cmd-filterbar .inp::placeholder { color: var(--faint); }
 .cmd-filterbar .inp:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(52, 224, 234, .15), 0 0 14px rgba(52, 224, 234, .16); }
-/* 指令台收起态：搜索条 + 标签 + 计数全隐藏，指令输出区吃满 */
+/* 指令台收起态：整栏缩成 38px 窄轨，只留「展开」按钮。
+   曾经写的是 width:0 + overflow:hidden：可展开按钮就住在左栏里，跟着内容一起
+   被裁掉，收起之后就再也点不到、展不回来（用户实报「没办法再次展开」）。
+   现在学设备栏的窄轨做法——轨内只保留那一个可点目标，其余内容全部隐藏，
+   整条轨同时是展开热区（JS 侧有 click 委托）。 */
 .cmd-layout.collapsed .cmd-filterbar,
 .cmd-layout.collapsed .cmd-tags,
-.cmd-layout.collapsed .cmd-count { display: none; }
+.cmd-layout.collapsed .cmd-count,
+.cmd-layout.collapsed .cmd-groups { display: none; }
 .cmd-layout.collapsed .panel-left {
-  /* 左侧面板从 flex 布局中"塌缩"——给 splitter + 右侧面板更大空间。
-     flex-shrink: 0 + 很小宽度：保留可被拖回的可能性；同时隐藏内部内容避免占高 */
-  width: 0; min-width: 0; overflow: hidden; flex: 0 0 0;
-  border-right: none; padding: 0; margin: 0;
-  transition: width .25s ease;
+  width: 38px; min-width: 38px; flex: 0 0 38px;
+  overflow: hidden; padding: 8px 0 0; margin: 0;
+  border-right: 1px solid var(--line);
+  cursor: pointer;                 /* 整轨可点：展开（按钮自身的点击会跳过） */
+  transition: width .25s ease, background var(--dur-fast) ease;
 }
-.cmd-layout.collapsed #cmd-splitter { display: none; }
-/* 收起/展开按钮图标动画 */
-#btn-cmd-toggle[data-icon="caret-left"]::before,
-#btn-cmd-toggle[data-icon="caret-right"]::before { content: ""; }
-/* 展开时图标方向反转（通过 JS 换 data-icon） */
-#btn-cmd-toggle[data-icon="caret-right"]::before { content: ""; }
+.cmd-layout.collapsed .panel-left:hover { background: var(--surface-2); }
+/* 窄轨里的标题行：去掉「指令台 / COMMANDS」文字（font-size:0 不解构 DOM），
+   只留居中的方形展开钮 */
+.cmd-layout.collapsed .panel-left .panel-title {
+  flex-direction: column; align-items: center;
+  gap: 0; margin: 0; padding: 0;
+  font-size: 0; letter-spacing: 0;
+}
+.cmd-layout.collapsed .panel-left .panel-title .panel-sub { display: none; }
+.cmd-layout.collapsed .panel-left .panel-actions {
+  margin: 0; flex-direction: column; align-items: center; gap: 6px;
+}
+/* 新建 / 导入 / 导出 在窄轨里没有容身之处：只留收起 / 展开钮 */
+.cmd-layout.collapsed .panel-left .panel-actions > .btn { display: none; }
+.cmd-layout.collapsed .panel-left .panel-actions > [data-role="btn-cmd-toggle"] {
+  display: inline-flex; width: 26px; height: 26px; min-width: 0; padding: 0;
+  justify-content: center;
+}
+/* 分隔条按 class 隐藏：多工作区的克隆体被剥掉了 id，按 #cmd-splitter 写的
+   规则只对第 1 个工作区生效，其余工作区收起后仍露着一条分隔条 */
+.cmd-layout.collapsed .splitter { display: none; }
 .cmd-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .cmd-tag {
   background: var(--surface-2); color: var(--muted);
