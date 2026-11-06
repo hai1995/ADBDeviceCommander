@@ -113,6 +113,7 @@
     aboutVer: $("about-ver"), aboutAdb: $("about-adb"),
     aboutCmd: $("about-cmd"), aboutDev: $("about-dev"), aboutWarn: $("about-warn"),
     aboutAdbDir: $("about-adb-dir"), aboutAdbSave: $("about-adb-save"),
+    aboutCmdTimeout: $("about-cmd-timeout"),
     aboutConfigPath: $("about-config-path"),
     // 版本更新：关于页一行（自动检查 + 上次结果 + 手动检查）+ 新版本弹窗
     aboutUpdateAuto: $("about-update-auto"),
@@ -1122,6 +1123,12 @@
     }
     if (typeof s.save_dir === "string" && s.save_dir) setSaveDirInputs(s.save_dir);
     if (typeof s.adb_dir === "string") els.aboutAdbDir.value = s.adb_dir;
+    // 命令超时保护：整数秒（0 = 不限制）。老 config.json 缺此键时 UI 留空，
+    // 后端默认 0（不限制）；用户手动填值后下次启动 applyBootSettings 回填。
+    if (els.aboutCmdTimeout && typeof s.cmd_timeout === "number"
+        && Number.isFinite(s.cmd_timeout)) {
+      els.aboutCmdTimeout.value = String(Math.round(s.cmd_timeout));
+    }
     // 缺省不写就保持 HTML 的默认勾选（默认开启）；用户显式设过值则以设置为准
     if (els.shotClipboard && typeof s.shot_to_clipboard === "boolean") {
       els.shotClipboard.checked = s.shot_to_clipboard;
@@ -6994,6 +7001,28 @@
       // 目录配好后立即用新 PATH 刷新一次设备列表
       if (ok && adbRes && adbRes.ok) callApi(api.refresh_devices());
     });
+    // 关于页「命令超时保护」：数字输入框失焦时即时持久化（0~3600 秒）。
+    // 非法值（空 / 负数 / 非数字）交给后端 sanitize_prefs 回退默认 0，
+    // 前端只做基本夹取保证 UI 一致显示。
+    if (els.aboutCmdTimeout) {
+      els.aboutCmdTimeout.addEventListener("blur", () => {
+        const raw = els.aboutCmdTimeout.value || "";
+        let v = parseInt(raw, 10);
+        if (!Number.isFinite(v) || v < 0) v = 0;
+        if (v > 3600) v = 3600;
+        els.aboutCmdTimeout.value = String(v);
+        persistPref("cmd_timeout", v);
+        if (v === 0) {
+          pushStatus("ok", "✓ 命令超时保护已关闭（0 = 不限制）");
+        } else {
+          pushStatus("ok", "✓ 命令超时保护已设为 " + v + " 秒");
+        }
+      });
+      // 回车即保存（和其他输入框交互一致）
+      els.aboutCmdTimeout.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); els.aboutCmdTimeout.blur(); }
+      });
+    }
     // ---- 版本更新（关于页一行 + 新版本弹窗）----
     if (els.aboutUpdateCheck) els.aboutUpdateCheck.addEventListener("click", checkUpdateManual);
     if (els.aboutUpdateAuto) {

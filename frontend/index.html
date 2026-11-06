@@ -677,6 +677,11 @@
                    autocomplete="off">
             <button id="about-adb-save" class="btn tiny" type="button" data-icon="save">保存</button>
           </div>
+          <div class="about-row adb-cfg"><span>命令超时保护</span>
+            <input id="about-cmd-timeout" class="inp num" type="number" min="0" max="3600" step="1"
+                   placeholder="0 = 不限制" spellcheck="false" autocomplete="off">
+            <span class="fld-hint dim" style="margin-left:8px;">秒（默认 0；超过后自动终止当前命令）</span>
+          </div>
           <div class="about-row adb-cfg"><span>配置文件</span>
             <b id="about-config-path" class="cfg-path" title="config.json 的绝对路径">—</b>
             <button id="about-config-open" class="btn tiny" type="button" data-icon="folder">打开目录</button>
