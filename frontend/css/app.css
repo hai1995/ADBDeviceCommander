@@ -1093,7 +1093,6 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   box-shadow: none; outline: none;
 }
 .cmd-prompt-wrap input::placeholder { color: var(--faint); opacity: .7; }
-.cmd-prompt-wrap .clear-x { right: 4px; }
 /* 输入框清除按钮：立体圆形小键，与全局按钮同一套语言 */
 .clear-x {
   position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
@@ -1111,6 +1110,8 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
               0 0 14px rgba(52, 224, 234, .22);
 }
 .clear-x:active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .45); }
+/* prompt-wrap 里的 clear-x 比搜索框里的靠右位置差 3px */
+.cmd-prompt-wrap .clear-x { right: 4px; }
 .clear-x[hidden] { display: none; }
 
 /* ---------------- Logcat ----------------
