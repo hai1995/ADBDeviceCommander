@@ -256,16 +256,6 @@ def plan_size(adb, serial, max_edge=1080):
     return "%dx%d" % (max(nw, 2), max(nh, 2))
 
 
-def _tail_text(stream, limit=400):
-    """取子进程 stderr 末尾若干字符（秒退时用它给出设备端的真实报错）。"""
-    try:
-        data = stream.read() or ""
-    except Exception:
-        return ""
-    text = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
-    return " ".join(text.split())[-limit:]
-
-
 class PipeMirror:
     """单台设备的管道投屏：adb screenrecord → 本机播放器窗口（含 180s 续流）。
 
@@ -295,6 +285,7 @@ class PipeMirror:
         self._player = None
         self._player_err = ""                  # 播放器 stderr 末尾（失败时给原因）
         self._adb_proc = None
+        self._adb_err = ""                     # adb stderr 末尾（设备端报错时用）
         self._thread = None
         self.restarts = 0
         self.error = ""
@@ -360,7 +351,25 @@ class PipeMirror:
                 stderr=subprocess.PIPE, creationflags=no_window_flags())
         except Exception as e:
             return False, "screenrecord 启动失败：%s" % e
+        # adb stderr 可能输出设备掉线 / 权限不足等报错：管道 64KB 写满后 adb
+        # 会阻塞在 write 上（stdout 的视频流也会停止、player 收不到新帧），
+        # 必须开个线程把 stderr 读走。每次重连都是新的 adb proc，各自一条。
+        threading.Thread(target=self._drain_adb_err,
+                         args=(self._adb_proc.stderr,), daemon=True,
+                         name="mirror-adb-err-%s" % self.serial).start()
         return True, ""
+
+    def _drain_adb_err(self, stream):
+        """读走 adb stderr，留末尾 300 字符供秒退时报原因。"""
+        try:
+            for raw in iter(stream.readline, b""):
+                if self._stop.is_set():
+                    break
+                text = raw.decode("utf-8", "replace").strip()
+                if text:
+                    self._adb_err = (self._adb_err + " " + text)[-300:]
+        except Exception:
+            pass
 
     def _drain_player_err(self, stream):
         """把播放器的 stderr 持续读走，只留末尾 400 字符（供秒退时报原因）。
@@ -390,12 +399,13 @@ class PipeMirror:
             return False
 
     def _close_player(self, wait=2.0):
-        """收掉播放器进程：terminate → 短暂等待 → 仍活着才 kill。"""
+        """收掉播放器进程：terminate → 短暂等待 → 仍活着才 kill → 关 pipe。"""
         player = self._player
         if player is None:
             return
         try:
             if player.poll() is not None:
+                self._close_player_pipes(player)
                 return
             player.terminate()
         except Exception:
@@ -407,6 +417,19 @@ class PipeMirror:
                 player.kill()
             except Exception:
                 pass
+        self._close_player_pipes(player)
+
+    def _close_player_pipes(self, player):
+        """关播放器的 stdin / stderr pipe：player 进程死掉后父进程的句柄靠
+        GC 才会被回收，在 Windows 上短时间累积可能产生句柄耗尽。主动关掉。"""
+        try:
+            if player.stdin: player.stdin.close()
+        except Exception:
+            pass
+        try:
+            if player.stderr: player.stderr.close()
+        except Exception:
+            pass
 
     def _feed_loop(self):
         """转发循环：adb stdout → 播放器 stdin；adb 退出即续流（直到被 stop）。"""
@@ -433,7 +456,11 @@ class PipeMirror:
                 except Exception as e:
                     self.error = "转发中断：%s" % e
                 try:
-                    proc.stdout.close()
+                    if proc.stdout: proc.stdout.close()
+                except Exception:
+                    pass
+                try:
+                    if proc.stderr: proc.stderr.close()
                 except Exception:
                     pass
                 try:
@@ -458,8 +485,10 @@ class PipeMirror:
                 break
             if not got:
                 # 一个字节都没收到就退出 = 设备端命令不可用（ROM 移除 /
-                # 参数不支持 / 未授权），重试无意义
-                tail = _tail_text(proc.stderr) if proc is not None else ""
+                # 参数不支持 / 未授权），重试无意义。adb 的错误信息已经被
+                # drain 线程收集到 self._adb_err 里了，直接读即可（stream
+                # 本身已被 drain 读空，再 _tail_text 只会读到空串或阻塞）。
+                tail = self._adb_err or ""
                 self.error = self.error or (
                     "设备端 screenrecord 未输出画面%s"
                     % ("（%s）" % tail if tail else ""))
@@ -468,6 +497,8 @@ class PipeMirror:
                 return
             # 正常跑满 180s 上限 → 续流
             self.restarts += 1
+            # 清空上一轮 adb 的错误日志：新的 adb proc 会自己产生新的 _adb_err
+            self._adb_err = ""
             if self.restarts > MAX_RESTARTS:
                 # 设备端 screenrecord 反复退出（编码器被别的应用占着 / 该 ROM
                 # 限制了单次时长）：停止重连，并把原因留下来。原来是静默
@@ -507,6 +538,15 @@ class PipeMirror:
             try:
                 if proc.poll() is None:
                     proc.kill()
+            except Exception:
+                pass
+            # 关 adb pipe（drain 线程在 self._stop 后也会自己退，但主动关更快释放句柄）
+            try:
+                if proc.stdout: proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if proc.stderr: proc.stderr.close()
             except Exception:
                 pass
         # 设备端 screenrecord 可能还活着（adb 客户端被杀不会带走它），

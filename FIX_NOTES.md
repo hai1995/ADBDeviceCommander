@@ -4086,3 +4086,34 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   点击后二次请求、重试成功收起）与 CSS 可点击断言。
 - 验证：前端 **87 个文件 0 失败**；`loading_states.test.cjs` 55 项全过。
 
+# 第五十八轮（全局代码扫描：pipe 泄露修复）
+- 背景：对 backend/frontend 做全量静态审查，重点查 Popen 管道、事件监听、
+  竞态窗口。mirror_service（管道投屏）和 screen_service（录屏）各查出
+  实际 pipe 泄露 bug。
+- `backend/mirror_service.py`：
+  - **Bug 1：adb proc 的 stderr 是 PIPE 但从未被 drain**。player 有
+    `_drain_player_err`，adb 没有。adb 的 stderr 可能输出设备掉线 /
+    权限不足等报错，管道容量只有 64KB，写满后 adb 阻塞在 write 上，
+    stdout 的视频流也随之停止，player 收不到新帧 → 画面卡死且续流会
+    一路刷到 MAX_RESTARTS 才停。新增 `_drain_adb_err` 线程读走 stderr、
+    留末尾 300 字符供秒退时报原因；`_spawn_adb()` 每次新建 proc 后
+    自动启动 drain。
+  - **Bug 2：错误原因从 `_tail_text(proc.stderr)` 改为读 `self._adb_err`**。
+    drain 线程读完后 stream 里已无数据，再调 `stream.read()` 只会返回
+    空串；进程未退出时还会阻塞到 EOF。每次重连前清空 `_adb_err`，
+    避免旧段的错误混入新段。
+  - **Bug 3：pipe 泄露**。`_feed_loop` 里 adb 退出后只 close stdout，
+    漏了 stderr；`stop()` kill adb 后 pipe 完全不关；player 的
+    stdin / stderr 也从没 close。Windows 上靠 GC 回收句柄，多段
+    投屏 + 录屏累积后会短暂触发句柄耗尽。新增 `_close_player_pipes()`，
+    `_close_player` / `stop` / `_feed_loop` 的各收尾路径统一 close。
+  - **清理 dead code**：`_tail_text()` 全项目无调用，删掉。
+- `backend/screen_service.py`：
+  - **Bug 4：分段 roll 时旧 adb proc 的 pipe 被丢弃**。
+    `_roll_segment_locked` 换新段 `sess["proc"] = proc` 时，旧段
+    的 stdout / stderr 没有 close，每 roll 一次留一份句柄。在替换
+    前主动 close。
+  - **Bug 5：stop_ex 里 kill proc 后 pipe 没 close**。wait/kill 之后
+    加一轮 close stdout / stderr。
+- 验证：`pytest` **1355 passed / 1 skipped**；前端 **87 个文件 0 失败**。
+

@@ -684,6 +684,17 @@ class VideoRecorder:
             sess["seg_err"] = "第 %d 段未能启动（%s）" % (seg_no, e)
             return
         sess.setdefault("segments", []).append(prev)
+        # 旧段的 adb proc 通常已退出（它的 --time-limit 到了 / 设备端写完 moov），
+        # 但 pipe 句柄还在父进程里。每 roll 一次就留一份，Windows 上累积多段会
+        # 触发句柄耗尽。主动关掉立即释放。
+        old_proc = sess.get("proc")
+        if old_proc is not None:
+            for s in ("stdout", "stderr"):
+                try:
+                    f = getattr(old_proc, s, None)
+                    if f is not None: f.close()
+                except Exception:
+                    pass
         sess["remote"] = remote
         sess["local"] = local
         sess["proc"] = proc
@@ -974,6 +985,15 @@ class VideoRecorder:
             try:
                 if proc is not None:
                     proc.kill()
+            except Exception:
+                pass
+        # 关 pipe：录屏期间 stdout / stderr 可能积累少量 adb 报错；
+        # proc 死掉后父进程的 pipe 句柄靠 GC 才被回收，Windows 上累积
+        # 多段会短暂触发句柄耗尽。主动关掉立即释放。
+        for s in ("stdout", "stderr"):
+            try:
+                f = getattr(proc, s, None)
+                if f is not None: f.close()
             except Exception:
                 pass
         ok, local, err = self._pull_and_finish(serial)
