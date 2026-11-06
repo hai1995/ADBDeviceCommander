@@ -1373,8 +1373,9 @@ class VideoRecorder:
                         "设备已重启，但录屏临时文件已被系统清理或从未写入磁盘，"
                         "本次录制内容丢失"
                         + ("（%s）" % why if why else ""))
-                # ready=True：文件还在！走下面的 pull 路径
-                break
+                # ready=True：文件还在！**不能 break**：break 会跳出整个重试循环，
+                # 连本轮的 pull 都跳过，最终只剩一句「pull 失败」——设备重启后
+                # 明明还能取回的视频就这么丢了。这里直接落到下面的 pull 分支。
             if ready:
                 try:
                     r = subprocess.run(

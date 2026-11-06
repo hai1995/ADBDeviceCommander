@@ -1297,6 +1297,46 @@ def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
     assert any("等待设备重启超时" in err for _ in [None]), err
 
 
+def test_pull_succeeds_after_device_reboots_and_file_survives(monkeypatch, tmp_path):
+    """设备重启回来后临时文件还在 → 必须真的把文件 pull 回本地。
+
+    回归：掉线分支等到设备回来、二次 probe 也确认文件还在之后写了 `break`，
+    直接跳出整个重试循环，连本轮该执行的 pull 都跳过了；最终只返回一句
+    「pull 失败」。功能上等于「车机重启后录好的视频取不回来」，而这正是本工具
+    必须保住的核心场景。
+    """
+    local = tmp_path / "record_A1_x.mp4"
+    probes = {"n": 0}
+    pulled = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        if "ls" in cmd:
+            probes["n"] += 1
+            if probes["n"] == 1:
+                return type("R", (), {"returncode": 1, "stdout":
+                                      "error: device 'A1' not found\n",
+                                      "stderr": ""})()
+            return type("R", (), {"returncode": 0, "stdout":
+                                  "/sdcard/adb_rec_A1.mp4\n",
+                                  "stderr": ""})()
+        if "pull" in cmd:
+            pulled["n"] += 1
+            local.write_bytes(b"\x00\x00\x00\x08moov" + b"0" * 200)
+            return type("R", (), {"returncode": 0, "stdout": "",
+                                  "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "",
+                              "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: True)
+    ok, lp, err = vr._pull_and_finish("A1")
+
+    assert ok is True, err
+    assert pulled["n"] >= 1, "设备回来后没有执行 pull，文件没取回来"
+    assert lp == str(local)
+
+
 def test_pull_gives_up_at_once_when_ls_is_permission_denied(monkeypatch, tmp_path):
     """`ls` 报权限不足：不该白等 9 秒，更不能说成「未生成录屏文件」。
 
