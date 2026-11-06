@@ -128,6 +128,9 @@ PREFS_DEFAULTS = {
     "cmd_timeout": 0,
     # 设备栏（已连接设备列表）收起状态：侧边栏折叠，内容区让出宽度
     "sidebar_collapsed": False,
+    # 指令台左栏（命令库面板）收起状态：折叠后指令输出区吃满宽度，
+    # 给正在跑长输出命令 / 多设备并发输出的用户更多空间。
+    "cmd_panel_collapsed": False,
     # Logcat 实时监控
     "lc_keyword": "",
     "lc_levels": list(VALID_LEVELS),

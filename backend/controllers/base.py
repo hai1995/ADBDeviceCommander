@@ -176,7 +176,8 @@ class WebApiBase:
         # 会话延迟创建：避免无 GUI 环境（单测/无头）也拉起 powershell
         if self.session is None:
             self.session = self._session_factory(
-                output_callback=self._on_session_output)
+                output_callback=self._on_session_output,
+                on_dir_change=self._on_session_dir_change)
         # adb 就绪状态：about 页展示用；缺失时不阻断启动，改用引导提示
         adb_info = self._probe_adb()
         payload["adb_ok"] = adb_info["ok"]
@@ -395,7 +396,9 @@ class WebApiBase:
                     # 回调里绑定建会话时的 wid：读线程不是执行线程，线程局部取不到
                     sess = self._session_factory(
                         output_callback=lambda text, w=wid:
-                            self._on_session_output(text, w))
+                            self._on_session_output(text, w),
+                        on_dir_change=lambda path, w=wid:
+                            self._on_session_dir_change(path, w))
                     self._ws_sessions[wid] = sess
         return sess
 
@@ -494,6 +497,18 @@ class WebApiBase:
         既有测试都按 p.ws || "w1" 兜底。
         """
         payload = {"kind": "out", "text": text}
+        wid = self._ws_id(ws)
+        if wid != self.WS_DEFAULT:
+            payload["ws"] = wid
+        self.bus.push("console", payload)
+
+    def _on_session_dir_change(self, path, ws=None):
+        """ShellSession 工作目录变化回调 -> prompt 事件。
+
+        前端 cmd-prompt span 实时更新成新路径，就像 PowerShell 那样。
+        默认工作区不带 ws 字段（兼容老前端）。
+        """
+        payload = {"kind": "prompt", "cwd": path}
         wid = self._ws_id(ws)
         if wid != self.WS_DEFAULT:
             payload["ws"] = wid

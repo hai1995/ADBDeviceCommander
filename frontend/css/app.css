@@ -995,14 +995,35 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 
 /* 指令台筛选 + 标签过滤 */
-.cmd-filterbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.cmd-filterbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+/* 搜索框尾部 clear-x 内嵌：input 整体包裹，按钮 absolute 到右侧，
+   input padding-right 给按钮让位置 */
+.filter-input-wrap { position: relative; flex: 1; min-width: 0; }
 .cmd-filterbar .inp {
-  flex: 1; background: var(--inset); border: 1px solid var(--line-strong); color: var(--text);
-  border-radius: var(--r-sm); padding: 6px 10px; font-size: var(--fs-md);
+  width: 100%; background: var(--inset); border: 1px solid var(--line-strong); color: var(--text);
+  border-radius: var(--r-sm); padding: 6px 28px 6px 10px; font-size: var(--fs-md);
   font-family: var(--font-mono);
+  box-sizing: border-box;
 }
 .cmd-filterbar .inp::placeholder { color: var(--faint); }
 .cmd-filterbar .inp:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(52, 224, 234, .15), 0 0 14px rgba(52, 224, 234, .16); }
+/* 指令台收起态：搜索条 + 标签 + 计数全隐藏，指令输出区吃满 */
+.cmd-layout.collapsed .cmd-filterbar,
+.cmd-layout.collapsed .cmd-tags,
+.cmd-layout.collapsed .cmd-count { display: none; }
+.cmd-layout.collapsed .panel-left {
+  /* 左侧面板从 flex 布局中"塌缩"——给 splitter + 右侧面板更大空间。
+     flex-shrink: 0 + 很小宽度：保留可被拖回的可能性；同时隐藏内部内容避免占高 */
+  width: 0; min-width: 0; overflow: hidden; flex: 0 0 0;
+  border-right: none; padding: 0; margin: 0;
+  transition: width .25s ease;
+}
+.cmd-layout.collapsed #cmd-splitter { display: none; }
+/* 收起/展开按钮图标动画 */
+#btn-cmd-toggle[data-icon="caret-left"]::before,
+#btn-cmd-toggle[data-icon="caret-right"]::before { content: ""; }
+/* 展开时图标方向反转（通过 JS 换 data-icon） */
+#btn-cmd-toggle[data-icon="caret-right"]::before { content: ""; }
 .cmd-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .cmd-tag {
   background: var(--surface-2); color: var(--muted);
@@ -1046,16 +1067,33 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .inputbar { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
 .inputbar .chk { flex: none; white-space: nowrap; }
 .cmd-input-wrap { position: relative; flex: 1; display: flex; min-width: 180px; }
-.cmd-input-wrap input {
-  flex: 1; background: var(--inset); border: 1px solid var(--line-strong); color: var(--text);
-  border-radius: var(--r-sm); padding: 7px 32px 7px 11px;
-  font-family: var(--font-mono); font-size: var(--fs-md);
+/* cmd 风格 prompt：输入框左边显示当前会话路径，像 PowerShell 那样 */
+.cmd-prompt-wrap { background: var(--inset); border: 1px solid var(--line-strong);
+                   border-radius: var(--r-sm); padding: 0 30px 0 10px;
+                   box-sizing: border-box; align-items: center; gap: 6px; min-width: 0; }
+.cmd-prompt {
+  flex: none; color: var(--accent); font-family: var(--font-mono);
+  font-size: var(--fs-md); font-weight: 500; white-space: nowrap;
+  text-shadow: 0 0 8px rgba(52, 224, 234, .35);
+  user-select: none; cursor: default;
+  max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+  direction: ltr;   /* 从左往右省略（长路径显示末尾更有意义，用户更常关心当前目录名） */
+  text-align: left;
 }
-.cmd-input-wrap input::placeholder { color: var(--faint); }
-.cmd-input-wrap input:focus {
-  outline: none; border-color: var(--accent);
+.cmd-input-wrap.cmd-prompt-wrap:focus-within {
+  border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(52, 224, 234, .15), 0 0 14px rgba(52, 224, 234, .16);
+  outline: none;
 }
+/* prompt-wrap 里的 input 不能再带背景/边框/圆角（已经在外层上了），
+   padding-right 改给 clear-x 让位置，padding-left 由外层 gap 控制 */
+.cmd-prompt-wrap input {
+  background: transparent; border: none; border-radius: 0;
+  padding: 0; flex: 1; min-width: 40px;
+  box-shadow: none; outline: none;
+}
+.cmd-prompt-wrap input::placeholder { color: var(--faint); opacity: .7; }
+.cmd-prompt-wrap .clear-x { right: 4px; }
 /* 输入框清除按钮：立体圆形小键，与全局按钮同一套语言 */
 .clear-x {
   position: absolute; right: 7px; top: 50%; transform: translateY(-50%);

@@ -12,6 +12,8 @@
     cmdFilter: $("cmd-filter"), cmdTags: $("cmd-tags"),
     cmdCount: $("cmd-count"), btnCmdClear: $("btn-cmd-clear"),
     btnCmdInputClear: $("btn-cmd-input-clear"),
+    btnCmdToggle: $("btn-cmd-toggle"), cmdPrompt: $("cmd-prompt"),
+    cmdLayout: document.querySelector(".cmd-layout"),
     status: $("status"), console: $("console"),
     btnCopyStatus: $("btn-copy-status"),
     // 状态信息：顶栏跑马灯（概览）+ 弹窗（全量历史，#status 就住在弹窗里）
@@ -366,6 +368,20 @@
   function clearOut(container) {
     _outQueues.delete(container);
     container.innerHTML = "";
+  }
+
+  /** 把后端 ShellSession.current_dir 转成 cmd 风格 prompt：
+   *  - Windows 路径（盘符开头）→ "PS D:\Foo\Bar>"
+   *  - Unix 路径（/ 开头）→ "$ /home/user>"
+   *  - 其他/空 → ">"
+   *  路径过长时保持原样（CSS 里 max-width + text-overflow 处理省略）。 */
+  function formatPrompt(cwd) {
+    if (!cwd) return ">";
+    cwd = String(cwd).trim();
+    if (!cwd) return ">";
+    if (/^[A-Za-z]:[\\/]/.test(cwd)) return "PS " + cwd + ">";   // Windows 盘符
+    if (cwd.startsWith("/")) return "$ " + cwd + ">";            // Unix
+    return cwd + ">";
   }
 
   /* 一次性裁剪容器头部超出的行。
@@ -907,6 +923,11 @@
         const ws = wsOf(p.ws || "w1");
         if (!ws || !ws.consoleEl) break;
         if (p.kind === "clear") clearOut(ws.consoleEl);
+        else if (p.kind === "prompt") {
+          // cmd 风格 prompt：ShellSession 非交互 run 结束后通过 sentinel|path
+          // 上报当前 cwd → 后端 bus.push console({kind:"prompt", cwd})
+          if (ws.promptEl) ws.promptEl.textContent = formatPrompt(p.cwd);
+        }
         else pushConsole(p.kind, p.text || "", ws.id);
         break;
       }
@@ -1120,6 +1141,15 @@
     // 设备栏收起状态（布局偏好，跨会话记忆）：缺省 / 非布尔 → 展开态不动
     if (typeof s.sidebar_collapsed === "boolean") {
       applySidebarCollapsed(s.sidebar_collapsed, false);
+    }
+    // 指令台左栏收起状态：老 config.json 缺此键 → 展开态不动
+    if (typeof s.cmd_panel_collapsed === "boolean"
+        && els.cmdLayout && els.btnCmdToggle) {
+      if (s.cmd_panel_collapsed) {
+        els.cmdLayout.classList.add("collapsed");
+        els.btnCmdToggle.dataset.icon = "caret-right";
+        els.btnCmdToggle.title = "展开指令台";
+      }
     }
     if (typeof s.save_dir === "string" && s.save_dir) setSaveDirInputs(s.save_dir);
     if (typeof s.adb_dir === "string") els.aboutAdbDir.value = s.adb_dir;
@@ -1596,6 +1626,8 @@
   function onCmdFilterInput(ws) {
     ws = ws || curWs();
     if (!ws) return;
+    // 搜索框尾部 clear-x：有内容才显示
+    if (ws.clearFilterBtn) ws.clearFilterBtn.hidden = !ws.filterEl || !ws.filterEl.value;
     if (ws.filterTimer !== null) clearTimeout(ws.filterTimer);
     ws.filterTimer = setTimeout(() => { ws.filterTimer = null; applyCmdFilter(ws); }, 120);
   }
@@ -2263,6 +2295,7 @@
     ws = ws || curWs();
     if (!ws) return;
     if (ws.filterEl) ws.filterEl.value = "";
+    if (ws.clearFilterBtn) ws.clearFilterBtn.hidden = true;   // 清完立即隐藏 clear-x
     ws.tags.clear();
     renderCmdTags(ws);
     applyCmdFilter(ws);
@@ -5811,6 +5844,7 @@
     return {
       root: root,
       consoleEl: wsRole(root, "console"),
+      promptEl: wsRole(root, "cmd-prompt"),
       inputEl: wsRole(root, "cmd-input"),
       inputClearEl: wsRole(root, "btn-cmd-input-clear"),
       runBtn: wsRole(root, "btn-run"),
@@ -7021,6 +7055,17 @@
       // 回车即保存（和其他输入框交互一致）
       els.aboutCmdTimeout.addEventListener("keydown", (e) => {
         if (e.key === "Enter") { e.preventDefault(); els.aboutCmdTimeout.blur(); }
+      });
+    }
+    // ---- 指令台左栏收起 / 展开 ----
+    if (els.btnCmdToggle && els.cmdLayout) {
+      // 启动时的恢复已在 applyBootSettings 里做完（老 config.json 缺此键
+      // → 默认展开），这里只负责绑定事件
+      els.btnCmdToggle.addEventListener("click", () => {
+        const collapsed = els.cmdLayout.classList.toggle("collapsed");
+        els.btnCmdToggle.dataset.icon = collapsed ? "caret-right" : "caret-left";
+        els.btnCmdToggle.title = collapsed ? "展开指令台" : "收起指令台";
+        persistPref("cmd_panel_collapsed", collapsed);
       });
     }
     // ---- 版本更新（关于页一行 + 新版本弹窗）----

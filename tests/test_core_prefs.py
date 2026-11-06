@@ -363,7 +363,7 @@ _BOOL_KEY_TO_HTML_ID = {
 # （工具区改子 tab 后，shot/rec/scrcpy/apk/diag 的 *_collapsed 键已从 schema 删除。）
 # 显式列出（而非放宽断言）：将来真加了复选框的键必须登记进映射表，
 # 不允许被顺手塞进这个豁免名单。
-_NO_HTML_CHECKBOX_KEYS = {"sidebar_collapsed"}
+_NO_HTML_CHECKBOX_KEYS = {"sidebar_collapsed", "cmd_panel_collapsed"}
 
 
 def _html_checkbox_checked():

@@ -58,11 +58,15 @@ class ShellSession:
         """
         return 'Write-Output ("%s|" + (Get-Location).Path)' % tag
 
-    def __init__(self, output_callback=None):
+    def __init__(self, output_callback=None, on_dir_change=None):
         self.proc = None
         self.reader = None
         self.out_queue = queue.Queue()
         self.output_callback = output_callback
+        # 工作目录变化回调：shell 通过 sentinel|path 机制上报当前 cwd 时触发，
+        # 用于 UI 上 cmd 风格 prompt 实时更新。交互式 shell 里 cd 不会经过
+        # sentinel，所以只在非交互 run 结束时更新。
+        self.on_dir_change = on_dir_change
         # 每个 run 注册一条 (sentinel, done_event)；reader 命中即 set event
         # 并跳过渲染。run 等自己的 event，sentinel 互不干扰。
         self._pending = []
@@ -159,8 +163,13 @@ class ShellSession:
                     if t.startswith(s + "|"):
                         matched_ev = ev
                         path = t[len(s) + 1:].strip()
-                        if path:
+                        if path and path != self.current_dir:
                             self.current_dir = path
+                            if self.on_dir_change:
+                                try:
+                                    self.on_dir_change(path)
+                                except Exception:
+                                    pass
                         break
                 if matched_ev is not None:
                     matched_ev.set()

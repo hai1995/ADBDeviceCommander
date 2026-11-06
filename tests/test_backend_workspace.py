@@ -33,8 +33,9 @@ CMDS = [
 class FakeSession:
     """替身 ShellSession：记录 run 调用，不启动 powershell。"""
 
-    def __init__(self, output_callback=None):
+    def __init__(self, output_callback=None, on_dir_change=None):
         self.output_callback = output_callback
+        self.on_dir_change = on_dir_change
         self.current_dir = r"C:\adb_ws"
         self.in_interactive_shell = False
         self.calls = []

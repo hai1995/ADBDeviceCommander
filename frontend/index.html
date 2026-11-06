@@ -121,9 +121,11 @@
                 <input id="cmd-import-file" type="file" accept=".json,.txt,application/json" hidden>
               </div>
               <div class="cmd-filterbar">
-                <input id="cmd-filter" type="text" class="inp" autocomplete="off"
-                       placeholder="搜索命令名 / 命令内容…" spellcheck="false">
-                <button id="btn-cmd-clear" class="btn tiny" data-icon="x">清空</button>
+                <div class="filter-input-wrap">
+                  <input id="cmd-filter" type="text" class="inp" autocomplete="off"
+                         placeholder="搜索命令名 / 命令内容…" spellcheck="false">
+                  <button id="btn-cmd-clear" class="clear-x" type="button" title="清空搜索" hidden>×</button>
+                </div>
                 <span class="cmd-drag-hint" title="按住指令卡约 0.4 秒后拖动即可换位；顺序记在 config.json 的 cmd_order 里">长按卡片可拖动排序</span>
               </div>
               <div id="cmd-tags" class="cmd-tags"></div>
@@ -135,15 +137,18 @@
             <section class="panel panel-right">
               <div class="panel-title">
                 指令输出<span class="panel-sub">CONSOLE</span>
+                <button id="btn-cmd-toggle" class="btn tiny" data-icon="caret-left"
+                        title="收起指令台，给输出区更大空间" aria-label="收起指令台"></button>
                 <button id="btn-clear-console" class="btn tiny" data-icon="trash">清空</button>
               </div>
               <div id="console" class="out console"></div>
 
               <div class="inputbar">
-                <div class="cmd-input-wrap">
+                <div class="cmd-input-wrap cmd-prompt-wrap">
+                  <!-- cmd 风格 prompt：显示当前会话路径，像 cmd / PowerShell 那样 -->
+                  <span class="cmd-prompt" id="cmd-prompt">PS C:\Users\></span>
                   <input id="cmd-input" type="text" autocomplete="off"
-                         placeholder="输入任意命令（adb / scrcpy 会自动按受控设备下发）…"
-                         spellcheck="false">
+                         placeholder="输入任意命令…" spellcheck="false">
                   <button id="btn-cmd-input-clear" class="clear-x" type="button" title="清空输入" hidden>×</button>
                 </div>
                 <button id="btn-run" class="btn accent" data-icon="play">执行</button>
