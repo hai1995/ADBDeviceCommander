@@ -4140,3 +4140,28 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   与「停止前断掉仍要告警」两条。
 - 验证：`pytest` **1370 passed / 1 skipped**（前端未改动）。
 
+
+# 第六十轮（主动停止误报「投屏已中断」 / 死亡收尾标记丢失）
+- 背景：继续审查投屏链路收尾与多设备录屏的并发路径。
+- `backend/mirror_service.py`：
+  - **Bug 1：主动停止投屏被报成「投屏已中断」**。`stop()` 会先 set `_stop`
+    再终止 adb / 关闭播放器管道；转发线程若恰好阻塞在写播放器 stdin 上，
+    写操作抛异常并被记进 `self.error`，随后 `_emit` 照常回调，界面在
+    「ℹ 已停止投屏」之后紧跟一条红色「⚠ 投屏已中断」。用户刚亲手停止，
+    却被告知投屏断了。现在 `_emit` 在 `_stop` 已置位时直接静默。
+  - **Bug 2：低帧率预览的旧错误永不清理**。`SnapMirror._loop` 抓到帧只把
+    连续失败计数清零，`self.error` 仍保留早先一次瞬时失败（adb 超时 /
+    设备忙）的原因；用户随后停止预览，收尾回调把这个**早已恢复**的旧原因
+    当成中断推给界面。现在成功出帧即清空 `self.error`，且停止时不再回调。
+- `backend/controllers/autorefresh.py`：
+  - **Bug 3：收尾线程在跑时死亡标记被取走即丢**。`died_serials()` /
+    `limit_serials()` 取完即清，而 `Workers.spawn("rec-reap-dead")` 对同名
+    存活线程会直接丢弃新参数 —— 多设备先后掉线时，后掉线那台的
+    「被意外中断（视频不完整）」结论永久丢失。现在上一轮收尾未结束时
+    先不取标记，留到下一轮轮询再取。
+- 测试：`tests/test_backend_mirror.py` 新增
+  `test_pipe_stop_does_not_announce_interrupt`、
+  `test_snap_recovered_frame_clears_stale_error`；
+  `tests/test_backend_controller.py` 新增
+  `test_reap_dead_does_not_consume_markers_while_teardown_running`。
+- 验证：`pytest` **1373 passed / 1 skipped**（前端未改动）。

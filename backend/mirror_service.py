@@ -517,7 +517,12 @@ class PipeMirror:
         # 没投起来就没什么可「中断」的：这条回调的语义是「已经在投的链路断了」，
         # 由 controller 转成红字状态。启动失败的那一档由 start() 的返回值负责，
         # 调用方会降级并给出正常提示。
-        if not self._started_ok:
+        #
+        # 用户主动停止同理：stop() 会先 set _stop 再关 adb / 播放器管道，转发
+        # 线程此刻若正好阻塞在写 stdin 上，会抛异常并被记进 self.error；若照常
+        # 回调，界面就会在「已停止投屏」之后紧跟一条红色「投屏已中断」。主动
+        # 停止不是中断，直接静默。
+        if not self._started_ok or self._stop.is_set():
             return
         if self.on_status:
             try:
@@ -791,6 +796,9 @@ class SnapMirror:
             data, err = self._grab()
             if data:
                 fails = 0
+                # 抓到帧就说明链路已经恢复：清掉上一瞬的失败原因，否则它会
+                # 一直留到最后，用户点「停止投屏」时被当成「投屏已中断」报红。
+                self.error = ""
                 self.server.set_frame(self.serial, data)
                 self.frames += 1
             else:
@@ -812,7 +820,9 @@ class SnapMirror:
                 self._stop.wait(wait)      # stop() 会提前唤醒
             if self._stop.is_set():
                 break
-        if self.on_status:
+        # 主动停止不是中断：不再回调 on_status，避免刚提示「已停止投屏」
+        # 又紧跟一条红色「投屏已中断」（原因见 PipeMirror._emit 的说明）。
+        if self.on_status and not self._stop.is_set():
             try:
                 self.on_status(self.serial, self.error)
             except Exception:

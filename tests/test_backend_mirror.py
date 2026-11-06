@@ -365,6 +365,34 @@ def test_snap_start_fails_without_data(monkeypatch):
     assert err
 
 
+def test_snap_recovered_frame_clears_stale_error(monkeypatch):
+    """抓帧恢复后必须清掉旧错误，且主动停止时不再回调 on_status。
+
+    回归：一次瞬时抓帧失败（adb 超时 / 设备忙）会被记进 self.error 且再也
+    不会被清；用户随后点「停止投屏」，_loop 收尾时把这个**早已恢复**的旧
+    原因回抛给 controller —— 界面刚提示「已停止投屏」，紧跟一条红色
+    「投屏已中断」，用户以为是自己把投屏搞断了。
+    """
+    srv = svc.FrameServer()
+    calls = []
+    m = svc.SnapMirror("adb", "S1", srv, 2,
+                       on_status=lambda s, e: calls.append((s, e)))
+    good = b"\x89PNG\r\n\x1a\nframe"
+    seq = [(None, "adb 超时"), (good, None)]
+
+    def fake_grab():
+        if seq:
+            return seq.pop(0)
+        m._stop.set()          # 已恢复出帧，由测试模拟用户点「停止」
+        return (good, None)
+
+    monkeypatch.setattr(m, "_grab", fake_grab)
+    m._loop()
+    assert m.frames == 2
+    assert m.error == "", "成功抓到帧后必须清掉上一瞬的失败原因"
+    assert calls == [], "主动停止不该报「投屏已中断」：%r" % (calls,)
+
+
 def test_snap_interval_clamps_fps():
     """帧率必须夹在 1~10：给 100 等于每 10ms 抓一次截图，只会白烧 CPU 与
     adb 带宽；给 0 / 空则回退默认 2fps（不能让它变成除零或疯狂抓帧）。"""
@@ -546,6 +574,45 @@ def test_pipe_announces_after_started_then_player_closed(monkeypatch):
     m._thread.join(timeout=5)
     assert calls, "投屏中断必须通知界面"
     assert "播放器窗口已关闭" in calls[0][1]
+
+
+def test_pipe_stop_does_not_announce_interrupt(monkeypatch):
+    """用户主动停止时，收尾阶段管道关闭引发的异常不能被报成「投屏已中断」。
+
+    回归：stop() 先 set _stop 再杀 adb / 关播放器管道。转发线程若恰好阻塞在
+    写播放器 stdin 上，写操作会抛异常并记进 self.error；随后 _emit 照常回调，
+    界面刚提示「已停止投屏」，紧跟一条红色「投屏已中断」，用户以为自己把
+    投屏弄断了。
+    """
+    calls = []
+    factory = _PopenFactory([[b"frame-1", b"frame-2"]])
+    m = _pipe(monkeypatch, factory,
+              on_status=lambda s, e: calls.append((s, e)))
+
+    class _RacingStdin(_FakeStdin):
+        """第二次写入时模拟「用户已点停止、播放器 stdin 被关」。"""
+        n = 0
+
+        def write(self, b):
+            type(self).n += 1
+            if type(self).n >= 2:
+                m._stop.set()
+                raise ValueError("write to closed file")
+            return super().write(b)
+
+    orig = factory.__call__
+
+    def _popen(cmd, **kw):
+        p = orig(cmd, **kw)
+        if "screenrecord" not in cmd:
+            p.stdin = _RacingStdin()
+        return p
+
+    monkeypatch.setattr(svc.subprocess, "Popen", _popen)
+    ok, _ = m.start()
+    assert ok is True
+    m._thread.join(timeout=5)
+    assert calls == [], "主动停止不该报「投屏已中断」：%r" % (calls,)
 
 
 def test_pipe_reports_reason_when_restarts_exhausted(monkeypatch):

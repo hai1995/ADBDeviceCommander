@@ -959,6 +959,38 @@ def test_reap_passes_limit_hits_alongside_dead(monkeypatch):
     assert spawned and spawned[0][2] == ([], ["A1"]), spawned
 
 
+def test_reap_dead_does_not_consume_markers_while_teardown_running(monkeypatch):
+    """上一轮收尾还在跑时，本轮不能取走死亡标记。
+
+    回归：`_reap_dead_recordings` 先把 `died_serials()` / `limit_serials()`
+    取走（取完即清），再 `workers.spawn("rec-reap-dead")`；同名线程只要还
+    存活，spawn 就直接丢弃新参数 —— 标记已被消耗、收尾却没收到，那台设备
+    「被意外中断（视频不完整）」的结论永久丢失（多设备先后掉线会撞上）。
+    """
+    api = _make_api()
+    api._rec_session = _dead_rec_session(".")
+    spawned = []
+    consumed = []
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: spawned.append(key))
+    monkeypatch.setattr(api.workers, "is_running",
+                        lambda key=None: key == "rec-reap-dead")
+
+    class FakeVideo:
+        def died_serials(self):
+            consumed.append("died")
+            return ["A2"]
+
+        def limit_serials(self):
+            consumed.append("limit")
+            return []
+
+    api.video = FakeVideo()
+    api._reap_dead_recordings()
+    assert consumed == [], "收尾线程还在跑时不能取走死亡标记"
+    assert spawned == [], spawned
+
+
 def test_reap_dead_recordings_noop_when_nothing_died(monkeypatch):
     """没有进程死亡时不得派 worker、不得动会话（自动轮询每秒都会走到这里）。"""
     api = _make_api()
