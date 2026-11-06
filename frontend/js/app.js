@@ -42,6 +42,7 @@
     shotPreview: $("shot-preview"), shotPreviewFrame: $("shot-preview-frame"),
     shotPreviewImg: $("shot-preview-img"), shotPreviewGrip: $("shot-preview-grip"),
     shotPreviewLoading: $("shot-preview-loading"),
+    shotPreviewLoadingText: $("shot-preview-loading-text"),
     shotPreviewName: $("shot-preview-name"),
     toolRec: $("tool-rec"),
     toolRecStop: $("tool-rec-stop"),
@@ -3558,20 +3559,63 @@
   const SHOT_PREVIEW_MIN_W = 160, SHOT_PREVIEW_MIN_H = 120, SHOT_PREVIEW_MAX_H = 1400;
   let shotPreviewSize = { w: 0, h: 0 };
   let shotPreviewSeq = 0;   // 多设备连拍时只认最后一次请求，防止旧响应覆盖新图
+  let shotPreviewLastPath = "";
 
   function setShotPreviewLoading(loading) {
     const frame = els.shotPreviewFrame;
     if (!frame) return;
     const busy = !!loading;
     frame.classList.toggle("is-loading", busy);
-    if (busy) frame.setAttribute("aria-busy", "true");
-    else frame.removeAttribute("aria-busy");
-    if (els.shotPreviewLoading) els.shotPreviewLoading.hidden = !busy;
+    if (busy) {
+      frame.classList.remove("is-error");
+      frame.setAttribute("aria-busy", "true");
+    } else {
+      frame.removeAttribute("aria-busy");
+    }
+    const note = els.shotPreviewLoading;
+    if (note) {
+      note.hidden = !busy;
+      if (busy) {
+        note.classList.remove("is-error");
+        note.setAttribute("role", "status");
+        note.removeAttribute("tabindex");
+        note.title = "";
+        if (els.shotPreviewLoadingText) els.shotPreviewLoadingText.textContent = "正在生成预览…";
+      }
+    }
+  }
+
+  /* 预览失败不是「没反应」：遮罩变成可点击的重试按钮，保留首次失败原因，
+     鼠标 / 键盘都能再来一次。读盘失败和图片解码失败走同一套。 */
+  function setShotPreviewError(message) {
+    const frame = els.shotPreviewFrame;
+    if (frame) {
+      frame.classList.remove("is-loading");
+      frame.classList.add("is-error");
+      frame.removeAttribute("aria-busy");
+    }
+    if (els.shotPreviewImg) {
+      // 先清 seq 再撤 src：部分 WebView 撤掉坏图时会再触发一次 error，
+      // 不标记就会把「重试中」又打回失败态。
+      els.shotPreviewImg.dataset.seq = "";
+      els.shotPreviewImg.removeAttribute("src");
+      els.shotPreviewImg.style.visibility = "";
+    }
+    const note = els.shotPreviewLoading;
+    if (note) {
+      note.hidden = false;
+      note.classList.add("is-error");
+      note.setAttribute("role", "button");
+      note.setAttribute("tabindex", "0");
+      note.title = "点击重新生成预览";
+      if (els.shotPreviewLoadingText) els.shotPreviewLoadingText.textContent = message;
+    }
   }
 
   async function showShotPreview(path) {
     if (!els.shotPreview || !els.shotPreviewImg) return;
     const seq = ++shotPreviewSeq;
+    shotPreviewLastPath = String(path || "");
     const nameOfPath = String(path || "").split(/[\\/]/).pop() || String(path || "");
     // 先亮出预览块与转圈，再去读盘：读盘 + base64 传输是秒级操作，
     // 若等结果回来才显示，用户会看到卡片下方空一块、没有任何「在做事」的迹象。
@@ -3580,18 +3624,22 @@
     if (els.shotPreviewName) {
       els.shotPreviewName.textContent = "正在生成预览…" + (nameOfPath ? "（" + nameOfPath + "）" : "");
       els.shotPreviewName.title = path;
+      els.shotPreviewName.classList.remove("err");
     }
     const res = await callApi(api.screenshot_data(path));
     if (seq !== shotPreviewSeq) return;   // 已有更新的一次预览请求，丢弃旧结果
     setShotPreviewLoading(false);
     if (!res || !res.ok || !res.data) {
+      setShotPreviewError("预览生成失败 · 点击重试");
       if (els.shotPreviewName) {
-        els.shotPreviewName.textContent = "预览生成失败：" + nameOfPath;
+        els.shotPreviewName.textContent = "预览生成失败，点击重试：" + nameOfPath;
         els.shotPreviewName.classList.add("err");
+        els.shotPreviewName.title = "点击重新生成预览";
       }
       return;
     }
     if (els.shotPreviewName) els.shotPreviewName.classList.remove("err");
+    els.shotPreviewImg.dataset.seq = String(seq);
     els.shotPreviewImg.src = "data:image/png;base64," + res.data;
     if (els.shotPreviewName) {
       els.shotPreviewName.textContent = res.name || path;
@@ -3620,6 +3668,41 @@
     const grip = els.shotPreviewGrip;
     const frame = els.shotPreviewFrame;
     if (!grip || !frame) return;
+
+    // 预览失败后的重试入口：鼠标点遮罩 / 键盘 Enter·Space / 点文件名都能重来。
+    const retry = () => {
+      if (!shotPreviewLastPath) return;
+      showShotPreview(shotPreviewLastPath);
+    };
+    if (els.shotPreviewLoading) {
+      els.shotPreviewLoading.addEventListener("click", () => {
+        if (els.shotPreviewLoading.classList.contains("is-error")) retry();
+      });
+      els.shotPreviewLoading.addEventListener("keydown", (e) => {
+        if (!els.shotPreviewLoading.classList.contains("is-error")) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); retry(); }
+      });
+    }
+    if (els.shotPreviewName) {
+      els.shotPreviewName.addEventListener("click", () => {
+        if (els.shotPreviewName.classList.contains("err")) retry();
+      });
+    }
+    if (els.shotPreviewImg) {
+      // base64 坏掉 / 截断时 <img> 只会显示裂图标；把失败写回遮罩，给统一重试入口。
+      els.shotPreviewImg.addEventListener("error", () => {
+        const seq = els.shotPreviewImg.dataset.seq;
+        if (!seq || seq !== String(shotPreviewSeq)) return;
+        const base = shotPreviewLastPath.split(/[\\/]/).pop() || shotPreviewLastPath;
+        setShotPreviewError("预览图解码失败 · 点击重试");
+        if (els.shotPreviewName) {
+          els.shotPreviewName.textContent = "预览图解码失败，点击重试：" + base;
+          els.shotPreviewName.classList.add("err");
+          els.shotPreviewName.title = "点击重新生成预览";
+        }
+      });
+    }
+
     let drag = null;
     grip.addEventListener("pointerdown", (e) => {
       const fr = frame.getBoundingClientRect ? frame.getBoundingClientRect() : null;

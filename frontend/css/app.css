@@ -1386,6 +1386,13 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 /* 预览生成中：占住高度、隐藏旧图，中间转圈 + 文案，避免等几秒后突然弹出。 */
 .shot-preview-frame.is-loading { min-height: 220px; }
 .shot-preview-frame.is-loading img { visibility: hidden; }
+/* 失败态：遮罩复用成「点击重试」按钮，去掉转圈、换错误色。 */
+.shot-preview-frame.is-error { min-height: 220px; }
+.shot-preview-loading.is-error {
+  cursor: pointer; color: var(--err); background: var(--err-soft);
+  border: 1px dashed rgba(255, 95, 107, .38); text-align: center;
+}
+.shot-preview-loading.is-error .spinner { display: none; }
 .shot-preview-loading {
   position: absolute; inset: 0; z-index: 1;
   display: flex; align-items: center; justify-content: center; gap: 8px;

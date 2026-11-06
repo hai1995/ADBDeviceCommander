@@ -4066,3 +4066,23 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 - 验证：`node tests/frontend/run-all.cjs` **87 个文件 0 失败**；
   `loading_states.test.cjs` 45 项全过。
 
+# 第五十七轮（预览失败可重试 + README 快速排障）
+- 背景：预览图读盘失败时只把文件名标红成「预览生成失败：xxx」，遮罩收起、
+  `img` 仍可见（可能还是上一张旧图），用户既分不清「旧图 / 新图」，也没有重试入口；
+  `img` 解码失败（base64 截断 / 损坏）更只剩一张裂图。
+- `frontend/js/app.js`：
+  - 失败遮罩复用为可点击按钮：`is-error` 态去掉转圈、换错误色、提示
+    「预览生成失败 · 点击重试」；鼠标、Enter / Space、点文件名都能重新请求；
+  - 失败时清掉旧 `src`，避免旧图冒充新图；
+  - `<img>` `error` 事件按当前请求序号校验后写回同一失败态（base64 损坏也能重试）；
+  - 重试走原有 `shotPreviewSeq`，多设备连拍时仍只认最后一次响应。
+- `frontend/index.html` / `frontend/css/app.css`：遮罩文案 / 转圈拆出 id 便于切换；
+  补 `is-error` 的尺寸、错误色、虚线与手型光标。
+- `README.md`：新增「常见问题（快速排障）」六条速查（设备空白 / 未授权、
+  more than one device、短暂失联、json 不生效、录屏无声音、更新不自动装），
+  并加入文档导航；界面说明补预览失败重试。
+- `使用说明.txt`：截图段落补失败重试说明。
+- `tests/frontend/loading_states.test.cjs`：新增失败遮罩重试组（旧图清除、文案、
+  点击后二次请求、重试成功收起）与 CSS 可点击断言。
+- 验证：前端 **87 个文件 0 失败**；`loading_states.test.cjs` 55 项全过。
+

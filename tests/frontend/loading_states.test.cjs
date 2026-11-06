@@ -106,6 +106,8 @@ function mkEnv(overrides) {
        "预览生成时先占住高度（不塌成一条线）");
     ok(/\.shot-preview-loading\s*\{[^}]*position: absolute/.test(css),
        "加载遮罩覆盖预览框");
+    ok(/\.shot-preview-loading\.is-error\s*\{[^}]*cursor: pointer/.test(css),
+       "失败遮罩可点击重试");
   }
 
   console.log("\n[1] 截图预览：数据回来之前先显示加载遮罩");
@@ -133,6 +135,40 @@ function mkEnv(overrides) {
     const done = await waitFor(() => note.hidden && !frame.classList.contains("is-loading"), 3000, "遮罩收起");
     ok(done, "数据到达后遮罩收起");
     ok(/^data:image\/png;base64,/.test(img.getAttribute("src") || ""), "预览图正常写入");
+  }
+
+  console.log("\n[1.5] 截图预览失败：遮罩变成可点击重试");
+  {
+    let calls = 0, resolveSecond = null;
+    const { window } = mkEnv({
+      screenshot_data: () => {
+        calls++;
+        if (calls === 1) return Promise.resolve({ ok: false, reason: "read_failed" });
+        return new Promise((r) => { resolveSecond = r; });
+      },
+    });
+    const doc = window.document;
+    const frame = doc.getElementById("shot-preview-frame");
+    const note = doc.getElementById("shot-preview-loading");
+    const img = doc.getElementById("shot-preview-img");
+    const name = doc.getElementById("shot-preview-name");
+    await waitFor(() => !doc.getElementById("tool-shot").disabled, 3000, "设备就绪");
+    window.__push({ kind: "tool", payload: { type: "screenshot", path: "D:\\x\\bad.png" } });
+    const failed = await waitFor(() => !note.hidden && note.classList.contains("is-error"), 4000, "失败态");
+    ok(failed, "读盘失败后遮罩显示错误态");
+    ok(frame.classList.contains("is-error"), "预览框标记 is-error 并保持高度");
+    ok(!img.getAttribute("src"), "失败后不保留旧图");
+    ok((doc.getElementById("shot-preview-loading-text").textContent || "").indexOf("点击重试") >= 0,
+       "遮罩文案提示点击重试");
+    ok(name.classList.contains("err"), "文件名行也标记失败");
+    note.dispatchEvent(new window.Event("click", { bubbles: true }));
+    await waitFor(() => calls === 2, 3000, "重试请求");
+    ok(calls === 2, "点击遮罩会重新请求预览");
+    resolveSecond({ ok: true, data: PNG_B64, name: "bad.png" });
+    const done = await waitFor(() => note.hidden && !frame.classList.contains("is-error"), 3000, "重试成功");
+    ok(done, "重试成功后遮罩收起");
+    ok(/^data:image\/png;base64,/.test(img.getAttribute("src") || ""), "重试成功后正常显示预览");
+    ok(!name.classList.contains("err"), "成功后清除失败标记");
   }
 
   console.log("\n[2] 截图按钮：点击即转圈，shot_state 收尾后恢复");
