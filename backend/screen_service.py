@@ -1186,6 +1186,16 @@ class VideoRecorder:
                     proc.kill()
             except Exception:
                 pass
+        # 关 pipe：与 stop_ex 同一处理。取消录屏同样会结束一个 adb 进程，
+        # 不主动关 stdout / stderr，句柄要等 GC 才回收；Windows 上反复
+        # 「录制 → 取消」会累积句柄，最终触发句柄耗尽。
+        for s in ("stdout", "stderr"):
+            try:
+                f = getattr(proc, s, None)
+                if f is not None:
+                    f.close()
+            except Exception:
+                pass
         with self._lock:
             self._sessions.pop(serial, None)
         # 2) 已录完的段正在后台并行拉取：等它们各自结束再交路径，否则 pull 线程

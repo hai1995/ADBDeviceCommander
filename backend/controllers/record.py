@@ -658,6 +658,10 @@ class RecordMixin:
         # 退出 → 轮询设备端文件就绪 → pull」，几台设备并行也要数秒；日志若等
         # 它拉完再停，就会比视频多跑这几秒 —— 事后按时间轴对照视频找日志时，
         # 两边差出的正是案发现场那一段。
+        # 记下「下发停止」的本机时刻：后面算日志覆盖度时要扣掉收尾本身的耗时
+        # （拉段 / 合并 / 打包 / 等设备回来可能长达数十秒），否则一次正常收尾
+        # 会被误报成「后段日志丢失」。
+        logcat_stop_ts = time.time()
         for s in list(sess.get("logcat_captures", {}).keys()):
             try:
                 self.logcat_capture.stop(s, zip_on_stop=False)
@@ -795,7 +799,8 @@ class RecordMixin:
         # 结论只进内存（sess["logcat_notes"]），由调用方在「✓ 录屏已完成」之后
         # 逐条播报 —— 从这里直接弹 toast 会被后面那条成功提示盖掉。
         sess["logcat_notes"] = self._logcat_coverage_notes(
-            sess, sess.get("logcat_captures") or {})
+            sess, sess.get("logcat_captures") or {},
+            since_ts=logcat_stop_ts)
         # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
         zpath = None
         if sess.get("with_zip") and rec_files:
@@ -812,7 +817,7 @@ class RecordMixin:
                             % sess.get("dir"))
         return rec_files, zpath
 
-    def _logcat_coverage_notes(self, sess, cap_map):
+    def _logcat_coverage_notes(self, sess, cap_map, since_ts=None):
         """录屏收尾时校验「同步日志到底跟到什么时候」，返回 [(级别, 文案)]。
 
         为什么非做不可：用户实况是视频录到 11:14，配套 logcat 的最后一条却停在
@@ -827,11 +832,24 @@ class RecordMixin:
 
         任何一步取不到（设备已拔、shell 被拦截、文件里没有时间戳）都安静跳过：
         这是增强提示，不是判定成功/失败的依据，宁可不说也不给错结论。
+
+        since_ts：下发「停止 logcat」的本机时刻（time.time()）。收尾本身要花时间
+        （拉段、合并、打包、设备重启等待），若直接用「现在」减日志最后一条，会把
+        这段耗时算成日志缺口，正常收尾也可能被误报成「后段日志丢失」。传入该值
+        后按本机流逝时长扣掉；不传则保持原行为（仅用于对拍/测试）。
         """
         jobs = [(s, p) for s, p in (cap_map or {}).items() if p]
         if not jobs:
             return []
         host_now = time.time()
+        # 从「下发停止」到「算覆盖度」之间流逝的本机秒数。设备时钟与本机时钟在
+        # 几十秒的收尾窗口内同步推进，用本机流逝时长近似设备侧流逝时长即可。
+        elapsed = 0.0
+        if since_ts is not None:
+            try:
+                elapsed = max(0.0, host_now - float(since_ts))
+            except (TypeError, ValueError):
+                elapsed = 0.0
 
         def _one(job):
             s, p = job
@@ -859,7 +877,9 @@ class RecordMixin:
                 if tz_off is not None:
                     last_ep = ts_epoch(last, ref=dev_now, tz_offset=tz_off)
                     if last_ep is not None:
-                        gap = dev_now - last_ep
+                        # 扣掉「停止之后收尾花了多久」：日志停在下发停止那一刻，
+                        # 之后的拉段 / 合并 / 打包不属于日志缺口。
+                        gap = dev_now - elapsed - last_ep
                 if gap is not None and gap >= LOGCAT_COVERAGE_WARN_S:
                     out.append((
                         "warn",

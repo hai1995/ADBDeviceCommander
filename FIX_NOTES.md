@@ -4117,3 +4117,26 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
     加一轮 close stdout / stderr。
 - 验证：`pytest` **1355 passed / 1 skipped**；前端 **87 个文件 0 失败**。
 
+# 第五十九轮（车机重启取回 / 取消路径 pipe / 日志覆盖度误报）
+- 背景：围绕「录屏期间车机重启不能丢视频 / 日志」继续审查收尾与失败路径。
+- `backend/screen_service.py`：
+  - **Bug 1：设备重启后 `_pull_one` 直接放弃**。`_remote_probe` 判定设备
+    offline 时，旧代码只报「pull 失败」就退出——设备明明会在几十秒后回来，
+    `/data/local/tmp` 里已经录好的那一段却永久丢失。现在先
+    `_wait_device_back`（最多 60 秒）等设备回到 `device`，再 probe + pull；
+    回来后文件仍在就按正常路径拉取并校验 moov。新增回归用例
+    （重启后临时文件仍在 → 必须能取回）。
+  - **Bug 2：`discard_ex` 漏关 adb 管道**。第五十八轮修了 `stop_ex`，但后加的
+    取消路径 (`discard_ex`) 在 wait/kill 之后没有 close stdout/stderr，句柄要
+    等 GC 才回收；Windows 上反复「录制 → 取消」会累积句柄。补齐同一处理。
+- `backend/controllers/record.py`：
+  - **Bug 3：收尾耗时被算进「日志缺口」**。覆盖度校验用「现在（设备时间）−
+    日志最后一条」算缺口，但这段校验发生在视频拉段 / 合并 / 打包之后，正常
+    收尾多花的几十秒会被误报成「后段日志已丢失」。改为在**下发停止 logcat
+    的那一刻**记下本机时刻，校验时扣掉此后流逝的时长（`since_ts`）；停止前
+    就已断掉的日志仍照常告警。
+- 测试：`tests/test_backend_screen.py` 新增 `test_discard_ex_closes_adb_pipes`；
+  `tests/test_backend_record_logcat_coverage.py` 新增「收尾耗时不算缺口」
+  与「停止前断掉仍要告警」两条。
+- 验证：`pytest` **1370 passed / 1 skipped**（前端未改动）。
+

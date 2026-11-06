@@ -1582,6 +1582,44 @@ def test_discard_ex_is_not_reported_as_unexpected_death(monkeypatch, tmp_path):
     assert vr.died_serials() == [], "取消不该被标记成意外中断"
 
 
+def test_discard_ex_closes_adb_pipes(monkeypatch, tmp_path):
+    """取消录屏也要主动关闭 adb 进程的 stdout/stderr（与 stop_ex 同一处理）。
+
+    回归：stop_ex 早已补了关管道，discard_ex 是后加的独立路径却漏了同一处理。
+    Popen 的管道句柄要等对象被 GC 才回收；反复「录制 → 取消」会累积句柄，
+    Windows 上最终表现为后续 Popen 失败。
+    """
+    monkeypatch.setattr(
+        ss.subprocess, "run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    class _Pipe:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Proc(_FakeProc):
+        def __init__(self):
+            super().__init__()
+            self.stdout = _Pipe()
+            self.stderr = _Pipe()
+
+    vr = ss.VideoRecorder(_Bus(), "adb")
+    proc = _Proc()
+    vr._sessions["A1"] = {
+        "remote": "/sdcard/adb_rec_A1.mp4",
+        "local": str(tmp_path / "record_A1_x.mp4"),
+        "proc": proc, "dir": str(tmp_path), "done": threading.Event(),
+    }
+
+    ok, _paths, err = vr.discard_ex("A1")
+
+    assert ok and err is None, (ok, err)
+    assert proc.stdout.closed and proc.stderr.closed, "取消后 adb 管道必须关闭"
+
+
 def test_discard_unknown_serial_is_rejected(tmp_path):
     """没在录的设备点取消：返回「未在录制」，不抛异常。"""
     vr = ss.VideoRecorder(_Bus(), "adb")

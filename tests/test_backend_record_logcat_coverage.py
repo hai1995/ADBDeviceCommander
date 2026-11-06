@@ -124,6 +124,36 @@ def test_notes_skip_quietly_when_device_time_unavailable(tmp_path, monkeypatch):
     assert api._logcat_coverage_notes({}, {"A1": p}) == []
 
 
+def test_notes_do_not_count_teardown_elapsed_as_log_gap(tmp_path, monkeypatch):
+    """收尾耗时（拉段 / 合并 / 打包 / 等设备回来）不能被算成日志缺口。
+
+    回归：日志恰在「点停止」那一刻结束，但收尾合并可能再花几十秒；用「现在」
+    减最后一条时间戳，会把这段耗时误报成「后段日志丢失」，用户以为日志残缺。
+    since_ts 是下发停止的时刻，必须把它之后的耗时扣掉。
+    """
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 300), _ts(now - 65)])
+    _fake_clock(monkeypatch, now)
+
+    # 65 秒前下发停止，日志恰停在那里：收尾耗时 65 秒，不该报警。
+    assert api._logcat_coverage_notes({}, {"A1": p}, since_ts=now - 65) == []
+
+
+def test_notes_still_warn_when_log_died_before_stop(tmp_path, monkeypatch):
+    """扣收尾耗时只影响「停止之后」的时间，停止前就断掉的日志照样必须报。"""
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 1500), _ts(now - 1440)])
+    _fake_clock(monkeypatch, now)
+
+    notes = api._logcat_coverage_notes({}, {"A1": p}, since_ts=now - 30)
+    warns = [t for lvl, t in notes if lvl == "warn"]
+    assert warns and "后段日志已丢失" in warns[0], notes
+
+
 def test_notes_survive_adb_exception(tmp_path, monkeypatch):
     """探测过程抛异常也不能影响收尾：返回空列表即可。"""
     api = _make_api()
