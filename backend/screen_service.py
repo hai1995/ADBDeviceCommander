@@ -1162,6 +1162,29 @@ class VideoRecorder:
         except Exception:
             return False
 
+    def _wait_device_back(self, serial, max_wait_s=60, interval_s=3):
+        """等设备从 offline / reboot 回来。每 interval_s 秒 poll 一次 get-state。
+
+        返回 True 表示设备已回到 state=device；False 表示等了 max_wait_s 仍未回来。
+        给设备重启留足窗口（Android 冷启动一般 15~30 秒）。USB 拔线不会回来，
+        这时也不会无限等——max_wait_s 到期就放弃。
+        """
+        deadline = time.time() + max(1, max_wait_s)
+        while time.time() < deadline:
+            try:
+                r = subprocess.run(
+                    [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
+                if r.returncode == 0 and (r.stdout or "").strip() == "device":
+                    return True
+            except Exception:
+                pass
+            # 用 deadline 减当前时间算出剩余，避免等过了 deadline
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
+            time.sleep(min(interval_s, remain))
+        return False
+
     def _pull_and_finish(self, serial):
         with self._lock:
             sess = self._sessions.pop(serial, None)
@@ -1194,15 +1217,32 @@ class VideoRecorder:
         for attempt in range(6):
             ready, why, gone = self._remote_probe(self.adb, serial, remote)
             if gone:
-                # 设备掉线 / 未授权 / adb 连接断了：`ls` 再试一百次也是同一句话。
-                # 旧实现把它与「文件还没写好」一视同仁，白等 9 秒，最后报
-                # 「设备端未生成录屏文件（screenrecord 可能未启动/提前退出）」——
-                # 用户于是去查 screenrecord，而真正的问题是设备已经不在了
-                # （往往是拔了线、锁屏杀掉了 adb、或者无线设备换了 IP）。
-                # 立即返回真因，并把 adb 的原话带上。
-                return False, None, (
-                    "设备已断开，录屏文件无法取回%s"
-                    % ("（%s）" % why if why else ""))
+                # 设备掉线 / 未授权 / adb 连接断了：可能是拔线，也可能是用户在重启设备。
+                # 设备重启期间 screenrecord 进程被杀、/data/local/tmp 里的 mp4 还没被
+                # 系统清理（多数 ROM 重启后才会清，少数不清）——此时立即放弃会丢掉
+                # 已经录好的那一段。给一次等待机会：等设备回来（最多 60 秒），
+                # 回来后再 probe + pull。还不行才真正放弃。
+                returned = self._wait_device_back(serial, max_wait_s=60)
+                if not returned:
+                    return False, None, (
+                        "设备已断开，录屏文件无法取回（等待设备重启超时 60 秒）%s"
+                        % ("（%s）" % why if why else ""))
+                # 设备回来了！再 probe + pull 一次
+                ready, why, gone = self._remote_probe(self.adb, serial, remote)
+                if gone:
+                    # 刚回来又掉了？那就真的没办法了
+                    return False, None, (
+                        "设备重连后再次断开，录屏文件无法取回%s"
+                        % ("（%s）" % why if why else ""))
+                # ready=False 但 gone=False：文件被系统清了（/data/local/tmp 重启后清空）
+                # 或 screenrecord 被杀时根本没来得及 flush 任何东西
+                if not ready:
+                    return False, None, (
+                        "设备已重启，但录屏临时文件已被系统清理或从未写入磁盘，"
+                        "本次录制内容丢失"
+                        + ("（%s）" % why if why else ""))
+                # ready=True：文件还在！走下面的 pull 路径
+                break
             if ready:
                 try:
                     r = subprocess.run(

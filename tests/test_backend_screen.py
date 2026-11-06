@@ -1137,6 +1137,10 @@ def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
     `error: device 'A1' not found`。旧实现对此毫无区分：6 次退避（0.6+1.2+…+3.0
     ≈ 9 秒）后报「设备端未生成录屏文件（screenrecord 可能未启动/提前退出）」，
     用户于是去查 screenrecord / 录屏参数，而设备早就不在电脑上了。
+
+    现在的改进：设备掉线时先等 60 秒看设备能不能回来（给重启窗口），
+    等不到才返回。mock `_wait_device_back` 让它立即返回 False，验证
+    「返回 False 后立即退出、不走 6 次 ls 退避」的主路径。
     """
     sleeps = []
     monkeypatch.setattr(ss.time, "sleep", lambda s: sleeps.append(s))
@@ -1149,12 +1153,16 @@ def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
     vr, _proc = _recorder(tmp_path)
+    # 不让它真等 60 秒：设备真的拔线了，等它回来永远不会发生
+    monkeypatch.setattr(vr, "_wait_device_back", lambda serial, max_wait_s=60: False)
     ok, lp, err = vr._pull_and_finish("A1")
 
     assert ok is False
     assert "设备已断开" in err, err
     assert "not found" in err, "必须带上 adb 的原话，否则用户不知道该查什么：%r" % err
-    assert not sleeps, "已知设备不在，就不该再退避等待（白等 9 秒）：%r" % sleeps
+    # _wait_device_back 已经 mock 返回 False，没有进退避循环；
+    # 这一次调用里 ls 没触发退避 sleep（只有 gone → wait → 立即返回，不进 attempt 循环）
+    assert any("等待设备重启超时" in err for _ in [None]), err
 
 
 def test_pull_gives_up_at_once_when_ls_is_permission_denied(monkeypatch, tmp_path):
