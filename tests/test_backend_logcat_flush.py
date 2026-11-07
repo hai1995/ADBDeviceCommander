@@ -7,6 +7,7 @@
 以为监控挂了。现在 stdout 由读线程搬进队列，消费循环用 get(timeout) 等待，
 超时即按时刷新/收尾爆发期，不再依赖设备继续吐日志。
 """
+import queue
 import threading
 import time
 
@@ -122,3 +123,67 @@ def test_boot_tail_is_flushed_when_stream_goes_quiet(monkeypatch):
             % bus.pushed_lines())
     finally:
         mon.stop("A1")
+
+
+class _FloodProc:
+    """尽可能快地吐 n 行，模拟日志洪流（消费端故意不消费）。"""
+
+    def __init__(self, n):
+        self._n = n
+        self._i = 0
+        self._alive = True
+
+    @property
+    def stdout(self):
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # 真 adb 被终止后 stdout 会 EOF；假进程用 _alive 模拟这一点，
+        # 否则读线程只能靠「队列满 + poll」这个兜底路径退出。
+        if not self._alive or self._i >= self._n:
+            raise StopIteration
+        self._i += 1
+        return "08-29 10:00:00.000  1  1 I Tag: flood %d\n" % self._i
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def terminate(self):
+        self._alive = False
+
+
+def test_pump_queue_is_bounded_for_backpressure():
+    """读线程 → 消费线程的队列必须有界，否则日志洪流会把内存吃光。
+
+    消费端完全不动时，读线程最多只能填满 _QUEUE_MAX 行就阻塞住（旧实现里
+    消费与读同线程，管道满了天然反压到 adb；改成读线程后必须用有界队列
+    把这层背压补回来）。
+
+    同时验证 adb 退出后读线程不会永远卡在满队列的 put 上。
+    """
+    q = queue.Queue(maxsize=5)
+    proc = _FloodProc(10000)
+    t = threading.Thread(target=ls.LogcatMonitor._pump, args=(proc, q),
+                         daemon=True)
+    t.start()
+    try:
+        deadline = time.time() + 1.0
+        while time.time() < deadline and q.qsize() < 5:
+            time.sleep(0.01)
+        assert q.qsize() == 5, "队列应被上限卡住，实际 %d 行" % q.qsize()
+        assert proc._i <= 10, (
+            "读线程不应在消费端停滞时继续抽干 adb 输出（已读 %d 行）" % proc._i)
+    finally:
+        proc.terminate()
+        # 消费者已走 + adb 已退出：读线程要能自行退出，不能遗留卡死的线程
+        deadline = time.time() + 3.0
+        while t.is_alive() and time.time() < deadline:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                time.sleep(0.01)
+        assert not t.is_alive(), "adb 退出后读线程仍卡在 put 上"
+

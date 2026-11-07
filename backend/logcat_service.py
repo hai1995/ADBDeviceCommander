@@ -59,6 +59,12 @@ def _terminate(proc):
 
 _BATCH_MAX = 400          # 单次 append 事件最多携带行数
 _FLUSH_MS = 0.05          # 批量刷新间隔（秒）
+# 读线程与消费线程之间的行队列上限。必须**有界**：无界队列会让读线程把 adb
+# 管道抽干（旧实现里消费与读在同一线程，管道满了自然反压到 adb 与设备端，
+# 日志洪流不会在本进程堆内存）。有界队列 + 阻塞 put 把这份背压原样保留，
+# 同时仍能让消费循环按 _FLUSH_MS 限时等待、按时刷新残批。5000 行 ≈ 数百 KB
+# 到 1MB，足够吸收启动爆发期的抖动。
+_QUEUE_MAX = 5000
 
 # 读线程队列的结束哨兵：看到它说明 adb 的输出已到 EOF（或读线程异常退出），
 # 消费循环据此收尾，而不是继续等下去。
@@ -258,6 +264,7 @@ class LogcatMonitor:
         # 分帧渲染占满 —— 一开始监控整个程序就卡顿（用户实报）。
         win_start, win_pushed = t0, 0
         dropped, noticed, last_notice = 0, 0, 0.0
+        q = None                  # 读线程 → 消费线程的行队列（见下方说明）
         try:
             # 读线程 + 限时等待的消费循环。
             #
@@ -270,7 +277,7 @@ class LogcatMonitor:
             # 读线程只负责把 stdout 搬进队列，消费循环用 get(timeout) 等待：
             # 超时即代表「这段时间没有新行」，正好用来按时刷新与收尾爆发期。
             # 单线程消费保证推送顺序与原来完全一致。
-            q = queue.Queue()
+            q = queue.Queue(maxsize=_QUEUE_MAX)
             threading.Thread(
                 target=self._pump, args=(proc, q),
                 daemon=True, name="logcat-pump-%s" % serial).start()
@@ -384,6 +391,14 @@ class LogcatMonitor:
                              "（实时监控限速 %d 行/秒）"
                              % (dropped - noticed, LOGCAT_DISPLAY_MAX_LPS)})
             _terminate(proc)
+            # 把队列里没消费完的行丢掉，解开可能阻塞在满队列 put 上的读线程，
+            # 让它读到 EOF 自行退出（否则每次停止都可能遗留一个卡住的 pump 线程）。
+            if q is not None:
+                try:
+                    while True:
+                        q.get_nowait()
+                except queue.Empty:
+                    pass
             with self._lock:
                 self._running.pop(serial, None)
                 self._procs.pop(serial, None)
@@ -413,14 +428,29 @@ class LogcatMonitor:
         只做搬运、不做解析：解析与推送全部留在 worker 线程，保证事件顺序与
         原先的单线程读循环完全一致。异常（终止瞬间的管道错误）不外抛 —— 收尾
         由 worker 的 finally 统一负责。
+
+        队列有界，put 满了就阻塞（限时重试）：这就是旧「同线程阻塞读」天然
+        具备的背压 —— 队列满 → 不再读 stdout → 管道满 → adb 停写 → 设备端
+        logcat 缓冲自己顶住，本进程内存不会随日志洪流无上限增长。
+        adb 进程已退出（消费者也走了）时直接返回，避免线程永远卡在 put 上。
         """
         try:
             for raw in proc.stdout:
-                q.put(raw)
+                while True:
+                    try:
+                        q.put(raw, timeout=0.5)
+                        break
+                    except queue.Full:
+                        if proc.poll() is not None:
+                            return
         except Exception:
             pass
         finally:
-            q.put(_LOGCAT_EOF)
+            # 收尾哨兵也可能撞上满队列：限时投递，投不进去说明消费者已经不在了。
+            try:
+                q.put(_LOGCAT_EOF, timeout=0.5)
+            except Exception:
+                pass
 
     @staticmethod
     def _classify_and_filter(raw, levels, keyword, only_exc, stats=None):

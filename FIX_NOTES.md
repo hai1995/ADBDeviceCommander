@@ -4197,3 +4197,21 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   与「爆发期尾部」两种设备安静场景（停止前就必须收到全部行）。
 - 验证：`pytest` **1376 passed / 1 skipped**；`ruff` F/E9/B 全过。
 
+## 2026-11-07 — 读线程队列改为有界，恢复日志洪流下的背压
+
+- `backend/logcat_service.py`：上一轮把实时监控的 stdout 搬到独立读线程后，
+  读线程与消费线程之间用的是**无界** `queue.Queue`。旧实现里读与消费在同一
+  线程，管道写满会自然反压到 `adb`、再到设备端 logcat 缓冲；拆成两线程后
+  这层背压消失，日志洪流（启动 dump / 满缓冲全级别）时读线程会把 adb 输出
+  尽量抽干堆进队列，内存随流量无上限增长。现在队列容量固定为 `_QUEUE_MAX`
+  （5000 行），`put` 满时限时阻塞 —— 队列满 → 不读 stdout → 管道满 → adb
+  停写，背压链路与旧实现一致；消费循环仍用 `get(timeout=_FLUSH_MS)`，按时
+  刷新残批的行为不变。`_pump` 在 adb 已退出且队列持续满时直接返回，避免
+  线程卡死在 `put` 上；worker 的 finally 在终止子进程后清空队列，解开可能
+  阻塞的读线程。
+- 测试：`tests/test_backend_logcat_flush.py` 新增
+  `test_pump_queue_is_bounded_for_backpressure`（消费端停滞时读线程最多填满
+  队列，且 adb 退出后能自行结束）。
+- 验证：`pytest` **1377 passed / 1 skipped**。
+
+
