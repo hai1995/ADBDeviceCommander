@@ -842,6 +842,68 @@ def test_confirm_segment_does_not_kill_reboot_wait(tmp_path):
     assert not sess.get("seg_err"), "等待重启期间不该写「段启动后立即退出」"
 
 
+def test_confirm_segment_does_not_mark_died_when_device_gone_but_watcher_late(
+        tmp_path, monkeypatch):
+    """竞态回归：watcher 的 adb 探测还没回来，confirm 不得抢先把续录掐死。
+
+    车机重启刚自动续上一段、设备又掉了一次时：新段秒退，watcher 的
+    `_device_online` 要等 adb 超时（常超过 confirm 的 1.5s），confirm 先拿到锁。
+    此时 reboot_wait 尚未置位 —— 老代码会在这里标 died，controller 立刻收尾、
+    等待线程因 should_abort 退出，「设备回来后自动继续录制」被掐断。
+    confirm 必须先做同一次探测：设备明确离线就交给 watcher。
+    """
+    monkeypatch.setattr(ss.time, "sleep", lambda *_: None)
+    vr, _unused = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    dead = _FakeProc()
+    dead.poll = lambda: 0
+    sess["proc"] = dead
+    # 设备明确离线（重启中），但 watcher 还没来得及置 reboot_wait
+    monkeypatch.setattr(vr, "_device_online", lambda s: False)
+    monkeypatch.setattr(vr, "_wait_reboot_and_resume", lambda *a: None)
+
+    vr._confirm_segment("A1", dead, 2)
+
+    assert sess.get("died") is None, "设备离线时 confirm 不得抢先判死"
+    assert not sess.get("seg_err")
+
+    # watcher 探测回来后正常转入等待重启，整场录制不中断
+    vr._watch_exit("A1", dead)
+    assert sess.get("died") is None
+    assert sess.get("reboot_wait") is True
+
+
+def test_confirm_segment_marks_died_when_device_online(tmp_path, monkeypatch):
+    """设备在线、新段仍秒退（编码器占用 / 磁盘满）：必须判死并写明段号。"""
+    monkeypatch.setattr(ss.time, "sleep", lambda *_: None)
+    vr, _unused = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    dead = _FakeProc()
+    dead.poll = lambda: 0
+    sess["proc"] = dead
+    monkeypatch.setattr(vr, "_device_online", lambda s: True)
+
+    vr._confirm_segment("A1", dead, 2)
+
+    assert sess.get("died") is True
+    assert "第 2 段启动后立即退出" in (sess.get("seg_err") or "")
+
+
+def test_confirm_segment_marks_died_when_probe_fails(tmp_path, monkeypatch):
+    """探测本身失败（adb 不可用）：保持老行为判死，不白等重启窗口。"""
+    monkeypatch.setattr(ss.time, "sleep", lambda *_: None)
+    vr, _unused = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    dead = _FakeProc()
+    dead.poll = lambda: 0
+    sess["proc"] = dead
+    monkeypatch.setattr(vr, "_device_online", lambda s: None)
+
+    vr._confirm_segment("A1", dead, 2)
+
+    assert sess.get("died") is True
+
+
 def test_reboot_wait_resumes_next_segment_when_device_returns(tmp_path, monkeypatch):
     """设备回来：先收好重启前那一段，再自动接下一段，整场录制不中断。"""
     vr, proc = _recorder(tmp_path)

@@ -4281,3 +4281,21 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
   执行指示不被改动（先用一条正常输出确认这批事件确实已被处理，避免空等）。
   已验证该用例在修复前会失败 3 条。
 - 验证：后端 **1381 passed / 1 skipped**；前端 87 个用例文件全绿。
+
+## 2026-11-08 — 录屏续段确认不再抢先判死（车机二次掉线竞态）
+
+「录屏期间车机重启不丢视频」依赖 `_watch_exit` 把掉线设备转入等待重启窗口。
+但自动续段的「启动确认」线程 `_confirm_segment` 只睡 1.5s，而 watcher 的
+`_device_online` 是一次 adb 往返、设备掉线时要等到超时 —— 车机重启刚自动
+续上一段、设备又掉一次时，新段秒退，confirm 会抢在 watcher 置 `reboot_wait`
+之前拿到锁并标 `died`。controller 看到 died 立刻收尾、等待线程也因
+should_abort 退出，「设备回来后自动继续录制」当场被掐断，后段画面丢失。
+
+- `backend/screen_service.py`：`_confirm_segment` 标死前做与 watcher 相同的
+  一次 `_device_online` 探测；设备**明确**离线（False）时不判死，交给 watcher
+  转入等待重启。探测失败（None）保持老行为判死，与 watcher 策略一致；健康
+  续段在 1.5s 探活处即返回，不产生额外 adb 调用。
+- 测试：`tests/test_backend_screen.py` 新增 3 条 —— 竞态回归（设备离线且
+  watcher 未到时 confirm 不判死，watcher 随后正常进入等待重启，已验证该条
+  修复前失败）、设备在线仍判死并写明段号、探测失败仍判死。
+- 验证：全量 **1384 passed / 1 skipped**。

@@ -835,6 +835,13 @@ class VideoRecorder:
                 return
         except Exception:
             return
+        # 与 _watch_exit 做同一次探测：设备明确不在线时，秒退是「设备掉了」造成
+        # 的，交给 watcher 转入等待重启。watcher 的探测是一次 adb 往返、掉线时要
+        # 等到超时，经常比这里的 1.5s 晚 —— 不探测就会抢在它前面标 died，
+        # controller 立刻收尾、等待线程也因 should_abort 退出，自动续录被掐断。
+        # （典型场景：车机重启刚自动续上一段，设备又掉了一次。）
+        # 探测失败（None）时保持老行为判死，与 _watch_exit 的策略一致。
+        online = self._device_online(serial)
         with self._lock:
             sess = self._sessions.get(serial)
             if sess is None or sess.get("proc") is not proc:
@@ -847,6 +854,10 @@ class VideoRecorder:
                 # 收尾，等待线程也会因 should_abort 退出，自动续录当场被掐断。
                 # （典型场景：刚好录满一段时车机重启，自动换段拉起的下一段
                 #   在还没连上的设备上秒退。）
+                return
+            if online is False:
+                # watcher 的探测还没回来（或马上到）：设备明确不在线，这里不能
+                # 抢先判死，交给它置 reboot_wait 进入等待重启窗口。
                 return
             sess["died"] = True
             if not sess.get("seg_err"):
