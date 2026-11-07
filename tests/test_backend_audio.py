@@ -6,7 +6,9 @@
 """
 import ctypes
 import os
+import struct
 import threading
+import types
 
 import pytest
 
@@ -708,3 +710,96 @@ def test_device_audio_start_ex_reports_popen_failure(monkeypatch):
     ok, why = cap.start_ex("A1", "/data/local/tmp/a.wav")
     assert ok is False
     assert "tinycap" in why and "adb 不在 PATH" in why, why
+
+
+# ---------------------------------------------------------------------------
+# MicRecorder 采集格式降级：写死 44.1k 立体声会让部分声卡直接 32
+# ---------------------------------------------------------------------------
+class _FakeOpenWinMM:
+    """只够 _open() 跑通的 WinMM 替身；记录每次尝试的 (声道, 采样率)。"""
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.formats = []
+
+    def waveInOpen(self, phwi, dev, fmtp, cb, inst, flags):
+        raw = ctypes.string_at(fmtp, 18)
+        _tag, channels, rate = struct.unpack_from("<HHI", raw)
+        self.formats.append((channels, rate))
+        return 32 if (channels, rate) in self.fail else 0
+
+    def waveInPrepareHeader(self, h, hdr, n):
+        return 0
+
+    def waveInAddBuffer(self, h, hdr, n):
+        return 0
+
+    def waveInStart(self, h):
+        return 0
+
+
+def _bare_recorder():
+    """绕过 __init__ 的构造：_open() 只在 Windows 真实调用，这里用替身驱动。"""
+    import backend.audio_service as au
+
+    mr = au.MicRecorder.__new__(au.MicRecorder)
+    mr.sample_bits = 16
+    mr.channels, mr.rate = 2, 44100
+    mr._chunks = []
+    mr._collected = set()
+    mr._lock = threading.Lock()
+    mr._stop = threading.Event()
+    mr._running = False
+    mr._hdrs = []
+    mr._wavein = None
+    return mr
+
+
+def test_open_falls_back_when_format_unsupported(monkeypatch):
+    """44.1k 立体声不被支持（错误码 32）时应继续尝试其它格式。
+
+    回归背景：写死 (2, 44100) 时，内置单声道阵列麦 / 只认 48k 的 USB 麦会
+    直接 waveInOpen 失败，用户在隐私设置已允许的情况下仍被告知「启动失败」。
+    """
+    import backend.audio_service as au
+
+    fake = _FakeOpenWinMM(fail={(2, 44100), (2, 48000)})
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(winmm=fake), raising=False)
+    mr = _bare_recorder()
+    mr._open()
+    assert fake.formats == [(2, 44100), (2, 48000), (1, 48000)]
+    assert (mr.channels, mr.rate) == (1, 48000), "WAV 头必须用实际打开的格式"
+    assert mr._wavein is not None
+
+
+def test_open_does_not_fall_back_on_busy_device(monkeypatch):
+    """设备被占用（错误码 4）换格式也没用：必须立刻报出真实原因。"""
+    import backend.audio_service as au
+
+    fake = _FakeOpenWinMM(fail={(2, 44100)})
+    fake.waveInOpen = lambda phwi, dev, fmtp, cb, inst, flags: (
+        fake.formats.append((2, 44100)) or 4)
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(winmm=fake), raising=False)
+    mr = _bare_recorder()
+    with pytest.raises(RuntimeError) as ei:
+        mr._open()
+    assert "4" in str(ei.value) and "占用" in str(ei.value)
+    assert fake.formats == [(2, 44100)], "非 32 错误不得继续试其它格式"
+
+
+def test_open_reports_last_format_error_when_all_unsupported(monkeypatch):
+    """所有候选格式都不支持时，报错要带 32（而不是空泛的「启动失败」）。"""
+    import backend.audio_service as au
+
+    fake = _FakeOpenWinMM(fail=set(au._MIC_FORMATS))
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(winmm=fake), raising=False)
+    mr = _bare_recorder()
+    with pytest.raises(RuntimeError) as ei:
+        mr._open()
+    assert "32" in str(ei.value) and "音频格式" in str(ei.value)
+    assert fake.formats == list(au._MIC_FORMATS), "应按顺序全部试一遍"
+    assert mr._wavein is None
+

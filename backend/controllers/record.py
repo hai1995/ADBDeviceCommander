@@ -167,6 +167,15 @@ class RecordMixin:
             if ok:
                 self._rec_session["mic_path"] = p
                 self._rec_session["mic_started"] = True
+                # 麦克风能录，但合成要靠本机 ffmpeg。等录完再报「合成失败」时，
+                # 用户已经录了一整场，来不及补装 —— 开局就把丑话说在前面。
+                # 麦克风仍照常录：wav 会留在录制目录，事后可自行合成。
+                if not _have_ffmpeg():
+                    self._push_toast(
+                        "warn",
+                        "⚠ 未检测到 ffmpeg：麦克风会照常录成 mic_*.wav，但停止时"
+                        "无法把声音合成进视频（wav 保留在录制目录，可事后自行"
+                        "合成）。安装 ffmpeg 并加入 PATH 后重启本程序即可自动合成。")
             else:
                 self._rec_session["mic_started"] = False
                 # 最常见的两种失败是「系统隐私设置没允许桌面应用用麦克风」和

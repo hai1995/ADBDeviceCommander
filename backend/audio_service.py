@@ -35,6 +35,16 @@ _MM_ERROR_TEXT = {
     32: "设备不支持该音频格式（声道 / 采样率 / 位深）",
 }
 
+# 电脑麦克风按顺序尝试的采集格式：(声道, 采样率)。
+#
+# 不同声卡在 WinMM 共享模式下支持的组合并不统一：笔记本内置阵列麦常常只有
+# 单声道，部分 USB 麦只认 48kHz。旧实现写死 44.1kHz 立体声，waveInOpen 直接
+# 返回 32（WAVERR_BADFORMAT）—— 用户明明已在系统里允许了麦克风权限，却只看到
+# 「电脑麦克风启动失败」，以为是自己哪里没开。这里按「立体声优先、再降为单
+# 声道」的顺序逐个试，**只有 32 才换下一种**：设备被占用（4）、无驱动（6）
+# 这类错误换格式也不会好，必须原样报出来，否则用户永远查不到真正原因。
+_MIC_FORMATS = ((2, 44100), (2, 48000), (1, 48000), (1, 44100), (1, 16000))
+
 
 def _check_mmresult(mr, what):
     """WinMM 调用返回非 0 就抛可读异常（0 / None 视为成功）。
@@ -495,14 +505,8 @@ class MicRecorder:
                 ("cbSize", ctypes.c_ushort),
             ]
 
-        block_align = self.channels * (self.sample_bits // 8)
-        fmt = WAVEFORMATEX(
-            WAVE_FORMAT_PCM, self.channels, self.rate,
-            self.rate * block_align, block_align, self.sample_bits, 0)
-
         self._winmm = winmm
         self._WAVEFORMATEX = WAVEFORMATEX
-        phwi = ctypes.c_void_p()
         WAVE_CALLBACK = ctypes.CFUNCTYPE(
             None, ctypes.c_void_p, ctypes.c_uint,
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
@@ -526,12 +530,33 @@ class MicRecorder:
                     pass
 
         self._callback = WAVE_CALLBACK(_cb)
-        mr = winmm.waveInOpen(
-            ctypes.byref(phwi), 0, ctypes.byref(fmt),
-            self._callback, 0, CALLBACK_FUNCTION)
-        _check_mmresult(mr, "waveInOpen")
-        self._wavein = phwi
-        self._fmt = fmt
+        # 逐个格式尝试打开（见 _MIC_FORMATS）：只有 32（格式不支持）才换下一种；
+        # 其它错误（设备占用 / 无驱动 / 无权限）原地报出来，换格式也救不了。
+        self._wavein = None
+        last_err = None
+        for channels, rate in _MIC_FORMATS:
+            block_align = channels * (self.sample_bits // 8)
+            fmt = WAVEFORMATEX(
+                WAVE_FORMAT_PCM, channels, rate,
+                rate * block_align, block_align, self.sample_bits, 0)
+            phwi = ctypes.c_void_p()
+            mr = winmm.waveInOpen(
+                ctypes.byref(phwi), 0, ctypes.byref(fmt),
+                self._callback, 0, CALLBACK_FUNCTION)
+            if not mr:
+                # 用实际打开成功的格式写 WAV 头：降级到单声道后若仍按立体声写头，
+                # 播放器会把音高/时长全算错。
+                self.channels, self.rate = channels, rate
+                self._fmt = fmt
+                self._wavein = phwi
+                break
+            last_err = mr
+            if mr != 32:
+                break
+        if self._wavein is None:
+            _check_mmresult(last_err, "waveInOpen")
+            raise RuntimeError("waveInOpen 失败（未返回错误码）")
+        phwi = self._wavein
 
         # 准备缓冲区
         self._hdrs = []

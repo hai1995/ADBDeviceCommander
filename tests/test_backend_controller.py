@@ -2016,6 +2016,36 @@ def test_screen_record_start_survives_mic_exception(monkeypatch, tmp_path):
     api.workers.shutdown(timeout=2.0)
 
 
+def test_screen_record_start_warns_when_mic_on_but_ffmpeg_missing(
+        monkeypatch, tmp_path):
+    """勾了麦克风但本机没有 ffmpeg：开局就要说清「录得到、合不进视频」。
+
+    回归背景：麦克风开关恢复后，若机器上没装 ffmpeg，用户会录完整场才发现
+    成片没有声音 —— 而 wav 明明就在目录里。提示必须发生在**开始录制时**，
+    不能等收尾。
+    """
+    api = _make_api()
+
+    class _OkMic:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self, save_dir):
+            return True, str(tmp_path / "mic_20260101_000000.wav")
+
+    patch_ctrl(monkeypatch, "MicRecorder", _OkMic)
+    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: False)
+    monkeypatch.setattr(api.video, "start",
+                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
+
+    res = api.screen_record_start(None, with_mic=True, save_dir=str(tmp_path))
+    assert res.get("ok") is True, res
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("未检测到 ffmpeg" in t and "mic_" in t for t in texts), texts
+    api._rec_session = {}
+    api.workers.shutdown(timeout=2.0)
+
+
 def test_screen_record_start_cancels_session_on_unexpected_exception(
         monkeypatch, tmp_path):
     """启动链路出现**其它未预期异常**时：必须撤销半启动会话，不能锁死录屏。
