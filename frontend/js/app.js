@@ -246,6 +246,16 @@
     return wsMap.get(id) || wsMap.get("w1") || null;
   }
 
+  /* 事件分流用**严格**查找：后端事件里的 ws 可能指向一个刚被关掉的工作区
+     （关闭时先 stop_run，kill 生效前会话仍可能吐出最后几行输出，或有一条在途
+     的 stop_state）。若这里像 wsOf 那样回落到 w1，这些输出会被写进默认工作区的
+     面板、stop_state 还会把 w1 的「停止」按钮态改成别人的状态 —— 用户看到的
+     正是「关掉的工作区把内容倒进了工作区 1」。closeWorkspace 对用户的承诺是
+     「其中的输出一并丢弃」，故找不到就丢弃，不回落。 */
+  function wsEventTarget(id) {
+    return wsMap.get(id || "w1") || null;
+  }
+
   function curWs() {
     return wsOf(wsActive);
   }
@@ -926,7 +936,7 @@
         if (els.wifiModal && !els.wifiModal.classList.contains("hidden")) refreshWifi();
         break;
       case "console": {
-        const ws = wsOf(p.ws || "w1");
+        const ws = wsEventTarget(p.ws || "w1");
         if (!ws || !ws.consoleEl) break;
         if (p.kind === "clear") clearOut(ws.consoleEl);
         else if (p.kind === "prompt") {
@@ -967,7 +977,7 @@
         // 顺带把「该 tab 正在执行」的指示点一起同步 —— 用户切走后仍能看出
         // 哪个工作区有活在跑。运行按钮同步转圈：只认后端 stop_state 事件
         // （每条命令开始/结束都会推），不做乐观猜测，永远不会卡住。
-        const ws = wsOf(p.ws || "w1");
+        const ws = wsEventTarget(p.ws || "w1");
         if (!ws) break;
         if (ws.stopBtn) ws.stopBtn.disabled = !p.running;
         markBtnBusy(ws.runBtn, p.running);

@@ -228,6 +228,41 @@ const activePanel = (doc) => doc.querySelector(".tab[data-tab='cmd'] .ws-panel.a
     ok(activePanel(doc) === panels(doc)[0], "关闭当前工作区后自动回到默认工作区");
   }
 
+  console.log("\n[7b] 已关闭工作区的在途事件必须丢弃，不能倒进默认工作区");
+  {
+    // 关闭工作区时后端先 stop_run 再 ws_close：kill 生效前会话仍可能吐出最后
+    // 几行输出，也可能还有一条在途的 stop_state。旧实现的事件分流会「找不到
+    // 就回落到 w1」—— 于是关掉的工作区的日志被倒进工作区 1，stop_state 还会
+    // 把工作区 1 正在跑的命令的「停止」按钮熄灭，用户就再也停不掉它了。
+    // closeWorkspace 明确承诺「其中的输出一并丢弃」，这里守住这个语义。
+    const { doc, push } = mkEnv();
+    doc.getElementById("btn-ws-add").click();
+    await waitFor(() => panels(doc).length === 2, 3000, "第二个 tab");
+    wsTabs(doc)[1].querySelector(".ws-x").click();
+    ok(await waitFor(() => panels(doc).length === 1, 3000, "面板移除"),
+      "工作区 2 已关闭");
+
+    // 默认工作区此刻正在执行：停止按钮可用、tab 上有执行指示
+    push({ kind: "stop_state", payload: { running: true, ws: "w1" } });
+    ok(await waitFor(() => doc.getElementById("btn-stop").disabled === false, 3000,
+      "w1 停止按钮启用"), "工作区 1 的命令跑起来了（停止按钮可用）");
+
+    // 关闭后的残留事件 + 一条用于确认「这批事件已被处理」的正常输出
+    push({ kind: "console", payload: { kind: "out", text: "关闭后迟到的输出", ws: "w2" } });
+    push({ kind: "stop_state", payload: { running: false, ws: "w2" } });
+    push({ kind: "console", payload: { kind: "out", text: "工作区1仍在正常输出" } });
+    ok(await waitFor(() => /工作区1仍在正常输出/.test(
+      doc.getElementById("console").textContent), 3000, "w1 正常输出"),
+      "后续事件已被处理（下面两条断言不是空等）");
+
+    ok(!/关闭后迟到的输出/.test(doc.getElementById("console").textContent),
+      "已关闭工作区的输出没有倒进默认工作区面板");
+    ok(doc.getElementById("btn-stop").disabled === false,
+      "已关闭工作区的 stop_state 没有熄灭默认工作区的「停止」按钮");
+    ok(wsTabs(doc)[0].classList.contains("is-busy"),
+      "默认工作区的 tab 仍显示「正在执行」（执行态没被别人清掉）");
+  }
+
   console.log("\n[8] 数量上限有明确提示，不会静默失败");
   {
     const { doc } = mkEnv();
