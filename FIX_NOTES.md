@@ -4179,3 +4179,21 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 - 测试：`tests/test_shell_session.py` 新增 `test_kill_closes_stdin_pipe`，
   并把 PytestUnraisableExceptionWarning 升级为错误回归验证（13 passed）。
 - 验证：`pytest` **1374 passed / 1 skipped**，警告全部消除。
+
+## 2026-11-07 — 设备安静时实时监控的尾部日志不再滞留到「停止」才出现
+
+- `backend/logcat_service.py`：`LogcatMonitor._worker` 原来直接
+  `for raw in proc.stdout` 阻塞读，而批量推送的「攒够 `_BATCH_MAX` 行 /
+  距上次推送超过 `_FLUSH_MS`」只在**收到下一行**时才会被检查。设备安静下来
+  （车机空闲、无新日志）后读循环一直阻塞，最后那几条日志（以及启动爆发期
+  尾部）就一直压在 `batch` / `boot_buf` 里，直到设备再吐一行、或用户点停止
+  才冒出来 —— 表现为「日志停在半路，一按停止反而全出现了」，用户会误以为
+  监控挂了；若一直不再有新日志，界面就永远差最后几条。
+  现在 stdout 由独立读线程（`_pump`）搬进 `queue.Queue`，消费仍留在 worker
+  线程，用 `get(timeout=_FLUSH_MS)` 限时等待：超时即代表「这段时间没有新行」，
+  正好按时刷新残批、或在到点时结束启动爆发期。解析与推送仍是单线程，
+  事件顺序与行数计数、限流/丢弃语义完全不变。
+- 测试：新增 `tests/test_backend_logcat_flush.py`，覆盖「正常批次残尾」
+  与「爆发期尾部」两种设备安静场景（停止前就必须收到全部行）。
+- 验证：`pytest` **1376 passed / 1 skipped**；`ruff` F/E9/B 全过。
+

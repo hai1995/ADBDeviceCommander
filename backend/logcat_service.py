@@ -19,6 +19,7 @@ backend.logcat_service —— Logcat 实时监控 + 抓取服务（与 UI 无关
                 packaged（仅 stopped）= 本次已打包，前端不再重复弹完成 toast
 """
 import os
+import queue
 import threading
 import subprocess
 import time
@@ -58,6 +59,10 @@ def _terminate(proc):
 
 _BATCH_MAX = 400          # 单次 append 事件最多携带行数
 _FLUSH_MS = 0.05          # 批量刷新间隔（秒）
+
+# 读线程队列的结束哨兵：看到它说明 adb 的输出已到 EOF（或读线程异常退出），
+# 消费循环据此收尾，而不是继续等下去。
+_LOGCAT_EOF = object()
 
 
 def _write_marker(f, text):
@@ -221,8 +226,8 @@ class LogcatMonitor:
             return
         with self._lock:
             self._procs[serial] = proc
-            # 注册期间就被点了停止：读循环还没开始，stop() 当时拿不到 proc，
-            # 这里补一次终止，让下面的 `for raw in proc.stdout` 立即结束。
+            # 注册期间就被点了停止：消费循环还没开始，stop() 当时拿不到 proc，
+            # 这里补一次终止，让下面的提前退出检查立即生效。
             stop_now = serial in self._stopreq
         if stop_now:
             stop_ev.set()
@@ -254,8 +259,62 @@ class LogcatMonitor:
         win_start, win_pushed = t0, 0
         dropped, noticed, last_notice = 0, 0, 0.0
         try:
-            for raw in proc.stdout:
+            # 读线程 + 限时等待的消费循环。
+            #
+            # 不能在 worker 线程里直接 `for raw in proc.stdout`：设备安静下来后
+            # 这个循环会一直阻塞，而批量推送的「攒够 _BATCH_MAX 行 / 距上次推送
+            # 超过 _FLUSH_MS」只在**收到下一行**时才会被检查。于是最后那几条
+            # 日志（以及启动爆发期尾部）会一直压在 batch / boot_buf 里，直到
+            # 设备再吐一行、或用户点停止才冒出来 —— 用户看到的是「日志停在
+            # 半路，一按停止就全出现了」，还会误以为监控挂了。
+            # 读线程只负责把 stdout 搬进队列，消费循环用 get(timeout) 等待：
+            # 超时即代表「这段时间没有新行」，正好用来按时刷新与收尾爆发期。
+            # 单线程消费保证推送顺序与原来完全一致。
+            q = queue.Queue()
+            threading.Thread(
+                target=self._pump, args=(proc, q),
+                daemon=True, name="logcat-pump-%s" % serial).start()
+
+            def _flush_batch(now):
+                nonlocal batch, last
+                if batch:
+                    self.bus.push("logcat",
+                                  {"serial": serial, "status": "append",
+                                   "lines": batch, "total": total, "exc": exc})
+                batch, last = [], now
+
+            def _end_boot(now):
+                nonlocal in_boot, boot_buf, boot_dropped, batch, last
+                in_boot = False
+                if boot_buf:
+                    self.bus.push("logcat",
+                                  {"serial": serial, "status": "append",
+                                   "lines": boot_buf, "total": total, "exc": exc})
+                    boot_buf = []
+                if boot_dropped:
+                    self.bus.push(
+                        "status",
+                        {"type": "info",
+                         "text": "已跳过 %d 行历史日志（仅保留最近 %d 行）"
+                                 % (boot_dropped, BOOT_KEEP_LINES)})
+                batch, last = [], now
+
+            while True:
                 if stop_ev.is_set():
+                    break
+                try:
+                    raw = q.get(timeout=_FLUSH_MS)
+                except queue.Empty:
+                    # 这段时间没有新日志：把攒下的行按时推出去（爆发期则按时
+                    # 结束，避免尾部历史行等不到「下一行」而滞留）。
+                    now = time.time()
+                    if in_boot:
+                        if now - t0 >= BOOT_WINDOW_SEC:
+                            _end_boot(now)
+                    elif batch:
+                        _flush_batch(now)
+                    continue
+                if raw is _LOGCAT_EOF:
                     break
                 item = self._classify_and_filter(raw, levels, keyword, only_exc,
                                                  stats)
@@ -274,22 +333,10 @@ class LogcatMonitor:
                     if len(boot_buf) > BOOT_KEEP_LINES:
                         boot_buf.pop(0)
                         boot_dropped += 1
-                    if time.time() - t0 < BOOT_WINDOW_SEC:
-                        continue
-                    # 爆发期结束：把攒下的最近若干行作为第一批推给前端
-                    in_boot = False
-                    if boot_buf:
-                        self.bus.push("logcat",
-                                      {"serial": serial, "status": "append",
-                                       "lines": boot_buf, "total": total, "exc": exc})
-                        boot_buf = []
-                    if boot_dropped:
-                        self.bus.push(
-                            "status",
-                            {"type": "info",
-                             "text": "已跳过 %d 行历史日志（仅保留最近 %d 行）"
-                                     % (boot_dropped, BOOT_KEEP_LINES)})
-                    batch, last = [], time.time()
+                    if time.time() - t0 >= BOOT_WINDOW_SEC:
+                        # 爆发期结束：把攒下的最近若干行作为第一批推给前端
+                        # （设备安静时由上面的超时分支负责收尾）
+                        _end_boot(time.time())
                     continue
 
                 # ---- 展示行数软上限（滑动 1s 窗口）----
@@ -318,10 +365,7 @@ class LogcatMonitor:
 
                 batch.append(item)
                 if len(batch) >= _BATCH_MAX or now - last >= _FLUSH_MS:
-                    self.bus.push("logcat",
-                                  {"serial": serial, "status": "append",
-                                   "lines": batch, "total": total, "exc": exc})
-                    batch, last = [], now
+                    _flush_batch(now)
         finally:
             if in_boot and boot_buf:
                 # 爆发期内就结束了：仍然把攒下的行推给前端，不吞数据
@@ -361,6 +405,22 @@ class LogcatMonitor:
                 self.bus.push("logcat",
                               {"serial": serial, "status": "stopped",
                                "total": total, "exc": exc})
+
+    @staticmethod
+    def _pump(proc, q):
+        """读线程：把 adb stdout 的每一行搬进队列，结束时投递 EOF 哨兵。
+
+        只做搬运、不做解析：解析与推送全部留在 worker 线程，保证事件顺序与
+        原先的单线程读循环完全一致。异常（终止瞬间的管道错误）不外抛 —— 收尾
+        由 worker 的 finally 统一负责。
+        """
+        try:
+            for raw in proc.stdout:
+                q.put(raw)
+        except Exception:
+            pass
+        finally:
+            q.put(_LOGCAT_EOF)
 
     @staticmethod
     def _classify_and_filter(raw, levels, keyword, only_exc, stats=None):
