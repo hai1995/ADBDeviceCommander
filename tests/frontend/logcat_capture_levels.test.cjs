@@ -129,8 +129,12 @@ function checkedLevels(doc, containerId) {
     ok(!doc.getElementById("rec-lc-levels"), "级别行容器也已撤掉（不留空壳）");
   }
 
-  console.log("\n[4] 开始录屏：第 7 参固定 null（全量），音频两项固定 false");
+  console.log("\n[4] 开始录屏：第 7 参固定 null（全量），电脑麦克风跟随开关");
   {
+    const mic = doc.getElementById("rec-mic");
+    ok(!!mic, "「同步录制电脑麦克风」开关存在");
+    ok(mic.checked === false, "电脑麦克风默认不勾选（避免权限/无声被当成故障）");
+    mic.checked = true;            // 勾选后必须真的把 with_mic=true 传给后端
     doc.getElementById("tool-rec").click();
     await sleep(120);
     const c = calls.find((x) => x.fn === "screen_record_start");
@@ -140,12 +144,17 @@ function checkedLevels(doc, containerId) {
     ok(c && c.args[6] === null,
        "第 7 参 logcat_levels = null（后端据此不过滤，实际：" +
        (c ? JSON.stringify(c.args[6]) : "-") + "）");
-    ok(c && c.args[1] === false && c.args[2] === false,
-       "设备音频 / 电脑麦克风固定 false（功能未实现，不给后端留错觉）");
+    ok(c && c.args[1] === false,
+       "设备音频固定 false（tinycap 需 root、机型差异大，未开放）");
+    ok(c && c.args[2] === true,
+       "勾选电脑麦克风 → 第 3 参 with_mic=true（实际：" +
+       (c ? JSON.stringify(c.args[2]) : "-") + "）");
     ok(doc.getElementById("rec-logcat").disabled === true, "录制中开关被锁定");
+    ok(mic.disabled === true, "录制中麦克风开关被锁定");
     doc.getElementById("tool-rec-stop").click();
     await sleep(120);
     ok(doc.getElementById("rec-logcat").disabled === false, "停止后开关解锁");
+    ok(mic.disabled === false, "停止后麦克风开关解锁");
   }
 
   window.close();

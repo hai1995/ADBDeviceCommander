@@ -96,7 +96,7 @@ const saved = (calls, key) =>
     const on = ["keep-input", "shot-clipboard", "lc-cap-zipstop",
                 "rec-pointer-location", "rec-show-touches", "lc-autoscroll",
                 "rec-logcat", "rec-zip"];
-    const off = ["lc-only-exc"];
+    const off = ["lc-only-exc", "rec-mic"];
     on.forEach((id) => ok(doc.getElementById(id).checked === true,
       id + " 默认勾选（默认开启）"));
     off.forEach((id) => ok(doc.getElementById(id).checked === false,
@@ -110,7 +110,7 @@ const saved = (calls, key) =>
       lc_keyword: "crash", lc_only_exc: true, lc_autoscroll: false,
       lc_buffer: "全部（main+system+events+crash）",
       lc_levels: ["D", "I"], lc_cap_zipstop: false, lc_cap_levels: ["E"],
-      rec_logcat: true, rec_zip: false,
+      rec_logcat: true, rec_zip: false, rec_mic: true,
       rec_pointer_location: false, rec_show_touches: false,
       save_dir: "D:\\shots",
     } });
@@ -133,6 +133,8 @@ const saved = (calls, key) =>
     ok(doc.getElementById("lc-cap-zipstop").checked === false, "抓取打包按配置取消");
     ok(lv("lc-cap-levels") === "E", "抓取级别回填 E（实际：" + lv("lc-cap-levels") + "）");
     ok(doc.getElementById("rec-logcat").checked === true, "同步 logcat 按配置勾选");
+    ok(doc.getElementById("rec-mic").checked === true,
+       "电脑麦克风按配置勾选（配置为 true 时才启用）");
     ok(doc.getElementById("rec-zip").checked === false, "录屏打包按配置取消");
     ok(doc.getElementById("rec-pointer-location").checked === false,
        "指针位置按配置取消（覆盖 HTML 默认勾选）");
@@ -278,6 +280,18 @@ const saved = (calls, key) =>
       saved(calls, "rec_logcat").pop().args[0].rec_logcat === true,
       3000, "rec_logcat=true"),
       "再点一次恢复 → rec_logcat=true");
+
+    // rec-mic 默认不勾选：点一次 → true，再点一次 → false（两个方向都锁）
+    click("rec-mic");
+    ok(await waitFor(() => saved(calls, "rec_mic").length &&
+      saved(calls, "rec_mic").pop().args[0].rec_mic === true,
+      3000, "rec_mic=true"),
+      "勾选「同步录制电脑麦克风」→ rec_mic=true");
+    click("rec-mic");
+    ok(await waitFor(() => saved(calls, "rec_mic").length &&
+      saved(calls, "rec_mic").pop().args[0].rec_mic === false,
+      3000, "rec_mic=false"),
+      "再点一次取消 → rec_mic=false");
 
     const dir = doc.getElementById("tool-dir");
     dir.value = "D:\\new-shots";

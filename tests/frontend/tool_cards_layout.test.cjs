@@ -215,18 +215,20 @@ const pane = (doc, key) => doc.querySelector('.tool-pane[data-tool-pane="' + key
     window.close();
   }
 
-  console.log("\n[6] 录屏面板：音频 / 麦克风 / 级别行已撤掉，只剩 4 个开关");
+  console.log("\n[6] 录屏面板：设备音频 / 级别行已撤掉，电脑麦克风恢复（共 5 个开关）");
   {
     const doc = new JSDOM(html).window.document;
-    ["rec-devaudio", "rec-mic", "rec-levels", "rec-lc-levels"].forEach((id) => {
+    ["rec-devaudio", "rec-levels", "rec-lc-levels"].forEach((id) => {
       ok(!doc.getElementById(id), "#" + id + " 已从界面上撤掉");
     });
+    ok(!!doc.getElementById("rec-mic"), "电脑麦克风开关已恢复（仅录本机麦克风说话声）");
     const opts = doc.querySelector("#rec-body .rec-opts");
     ok(!!opts, "开关容器 .rec-opts 仍在 #rec-pane 内");
     const ids = Array.from(opts.querySelectorAll("input[type=checkbox]"))
       .map((c) => c.id);
-    ok(ids.join(",") === "rec-logcat,rec-zip,rec-pointer-location,rec-show-touches",
-       "只剩 同步 logcat / 打包 zip / 指针位置 / 触摸圆点（实际 " + ids.join(",") + "）");
+    ok(ids.join(",") === "rec-logcat,rec-mic,rec-zip,rec-pointer-location,rec-show-touches",
+       "开关顺序：同步 logcat / 电脑麦克风 / 打包 zip / 指针位置 / 触摸圆点（实际 "
+       + ids.join(",") + "）");
     ok(ids.indexOf("rec-logcat") === 0, "「同步录制 logcat」仍是第一个开关");
   }
 

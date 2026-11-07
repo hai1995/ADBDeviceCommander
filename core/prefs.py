@@ -27,9 +27,9 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
                Logcat 实时监控的过滤条件（关键字 / 级别 / 仅异常 / 自动滚动 / 缓冲区）
   * lc_cap_zipstop / lc_cap_levels
                Logcat 落盘抓取（结束后打包 / 级别过滤）
-  * rec_logcat / rec_zip / rec_pointer_location / rec_show_touches
-               录屏各开关（设备音频 / 电脑麦克风 / 同步 logcat / 结束后打包 /
-               指针位置 / 触摸圆点 / 同步 logcat 的级别过滤）
+  * rec_logcat / rec_mic / rec_zip / rec_pointer_location / rec_show_touches
+               录屏各开关（同步 logcat / 电脑麦克风 / 结束后打包 /
+               指针位置 / 触摸圆点）
   * scrcpy_path  用户手动指定的 scrcpy 目录或可执行文件（留空 = 自动探测）
   * mirror_*     备用投屏的参数（播放器路径 / 分辨率 / 码率 / 预览帧率 /
                  预览区宽高 mirror_view_w / mirror_view_h，0 = 自适应）
@@ -150,6 +150,9 @@ PREFS_DEFAULTS = {
     # _migrate_rec_defaults() 一次性翻转（见那里的说明）。
     "rec_logcat": True,
     "rec_zip": True,
+    # 电脑麦克风：默认关闭。录的是**本机麦克风**（说话声），不是电脑播放的声音；
+    # 仅 Windows 且需要系统麦克风隐私权限，因此不默认开启，由用户显式勾选。
+    "rec_mic": False,
     "rec_pointer_location": True,
     "rec_show_touches": True,
     # 工具页已由「多张可折叠卡片」改为「子 tab」（每项整页展示），因此原来

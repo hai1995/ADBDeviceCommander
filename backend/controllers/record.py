@@ -95,8 +95,11 @@ class RecordMixin:
         （`-b all` + 不过滤级别），见下方抓取调用的说明。保留形参只为兼容旧调用方
         （以及留一条接回「按级别抓」的口子），界面上的级别勾选已撤掉。
 
-        with_devaudio / with_mic：同理保留但界面已撤掉 —— 设备端 tinycap 探测与
-        ffmpeg 合成两条链路都没做完，开关留着只会让人以为录出来的是有声视频。
+        with_devaudio：保留但界面已撤掉 —— 设备端 tinycap 在多数机型上需要 root，
+        无法稳定承诺；开关留着只会让人以为录进去的是设备声音。
+        with_mic：界面已恢复「同步录制电脑麦克风」开关（默认关闭）。录的是**本机
+        麦克风**（说话声），不是电脑正在播放的声音；仅 Windows 支持（WinMM），
+        需要系统麦克风隐私权限，停止时需本机 ffmpeg 才能合成进视频。
 
         pointer_location：录屏画面常驻指针准星（设备系统设置
         `settings put system pointer_location 1`，画面 overlay，全版本可用；
@@ -166,7 +169,14 @@ class RecordMixin:
                 self._rec_session["mic_started"] = True
             else:
                 self._rec_session["mic_started"] = False
-                self._push_toast("warn", "⚠ 电脑麦克风启动失败：%s" % p)
+                # 最常见的两种失败是「系统隐私设置没允许桌面应用用麦克风」和
+                # 「设备被别的程序占用」—— 错误码本身（如 4 / 1）用户看不懂，
+                # 这两句直接告诉人该去哪里改。
+                self._push_toast(
+                    "warn",
+                    "⚠ 电脑麦克风启动失败：%s（请检查系统「隐私和安全性 → 麦克风」"
+                    "是否允许桌面应用访问，以及麦克风是否被其它程序占用；"
+                    "本次录屏将继续，但没有麦克风声音）" % p)
         ok_any = False
 
         def _spawn(s):

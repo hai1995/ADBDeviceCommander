@@ -48,7 +48,7 @@
     toolRec: $("tool-rec"),
     toolRecStop: $("tool-rec-stop"),
     toolRecCancel: $("tool-rec-cancel"),
-    recLogcat: $("rec-logcat"), recZip: $("rec-zip"),
+    recLogcat: $("rec-logcat"), recMic: $("rec-mic"), recZip: $("rec-zip"),
     recPointerLocation: $("rec-pointer-location"), recShowTouches: $("rec-show-touches"),
     // 应用安装（APK）
     apkPick: $("apk-pick"), apkInstall: $("apk-install"), apkFile: $("apk-file"),
@@ -1216,6 +1216,8 @@
     }
     // ---- 录屏（指针位置 / 触摸圆点默认开启，缺省时保持 HTML 勾选）----
     if (els.recLogcat && typeof s.rec_logcat === "boolean") els.recLogcat.checked = s.rec_logcat;
+    // 电脑麦克风默认关闭：只有配置里显式写 true 才勾上（录的是本机麦克风说话声）
+    if (els.recMic && typeof s.rec_mic === "boolean") els.recMic.checked = s.rec_mic;
     if (els.recZip && typeof s.rec_zip === "boolean") els.recZip.checked = s.rec_zip;
     if (els.recPointerLocation && typeof s.rec_pointer_location === "boolean") {
       els.recPointerLocation.checked = s.rec_pointer_location;
@@ -2828,6 +2830,7 @@
     // 点了只会得到一句「当前没有进行中的录屏」，不如直接不给点。
     if (els.toolRecCancel) els.toolRecCancel.disabled = !running;
     els.recLogcat.disabled = running;
+    if (els.recMic) els.recMic.disabled = running;
     els.recZip.disabled = running;
     els.recPointerLocation.disabled = running;
     els.recShowTouches.disabled = running;
@@ -6679,7 +6682,7 @@
     // 录屏各开关一律即时记忆（config.json），下次启动沿用以往配置。
     // 同步 logcat 只留一个开关：级别与缓冲区不再可调（全量抓取才可能复现问题，
     // 少勾一级就少一条线索，而用户往往事后才发现漏了哪一级）。
-    [["recLogcat", "rec_logcat"], ["recZip", "rec_zip"],
+    [["recLogcat", "rec_logcat"], ["recMic", "rec_mic"], ["recZip", "rec_zip"],
      ["recPointerLocation", "rec_pointer_location"],
      ["recShowTouches", "rec_show_touches"]].forEach(([el, key]) => {
       if (els[el]) els[el].addEventListener("change", () => persistPref(key, !!els[el].checked));
@@ -6930,8 +6933,9 @@
 
     els.toolRec.addEventListener("click", async () => {
       if (recInFlight) return;      // 启动在途：按钮已禁用，这里再兜一道
-      // 第 2/3 参（设备音频 / 电脑麦克风）与第 7 参（logcat 级别）固定给
-      // false / null：音频采集链路没做完已从界面上撤掉，logcat 一律全量抓取。
+      // 第 2 参（设备音频）固定 false：设备端 tinycap 需 root、机型差异大，未开放；
+      // 第 3 参（电脑麦克风）跟随界面开关；第 7 参（logcat 级别）固定 null ——
+      // 录屏配套 logcat 一律全量抓取，不做级别过滤。
       setRecInFlight(true);
       if (els.toolRec) els.toolRec.title = "正在启动录屏，请稍候…";
       /* 多台设备要各自拉起 screenrecord 并确认它真的活着（每台约 1.5 秒，
@@ -6941,7 +6945,7 @@
       let res = null;
       try {
         res = await callApi(api.screen_record_start(
-          null, false, false, saveDir(),
+          null, false, !!(els.recMic && els.recMic.checked), saveDir(),
           els.recLogcat.checked, els.recZip.checked, null,
           !!els.recPointerLocation.checked, !!els.recShowTouches.checked));
       } finally {

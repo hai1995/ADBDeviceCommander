@@ -4215,3 +4215,29 @@ Windows 上首次弹对话框要几百毫秒，没有反馈会被当成没点上
 - 验证：`pytest` **1377 passed / 1 skipped**。
 
 
+
+## 2026-11-07 — 恢复「同步录制电脑麦克风」开关（默认关闭，界面写明来源与权限）
+
+用户反馈「录屏附带录制电脑音频没有正常工作」。核查结论：**不是权限问题** ——
+当前版本界面上根本没有音频开关，前端 `screen_record_start` 的第 2/3 参写死
+`false`，录出来必然无声；后端现存的 `MicRecorder` 录的是**本机麦克风**（说话
+声），不是电脑正在播放的声音（系统声音回环未实现）。
+
+- `frontend/index.html`：恢复 `#rec-mic`「同步录制电脑麦克风」开关，**默认不
+  勾选**；label title 与说明文字写清：录的是本机麦克风说话声 ≠ 电脑播放的声音、
+  仅 Windows、需系统「隐私和安全性 → 麦克风」允许桌面应用访问、停止时需本机
+  ffmpeg 才能合成进视频。设备音频（tinycap）仍不开放（多数机型需 root）。
+- `frontend/js/app.js`：开关值作为第 3 参 `with_mic` 传给后端；加进 els /
+  启动回填 / 变更落盘 / 录制中锁定（与 logcat、zip 同样的生命周期）。
+- `core/prefs.py`：新增 `rec_mic: False`（默认关闭，避免权限/设备占用被误当故障）。
+- `backend/controllers/record.py`：麦克风启动失败的 toast 补上排查指引（系统
+  麦克风隐私设置、设备被其它程序占用），更新 with_mic 的参数说明。
+- `README.md` FAQ：改为说明如何开启电脑麦克风及三项前置条件。
+- 测试：`checkbox_switch_style`（开关数 31、默认不勾选、文案含「本机麦克风」
+  与权限位置）、`tool_cards_layout`（5 个开关顺序）、`logcat_capture_levels`
+  （勾选后第 3 参为 true、录制中锁定/停止解锁）、`settings_persist`
+  （rec_mic 双向落盘）、`test_core_prefs` 映射表补 `rec_mic`。
+- 验证：后端 **1377 passed / 1 skipped**；前端 87 个用例文件全绿。
+
+说明：若用户在旧版 exe 里看到「电脑音频」勾选项，那是历史版本；本次恢复的是
+**麦克风**，系统声音回环仍需另行实现（WASAPI loopback / 立体声混音）。

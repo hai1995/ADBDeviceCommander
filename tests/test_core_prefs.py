@@ -344,6 +344,7 @@ _BOOL_KEY_TO_HTML_ID = {
     "lc_autoscroll": "lc-autoscroll",
     "lc_cap_zipstop": "lc-cap-zipstop",
     "rec_logcat": "rec-logcat",
+    "rec_mic": "rec-mic",
     "rec_zip": "rec-zip",
     "rec_pointer_location": "rec-pointer-location",
     "rec_show_touches": "rec-show-touches",

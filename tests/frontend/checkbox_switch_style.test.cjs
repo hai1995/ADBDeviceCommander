@@ -116,8 +116,8 @@ console.log("\n[B2] 文件区多选：方块复选框（与全局开关区分，
 console.log("\n[C] 结构完整性：复选框集合未被意外改动");
 {
   const boxes = html.match(/<input type="checkbox"/g) || [];
-  ok(boxes.length === 30,
-    "index.html 静态复选框为 30 个（keep-input×1 + 监控级别×6 + 抓取级别×6 + Logcat×3 + 工具×6 + APK 安装选项×3 + 诊断包×1 + 全选×1 + 命令编辑「仅输入」×1 + 应用包名「含系统应用」×1 + 关于页「自动检查更新」×1）"
+  ok(boxes.length === 31,
+    "index.html 静态复选框为 31 个（keep-input×1 + 监控级别×6 + 抓取级别×6 + Logcat×3 + 录屏×5 + 工具×6 + APK 安装选项×3 + 诊断包×1 + 全选×1 + 命令编辑「仅输入」×1 + 应用包名「含系统应用」×1 + 关于页「自动检查更新」×1）"
     + " -> 实际 " + boxes.length);
   ok(!/appearance:\s*checkbox/.test(css),
     "没有任何地方把开关退回原生 appearance:checkbox");
@@ -135,7 +135,7 @@ console.log("\n[D] 动效偏好");
 console.log("\n[E] 录屏开关横向换行布局（一行尽量多放，减小纵向占高）");
 {
   ok(/class="rec-opts"/.test(html), "录屏卡片存在 .rec-opts 开关容器");
-  // 4 个录屏开关必须全部收进 .rec-opts，按钮不混入。
+  // 5 个录屏开关必须全部收进 .rec-opts，按钮不混入。
   // 块提取按 <div>/</div> 配平：用「第一个 </div>」截断会把后面的开关漏掉
   // （rec-opts 里曾嵌套过级别行）——曾经踩过，故用配平而不是字符串截断。
   function divBlock(src, openIdx) {
@@ -152,7 +152,8 @@ console.log("\n[E] 录屏开关横向换行布局（一行尽量多放，减小�
   }
   const optsBlock = divBlock(html, html.indexOf('<div class="rec-opts">'));
   ok(!!optsBlock, ".rec-opts 块可按 <div>/</div> 配平完整提取");
-  ["rec-logcat", "rec-zip", "rec-pointer-location", "rec-show-touches"].forEach((id) => {
+  ["rec-logcat", "rec-mic", "rec-zip", "rec-pointer-location",
+   "rec-show-touches"].forEach((id) => {
     ok(new RegExp('id="' + id + '"').test(optsBlock || ""),
       "开关 #" + id + " 收在 .rec-opts 内（换行排布）");
   });
@@ -165,11 +166,18 @@ console.log("\n[E] 录屏开关横向换行布局（一行尽量多放，减小�
   const chk = block(".rec-opts .chk {");
   ok(!!chk && /width:\s*auto/.test(chk || ""),
     ".rec-opts 内的开关按内容宽度排列（可一行多个，不再整行独占）");
-  // 音频 / 麦克风两项已撤掉（采集链路没做完），界面上不应再有它们的开关
-  ["rec-devaudio", "rec-mic"].forEach((id) => {
-    ok(!new RegExp('id="' + id + '"').test(html),
-      "#" + id + " 已从界面移除（功能未实现，不留假开关）");
-  });
+  // 设备音频仍撤掉（tinycap 需 root、机型差异大）；电脑麦克风已恢复，但默认不勾选，
+  // 且标题/说明必须写清「录的是本机麦克风说话声，不是电脑播放的声音」。
+  ok(!/id="rec-devaudio"/.test(html), "#rec-devaudio 仍从界面移除（功能不可稳定承诺）");
+  ok(/id="rec-mic"/.test(html), "#rec-mic 已在界面恢复（同步录制电脑麦克风）");
+  const micLabel = (html.match(/<label[^>]*>[^<]*<input[^>]*id="rec-mic"[^>]*>([^<]*)</) || [])[1] || "";
+  ok(/电脑麦克风/.test(micLabel), "开关文案点明「电脑麦克风」");
+  ok(!/checked[^>]*id="rec-mic"/.test(html) && !/id="rec-mic"[^>]*checked/.test(html),
+     "电脑麦克风默认不勾选（避免无声/权限问题被误当成故障）");
+  ok(/本机麦克风/.test(html) && /不是电脑正在播放的声音/.test(html),
+     "说明文字写清「本机麦克风说话声 ≠ 电脑播放的声音」");
+  ok(/隐私和安全性/.test(html) && /麦克风/.test(html),
+     "说明文字给出 Windows 麦克风权限的检查位置");
 }
 
 console.log("\n[F] 顶栏无重复品牌标题（原生标题栏已展示应用名）");
