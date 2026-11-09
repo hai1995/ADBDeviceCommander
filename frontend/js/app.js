@@ -2894,11 +2894,12 @@
 
   function recElapsedStart(offsetMs) {
     recElapsedClear();
+    // 元素缺失（老 HTML / 被裁剪的页面）时不要起空转的 interval：
+    // 每 250ms 进一次渲染再直接 return，纯属白烧 CPU。
+    if (!els.recElapsed || !els.recElapsedT) return;
     recT0 = _recNow() - Math.max(0, Number(offsetMs) || 0);
-    if (els.recElapsed) {
-      els.recElapsed.hidden = false;
-      els.recElapsed.classList.remove("frozen");
-    }
+    els.recElapsed.hidden = false;
+    els.recElapsed.classList.remove("frozen");
     recElapsedRender();
     // 250ms 一跳：秒数每过整秒就更新，不会出现「看着卡住一秒」的观感；
     // 频率足够低，长时间录制也不会有可见的 CPU 开销。

@@ -4852,3 +4852,19 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 后端补一条断言：`started` 必须等于会话 `start_host`。
 
 全量：后端 **1395 passed / 1 skipped**；前端 **90 文件 0 失败**；pyflakes 干净。
+
+## 审查修正（同一轮）
+
+自查发现两处，已修：
+
+1. **起点偏长**：`start_host` 记录在麦克风初始化、设备音频拉起**之前**，这些步骤
+   可能耗 1~2 秒，读数会比视频长。改为各设备在 `video.start()` 前打 `t_start`，
+   取启动成功里最早的一台存为 `video_start_host`，`started` 用它
+   （[record.py](file:///workspace/backend/controllers/record.py#L223-L227)、
+   [#L264-L270](file:///workspace/backend/controllers/record.py#L264-L270)）。
+2. **空转 interval**：读数元素缺失时仍会每 250ms 起一次渲染再 return，改为
+   元素不在就不起表（[app.js](file:///workspace/frontend/js/app.js#L2895-L2900)）。
+
+确认无问题的点：点停止/取消即刻冻结，失败与 `rec_state died` 路径都会清表；
+`recInFlight` 期间不会起表；`[hidden]` 显式 `display:none`；多设备取最早起录
+时刻，不会因逐台启动累加；只读展示，不触碰任何产物。

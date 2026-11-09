@@ -220,9 +220,11 @@ class RecordMixin:
             # 这里**不吞异常**：真正的抛出（不是各服务返回的 ok=False）会一路
             # 冒到 screen_record_start 的兜底，把整场半启动会话撤销掉。并行化
             # 只改「等多久」，不改这条失败语义。
+            t_start = time.time()   # 视频真正开始录的时刻（Popen 发起前）
             ok, local = self.video.start(s, save_dir, extra_name=sess_ts)
             return s, {"da_tried": da_tried, "da": da, "da_err": da_err,
-                       "remote": remote, "ok": ok, "local": local}
+                       "remote": remote, "ok": ok, "local": local,
+                       "t_start": t_start}
 
         spawned = {}
         errors = []
@@ -258,6 +260,14 @@ class RecordMixin:
                 if r.get("ok"):
                     self._rec_session["videos"][s] = r["local"]
             raise errors[0]
+
+        # 视频真正开始录的本机时刻（只取启动成功的设备里最早的一台）。
+        # start_host 是在麦克风初始化、设备音频拉起**之前**记的，那些步骤
+        # 可能耗 1~2 秒；前端「已录时长」若拿它当起点，读数会比视频长一截。
+        t_starts = [r.get("t_start") for r in spawned.values()
+                    if r.get("ok") and r.get("t_start")]
+        if t_starts:
+            self._rec_session["video_start_host"] = min(t_starts)
 
         for s in serials:
             r = spawned[s]
@@ -331,10 +341,12 @@ class RecordMixin:
 
         return {"ok": ok_any, "mic": self._rec_session.get("mic_path"),
                 "ts": sess_ts,
-                # 会话开始的本机时刻（epoch 秒）：前端据此显示已录时长。
-                # 只按「点完开始、接口返回」起算会漏掉拉起 screenrecord 的
-                # 1~2 秒，读数比视频短一截。
-                "started": self._rec_session.get("start_host")}
+                # 视频真正开始录的本机时刻（epoch 秒），前端据此显示已录时长。
+                # 不用 start_host：那个时刻在麦克风初始化 / 设备音频拉起之前，
+                # 读数会比视频长 1~2 秒；也不用接口返回时刻：那会漏掉拉起
+                # screenrecord 的确认等待，读数比视频短一截。
+                "started": (self._rec_session.get("video_start_host")
+                            or self._rec_session.get("start_host"))}
 
     def _cancel_half_started_rec(self):
         """撤销「启动失败 / 启动异常」的录屏会话残留（须在持有 _rec_lock 时调用）。
