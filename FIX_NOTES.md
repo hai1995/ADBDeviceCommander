@@ -4380,3 +4380,62 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
   不中断启动；C) boot 失败有可见提示且 3s 重试可自愈。
 - 同步更新 `button_icons` / `sidebar_collapse` 的图标断言。
 - 验证：后端 **1389 passed / 1 skipped**；前端 **89 个用例文件全绿**；pyflakes 0。
+
+---
+
+# 第六十一轮（收起按钮点 icon 中心不收 / 录屏停止触发杀软误报）
+
+本轮修你反馈的两个 Bug。
+
+## 1. 「已连接设备」与「指令台」的收起按钮，点 icon 中心收不起来
+
+- 现象：点收起按钮中间的 `<` / `>` 图标本身没反应，只有点图标外面的按钮空白
+  才能收起 / 展开。
+- 根因：收起按钮的点击处理器会在同一次事件里调用 `setBtnIcon`，把按钮里的
+  `<svg>` 替换掉（切 caret-left / caret-right）。被点击的 `<path>` / `<svg>`
+  因此被脱离 DOM。事件继续冒泡到父级「整轨可点展开」委托时，委托用
+  `e.target.closest("button")` 判断「是不是点在按钮上」——但 `e.target` 已
+  脱离，`closest` 再也找不到祖先 `<button>`，返回 null，委托误判为「点在
+  轨道空白」，立刻又把面板展开。于是表现为「点 icon 收不起来」。
+- 修复（[app.js](file:///workspace/frontend/js/app.js)）：新增 `clickOnButton(e)`，
+  用 `e.composedPath()` 判断点击是否落在 `<button>` 上。`composedPath()` 在
+  事件分发瞬间算好整条路径，不受后续 DOM 变动影响，能稳稳命中当时的 button；
+  无 `composedPath` 的老旧环境回退到 `e.target.closest`。设备侧栏与指令台两处
+  委托都改用它。
+- 回归测试（[sidebar_collapse.test.cjs](file:///workspace/tests/frontend/sidebar_collapse.test.cjs)
+  第 [10] 节）：分别 dispatch click 到 `<svg>` 内部的 `<path>`、`<svg>` 元素
+  本体，验证都能收起 / 展开；并确认收起后点窄轨标签仍能展开（整轨热区不受影响）。
+
+## 2. 点击「结束录制」触发亚信杀软拦截，被当成病毒
+
+- 现象：停止录屏时，杀软（亚信等启发式引擎）直接拦截并报毒。
+- 根因：停止路径在主机侧做了两件启发式杀软眼里的「可疑操作」：
+  1. `proc.send_signal(signal.SIGINT)` —— 给另一个进程发信号，杀软常把
+     「信号注入」当成恶意行为；
+  2. `adb shell kill -INT <pid>` / `pkill` —— 按 PID / 名字杀进程，命令行
+     含 `kill` 也容易被启发式规则命中。
+  而 screenrecord 偏偏只在 SIGINT（Ctrl-C）下才写回 moov 优雅收尾，SIGTERM
+  会留下无时长的坏 mp4，所以又不能简单改成 kill。
+- 修复（[screen_service.py](file:///workspace/backend/screen_service.py)）：
+  改用 **PTY Ctrl-C** 优雅结束 screenrecord，主机侧只做一次管道写入：
+  - 启动命令加 `adb shell -t`，强制在设备端分配 PTY；
+  - Popen 加 `stdin=subprocess.PIPE`；
+  - 停止 / 取消时，新增的 `_graceful_stop_proc(proc)` 往 `proc.stdin` 写一个
+    `\x03`（Ctrl-C）并 flush。设备端 shell 的 PTY 行规程把它转成 SIGINT 投给
+    screenrecord，与终端里手动 Ctrl-C 完全等价，screenrecord 据此写回 moov 并退出。
+  - 删除 `_stop_device_screenrecord`（设备端 `kill -INT` / `pkill`）以及
+    `send_signal(SIGINT)` 调用；`signal`、`kill_device_process` 的导入一并移除。
+  - 兜底仍保留 `proc.kill()`（仅在 Ctrl-C 后 10 秒不退才用，杀的是我们自己
+    拉起的 adb 子进程，属于常规操作）。
+- 测试（[test_backend_screen.py](file:///workspace/tests/test_backend_screen.py)）：
+  - `test_start_uses_unique_remote_name` 断言命令带 `-t`；
+  - `test_graceful_stop_proc_writes_ctrl_c_to_stdin` /
+    `test_graceful_stop_proc_handles_missing_stdin`：验证写 `\x03` 且无 stdin 不崩；
+  - `test_stop_signals_device_side_screenrecord_first`、
+    `test_discard_ex_uses_pty_ctrl_c_not_kill`、
+    `test_stop_recording_never_kills_mirror_by_process_name`：验证 stop / discard
+    全程不出现 `kill` / `pkill`，且确实发出了 Ctrl-C。
+- 验证：后端 **1390 passed / 1 skipped**；前端 **89 个用例文件全绿**；pyflakes 0。
+- 备注：`device_proc.kill_device_process` 仍被 `audio_service`（tinycap）和
+  `mirror_service`（投屏）使用，本轮未改动 —— 如后续停止录音 / 投屏也被同类
+  杀软拦截，可按同样的 PTY Ctrl-C 思路处理。

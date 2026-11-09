@@ -14,13 +14,11 @@ backend.screen_service —— 截图 + 录屏（视频，不含音频合成）�
 """
 import itertools
 import os
-import signal
 import subprocess
 import tempfile
 import threading
 import time
 
-from backend.device_proc import kill_device_process
 from core import imgbytes
 from core.constants import (
     REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
@@ -501,8 +499,15 @@ class VideoRecorder:
         no_limit=True 用于极老的 ROM（不认这个选项时 start() 会去掉它重试一次）：
         退化到 180 秒硬上限也照样自动分段 —— 180 > 170，watcher 的「这一段录满了」
         判据不受影响。宁可段长不可控，也不能让整台设备录不了。
+
+        `-t`：强制 adb 在设备端分配 PTY。这样停止时往本地 stdin 写一个 Ctrl-C
+        （`\\x03`）就能让设备端 shell 把 SIGINT 投给 screenrecord —— 与终端里
+        手动 Ctrl-C 完全等价，screenrecord 据此写回 moov 并优雅退出。相比早年
+        的 `proc.send_signal(SIGINT)` + 设备端 `kill -INT <pid>`，这条路径在
+        主机侧只是「写一个字节到管道」，不触发任何杀进程 / 信号注入类的安全
+        软件告警（亚信等启发式杀软会把 `send_signal` / `kill` 当成可疑行为）。
         """
-        cmd = [adb, "-s", serial, "shell", "screenrecord"]
+        cmd = [adb, "-s", serial, "shell", "-t", "screenrecord"]
         if not no_limit:
             cmd += ["--time-limit", str(REC_SEGMENT_S)]
         cmd.append(remote)
@@ -781,6 +786,7 @@ class VideoRecorder:
             proc = subprocess.Popen(
                 self._screenrecord_cmd(self.adb, serial, remote,
                                        no_limit=bool(sess.get("no_lim"))),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
         except Exception as e:
@@ -961,7 +967,8 @@ class VideoRecorder:
         """
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cmd, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
         except Exception as e:
             return None, "启动录屏失败：%s" % e
@@ -1049,25 +1056,27 @@ class VideoRecorder:
                            or "settings 返回 %d" % r.returncode)
         return True, ""
 
-    def _stop_device_screenrecord(self, adb, serial, remote=None):
-        """精准结束设备端 screenrecord：用 SIGINT 让其优雅收尾（写回 moov 头），这是录出
-        可播放 MP4 的关键——screenrecord 只在 SIGINT（Ctrl-C）下收尾，仅 SIGTERM 会直接被杀、
-        文件没收尾（无 moov 头、没有时长、播放不了）。
+    @staticmethod
+    def _graceful_stop_proc(proc):
+        """用 PTY Ctrl-C 优雅结束 screenrecord（写回 moov）。
 
-        收尾顺序统一收口到 backend.device_proc.kill_device_process（录屏 / 录音共用）：
-        按 PID `kill -INT` → **等它把 moov 写完** → 确认仍存活才补 `-TERM`。早期这里把
-        `-INT` 与 `-TERM` 背靠背发出去，进程很可能死在写 moov 的中途——等于白优雅一次，
-        产物依旧是坏文件。
+        启动命令带了 `adb shell -t`，设备端分配了 PTY；往本地 adb 的 stdin
+        写一个 ``\\x03``（Ctrl-C），设备端 shell 会把 SIGINT 投给前台进程组
+        里的 screenrecord —— 与手动在终端里按 Ctrl-C 完全等价。screenrecord
+        只在 SIGINT 下收尾，SIGTERM 会留下没 moov 的残片。
 
-        **绝不能按进程名 pkill screenrecord**：投屏（`screenrecord --output-format=h264 -`）
-        是同名进程，停止录屏时一刀按名字切下去，会把用户眼前正在看的投屏一起掐断，而设备
-        明明好好的。因此只认「命令行里带本次录屏文件名」的那一条（remote 形如
-        /data/local/tmp/adb_rec_<serial>_<ts>_<seq>.mp4，每次录制唯一）；精确取不到 PID 时
-        退化为 `pkill -f <该文件名>`，仍然只命中自己那条。
+        主机侧只做了一次管道写入，没有 `send_signal` / `kill` / `pkill`，
+        不会被启发式杀软（亚信等）当成「信号注入 / 杀进程」拦截。
         """
-        match = os.path.basename(remote) if remote else None
-        kill_device_process(adb, serial, "screenrecord", match=match,
-                            fallback_name_kill=False)
+        if proc is None:
+            return
+        try:
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None:
+                stdin.write("\x03")
+                stdin.flush()
+        except Exception:
+            pass
 
     def stop(self, serial):
         """停止录屏并拉回本地。返回 (ok, local_path, err)。
@@ -1094,17 +1103,10 @@ class VideoRecorder:
         if sess is None:
             return False, [], "该设备未在录制"
         proc = sess.get("proc")
-        # 1) POSIX：给本地 adb 客户端发 SIGINT（等价于终端里 Ctrl-C），adb 会把中断转发给
-        #    设备端 screenrecord，后者由此优雅收尾（写回 moov 头并关闭文件）。这是标准停止路径，
-        #    能确保录出可播放的 MP4。Windows 不支持给子进程 send_signal(SIGINT)，改为靠下方的
-        #    设备端按 PID 精准结束。
-        if proc is not None and os.name != "nt":
-            try:
-                proc.send_signal(signal.SIGINT)
-            except Exception:
-                pass
-        # 2) 设备端按 PID 精准结束 screenrecord（比 pkill 更通用）；并给一点时间收尾。
-        self._stop_device_screenrecord(self.adb, serial, sess.get("remote"))
+        # 1) PTY Ctrl-C：往本地 adb 的 stdin 写 `\x03`，设备端 screenrecord
+        #    收到 SIGINT 后优雅收尾（写回 moov）。主机侧只是管道写一个字节，
+        #    不再调用 send_signal / kill / pkill，避免被启发式杀软拦截。
+        self._graceful_stop_proc(proc)
         try:
             if proc is not None:
                 proc.wait(timeout=10)
@@ -1178,14 +1180,9 @@ class VideoRecorder:
                 return False, [], "该设备未在录制"
             sess["stopping"] = True
         proc = sess.get("proc")
-        # 1) POSIX：SIGINT 让 adb 转发中断，screenrecord 优雅收尾（我们随后删文件，
-        #    但进程必须真的退出——否则它会一直占着编码器到 180 秒上限）。
-        if proc is not None and os.name != "nt":
-            try:
-                proc.send_signal(signal.SIGINT)
-            except Exception:
-                pass
-        self._stop_device_screenrecord(self.adb, serial, sess.get("remote"))
+        # 1) PTY Ctrl-C：与 stop_ex 同一手法——主机侧只写一个字节到 adb stdin，
+        #    设备端 screenrecord 收到 SIGINT 优雅收尾（不再用 send_signal / kill）。
+        self._graceful_stop_proc(proc)
         stopped = True
         try:
             if proc is not None:

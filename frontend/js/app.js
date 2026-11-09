@@ -6058,6 +6058,22 @@
     btn.dataset.iconDone = "1";
   }
 
+  /* 判断一次 click 是否落在某个 <button> 上。
+     为什么不用 e.target.closest("button")：收起 / 展开按钮的处理器会在同一次
+     事件派发里调用 setBtnIcon，把被点击的 svg / path 换掉并脱离 DOM。等事件
+     冒泡到父级「整轨可点展开」委托时，e.target 已经是脱离态，closest 再也找
+     不到祖先 button，委托就会误把「点按钮收起」当成「点轨道空白展开」，立刻
+     又把面板顶回去——表现为「点 icon 中心收不起来」。
+     composedPath() 在事件分发瞬间算好整条路径，不受后续 DOM 变动影响，能稳稳
+     命中当时的 button。没有 composedPath 的老旧环境回退到 e.target.closest。 */
+  function clickOnButton(e) {
+    if (e && typeof e.composedPath === "function") {
+      return e.composedPath().some((el) =>
+        el && el.nodeType === 1 && typeof el.closest === "function" && el.closest("button"));
+    }
+    return !!(e && e.target && typeof e.target.closest === "function" && e.target.closest("button"));
+  }
+
   /* 一个工作区里所有交互都在这儿绑一次（默认工作区与克隆体共用同一套代码，
      不会出现「第 2 个 tab 的按钮点了没反应」这种分叉 bug）。 */
   function bindWorkspace(ws) {
@@ -6145,7 +6161,7 @@
     if (ws.leftPanelEl) {
       ws.leftPanelEl.addEventListener("click", (e) => {
         if (!ws.root.classList.contains("collapsed")) return;
-        if (e.target.closest && e.target.closest("button")) return;
+        if (clickOnButton(e)) return;
         applyCmdCollapsed(ws, false);
       });
     }
@@ -7489,7 +7505,7 @@
     if (els.deviceSidebar) {
       els.deviceSidebar.addEventListener("click", (e) => {
         if (!sidebarCollapsed()) return;
-        if (e.target.closest && e.target.closest("button")) return;
+        if (clickOnButton(e)) return;
         applySidebarCollapsed(false);
       });
     }

@@ -294,6 +294,45 @@ async function booted(win, calls) {
     window.close();
   }
 
+  console.log("\n[10] 点 icon 中心也能收起（回归：点 svg 不收起）");
+  {
+    /* 回归：收起按钮的处理器会在同一次事件里调用 setBtnIcon 替换 svg，把被点击
+       的 path / svg 脱离 DOM。事件继续冒泡到「整轨可点展开」委托时，
+       e.target.closest("button") 因 target 已脱离而返回 null，委托误判为
+       「点轨道空白」立刻又把面板展开——表现为「点 icon 中心收不起来」。
+       修复：委托改用 e.composedPath() 判断是否落在按钮上（路径在分发时算好，
+       不受后续 DOM 变动影响）。这里分别点 svg 的 path、svg 元素本体，都应收起。 */
+    const { window, calls } = mkEnv();
+    const doc = window.document;
+    await booted(window, calls);
+    const row = doc.querySelector(".main-row");
+    const btn = () => doc.getElementById("btn-sidebar-collapse");
+    const svgPath = () => btn().querySelector("svg path");
+    const svgEl = () => btn().querySelector("svg");
+
+    ok(!row.classList.contains("sidebar-collapsed"), "初始展开");
+    // 点 svg 内部的 path（icon 最中心）
+    svgPath().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(row.classList.contains("sidebar-collapsed"),
+       "点 icon 的 path → 收起（不能因 setBtnIcon 换掉 svg 又被委托顶回展开）");
+    // 再点 path 展开
+    svgPath().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(!row.classList.contains("sidebar-collapsed"), "再点 path → 展开");
+    // 点 svg 元素本身
+    svgEl().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(row.classList.contains("sidebar-collapsed"), "点 svg 元素 → 收起");
+    svgEl().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(!row.classList.contains("sidebar-collapsed"), "点 svg 元素 → 展开");
+    // 整轨热区仍生效：收起后点非按钮区域能展开
+    btn().click();
+    ok(row.classList.contains("sidebar-collapsed"), "先收起");
+    doc.querySelector(".sidebar-title-text")
+       .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(!row.classList.contains("sidebar-collapsed"),
+       "收起后点窄轨标签仍能展开（整轨热区不受 composedPath 改造影响）");
+    window.close();
+  }
+
   console.log("\n" + "=".repeat(46));
   console.log(`结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);
