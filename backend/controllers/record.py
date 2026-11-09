@@ -330,7 +330,11 @@ class RecordMixin:
             return {"ok": False, "reason": "start_failed"}
 
         return {"ok": ok_any, "mic": self._rec_session.get("mic_path"),
-                "ts": sess_ts}
+                "ts": sess_ts,
+                # 会话开始的本机时刻（epoch 秒）：前端据此显示已录时长。
+                # 只按「点完开始、接口返回」起算会漏掉拉起 screenrecord 的
+                # 1~2 秒，读数比视频短一截。
+                "started": self._rec_session.get("start_host")}
 
     def _cancel_half_started_rec(self):
         """撤销「启动失败 / 启动异常」的录屏会话残留（须在持有 _rec_lock 时调用）。

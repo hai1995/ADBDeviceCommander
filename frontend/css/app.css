@@ -1390,6 +1390,32 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   border-radius: 4px;
 }
 .rec-limit .rec-limit-t { color: var(--warn); font-weight: 600; }
+/* 录制时长（紧贴「停止录制」）：录制中实时走动，等宽数字 + 固定秒位宽度，
+   避免每秒刷新把后面的「取消录制」推来推去。空闲时整块隐藏（[hidden] 必须
+   显式写回来：作者样式的 display 会盖掉浏览器默认的 [hidden]{display:none}）。 */
+.rec-elapsed {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border-radius: 6px; flex: none;
+  font: 600 var(--fs-sm)/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--err); background: var(--err-soft);
+  border: 1px solid rgba(255, 95, 107, .42);
+}
+.rec-elapsed[hidden] { display: none; }
+.rec-elapsed .rec-elapsed-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; flex: none;
+  animation: rec-elapsed-blink 1.2s ease-in-out infinite;
+}
+/* 冻结态（点了停止、正在收尾）：不再闪烁，数字停在点下去的那一刻。 */
+.rec-elapsed.frozen .rec-elapsed-dot { animation: none; opacity: .5; }
+@keyframes rec-elapsed-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rec-elapsed .rec-elapsed-dot { animation: none; }
+}
 .rec-limit code {
   font-family: var(--font-mono, monospace); font-size: .95em;
   padding: 0 3px; border-radius: 3px; background: rgba(0, 0, 0, .25);

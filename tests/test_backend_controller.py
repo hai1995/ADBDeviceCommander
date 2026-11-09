@@ -1764,6 +1764,10 @@ def test_devaudio_remote_path_safe_for_wireless_serial(monkeypatch, tmp_path):
     res = api.screen_record_start(
         "192.168.1.5:5555", with_devaudio=True, save_dir=str(tmp_path))
     assert res.get("ok") is True, res
+    # 前端「已录时长」的起点：必须是会话真实开始的本机时刻，不能靠前端
+    # 自己从点击完成起算（那会漏掉拉起 screenrecord 的 1~2 秒）
+    assert isinstance(res.get("started"), float), res
+    assert abs(res["started"] - api._rec_session["start_host"]) < 1e-6, res
     remote = api._rec_session["devaudio"]["192.168.1.5:5555"]
     assert remote.endswith(".wav"), remote
     # 基名过全部非法字符（/ 是设备端合法目录分隔符，单独放行）

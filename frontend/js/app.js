@@ -48,6 +48,7 @@
     toolRec: $("tool-rec"),
     toolRecStop: $("tool-rec-stop"),
     toolRecCancel: $("tool-rec-cancel"),
+    recElapsed: $("rec-elapsed"), recElapsedT: $("rec-elapsed-t"),
     recLogcat: $("rec-logcat"), recMic: $("rec-mic"), recZip: $("rec-zip"),
     recPointerLocation: $("rec-pointer-location"), recShowTouches: $("rec-show-touches"),
     // 应用安装（APK）
@@ -2859,6 +2860,76 @@
     markBtnBusy(els.toolRecCancel, busy);
   }
 
+  /* ---------------- 录制时长 ----------------
+     录制中在「停止录制」旁实时显示已录时长，让用户随时知道录了多久。
+     计时用 performance.now()（单调时钟）：用户改系统时间、或设备校时导致主机
+     时间跳变，都不会让读数突然多出一小时或少掉一段。
+     起点优先用后端返回的会话开始时刻（screen_record_start 返工前那次 Popen
+     到返回有 1~2 秒，只按前端点完开始的那一刻计会少算）；拿不到就从 0 起算。 */
+  let recTimerId = null;     // setInterval 句柄（null = 没有在走）
+  let recT0 = 0;             // 计时起点（performance.now 基准）
+  let recFrozenMs = null;    // 冻结后的已录毫秒数（点停止那一刻）
+
+  function _recNow() {
+    return (typeof performance !== "undefined" && performance.now)
+      ? performance.now() : Date.now();
+  }
+
+  function _fmtRecElapsed(ms) {
+    const t = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(t / 3600);
+    const m = Math.floor((t % 3600) / 60);
+    const s = t % 60;
+    const mm = String(m).padStart(2, "0");
+    const ss = String(s).padStart(2, "0");
+    // 满 1 小时才补上小时位：短录制（绝大多数场景）保持 MM:SS 不啰嗦
+    return h ? String(h) + ":" + mm + ":" + ss : mm + ":" + ss;
+  }
+
+  function recElapsedRender() {
+    if (!els.recElapsedT) return;
+    const ms = (recFrozenMs !== null) ? recFrozenMs : (_recNow() - recT0);
+    els.recElapsedT.textContent = _fmtRecElapsed(ms);
+  }
+
+  function recElapsedStart(offsetMs) {
+    recElapsedClear();
+    recT0 = _recNow() - Math.max(0, Number(offsetMs) || 0);
+    if (els.recElapsed) {
+      els.recElapsed.hidden = false;
+      els.recElapsed.classList.remove("frozen");
+    }
+    recElapsedRender();
+    // 250ms 一跳：秒数每过整秒就更新，不会出现「看着卡住一秒」的观感；
+    // 频率足够低，长时间录制也不会有可见的 CPU 开销。
+    recTimerId = setInterval(recElapsedRender, 250);
+  }
+
+  /* 点「停止 / 取消」的瞬间冻结读数：收尾（拉段 / 合并 / 打包）要十几秒，
+     若继续往上走，用户看到的数字会比视频实际时长还长，反而制造困惑。 */
+  function recElapsedFreeze() {
+    if (recTimerId === null && recFrozenMs === null) return;
+    if (recFrozenMs === null) recFrozenMs = _recNow() - recT0;
+    if (recTimerId !== null) {
+      clearInterval(recTimerId);
+      recTimerId = null;
+    }
+    if (els.recElapsed) els.recElapsed.classList.add("frozen");
+    recElapsedRender();
+  }
+
+  function recElapsedClear() {
+    if (recTimerId !== null) {
+      clearInterval(recTimerId);
+      recTimerId = null;
+    }
+    recFrozenMs = null;
+    if (els.recElapsed) {
+      els.recElapsed.hidden = true;
+      els.recElapsed.classList.remove("frozen");
+    }
+  }
+
   /* 录屏态：录制中把「停止」按钮切成红色实心并带轻微呼吸光晕，空闲时恢复灰。
      立即切换不等后端事件回传，避免点了没反应；复用 .btn.danger / .btn.danger.live。
      选项在录制中锁定防误改。
@@ -2868,12 +2939,21 @@
      用户再点停止只会得到 no_session）。
      请求在途（recInFlight）时忽略：按钮此刻已被点击处理函数禁用，
      在途收尾时会按最终结果统一设置，中途插入的事件不与之打架。 */
-  function setRecRunning(running) {
+  function setRecRunning(running, startedAtSec) {
     if (recInFlight) return;
     els.toolRec.disabled = running;
     els.toolRecStop.disabled = !running;
     els.toolRecStop.classList.toggle("danger", running);
     els.toolRecStop.classList.toggle("live", running);
+    // 时长读数与录制态同生命周期：进来就起表（按后端给的真实开始时刻补上
+    // 启动耗时），退出（用户停止 / 后端报录制意外结束）就整块收起。
+    if (running) {
+      const offset = startedAtSec
+        ? Math.max(0, Date.now() - startedAtSec * 1000) : 0;
+      recElapsedStart(offset);
+    } else {
+      recElapsedClear();
+    }
     // 「取消」只在录制中可点：它做的事是「停止 + 删除本次产物」，没有会话时
     // 点了只会得到一句「当前没有进行中的录屏」，不如直接不给点。
     if (els.toolRecCancel) els.toolRecCancel.disabled = !running;
@@ -7041,11 +7121,13 @@
         setRecRunning(false);
         return;
       }
-      setRecRunning(true);
+      setRecRunning(true, res && res.started);
     });
     els.toolRecStop.addEventListener("click", async () => {
       if (recInFlight) return;      // 停止在途：收尾（转码 / 打包）要十几秒，防连点
       setRecInFlight(true);
+      // 冻结在「点下去」这一刻：后面是十几秒收尾，数字不该继续往上走
+      recElapsedFreeze();
       if (els.toolRecStop) els.toolRecStop.title = "正在停止录屏并收尾，请稍候…";
       /* 收尾是「停设备端 → 等 moov 写完 → 拉视频 → 合成 → 打包」，几秒起步；
          这期间调用还没返回，按钮已禁用，界面若一句话都没有，用户会以为点空了。 */
@@ -7105,6 +7187,7 @@
           return;
         }
         setRecInFlight(true);
+        recElapsedFreeze();
         if (els.toolRecCancel) els.toolRecCancel.title = "正在停止设备端录制并删除文件…";
         /* 取消要「停设备端 → 等拉取收尾 → 删文件」，几秒起步；期间按钮全灰，
            没有一句话用户会以为点空了。 */

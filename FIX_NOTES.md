@@ -4817,3 +4817,38 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 `calls` 分配（先前全量跑时被残留 worker 干扰而偶发失败）。
 
 全量：后端 **1395 passed / 1 skipped**；pyflakes 干净。
+
+---
+
+# 第六十八轮（录制中在「停止录制」旁显示实时时长）
+
+## 需求
+
+「开始录制后，在结束录制按钮处增加时长的显示，能清晰感知到录制了多久。」
+
+## 实现
+
+- [index.html](file:///workspace/frontend/index.html#L333-L340)：在「停止录制」**紧后面**
+  加一个 `#rec-elapsed` 读数（红点 + 等宽数字），空闲时 `hidden`。
+- [app.css](file:///workspace/frontend/css/app.css#L1393-L1418)：红点呼吸、等宽
+  tabular-nums（秒数跳动不推动后面的按钮）；`.frozen` 停闪；`[hidden]` 显式写回
+  `display:none`——作者样式的 display 会盖掉浏览器默认规则，漏了这行「隐藏」就失效。
+- [app.js](file:///workspace/frontend/js/app.js#L2863-L2931)：`performance.now()`
+  单调计时（改系统时间 / 校时跳变不会让读数乱跳），250ms 一跳；
+  - 起点用后端 `screen_record_start` 返回的 `started`（会话真实开始时刻），补上
+    拉起 screenrecord 的 1~2 秒，读数与视频时长一致；
+  - 点「停止 / 取消」**那一刻**冻结读数（`.frozen`，红点停闪），收尾十几秒里不再
+    上涨——否则用户看到的数字会超过视频本身；
+  - `setRecRunning(false)`（含后端 `rec_state` 判定录制意外结束）整块收起；
+  - 满 1 小时自动补小时位（`1:02:05`），短录制保持 `MM:SS`。
+- [record.py](file:///workspace/backend/controllers/record.py#L332-L337)：启动返回体
+  新增 `started`（`start_host`，epoch 秒）。
+
+## 测试
+
+新增 [rec_elapsed.test.cjs](file:///workspace/tests/frontend/rec_elapsed.test.cjs)（14 条）：
+默认隐藏且紧贴停止按钮、按后端起点起算（65 秒 → `01:05`）、读数持续走动、点停止
+立刻冻结且收尾期间不涨、完成后收起、跨小时补位、`rec_state died` 事件后收起。
+后端补一条断言：`started` 必须等于会话 `start_host`。
+
+全量：后端 **1395 passed / 1 skipped**；前端 **90 文件 0 失败**；pyflakes 干净。

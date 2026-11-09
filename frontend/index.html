@@ -330,6 +330,14 @@
                    误读成「停止刷新」「取消选择」。名字本身就要说清动作落在什么上。 -->
               <button id="tool-rec" class="btn ok" data-icon="record">开始录制</button>
               <button id="tool-rec-stop" class="btn" disabled data-icon="stop">停止录制</button>
+              <!-- 录制时长：紧贴「停止录制」，录制中实时走动，让用户随时知道录了多久
+                   （分段每 ~3 分钟一次，有时长才好判断是不是录够了）。空闲时整个隐藏；
+                   点停止后先冻结在「点下去的那一刻」，收尾十几秒里不会继续往上跳，
+                   用户看到的数字与视频时长一致。 -->
+              <span id="rec-elapsed" class="rec-elapsed" role="timer"
+                    aria-label="已录制时长" hidden>
+                <span class="rec-elapsed-dot" aria-hidden="true"></span><span id="rec-elapsed-t">00:00</span>
+              </span>
               <!-- 取消录制：录错了（选错设备 / 场景不对 / 只是点错了开始）时的出口。
                    与「停止录制」的区别是**不保留**：停止并删除本次已产生的文件，不合并、
                    不打包。紧挨着「停止录制」有误点风险，故点击后必须过一道二次确认弹窗
