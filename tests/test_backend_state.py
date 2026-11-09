@@ -86,6 +86,30 @@ def test_mark_booted_keeps_builtin_flag():
     assert by_id["u1"]["builtin"] is False
 
 
+def test_mark_booted_keeps_section_and_scope():
+    """内置命令的两根分类轴必须随 booted 载荷下发。
+
+    回归：mark_booted 以白名单逐字段重建命令字典，section 就是这样被丢掉的
+    —— 前端拿到的 c.section 恒为 undefined，内置组永远只剩一个「其他」段
+    （不报错，只是「按用途分组」整个失效，而且只有真的启动界面才看得出来）。
+    scope（通用 / 车机 / 手机）同样必须显式下发，否则卡片角标永远不会出现。
+    """
+    st = AppState()
+    payload = st.mark_booted([
+        {"id": "bi.remount-adb", "name": "remount", "labels": ["内置"],
+         "section": "连接与投屏", "scope": "车机",
+         "commands": [{"command": "adb remount", "delay": 0}], "builtin": True},
+        {"id": "u1", "name": "我的命令", "labels": ["通用"],
+         "commands": [{"command": "git status", "delay": 0}]},
+    ], [])
+    by_id = {c["id"]: c for c in payload["commands"]}
+    assert by_id["bi.remount-adb"]["section"] == "连接与投屏"
+    assert by_id["bi.remount-adb"]["scope"] == "车机"
+    # 用户命令没有这两个字段 -> 下发空串（前端只需判断真假，不必处理 undefined）
+    assert by_id["u1"]["section"] == ""
+    assert by_id["u1"]["scope"] == ""
+
+
 def test_mark_booted_keeps_input_only_flag():
     """inputOnly（electerm 仅输入模式）必须随命令下发给前端。
 

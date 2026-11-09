@@ -30,6 +30,14 @@ core.commands.load_commands 在加载用户 quick_commands.json 后与本列表�
 # 刻意不复用 labels —— labels 决定一级分组和顶部标签过滤条，把六个细分塞进
 # 标签条只会让「通用 / 常用 / 内置」被内置命令的细分淹掉。二级分组顺序由
 # 前端常量 BUILTIN_SECTIONS 决定（这里只写归属，不写次序）。
+#
+# scope 是独立于 section 的第二根轴：这条命令适用于什么设备 ——「通用」/「车机」/
+# 「手机」。section 回答「干什么用」，scope 回答「在哪类设备上才有意义」（例如
+# 上滑解锁坐标按手机锁屏设计，remount 主要出现在车机工程机）。两者正交，前端
+# 在卡片上打小角标、并在「内置」组内提供按 scope 的筛选。
+# **缺省即「通用」**：绝大多数命令（按键 / 网络 / 信息查询）对两类设备都适用，
+# 逐条重复写 40 多次只会让真正需要区分的条目被淹没；只有明确偏向某一类设备
+# 的命令才显式标注。前端 / 后端读不到 scope 时一律按「通用」处理。
 BUILTIN_COMMANDS = [
     {
         "id": "bi.adb-status", "name": "ADB连接状态", "labels": ["内置"], "section": "连接与投屏",
@@ -55,6 +63,7 @@ BUILTIN_COMMANDS = [
             r'''adb shell dumpsys window | sls mCurrentFocus | %{ if ($_ -match '(\S+)/') { adb shell am force-stop $Matches[1] } }'''}]},
     {
         "id": "bi.update-time", "name": "更新设备时间", "labels": ["内置"], "section": "应用与信息",
+        "scope": "车机",
         "clickCount": 0, "builtin": True,
         "commands": [
             {"delay": 100, "command": "adb root"},
@@ -62,6 +71,7 @@ BUILTIN_COMMANDS = [
                 '''$currentDate = Get-Date -Format "MMddHHmmyyyy.ss"; adb shell "date $currentDate"'''}]},
     {
         "id": "bi.wifi-priority", "name": "优先使用WIFI", "labels": ["内置"], "section": "连接与投屏",
+        "scope": "车机",
         "clickCount": 0, "builtin": True,
         "commands": [{"delay": 100, "command":
             "adb shell settings put global is_allow_apna_use_wifi 1"}]},
@@ -114,6 +124,7 @@ BUILTIN_COMMANDS = [
         "commands": [{"delay": 100, "command": "adb get-serialno"}]},
     {
         "id": "bi.wake-unlock", "name": "亮屏并上滑解锁", "labels": ["内置"], "section": "按键",
+        "scope": "手机",
         "clickCount": 0, "builtin": True,
         # 必须用 224（KEYCODE_WAKEUP）而不是 26（KEYCODE_POWER）：26 是**电源开关**，
         # 屏幕本来就亮着时按下去等于熄屏，紧接着的上滑自然毫无效果 —— 命令名说「亮屏」，
@@ -134,6 +145,7 @@ BUILTIN_COMMANDS = [
             {"delay": 1000, "command": "adb devices"}]},
     {
         "id": "bi.root-adb", "name": "root", "labels": ["内置"], "section": "连接与投屏",
+        "scope": "车机",
         "clickCount": 0, "builtin": True,
         "commands": [
             {"delay": 0, "command": "adb root"}
@@ -141,6 +153,7 @@ BUILTIN_COMMANDS = [
     },
     {
         "id": "bi.remount-adb", "name": "remount", "labels": ["内置"], "section": "连接与投屏",
+        "scope": "车机",
         "clickCount": 0, "builtin": True,
         "commands": [
             {"delay": 0, "command": "adb remount"}
@@ -247,10 +260,12 @@ BUILTIN_COMMANDS = [
         "commands": [{"delay": 100, "command": "adb shell svc wifi disable"}]},
     {
         "id": "bi.data-on", "name": "打开移动数据", "labels": ["内置"], "section": "网络",
+        "scope": "手机",
         "clickCount": 0, "builtin": True,
         "commands": [{"delay": 100, "command": "adb shell svc data enable"}]},
     {
         "id": "bi.data-off", "name": "关闭移动数据", "labels": ["内置"], "section": "网络",
+        "scope": "手机",
         "clickCount": 0, "builtin": True,
         "commands": [{"delay": 100, "command": "adb shell svc data disable"}]},
     {
@@ -290,6 +305,7 @@ BUILTIN_COMMANDS = [
         "commands": [{"delay": 100, "command": "adb shell logcat -c"}]},
     {
         "id": "bi.battery", "name": "电池与温度信息", "labels": ["内置"], "section": "应用与信息",
+        "scope": "手机",
         "clickCount": 0, "builtin": True,
         "commands": [{"delay": 100, "command": "adb shell dumpsys battery"}]},
     {

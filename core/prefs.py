@@ -112,6 +112,9 @@ PREFS_DEFAULTS = {
     # 与 cmd_order 同一套「逗号串」约定：多值存成一个字符串，读写都不用
     # 处理嵌套结构，手改 config.json 也不容易写坏。
     "builtin_folded": "",
+    # 指令台「内置」组的设备类型筛选（scope）：空串 = 全部，或 通用 / 车机 / 手机。
+    # 与 builtin_folded 同一套「单值字符串」约定，非法值由前端忽略（保持「全部」）。
+    "builtin_scope": "",
     # 指令台工作区（子 tab）布局：逗号分隔的工作区名，第一个对应默认工作区。
     # 与 cmd_order / builtin_folded 同一套「逗号串」约定 —— 多值存成一个字符串，
     # 读写都不用处理嵌套结构，手改 config.json 也不容易写坏。

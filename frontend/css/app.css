@@ -979,6 +979,21 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 .cmd-fold-all:hover { color: var(--accent); border-color: var(--line-strong); }
 .cmd-fold-all:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+/* 「内置」组内的设备类型筛选条（全部 / 通用 / 车机 / 手机）。
+   比一级标签条更轻：它是内置命令内部的二次收窄，不参与顶部标签过滤。 */
+.cmd-scope-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 9px; }
+.cmd-scope {
+  background: none; border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 9px; cursor: pointer;
+  font: 500 var(--fs-xs)/1.5 var(--font-body); letter-spacing: .04em;
+  color: var(--muted);
+}
+.cmd-scope:hover { color: var(--text); border-color: var(--line-strong); }
+.cmd-scope.active {
+  color: var(--accent); background: var(--accent-soft);
+  border-color: rgba(52, 224, 234, .55);
+}
+.cmd-scope:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .cmd-chip {
   background: var(--surface-2); color: var(--text-2);
   border: 1px solid var(--line); border-radius: 999px;
@@ -1011,6 +1026,19 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   background: var(--warn-soft); color: #ffd9a0;
   border-color: var(--warn);
 }
+/* 内置命令的适用设备角标（通用 / 车机 / 手机）：字号更小、贴右，避免与
+   命令名抢视线；三种颜色只用于区分，不表示优先级。 */
+.chip-scope {
+  margin-left: 6px; padding: 0 5px; border-radius: 4px;
+  font: 500 9.5px/1.6 var(--font-body); letter-spacing: .04em;
+  vertical-align: 1px; white-space: nowrap;
+}
+.chip-scope--comm { color: var(--faint); background: rgba(255, 255, 255, .06); }
+.chip-scope--car { color: #9ecbff; background: rgba(120, 170, 255, .16); }
+.chip-scope--phone { color: #ffd08a; background: rgba(255, 180, 84, .16); }
+/* 内置卡没有 ⋯ 菜单，右侧不必留 kebab 的 20px 空位（角标贴边更整齐）。
+   用复合选择器压过后面的 .cmd-chip { padding-right: 20px }。 */
+.cmd-chip.cmd-chip--builtin { padding-right: 10px; }
 
 /* 指令台筛选 + 标签过滤 */
 .cmd-filterbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }

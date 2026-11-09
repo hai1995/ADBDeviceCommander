@@ -816,6 +816,41 @@ def test_section_survives_merge_for_frontend():
 
 
 # ---------------------------------------------------------------------------
+# 内置命令的适用设备（scope：通用 / 车机 / 手机）
+# ---------------------------------------------------------------------------
+# scope 与 section 正交：section 回答「干什么用」，scope 回答「在哪类设备上
+# 有意义」。缺省即「通用」（绝大多数命令两类设备都能用，逐条重复写只会让
+# 真正需要区分的条目被淹没），只有明确偏向某一类的才显式标注。
+BUILTIN_SCOPES = ["通用", "车机", "手机"]
+
+
+def test_builtin_scope_values_are_known():
+    """写歪一个字不会报错，只会让那条命令被前端按「通用」处理 ——
+    错误归类永远没人发现，故把三个名字钉死成契约。"""
+    bad = [(c["id"], c["scope"]) for c in BUILTIN_COMMANDS
+           if c.get("scope") is not None and c["scope"] not in BUILTIN_SCOPES]
+    assert not bad, "scope 不在白名单（前端会按「通用」处理）：%s" % bad
+
+
+def test_scope_covers_both_device_types():
+    """车机 / 手机两类都要有足够多的专属命令，否则筛选按钮点下去接近空列表。"""
+    from collections import Counter
+    cnt = Counter(c.get("scope", "通用") for c in BUILTIN_COMMANDS)
+    assert cnt["通用"] > cnt["车机"] + cnt["手机"], cnt
+    assert cnt["车机"] >= 2 and cnt["手机"] >= 2, cnt
+
+
+def test_scope_survives_merge_for_frontend():
+    """与 section 同理：merge_builtins 丢字段的话，卡片角标永远不出现。"""
+    merged = merge_builtins([])
+    by_id = {c["id"]: c for c in merged}
+    assert by_id["bi.remount-adb"].get("scope") == "车机"
+    assert by_id["bi.root-adb"].get("scope") == "车机"
+    assert by_id["bi.wake-unlock"].get("scope") == "手机"
+    assert by_id["bi.battery"].get("scope") == "手机"
+
+
+# ---------------------------------------------------------------------------
 # 写回：失败必须能上报（否则界面「已保存」与磁盘上的旧内容互相矛盾）
 # ---------------------------------------------------------------------------
 def test_write_json_atomic_reports_failure(tmp_path):

@@ -1206,6 +1206,13 @@
       builtinFolded = new Set(s.builtin_folded.split(",")
         .map((x) => x.trim()).filter(Boolean));
     }
+    // 内置命令的设备类型筛选（通用 / 车机 / 手机）：同样要先于首屏渲染恢复，
+    // 否则用户上次选的是「车机」，启动后却先看到全部、再被筛一次。
+    // 非法值（手改 config.json）直接忽略，保持「全部」。
+    if (typeof s.builtin_scope === "string"
+        && BUILTIN_SCOPES.indexOf(s.builtin_scope) >= 0) {
+      builtinScope = s.builtin_scope;
+    }
     // ---- Logcat 实时监控 ----
     if (els.lcFilter && typeof s.lc_keyword === "string") els.lcFilter.value = s.lc_keyword;
     if (els.lcOnlyExc && typeof s.lc_only_exc === "boolean") els.lcOnlyExc.checked = s.lc_only_exc;
@@ -1589,6 +1596,15 @@
   const BUILTIN_SECTION_TAIL = "其他";
   let builtinFolded = new Set();       // 已折叠的二级分组名（落 config.json 的 builtin_folded）
 
+  /* 「内置」命令的适用设备轴（与 section 正交）：section 回答「干什么用」，
+     scope 回答「在哪类设备上有意义」。卡片上打小角标，组内再给一排筛选按钮。
+     缺省（后端没写 scope）一律按「通用」——绝大多数命令两类设备都能用，
+     只有明确偏向某一类的才显式标注（见 core/builtin_commands.py）。 */
+  const BUILTIN_SCOPES = ["通用", "车机", "手机"];
+  let builtinScope = "";               // 空串 = 全部（落 config.json 的 builtin_scope）
+  // scope -> CSS 类后缀：类名不用中文，避免选择器 / 工具链的兼容问题
+  const SCOPE_CLASS = { "通用": "comm", "车机": "car", "手机": "phone" };
+
   // 标签过滤条：根据全部命令的 labels 生成可点选标签（多选 OR）
   function renderCmdTags(ws) {
     ws = ws || curWs();
@@ -1621,10 +1637,12 @@
         if (!labels.some((l) => ws.tags.has(l))) return false;
       }
       if (kw) {
-        // 搜索域含 section（二级分组名）：想找「网络」相关的一批命令时，
-        // 记不住具体名字也能一次筛出来。代价是搜「按键」会多命中两条命令名里
-        // 带「按键」的条目——可接受，因为结果仍是该类的子集。
+        // 搜索域含 section（二级分组名）与 scope（适用设备）：想找「网络」相关
+        // 的一批命令、或只记得「车机专用」时，记不住具体名字也能筛出来。
+        // 代价是搜「按键」会多命中两条命令名里带「按键」的条目——可接受，
+        // 因为结果仍是该类的子集。
         const hay = (c.name + " " + (c.section || "") + " "
+          + (c.builtin ? scopeNameOf(c) : "") + " "
           + (c.commands || []).map((x) => x.command).join(" ")).toLowerCase();
         if (!hay.includes(kw)) return false;
       }
@@ -1633,7 +1651,12 @@
     // 筛选中时内置二级分组一律展开：命中项藏在折叠块里等于告诉用户「没找到」
     renderCmdGroups(filtered, !!kw || ws.tags.size > 0, ws);
     if (ws.countEl) {
-      ws.countEl.textContent = "命中 " + filtered.length + " / " + allCommands.length + " 条";
+      // 设备类型筛选只作用于内置命令：计数要跟着可见卡片走，否则「手机」
+      // 只剩 4 张卡、右上角却还写着 12 条，用户会以为筛坏了。
+      const shown = builtinScope
+        ? filtered.filter((c) => !c.builtin || scopeNameOf(c) === builtinScope).length
+        : filtered.length;
+      ws.countEl.textContent = "命中 " + shown + " / " + allCommands.length + " 条";
     }
   }
 
@@ -1672,10 +1695,18 @@
       box.appendChild(title);
       // 「内置」再分一层：49 条平铺要横跨两三屏，其余分组照旧是一条扁平的 chips
       if (label === "内置") {
-        const secs = builtinSectionsOf(items);
+        // 先按设备类型（scope）收窄，再按用途分段：两级都是纯展示筛选，
+        // 段数与段头条数都只统计当前范围内可见的命令，不会出现「空段占位」。
+        const scoped = filterByScope(items);
+        const secs = builtinSectionsOf(scoped);
         // 段数 ≥2 才给「一键全折 / 全展」：只有一段时这个按钮没有意义
         if (secs.length > 1) title.appendChild(mkFoldAllBtn(secs, ws));
-        appendBuiltinSections(box, items, !!filtering, ws);
+        box.appendChild(mkScopeBar());
+        if (!scoped.length) {
+          pushLine(box, "（该子标签下暂无内置命令）", "dim");
+        } else {
+          appendBuiltinSections(box, scoped, !!filtering, ws);
+        }
       } else {
         const chips = document.createElement("div"); chips.className = "cmd-chips";
         items.forEach((c) => chips.appendChild(mkCmdChip(c, ws.id)));
@@ -1696,6 +1727,42 @@
 
   function sectionNameOf(c) {
     return BUILTIN_SECTIONS.indexOf(c.section) >= 0 ? c.section : BUILTIN_SECTION_TAIL;
+  }
+
+  /* 命令的适用设备：后端缺省 / 手写坏值一律按「通用」——宁可多显示，
+     也不能让一条命令因为在界面上被归错类而「消失」。 */
+  function scopeNameOf(c) {
+    return BUILTIN_SCOPES.indexOf(c.scope) >= 0 ? c.scope : "通用";
+  }
+
+  function filterByScope(items) {
+    if (!builtinScope) return items;
+    return items.filter((c) => scopeNameOf(c) === builtinScope);
+  }
+
+  /* 「内置」组内的设备类型筛选条：全部 / 通用 / 车机 / 手机。
+     纯展示层筛选（不影响命令本身可用性），状态全局共享并落 config.json
+     的 builtin_scope；切换后所有工作区一起重渲，避免切 tab 才「突然变」。 */
+  function mkScopeBar() {
+    const bar = document.createElement("div");
+    bar.className = "cmd-scope-bar";
+    [["", "全部"]].concat(BUILTIN_SCOPES.map((s) => [s, s])).forEach((pair) => {
+      const val = pair[0], txt = pair[1];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "cmd-scope" + (builtinScope === val ? " active" : "");
+      btn.textContent = txt;
+      btn.title = val ? "只看适用于「" + txt + "」的内置命令"
+                      : "显示全部内置命令";
+      btn.addEventListener("click", () => {
+        if (builtinScope === val) return;
+        builtinScope = val;
+        persistPref("builtin_scope", builtinScope);
+        renderAllWs();
+      });
+      bar.appendChild(btn);
+    });
+    return bar;
   }
 
   // 「全部折叠 / 全部展开」：六段逐个点太费事，而真正想干的事通常只有一个
@@ -1848,6 +1915,15 @@
     const lbl = document.createElement("span");
     lbl.className = "chip-label"; lbl.textContent = c.name;
     chip.appendChild(lbl);
+    if (c.builtin) {
+      // 适用设备小角标（通用 / 车机 / 手机）：说明「这条命令在哪类设备上
+      // 有意义」，不影响是否可执行；无法识别的 scope 按「通用」显示。
+      const sc = scopeNameOf(c);
+      const tag = document.createElement("span");
+      tag.className = "chip-scope chip-scope--" + (SCOPE_CLASS[sc] || "comm");
+      tag.textContent = sc;
+      chip.appendChild(tag);
+    }
     // 用户自定义命令：右侧固定 ⋯ 菜单（hover 弹出 复制 / 修改 / 删除）；内置命令不可改
     if (!c.builtin) {
       const menu = document.createElement("span");

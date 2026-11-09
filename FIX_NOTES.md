@@ -4299,3 +4299,23 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
   watcher 未到时 confirm 不判死，watcher 随后正常进入等待重启，已验证该条
   修复前失败）、设备在线仍判死并写明段号、探测失败仍判死。
 - 验证：全量 **1384 passed / 1 skipped**。
+
+## 2026-11-09 — 内置命令增加「通用 / 车机 / 手机」适用设备子标签
+
+- `core/builtin_commands.py`：新增 `scope` 字段（与 `section` 正交：用途 vs
+  适用设备）。缺省即「通用」，只有明确偏向某一类的才显式标注 —— 车机：
+  更新设备时间（root + date）、优先使用WIFI、root、remount；手机：亮屏并上滑
+  解锁、电池与温度信息、打开/关闭移动数据。
+- `backend/state.py`：`mark_booted` 的字段白名单补上 `section` 与 `scope`。
+  **这是本轮发现的既有 bug**：`section` 一直没随 booted 载荷下发，前端拿到的
+  恒为 `undefined`，内置命令在启动后全部落到「其他」段，按用途分组的六段只
+  在导入命令后（走 `load_commands`）才短暂出现。新增回归测试覆盖。
+- `core/prefs.py`：新增 `builtin_scope`（空串 = 全部），记住用户上次的筛选。
+- `frontend/js/app.js` / `css/app.css`：「内置」组内新增 全部 / 通用 / 车机 /
+  手机 筛选条（纯展示层收窄，段结构与段头条数跟着变）；每条内置卡片显示
+  对应角标（通用灰、车机蓝、手机橙）；关键字搜索域加入 scope；计数跟随可见
+  卡片。用户自定义命令不受影响。
+- 测试：后端新增 scope 白名单 / 分类覆盖 / merge 透传 / mark_booted 透传
+  4 条；前端新增 `builtin_scope.test.cjs`（35 条断言，含角标、筛选、落盘、
+  启动还原、非法值回退、搜索命中 scope）。
+- 验证：后端 **1388 passed / 1 skipped**；前端 88 个用例文件全绿。
