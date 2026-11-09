@@ -43,3 +43,7 @@ dist_stage/
 # 前端测试依赖（按需 `cd tests/frontend && npm i jsdom`）
 tests/frontend/node_modules/
 .venv
+
+# 会话上传的临时文件（截图 / 附件）：环境会自动把它们 commit 进仓库，
+# 属于杂物，明确忽略。
+.uploads/
