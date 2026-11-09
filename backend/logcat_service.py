@@ -291,7 +291,7 @@ class LogcatMonitor:
                 batch, last = [], now
 
             def _end_boot(now):
-                nonlocal in_boot, boot_buf, boot_dropped, batch, last
+                nonlocal in_boot, boot_buf, batch, last
                 in_boot = False
                 if boot_buf:
                     self.bus.push("logcat",

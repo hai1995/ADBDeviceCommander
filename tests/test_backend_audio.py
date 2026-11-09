@@ -761,8 +761,6 @@ def test_open_falls_back_when_format_unsupported(monkeypatch):
     回归背景：写死 (2, 44100) 时，内置单声道阵列麦 / 只认 48k 的 USB 麦会
     直接 waveInOpen 失败，用户在隐私设置已允许的情况下仍被告知「启动失败」。
     """
-    import backend.audio_service as au
-
     fake = _FakeOpenWinMM(fail={(2, 44100), (2, 48000)})
     monkeypatch.setattr(ctypes, "windll",
                         types.SimpleNamespace(winmm=fake), raising=False)
@@ -775,8 +773,6 @@ def test_open_falls_back_when_format_unsupported(monkeypatch):
 
 def test_open_does_not_fall_back_on_busy_device(monkeypatch):
     """设备被占用（错误码 4）换格式也没用：必须立刻报出真实原因。"""
-    import backend.audio_service as au
-
     fake = _FakeOpenWinMM(fail={(2, 44100)})
     fake.waveInOpen = lambda phwi, dev, fmtp, cb, inst, flags: (
         fake.formats.append((2, 44100)) or 4)

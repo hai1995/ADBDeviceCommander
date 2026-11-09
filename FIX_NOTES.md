@@ -4319,3 +4319,13 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
   4 条；前端新增 `builtin_scope.test.cjs`（35 条断言，含角标、筛选、落盘、
   启动还原、非法值回退、搜索命中 scope）。
 - 验证：后端 **1388 passed / 1 skipped**；前端 88 个用例文件全绿。
+
+## 2026-11-09 — 修复打包流水线 pyflakes 失败
+
+`Run python -m pyflakes backend core tools tests` 报 3 处告警，均无行为变化：
+
+- `backend/logcat_service.py`：`_end_boot` 的 `nonlocal` 列表去掉 `boot_dropped`
+  —— 该变量在闭包里只读不写，写了 `nonlocal` 反而会被 F821/F824 类检查挑剔。
+- `tests/test_backend_audio.py`：两个用例删掉未使用的
+  `import backend.audio_service as au`（复制粘贴残留）。
+- 验证：`pyflakes` 退出码 0；后端 **1388 passed / 1 skipped**。
