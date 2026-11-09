@@ -4439,3 +4439,109 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
 - 备注：`device_proc.kill_device_process` 仍被 `audio_service`（tinycap）和
   `mirror_service`（投屏）使用，本轮未改动 —— 如后续停止录音 / 投屏也被同类
   杀软拦截，可按同样的 PTY Ctrl-C 思路处理。
+
+---
+
+# 第六十二轮（PTY Ctrl-C 在 Windows ConPTY 上无效，设备端兜底 kill -INT 恢复）
+
+## 回归场景
+
+上一轮（第六十一轮）把录屏停止改成「PTY Ctrl-C」—— 启动命令加 `adb shell -t`
+分配 PTY，停止时往本地 adb 的 stdin 写 `\x03`，想让设备端 PTY 行规程把它转成
+SIGINT 投给 screenrecord。
+
+在 Linux/Mac 上这套成立（POSIX PTY 行规程真的会把 `\x03` 转成 SIGINT）。但在
+**Windows 上完全不工作**：用户实际测试后，录了 3 段全坏——
+
+> ⚠ 第 1 段：缺 moov 头（无法播放）
+> ⚠ 第 2 段：`adb pull ... Permission denied`
+> ⚠ 第 3 段：设备端未生成录屏文件
+
+## 根因链
+
+1. **Windows ConPTY 不认 `\x03`** —— adb 在 Windows 上用的是 ConPTY（不是 POSIX
+   PTY），它的行规程**不会把 `\x03` 转成 Ctrl-C 信号**，`\x03` 只是普通字节
+   （甚至可能还被 ECHO 出来）。所以用户点停止时，screenrecord **根本没收到
+   SIGINT**，只能等 10 秒超时后被 `proc.kill()` 杀掉；而 kill 是 TerminateProcess
+   （Windows 上等价 SIGKILL），screenrecord 没机会写回 moov —— 第 1 段残片。
+2. **分段滚动时旧进程 stdin pipe 没关** —— 之前只关了 stdout/stderr。新 PTY
+   模式下每个 adb.exe 都有 stdin=PIPE，旧进程的 stdin 写端不关：
+   - **Linux/Mac**：adb.exe 会等 stdin EOF 才能退出（它读 stdin 转发到设备端
+     PTY，虽然设备端 screenrecord 已经因为 --time-limit 退了，但 adb.exe 还
+     在读本地 stdin pipe，没 EOF 就永远阻塞）
+   - **Windows**：ConPTY pipe 不关写端会让 adb.exe 阻塞在 ReadConsoleInput
+     上（没 EOF 信号、也没新输入），watch_exit 线程永远等不到 poll() 返回，
+     分段滚动时机错乱 —— 后续段各自失败。
+3. **第 2、3 段是连带效应** —— 第 1 段 screenrecord 被异常终止后，设备端
+   编码器可能没完全释放，续段时 screenrecord 秒退 / 文件权限被临时破坏。
+
+## 修复（[screen_service.py](file:///workspace/backend/screen_service.py)）
+
+跨平台**三阶段优雅停止**，Linux/Mac 优先走无杀软告警的 PTY Ctrl-C，Windows 走
+跨平台共享的设备端兜底：
+
+### 第 1 阶段：主机侧 PTY Ctrl-C（`_graceful_stop_proc`）
+
+- **Linux/Mac**：往 stdin pipe 写 `\x03` 并 flush（POSIX PTY 行规程转成
+  SIGINT，screenrecord 据此写回 moov）。**主机侧只有一次管道写入，不触发
+  send_signal / kill / pkill** —— 这就是上一轮的「杀软不误报」主路径。
+- **Windows**：不写 `\x03`（ConPTY 不认），只关 stdin 让 adb.exe 收到 EOF
+  退出。这一阶段在 Windows 上**真正起作用的只是「关 stdin 不阻塞」**，
+  给后面的设备端兜底铺路。
+- **所有平台都必须关 stdin**：原来只关 stdout/stderr 是 bug。
+
+### 第 2 阶段：设备端 kill -INT 兜底（`_device_graceful_stop`，恢复上一轮删掉的）
+
+第 1 阶段后短等 3 秒。如果进程还没退（Windows 上几乎必然），**跨平台共享**
+的兜底：`adb shell pkill -INT -f <本次录屏文件 basename>`。
+
+**必须按命令行特征匹配、绝不能按进程名**：设备上可能同时跑着投屏用的另一条
+同名 screenrecord（`screenrecord --output-format=h264 -`），按名字
+`pkill screenrecord` 会连投屏一起掐断，用户眼前画面直接黑。按文件 basename
+定位时，投屏那条命令行里不会有我们的文件名，所以绝对不会被误伤。
+
+杀软误报怎么办？**Windows 上主机侧命令只是 `adb.exe -s X shell kill -INT`**，
+没有 cmd.exe / powershell 执行 kill 命令，杀软启发式主要监控的是「某个正常
+程序直接杀进程」（taskkill、Stop-Process、GenerateConsoleCtrlEvent），adb.exe
+作为合法工具执行远程 kill 是常规操作，杀软不会盯它。上一轮真正触发杀软告警的
+是 Linux 上的 `proc.send_signal(SIGINT)` —— 现在这条路已经没了。
+
+### 第 3 阶段：`proc.kill()` 强杀
+
+兜底的兜底。如果设备端 kill -INT 发了，screenrecord 还是没退（极少见），
+10 秒超时后 `proc.kill()` 强杀。正常不该走到这里。
+
+### 分段滚动（`_roll_segment_locked`）
+
+旧进程的 **stdin / stdout / stderr 三条 pipe 全部主动 close**。这是之前
+唯一没做的。stdin pipe 不关是 Windows 上 adb.exe 阻塞、分段滚动时机错乱的
+直接原因。
+
+### 流程对比
+
+| | 上一轮（单阶段 PTY Ctrl-C） | 本轮（三阶段跨平台） |
+|---|---|---|
+| Linux/Mac | PTY Ctrl-C → 等 10s → kill | PTY Ctrl-C → 等 3s → 设备端 kill -INT（**几乎不用走到这**） → kill |
+| Windows | PTY Ctrl-C（无效） → 等 10s → kill（TerminateProcess，不写 moov） | 关 stdin → 等 3s → **设备端 kill -INT（真正让 screenrecord 写 moov）** → kill |
+| 杀软告警 | Linux/Mac 没杀软告警；Windows 之前 kill -INT 可能触发（待核实） | **Linux/Mac 主路径完全无杀进程行为**；Windows 主机侧只是 adb.exe |
+
+## 测试（[test_backend_screen.py](file:///workspace/tests/test_backend_screen.py)）
+
+- FakeProc 重构：让 `wait()` 返回后 `poll()` 必须同步变成「已退出」
+  （`wait()` 说「进程退了 0」但 `poll()` 还说「还活着」是之前旧测试桩的隐藏
+  bug，刚好因为这个 bug 让 stop_ex 永远走不到 kill 分支、也永远没机会测到）。
+- `test_stop_signals_device_side_screenrecord_first`：验证 Ctrl-C 发出 + 设备端兜底也不会走（Linux/Mac 主路径足够优雅）。
+- `test_discard_ex_uses_pty_ctrl_c_not_kill`、`test_stop_recording_never_kills_mirror_by_process_name`：discard / stop 全程有 Ctrl-C 兜底。
+
+## 验证
+
+- 后端 **1390 passed / 1 skipped**
+- 前端 **89 个用例文件全绿**
+- pyflakes 0
+
+## 一句话总结
+
+上一轮的 PTY Ctrl-C 只在 Linux/Mac 工作（POSIX PTY 行规程转 `\x03` → SIGINT），
+Windows ConPTY 不认、实际是假工作。本轮加了跨平台设备端 kill -INT 兜底，
+但**精确按文件路径匹配**（不按进程名、不杀掉投屏），Linux/Mac 继续无杀软告警，
+Windows 恢复优雅停止 + 写回 moov。

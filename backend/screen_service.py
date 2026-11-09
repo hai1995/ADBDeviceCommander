@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 
+from backend.device_proc import kill_device_process
 from core import imgbytes
 from core.constants import (
     REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
@@ -801,10 +802,17 @@ class VideoRecorder:
         sess.setdefault("segments", []).append(prev)
         # 旧段的 adb proc 通常已退出（它的 --time-limit 到了 / 设备端写完 moov），
         # 但 pipe 句柄还在父进程里。每 roll 一次就留一份，Windows 上累积多段会
-        # 触发句柄耗尽。主动关掉立即释放。
+        # 触发句柄耗尽。
+        # 更关键：**stdin 也必须关掉** —— 新 PTY Ctrl-C 模式下每个 adb.exe 都
+        # 有 stdin=PIPE，旧进程的 stdin 写端不关的话：
+        #   - Linux/Mac：adb.exe 会等 stdin EOF 才能退出（它读 stdin 转发到设备端
+        #     PTY 虽然设备端那边已经 EOF 了，但 stdin pipe 写端不关它就还在读）
+        #   - Windows：adb.exe 的 stdin 是 ConPTY pipe，不关写端会让它阻塞在
+        #     ReadConsoleInput 上（没 EOF 信号、也没新输入），导致分段滚动时旧
+        #     的 adb.exe 永远不退出、watch_exit 线程永远等不到 poll() 返回
         old_proc = sess.get("proc")
         if old_proc is not None:
-            for s in ("stdout", "stderr"):
+            for s in ("stdin", "stdout", "stderr"):
                 try:
                     f = getattr(old_proc, s, None)
                     if f is not None: f.close()
@@ -1058,25 +1066,56 @@ class VideoRecorder:
 
     @staticmethod
     def _graceful_stop_proc(proc):
-        """用 PTY Ctrl-C 优雅结束 screenrecord（写回 moov）。
+        """跨平台优雅结束 screenrecord 的主机侧第一招。
 
-        启动命令带了 `adb shell -t`，设备端分配了 PTY；往本地 adb 的 stdin
-        写一个 ``\\x03``（Ctrl-C），设备端 shell 会把 SIGINT 投给前台进程组
-        里的 screenrecord —— 与手动在终端里按 Ctrl-C 完全等价。screenrecord
-        只在 SIGINT 下收尾，SIGTERM 会留下没 moov 的残片。
+        Linux/Mac（POSIX PTY）：往本地 adb 的 stdin 写 ``\\x03``（Ctrl-C），
+            设备端 PTY 行规程把它转成 SIGINT 投给前台进程组里的 screenrecord。
+            screenrecord 只在 SIGINT 下写回 moov；主机侧只有一次管道写入，
+            不触发 send_signal / kill / pkill 这类杀软敏感操作。
+        Windows（ConPTY）：不写 ``\\x03`` —— ConPTY 的行规程不会把它转成
+            Ctrl-C 信号，写了只是普通字节、毫无作用（甚至还可能被 ECHO 出来）。
+            这里只关 stdin 让 adb.exe 感知到 EOF，触发它内部的读循环退出。
+            真正给设备端 screenrecord 发 SIGINT 的工作交给 stop_ex() 里的
+            跨平台兜底路径（设备端 ``kill -INT``）。
 
-        主机侧只做了一次管道写入，没有 `send_signal` / `kill` / `pkill`，
-        不会被启发式杀软（亚信等）当成「信号注入 / 杀进程」拦截。
+        不论哪个平台，**std in 必须关掉**：不关的话，Python 侧的 pipe 读端
+        会一直等 EOF 才能回收；Windows 上 adb.exe 还会阻塞在读 stdin 上（因为
+        没有 EOF 信号），让分段滚动时旧进程永远不退出。
         """
         if proc is None:
             return
+        stdin = getattr(proc, "stdin", None)
+        if stdin is None:
+            return
         try:
-            stdin = getattr(proc, "stdin", None)
-            if stdin is not None:
+            # POSIX PTY：写 Ctrl-C 让设备端转成 SIGINT；Windows ConPTY 不认
+            if os.name != "nt":
                 stdin.write("\x03")
                 stdin.flush()
         except Exception:
             pass
+        try:
+            # 关掉写端让 adb.exe 读到 EOF：这是**所有平台**都需要做的事
+            stdin.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _device_graceful_stop(adb, serial, remote):
+        """设备端兜底优雅停止（跨平台共享）。
+
+        PTY Ctrl-C 在 Windows ConPTY 上无效，或极少数情况下设备端 shell
+        没能把 ``\\x03`` 转成 SIGINT —— 这时必须直接在设备端给
+        screenrecord 发 SIGINT，让它写回 moov 后自行退出。
+
+        **必须按「本次录屏文件路径」精确匹配**，绝不能按进程名：
+        设备上可能同时有另一条同名 screenrecord 正在投屏，``pkill
+        screenrecord`` 会连投屏一起掐断，用户眼前画面直接黑了。
+        这里按命令行特征（remote 文件 basename）定位，只命中自己那条。
+        """
+        match = os.path.basename(remote) if remote else None
+        kill_device_process(adb, serial, "screenrecord", match=match,
+                            fallback_name_kill=False)
 
     def stop(self, serial):
         """停止录屏并拉回本地。返回 (ok, local_path, err)。
@@ -1103,17 +1142,39 @@ class VideoRecorder:
         if sess is None:
             return False, [], "该设备未在录制"
         proc = sess.get("proc")
-        # 1) PTY Ctrl-C：往本地 adb 的 stdin 写 `\x03`，设备端 screenrecord
-        #    收到 SIGINT 后优雅收尾（写回 moov）。主机侧只是管道写一个字节，
-        #    不再调用 send_signal / kill / pkill，避免被启发式杀软拦截。
+        remote = sess.get("remote")
+        # —— 跨平台两阶段优雅停止 ——
+        # 第 1 阶段：主机侧 PTY Ctrl-C（Linux/Mac POSIX PTY 行规程把 \x03 转成
+        # SIGINT，screenrecord 收到后写回 moov）。Windows ConPTY 不认 \x03，
+        # 这招在 Windows 上实际只做了「关 stdin 让 adb.exe 不阻塞」。
+        # 主机侧只有一次管道写入，避免被启发式杀软当成「信号注入」。
         self._graceful_stop_proc(proc)
+        grace_seconds = 3  # 给 POSIX PTY Ctrl-C 和 Windows 上进程自然退留时间
         try:
             if proc is not None:
-                proc.wait(timeout=10)
+                proc.wait(timeout=grace_seconds)
         except Exception:
+            pass
+        # 第 2 阶段：设备端兜底 kill -INT（跨平台共享）。
+        # 触发条件：Windows ConPTY 不认 \x03 让进程还活着、或极少数 POSIX
+        # 情况下 PTY 没把 \x03 转成 SIGINT（设备端 shell 配置异常）。
+        # 必须按本次录屏文件路径精确匹配，绝不能按进程名 —— 设备上可能同
+        # 时跑着投屏用的另一条同名 screenrecord，按名字 pkill 会连投屏一起
+        # 掐断，用户眼前画面直接黑。
+        if proc is not None and proc.poll() is None:
+            self._device_graceful_stop(self.adb, serial, remote)
             try:
-                if proc is not None:
-                    proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        # 第 3 阶段：还不退才强杀 —— 兜底而已，正常不该走到这里。
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=3)
             except Exception:
                 pass
         # 关 pipe：录屏期间 stdout / stderr 可能积累少量 adb 报错；
@@ -1180,18 +1241,25 @@ class VideoRecorder:
                 return False, [], "该设备未在录制"
             sess["stopping"] = True
         proc = sess.get("proc")
-        # 1) PTY Ctrl-C：与 stop_ex 同一手法——主机侧只写一个字节到 adb stdin，
-        #    设备端 screenrecord 收到 SIGINT 优雅收尾（不再用 send_signal / kill）。
+        remote = sess.get("remote")
+        # —— 与 stop_ex 同一套跨平台两阶段优雅停止 ——
         self._graceful_stop_proc(proc)
         stopped = True
         try:
             if proc is not None:
-                proc.wait(timeout=10)
+                proc.wait(timeout=3)
         except Exception:
+            pass
+        if proc is not None and proc.poll() is None:
+            self._device_graceful_stop(self.adb, serial, remote)
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        if proc is not None and proc.poll() is None:
             stopped = False
             try:
-                if proc is not None:
-                    proc.kill()
+                proc.kill()
             except Exception:
                 pass
         # 关 pipe：与 stop_ex 同一处理。取消录屏同样会结束一个 adb 进程，

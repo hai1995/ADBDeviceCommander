@@ -17,30 +17,55 @@ class _Bus:
 
 
 class _FakeProc:
-    def __init__(self):
+    """模拟 subprocess.Popen 对象。
+
+    必须让 poll() 与 wait() 保持一致：wait() 返回后，poll() 必须同时返回退出码
+    （不能一个说「已退出 0」、另一个还说「活着」）—— 否则 stop_ex/discard_ex
+    的跨平台两阶段优雅停止流程会永远认为进程还活着、不停走兜底分支。
+    """
+
+    def __init__(self, poll_after_wait=True):
         self.terminated = False
         self.killed = False
-        self.stdin_writes = []
+        self.poll_after_wait = poll_after_wait
+        self._poll_value = None          # 初始：进程活着
+        self._wait_calls = 0
 
         class _Stdin:
+            def __init__(self_inner):
+                self_inner.stdin_writes = []
+                self_inner.closed = False
+
             def write(self_inner, data):
-                self.stdin_writes.append(data)
+                self_inner.stdin_writes.append(data)
 
             def flush(self_inner):
                 pass
 
+            def close(self_inner):
+                self_inner.closed = True
+
         self.stdin = _Stdin()
+        # 便捷暴露：让测试可以直接 proc.stdin_writes 访问
+        self.stdin_writes = self.stdin.stdin_writes
 
     def poll(self):
-        return None
+        return self._poll_value
 
     def terminate(self):
         self.terminated = True
+        self._poll_value = -15          # SIGTERM
 
     def kill(self):
         self.killed = True
+        self._poll_value = -9           # SIGKILL
 
     def wait(self, timeout=None):
+        """立即返回 0（进程优雅退出）。wait 一旦返回，poll() 也必须同步变成已退出。"""
+        self._wait_calls += 1
+        if self.poll_after_wait:
+            # 第一次 wait 返回后，poll() 也要同步变成已退出（返回退出码）
+            self._poll_value = 0
         return 0
 
 
