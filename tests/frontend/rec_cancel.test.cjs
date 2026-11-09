@@ -184,8 +184,9 @@ watchdog.unref && watchdog.unref();
   ok(order.indexOf(hint) > order.indexOf(opts),
     "分段提示语也要排在开关组之后");
   ok(order[order.length - 1] === hint, "提示语是录屏卡的最后一块（真正在「区块下方」）");
-  ok(/3\s*分钟/.test(hint.textContent) && /合并/.test(hint.textContent),
-    "提示语内容本身不能丢（3 分钟 / 合并仍要写明）");
+  ok(/60\s*秒/.test(hint.textContent) && /合并/.test(hint.textContent)
+     && /重启/.test(hint.textContent),
+    "提示语内容本身不能丢（60 秒 / 合并 / 重启分别保存仍要写明）");
 
   // ---------- 4) 点「取消录制」→ 弹窗出现，焦点在「否」，一个请求都没发 ----------
   {

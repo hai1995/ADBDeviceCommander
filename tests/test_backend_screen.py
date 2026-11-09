@@ -972,6 +972,169 @@ def test_stop_during_reboot_wait_keeps_session_for_teardown(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# 设备刚被移除、watcher 尚未判定掉线：controller 主动转入等待重启（竞态修复）
+# ---------------------------------------------------------------------------
+def test_notice_device_gone_enters_reboot_wait_without_dying(tmp_path, monkeypatch):
+    """设备从列表消失时主动通知，必须进等待而不是判死 / 强停。
+
+    回归：车机重启后设备从 adb 列表消失（超过 15 秒宽限），而录屏侧 watcher 的
+    get-state 探测往往还没超时返回。controller 的孤儿回收若在此时强停，重启前
+    那一段和整场日志就一起没了 —— 用户实测正是「只剩重启后的数据」。
+    """
+    vr, proc = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    started = []
+
+    class _T:
+        def __init__(self, target=None, args=(), **kw):
+            self.args = args
+        def start(self):
+            started.append(self.args)
+
+    monkeypatch.setattr(ss.threading, "Thread", _T)
+
+    assert vr.notice_device_gone("A1") is True
+    assert sess["reboot_wait"] is True
+    assert sess["reboot_wait_note"] is True
+    assert vr.died_serials() == [], "只是在等设备回来，不是录屏意外结束"
+    assert len(started) == 1 and started[0][0] == "A1"
+
+    # 重复通知：不重复起等待线程，也不清掉「待播报」标记
+    assert vr.notice_device_gone("A1") is True
+    assert len(started) == 1, "同一会话只能有一个等待线程"
+    assert sess["reboot_wait_note"] is True
+
+    # 之后的 watcher 醒来不得再起第二个等待线程 / 标死
+    monkeypatch.setattr(vr, "_wait_reboot_and_resume", lambda *a: None)
+    vr._watch_exit("A1", proc)
+    assert vr.died_serials() == []
+    assert len(started) == 1
+
+
+def test_notice_device_gone_returns_false_when_stopping_or_missing(tmp_path):
+    """已在停止 / 会话不存在：由原有收尾路径处理，不要另起等待。"""
+    vr, _proc = _recorder(tmp_path)
+    vr._sessions["A1"]["stopping"] = True
+    assert vr.notice_device_gone("A1") is False
+    assert vr._sessions["A1"].get("reboot_wait") is None
+
+    assert vr.notice_device_gone("NOT_THERE") is False
+
+
+def test_device_online_settled_retries_transient_probe_failure(tmp_path, monkeypatch):
+    """重启瞬间 adb 探测抖动：连探几次再下结论，别把一次失败当「设备还在」。"""
+    monkeypatch.setattr(ss.time, "sleep", lambda *_: None)
+    vr = ss.VideoRecorder(_Bus(), "adb")
+
+    seq = iter([False, None, False])
+    monkeypatch.setattr(vr, "_device_online", lambda s: next(seq))
+    assert vr._device_online_settled("A1") is False, "全是明确离线才算离线"
+
+    seq = iter([None, None, None])
+    monkeypatch.setattr(vr, "_device_online", lambda s: next(seq))
+    assert vr._device_online_settled("A1") is None, "探测本身失败不能谎报在线/离线"
+
+    monkeypatch.setattr(vr, "_device_online", lambda s: True)
+    assert vr._device_online_settled("A1") is True
+
+
+def test_reboot_wait_resume_starts_new_cycle(tmp_path, monkeypatch):
+    """设备重启后自动续录：段号 +1，且新段归入下一轮（收尾时前后分开成片）。"""
+    vr, proc = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    sess["cycle"] = 1
+    new_proc = _FakeProc()
+
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: new_proc)
+    monkeypatch.setattr(vr, "_pull_segment_bg", lambda seg: None)
+    monkeypatch.setattr(vr, "_confirm_segment", lambda *a: None)
+    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: True)
+
+    vr._wait_reboot_and_resume("A1", sess)
+
+    assert sess["seg"] == 2
+    assert sess["cycle"] == 2, "重启后录的内容属于第 2 轮"
+    assert sess["segments"][0]["cycle"] == 1, "重启前那一段必须留在第 1 轮"
+
+
+def test_notice_wait_does_not_roll_when_proc_still_alive(tmp_path, monkeypatch):
+    """误报保护：设备只是短暂从列表消失时，录屏进程还活着就不能换段。
+
+    否则设备端会同时跑两个 screenrecord，旧段还在写、拉回来必然缺 moov ——
+    为了「防丢」反而丢掉一段。
+    """
+    vr, proc = _recorder(tmp_path)
+    sess = _sess_for_roll(vr, tmp_path)
+    sess["cycle"] = 1
+    assert proc.poll() is None
+    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: True)
+
+    vr._wait_reboot_and_resume("A1", sess, True)
+
+    assert sess["seg"] == 1, "不应换段"
+    assert sess["cycle"] == 1, "不应进入下一轮"
+    assert sess["reboot_wait"] is False
+    assert not sess.get("died")
+
+
+def test_stop_ex_groups_splits_segments_by_reboot_cycle(tmp_path, monkeypatch):
+    """stop_ex_groups 按重启轮次返回路径；stop_ex 仍返回扁平列表（兼容旧调用）。"""
+    vr = ss.VideoRecorder(_Bus(), "adb")
+    names = ["a_p1.mp4", "a_p2.mp4", "a_p3.mp4", "a_p4.mp4"]
+    for n in names:
+        (tmp_path / n).write_bytes(b"x")
+    done = threading.Event()
+    done.set()
+    vr._sessions["A1"] = {
+        "remote": "/sdcard/adb_rec_A1.mp4",
+        "local": str(tmp_path / "a_p4.mp4"),
+        "proc": _FakeProc(), "dir": str(tmp_path), "cycle": 2,
+        "segments": [
+            {"n": 1, "cycle": 1, "local": str(tmp_path / "a_p1.mp4"),
+             "ok": True, "err": None, "done": done},
+            {"n": 2, "cycle": 2, "local": str(tmp_path / "a_p2.mp4"),
+             "ok": True, "err": None, "done": done},
+            {"n": 3, "cycle": 2, "local": str(tmp_path / "a_p3.mp4"),
+             "ok": True, "err": None, "done": done},
+        ],
+    }
+    monkeypatch.setattr(vr, "_stop_device_screenrecord", lambda *a: None)
+    monkeypatch.setattr(vr, "_pull_and_finish",
+                        lambda s: (True, str(tmp_path / "a_p4.mp4"), None))
+
+    ok, groups, err = vr.stop_ex_groups("A1")
+
+    assert ok is True
+    assert [c for c, _ps in groups] == [1, 2], groups
+    assert [p.rsplit("/", 1)[-1] for p in groups[0][1]] == ["a_p1.mp4"]
+    assert [p.rsplit("/", 1)[-1] for p in groups[1][1]] == [
+        "a_p2.mp4", "a_p3.mp4", "a_p4.mp4"]
+
+
+def test_stop_ex_still_returns_flat_paths_in_order(tmp_path, monkeypatch):
+    """旧的扁平签名不能被改坏：controller 里仍有 `paths` 调用方与测试。"""
+    vr = ss.VideoRecorder(_Bus(), "adb")
+    for n in ("a_p1.mp4", "a_p2.mp4"):
+        (tmp_path / n).write_bytes(b"x")
+    done = threading.Event()
+    done.set()
+    vr._sessions["A1"] = {
+        "remote": "/sdcard/adb_rec_A1.mp4", "local": str(tmp_path / "a_p2.mp4"),
+        "proc": _FakeProc(), "dir": str(tmp_path), "cycle": 2,
+        "segments": [{"n": 1, "cycle": 1, "local": str(tmp_path / "a_p1.mp4"),
+                      "ok": True, "err": None, "done": done}],
+    }
+    monkeypatch.setattr(vr, "_stop_device_screenrecord", lambda *a: None)
+    monkeypatch.setattr(vr, "_pull_and_finish",
+                        lambda s: (True, str(tmp_path / "a_p2.mp4"), None))
+
+    ok, paths, err = vr.stop_ex("A1")
+
+    assert ok is True
+    assert [p.rsplit("/", 1)[-1] for p in paths] == ["a_p1.mp4", "a_p2.mp4"]
+
+
+# ---------------------------------------------------------------------------
 # 截图落盘的字节归一化（车机 screencap 会在 PNG 前吐杂字节）
 # ---------------------------------------------------------------------------
 def _tiny_png():
@@ -1357,6 +1520,39 @@ def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
     # _wait_device_back 已经 mock 返回 False，没有进退避循环；
     # 这一次调用里 ls 没触发退避 sleep（只有 gone → wait → 立即返回，不进 attempt 循环）
     assert any("等待设备重启超时" in err for _ in [None]), err
+
+
+def test_pull_wait_extends_to_reboot_window_when_stopping_during_wait(
+        monkeypatch, tmp_path):
+    """用户在「等待设备重启」时点停止：最后这次等待要放宽到重启窗口。
+
+    车机冷启动常要 60~180 秒，旧实现只等 60 秒就判「取不回」，把重启前那一段
+    丢掉。会话明确处于 reboot_wait 时，停止也应按完整的重启窗口等。
+    """
+    monkeypatch.setattr(ss.time, "sleep", lambda s: None)
+
+    def fake_run(cmd, **kw):
+        if "ls" in cmd:
+            return type("R", (), {"returncode": 1, "stdout":
+                                  "error: device 'A1' not found\n", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    vr, _proc = _recorder(tmp_path)
+    vr._sessions["A1"]["reboot_wait"] = True
+    seen = {}
+
+    def fake_wait(serial, max_wait_s=60, **kw):
+        seen["max_wait_s"] = max_wait_s
+        return False
+
+    monkeypatch.setattr(vr, "_wait_device_back", fake_wait)
+    ok, lp, err = vr._pull_and_finish("A1")
+
+    assert ok is False
+    assert seen["max_wait_s"] == ss.REC_REBOOT_WAIT_S, (
+        "reboot_wait 时应等满重启窗口，而不是 60 秒")
+    assert "超时 %d 秒" % ss.REC_REBOOT_WAIT_S in err, err
 
 
 def test_pull_succeeds_after_device_reboots_and_file_survives(monkeypatch, tmp_path):

@@ -840,6 +840,91 @@ def test_reap_gone_tools_keeps_device_waiting_for_reboot(monkeypatch):
     assert "rec-reap" not in spawned, spawned
 
 
+def test_reap_gone_tools_notices_removed_recording_instead_of_stopping(monkeypatch):
+    """设备刚被移除、watcher 尚未判定掉线：主动通知转入等待重启，绝不强停视频。
+
+    时序竞态：宽限只有约 15 秒，而车机冷启动常要 60~180 秒 —— 依赖
+    reboot_wait_serials() 豁免永远慢一步。这里改为主动 notice，只有明确没有
+    录屏会话的设备才强停；设备音频仍要收尾（重启后 tinycap 早已被杀）。
+    """
+    api = _make_api()
+    api.devices.device_state = {"A1": "device"}   # B2 已移除/重启中
+    api.devices.device_checked = {"A1": True}
+    api._rec_session = {
+        "videos": {"A1": "v_a.mp4", "B2": "v_b.mp4"},
+        "devaudio": {"B2": "a_b.wav"},
+        "logcat_captures": {}, "mic_path": None,
+    }
+    noticed, stopped_v, stopped_a = [], [], []
+
+    class FakeVideo:
+        def reboot_wait_serials(self): return []
+        def notice_device_gone(self, s):
+            noticed.append(s)
+            return True
+        def stop(self, s): stopped_v.append(s)
+
+    class FakeAudio:
+        def stop(self, s): stopped_a.append(s)
+
+    class FakeMon:
+        def running_serials(self): return []
+        def stop(self, s, **kw): pass
+
+    api.video = FakeVideo()
+    api.device_audio = FakeAudio()
+    api.logcat_monitor = FakeMon()
+    api.logcat_capture = FakeMon()
+
+    spawned = []
+    def fake_spawn(key, fn, *args, **kwargs):
+        spawned.append((key, args))
+        fn(*args, **kwargs)
+    monkeypatch.setattr(api.workers, "spawn", fake_spawn)
+
+    api._reap_gone_tools()
+
+    assert noticed == ["B2"], "仍能通知到的设备必须转入等待重启"
+    assert stopped_v == [], "通知成功后绝不能强停视频（会丢重启前那一段）"
+    assert stopped_a == ["B2"], "设备音频仍要收尾"
+    reap = [a for k, a in spawned if k == "rec-reap"]
+    assert reap and reap[0][1] == {"B2"}, "已等待的设备要作为 skip_video 传下去"
+
+
+def test_reap_gone_tools_does_not_double_stop_same_serial(monkeypatch):
+    """同一台设备同时有视频与设备音频时只能强停一次（候选列表要去重）。"""
+    api = _make_api()
+    api.devices.device_state = {}
+    api.devices.device_checked = {}
+    api._rec_session = {
+        "videos": {"B2": "v_b.mp4"}, "devaudio": {"B2": "a_b.wav"},
+        "logcat_captures": {}, "mic_path": None,
+    }
+    stopped_v, stopped_a = [], []
+
+    class FakeVideo:
+        def stop(self, s): stopped_v.append(s)
+
+    class FakeAudio:
+        def stop(self, s): stopped_a.append(s)
+
+    class FakeMon:
+        def running_serials(self): return []
+        def stop(self, s, **kw): pass
+
+    api.video = FakeVideo()
+    api.device_audio = FakeAudio()
+    api.logcat_monitor = FakeMon()
+    api.logcat_capture = FakeMon()
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **k: fn(*a, **k))
+
+    api._reap_gone_tools()
+
+    assert stopped_v == ["B2"], stopped_v
+    assert stopped_a == ["B2"], stopped_a
+
+
 def test_reap_dead_recordings_announces_reboot_wait_and_resume(monkeypatch):
     """进入等待 / 恢复续录都要在状态栏说清楚，用户才知道「没丢、还在录」。"""
     api = _make_api()
@@ -1681,8 +1766,9 @@ def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
     # 打 _stop_video 而不是 video.stop：收尾现在走 stop_ex（自动分段会有多段），
     # 这里只关心「日志停止」与「视频收尾」的先后顺序。
     monkeypatch.setattr(
-        api, "_stop_video",
-        lambda s: (order.append("video"), (True, [str(video)], None))[1])
+        api, "_stop_video_groups",
+        lambda s: (order.append("video"),
+                   (True, [(1, [str(video)])], None))[1])
     monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: False)
     monkeypatch.setattr(
         api.logcat_capture, "stop",
@@ -1997,7 +2083,7 @@ def test_screen_record_stop_clears_session_even_on_exception(monkeypatch, tmp_pa
         raise OSError("保存目录不可用")
 
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(api, "_stop_video", boom)
+    monkeypatch.setattr(api, "_stop_video_groups", boom)
 
     res = api.screen_record_stop()
     assert res["ok"] is False and res["reason"] == "stop_error", res
@@ -2636,7 +2722,8 @@ def test_multi_segments_merge_into_one_complete_video(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
     monkeypatch.setattr(
-        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
+        api, "_stop_video_groups",
+        lambda s: (True, [(1, [str(s1), str(s2)])], None))
     _patch_join(monkeypatch)
 
     assert api.screen_record_stop() == {"ok": True}
@@ -2653,6 +2740,44 @@ def test_multi_segments_merge_into_one_complete_video(monkeypatch, tmp_path):
             "合并后包里只应有一个视频，且名字回到不带 _pN 的成品名：%r" % names)
         body = zf.read("record_A1_ts1.mp4")
     assert body.endswith(b"B" * 100), "成片必须包含第 2 段的内容（顺序＝段序）"
+
+
+def test_reboot_cycles_are_saved_as_separate_videos(monkeypatch, tmp_path):
+    """设备重启前后分别成片：第 1 轮 record_...mp4，第 2 轮 record_..._r2.mp4。
+
+    用户实测车机中途重启：重启期间的画面设备端本来就录不到，硬把前后两轮拼成
+    一个文件，回放时会看到一次几分钟的跳跃却没有任何文件层面的痕迹说明断过。
+    要求是「重启前一份、重启后一份、重启几次就有几份」，且第 2 轮不能覆盖第 1 轮。
+    """
+    api = _make_api()
+    n1, n2 = "record_A1_ts1.mp4", "record_A1_ts1_p2.mp4"
+    n3, n4 = "record_A1_ts1_p3.mp4", "record_A1_ts1_p4.mp4"
+    for n in (n1, n2, n3, n4):
+        (tmp_path / n).write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "with_zip": False,
+        "videos": {"A1": str(tmp_path / n1)}, "devaudio": {},
+        "logcat_captures": {},
+    }
+    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
+    monkeypatch.setattr(api, "_stop_video_groups", lambda s: (True, [
+        (1, [str(tmp_path / n1), str(tmp_path / n2)]),
+        (2, [str(tmp_path / n3), str(tmp_path / n4)]),
+    ], None))
+    _patch_join(monkeypatch)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    assert (tmp_path / n1).exists(), "第 1 轮成品必须保留"
+    assert (tmp_path / "record_A1_ts1_r2.mp4").exists(), (
+        "第 2 轮必须另存为 _r2，不能覆盖第 1 轮")
+    assert not (tmp_path / n2).exists()
+    assert not (tmp_path / n3).exists(), "已并入第 2 轮成品的中间段要清掉"
+    assert not (tmp_path / n4).exists()
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("设备重启 1 次" in t and "2 个视频" in t for t in texts), texts
 
 
 def test_merge_failure_keeps_every_segment(monkeypatch, tmp_path):
@@ -2674,7 +2799,8 @@ def test_merge_failure_keeps_every_segment(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
     monkeypatch.setattr(
-        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
+        api, "_stop_video_groups",
+        lambda s: (True, [(1, [str(s1), str(s2)])], None))
     _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg")
 
     assert api.screen_record_stop() == {"ok": True}
@@ -2705,7 +2831,8 @@ def test_zip_failure_is_reported_not_silently_skipped(monkeypatch, tmp_path):
         "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
     }
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(api, "_stop_video", lambda s: (True, [str(s1)], None))
+    monkeypatch.setattr(
+        api, "_stop_video_groups", lambda s: (True, [(1, [str(s1)])], None))
     monkeypatch.setattr(api, "_zip_paths", staticmethod(lambda *a, **k: None))
 
     assert api.screen_record_stop() == {"ok": True}
@@ -2742,7 +2869,8 @@ def test_all_segments_are_kept_and_zipped(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
     monkeypatch.setattr(
-        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
+        api, "_stop_video_groups",
+        lambda s: (True, [(1, [str(s1), str(s2)])], None))
 
     assert api.screen_record_stop() == {"ok": True}
     api.workers.shutdown(timeout=2.0)
@@ -2773,8 +2901,8 @@ def test_partially_failed_teardown_keeps_finished_segments(monkeypatch, tmp_path
     monkeypatch.setattr(api.video, "is_recording", lambda s: True)
     # stop_ex 的语义：paths 只含正常收尾的段，残片路径在 err 里
     monkeypatch.setattr(
-        api, "_stop_video",
-        lambda s: (False, [str(s1)],
+        api, "_stop_video_groups",
+        lambda s: (False, [(1, [str(s1)])],
                    "缺 moov 头，无法播放（当前段残片：%s）" % partial))
 
     assert api.screen_record_stop() == {"ok": True}
