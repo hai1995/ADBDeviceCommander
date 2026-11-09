@@ -11,7 +11,7 @@ from backend.controller import (
 from backend.screen_service import device_clock
 from backend.video_join import join_segments
 from core.constants import LOGCAT_COVERAGE_WARN_S
-from core.logcat import read_time_bounds, ts_epoch
+from core.logcat import read_time_bounds
 
 
 def _fmt_span(sec):
@@ -680,10 +680,6 @@ class RecordMixin:
         # 退出 → 轮询设备端文件就绪 → pull」，几台设备并行也要数秒；日志若等
         # 它拉完再停，就会比视频多跑这几秒 —— 事后按时间轴对照视频找日志时，
         # 两边差出的正是案发现场那一段。
-        # 记下「下发停止」的本机时刻：后面算日志覆盖度时要扣掉收尾本身的耗时
-        # （拉段 / 合并 / 打包 / 等设备回来可能长达数十秒），否则一次正常收尾
-        # 会被误报成「后段日志丢失」。
-        logcat_stop_ts = time.time()
         for s in list(sess.get("logcat_captures", {}).keys()):
             try:
                 self.logcat_capture.stop(s, zip_on_stop=False)
@@ -821,8 +817,7 @@ class RecordMixin:
         # 结论只进内存（sess["logcat_notes"]），由调用方在「✓ 录屏已完成」之后
         # 逐条播报 —— 从这里直接弹 toast 会被后面那条成功提示盖掉。
         sess["logcat_notes"] = self._logcat_coverage_notes(
-            sess, sess.get("logcat_captures") or {},
-            since_ts=logcat_stop_ts)
+            sess, sess.get("logcat_captures") or {})
         # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
         zpath = None
         if sess.get("with_zip") and rec_files:
@@ -839,39 +834,28 @@ class RecordMixin:
                             % sess.get("dir"))
         return rec_files, zpath
 
-    def _logcat_coverage_notes(self, sess, cap_map, since_ts=None):
-        """录屏收尾时校验「同步日志到底跟到什么时候」，返回 [(级别, 文案)]。
+    def _logcat_coverage_notes(self, sess, cap_map):
+        """录屏收尾时校验「配套日志有没有覆盖本次录制」，返回 [(级别, 文案)]。
 
-        为什么非做不可：用户实况是视频录到 11:14，配套 logcat 的最后一条却停在
-        10:50 —— 后 24 分钟一条日志都没有，而收尾只弹了一句「✓ 录屏已完成」。
-        直到事后拿视频时间轴去对日志才发现日志是残缺的，那时既补不回来、也
-        说不清断在哪。所以收尾时就必须把「日志比视频短了多久」讲到脸上。
+        **纯提示，绝不改动产物**：txt 原样保留、该进包的照常进包，结论只写入
+        `sess["logcat_notes"]`，由调用方在「✓ 录屏已完成」之后播报。
 
-        判据只用**设备自己的钟**（`adb shell date +%s`）：视频与日志都发生在
-        设备时间轴上，拿设备当前时刻减日志最后一条的时间戳，得到的差值既不受
-        主机时钟影响，也不会把「设备时钟比本机慢」误判成「日志丢了 24 分钟」
-        ——后者顺带单独提示，因为它同样会让用户对着两个时间轴怀疑人生。
+        判据只用**进程侧可验证的事实**（`LogcatCapture.capture_facts`）：
+          * 抓取线程起点是否晚于录制起点（本机时钟，与设备时钟无关）；
+          * 抓取过程中是否真的断过（设备掉线 / adb 意外退出 / 重连耗尽）；
+          * 是否因设备不认 `-T` 回落到兼容模式（会先带出历史缓冲）。
 
-        任何一步取不到（设备已拔、shell 被拦截、文件里没有时间戳）都安静跳过：
-        这是增强提示，不是判定成功/失败的依据，宁可不说也不给错结论。
-
-        since_ts：下发「停止 logcat」的本机时刻（time.time()）。收尾本身要花时间
-        （拉段、合并、打包、设备重启等待），若直接用「现在」减日志最后一条，会把
-        这段耗时算成日志缺口，正常收尾也可能被误报成「后段日志丢失」。传入该值
-        后按本机流逝时长扣掉；不传则保持原行为（仅用于对拍/测试）。
+        刻意**不再**用「设备当前时刻 − 日志最后一条时间戳」判缺口：车机没校时、
+        或录制期间被人手动改过时间，都会让这个差值失真——用户实报的「只录十几秒
+        却提示丢了 10 分 49 秒」正是该判据在历史缓冲场景下的假告警。设备时钟只
+        用于一条独立提示（与本机差多少，对照时统一按设备时间看），不参与完整性
+        判定；读不到设备时间时，上面三条事实仍照常给出结论。
         """
         jobs = [(s, p) for s, p in (cap_map or {}).items() if p]
         if not jobs:
             return []
         host_now = time.time()
-        # 从「下发停止」到「算覆盖度」之间流逝的本机秒数。设备时钟与本机时钟在
-        # 几十秒的收尾窗口内同步推进，用本机流逝时长近似设备侧流逝时长即可。
-        elapsed = 0.0
-        if since_ts is not None:
-            try:
-                elapsed = max(0.0, host_now - float(since_ts))
-            except (TypeError, ValueError):
-                elapsed = 0.0
+        start_host = sess.get("start_host") if isinstance(sess, dict) else None
 
         def _one(job):
             s, p = job
@@ -887,62 +871,49 @@ class RecordMixin:
                     return [("warn", "⚠ %s 的配套 logcat 文件里没有任何日志行"
                                       "（抓取可能一开始就被中断），"
                                       "本次日志不可用" % s)]
-                dev = device_clock(self.state.adb_path, s, timeout=3)
-                if not dev:
-                    return []
-                dev_now, tz_off = dev
-                # 时区拿不到（个别老 shell 不支持 date +%z）：日志时间戳只能按
-                # 主机时区解释，两边时区不同就会算出整小时的**假**缺口。宁可
-                # 不报缺口，也不给一个按猜测得到的结论 —— 假告警会让用户之后
-                # 连真的那条都不信（时钟偏差那条仍可给，它只比 epoch）。
-                # 会话开始的设备时钟：本机开始时刻 + 此刻「设备 - 本机」的偏移。
-                # 收尾只有几十秒，两边同步推进，用同一时刻的偏移换算足够准。
-                # 没有 start_host（老调用 / 单测）时保持旧行为，不启用这条判据。
-                start_dev = None
-                start_host = sess.get("start_host") if isinstance(sess, dict) else None
-                if start_host:
+                try:
+                    facts = self.logcat_capture.capture_facts(s) or {}
+                except Exception:
+                    facts = {}
+                # ① 抓取起点晚于录制起点：录制开头那段确实没有日志。
+                cap_started = facts.get("started_host")
+                if start_host and cap_started:
                     try:
-                        start_dev = float(start_host) + (dev_now - host_now)
+                        late = float(cap_started) - float(start_host)
                     except (TypeError, ValueError):
-                        start_dev = None
-                gap = None
-                last_ep = None
-                if tz_off is not None:
-                    last_ep = ts_epoch(last, ref=dev_now, tz_offset=tz_off)
-                    if last_ep is not None:
-                        # 扣掉「停止之后收尾花了多久」：日志停在下发停止那一刻，
-                        # 之后的拉段 / 合并 / 打包不属于日志缺口。
-                        gap = dev_now - elapsed - last_ep
-                if (gap is not None and start_dev is not None
-                        and last_ep < start_dev - LOGCAT_COVERAGE_WARN_S):
-                    # 最后一条日志比「开始录制」还早：整份文件都是录制前的历史
-                    # 缓冲，录制时段一条都没有。**绝不能**按 gap 报「距录屏结束
-                    # 还有 N 分钟没有日志」——那个 N 完全落在录制开始之前，用户
-                    # 只录十几秒却被告知丢了 10 分 49 秒（实报）。这里单独说清
-                    # 「日志覆盖的是录制前，不是录制中」。
-                    out.append((
-                        "warn",
-                        "⚠ %s 的配套 logcat 没有覆盖本次录制：最后一条日志停在 %s，"
-                        "比开始录制还早约 %s——抓到的都是录制开始前的历史缓冲，"
-                        "本次录制期间没有采到日志" % (
-                            s, last, _fmt_span(start_dev - last_ep))))
-                elif gap is not None and gap >= LOGCAT_COVERAGE_WARN_S:
-                    out.append((
-                        "warn",
-                        "⚠ %s 的 logcat 只跟到 %s，距录屏结束还有约 %s 没有日志："
-                        "后段日志已丢失（文件内有 [logcat] 标记说明断点，"
-                        "状态栏有中断原因）" % (s, last, _fmt_span(gap))))
-                # 设备时钟与本机不一致：视频文件名（本机时间）与日志时间戳
-                # （设备时间）会天然差出这一段，按时间轴对照时极易被当成「日志
-                # 丢了一段」。只在偏差超过告警阈值时说一句，正常录屏不会出现。
-                skew = dev_now - host_now
-                if abs(skew) >= LOGCAT_COVERAGE_WARN_S:
+                        late = 0.0
+                    if late >= LOGCAT_COVERAGE_WARN_S:
+                        out.append((
+                            "warn",
+                            "⚠ %s 的配套 logcat 比录制开始晚约 %s 才启动，"
+                            "录制开头这一段没有日志" % (s, _fmt_span(late))))
+                # ② 设备不认 -T、走兼容模式：起点可能早于录制，开头可能是历史缓冲。
+                # 这只是事实说明，不代表一定缺录制期间的日志（兼容模式也会继续跟流）。
+                if facts.get("compat"):
                     out.append((
                         "info",
-                        "ℹ %s 的设备时钟与本机相差 %s（%s），视频与日志对照时请"
-                        "统一按设备时间看" % (
-                            s, _fmt_span(abs(skew)),
-                            "设备偏快" if skew > 0 else "设备偏慢")))
+                        "ℹ %s 的 logcat 不支持从当前时刻起抓（无 -T），已回落兼容"
+                        "模式：日志开头可能包含录制前的历史缓冲" % s))
+                # ③ 真的断过（掉线 / 意外退出 / 重连耗尽）：这是唯一能确证的缺口。
+                if facts.get("data_gap"):
+                    out.append((
+                        "warn",
+                        "⚠ %s 的配套 logcat 在录制期间中断过（设备掉线 / logcat "
+                        "意外退出），文件里 [logcat] 标记处存在时间缺口"
+                        "（中断原因见状态信息）" % s))
+                # 设备时钟偏差：只影响「视频文件名（本机时间）」与「日志时间戳
+                # （设备时间）」的对照，与日志是否完整无关，故只做 info。
+                dev = device_clock(self.state.adb_path, s, timeout=3)
+                if dev:
+                    dev_now, _tz_off = dev
+                    skew = dev_now - host_now
+                    if abs(skew) >= LOGCAT_COVERAGE_WARN_S:
+                        out.append((
+                            "info",
+                            "ℹ %s 的设备时钟与本机相差 %s（%s），视频与日志对照时"
+                            "请统一按设备时间看" % (
+                                s, _fmt_span(abs(skew)),
+                                "设备偏快" if skew > 0 else "设备偏慢")))
             except Exception:
                 return out
             return out

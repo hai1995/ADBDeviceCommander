@@ -536,6 +536,11 @@ class LogcatCapture:
         # 一旦某台设备带 -T 一行日志都拿不到就 EOF，就把它记进来，本次进程内
         # 后续抓取直接走兼容命令——不再每次都先撞一次墙。
         self._no_T = set()
+        # 最近一次抓取的「会话事实」，供录屏收尾判断日志有没有覆盖录制时段。
+        # 只记录**进程侧可验证**的信号（起点、是否回落兼容模式、是否真的断过），
+        # 一律不依赖设备时钟 —— 车机没校时、或被手动改过时间，都不会让这些
+        # 信号失真。设备时钟只影响日志时间戳的展示，不影响完整性判定。
+        self._facts = {}
 
     def is_running(self, serial):
         with self._lock:
@@ -599,6 +604,13 @@ class LogcatCapture:
                 return False
             self._files[serial] = path
             self._flags[serial] = {"zip_on_stop": False}
+            self._facts[serial] = {
+                "started_host": time.time(),
+                "compat": False,
+                "data_gap": False,
+                "lines": 0,
+                "error": "",
+            }
             self._stopreq.discard(serial)
             self._starting.add(serial)
         # 用 `is None` 而非 `or`：前端取消勾选全部级别时传的是空列表 []，
@@ -637,6 +649,32 @@ class LogcatCapture:
             serials = list(self._procs.keys()) + list(self._starting)
         for s in serials:
             self.stop(s, zip_on_stop=zip_on_stop)
+
+    # ------------------------------------------------------------------
+    def capture_facts(self, serial):
+        """最近一次抓取的「会话事实」，未知设备返回空 dict。
+
+        字段全部是进程侧可验证的：
+          * started_host —— 抓取线程启动的本机时刻；
+          * compat       —— 是否因设备不认 -T 回落到兼容模式（会先带出历史
+                            缓冲，起点可能早于录制开始）；
+          * data_gap     —— 是否真的断过（设备掉线 / logcat 意外退出 / 重连
+                            耗尽），文件里必有 [logcat] 缺口标记；
+          * lines        —— 实际写盘行数；
+          * error        —— 收尾错误原文（写盘失败 / 重连耗尽）。
+        刻意不含「设备时钟推算的缺口」：设备没校时或被人手动改时间时那个值
+        不可信，拿它做完整性判定只会产生假告警。
+        """
+        with self._lock:
+            f = self._facts.get(serial)
+            return dict(f) if f else {}
+
+    def _fact(self, serial, **kw):
+        """更新会话事实（抓取线程内部用；serial 已收尾时静静忽略）。"""
+        with self._lock:
+            f = self._facts.get(serial)
+            if f is not None:
+                f.update(kw)
 
     # ------------------------------------------------------------------
     # 重连等待：设备掉线后轮询直到重连 / 用户停止 / 超时。
@@ -689,6 +727,10 @@ class LogcatCapture:
         # 只有半截，甚至一行都没写进去。
         write_error = ""
         gap_written = False        # 文件里是否写过「设备掉线」缺口标记
+        # 是否发生过**真实的数据缺口**（设备掉线 / logcat 意外退出 / 重连后
+        # 的日志空洞）。与 gap_written 分开：后者还包含「设备时钟回退」这类
+        # 只影响排序、并不丢数据的标记，不能拿来判完整性。
+        data_gap = False
         # 设备仍在线、adb logcat 却自己退出了：文件在此处截断。收尾时必须
         # 说明，否则就是一次「✓ 抓取完毕」的假成功（见 finally）。
         eof_unexpected = False
@@ -901,6 +943,7 @@ class LogcatCapture:
                                        "未能取回（中断期间产生的日志已滚出设备"
                                        "缓冲区）" % (last_log_ts, ts, cur - prev))
                                 gap_written = True
+                                data_gap = True
                         f.write(raw)
                         lines += 1
                         if ts:
@@ -944,6 +987,9 @@ class LogcatCapture:
                                 self._no_T.add(serial)
                         from_now = False
                         cmd = _logcat_cmd(adb, serial, buffers, None)
+                        # 兼容模式会先把历史缓冲区灌出来：起点可能早于录制开始。
+                        # 这是收尾判断「日志有没有覆盖录制时段」的真实依据之一。
+                        self._fact(serial, compat=True)
                         if bad_opt:
                             text = ("logcat 抓取：设备 %s 不支持 -T（从当前时刻起抓），"
                                     "已改用兼容命令重新开始（本次会先带出缓冲区里的历史日志）"
@@ -971,6 +1017,7 @@ class LogcatCapture:
                 if gone_hint or device_present(adb, serial) is False:
                     # 确认设备掉了：写入缺口标记，等待重连后往同一文件续写（绝不丢已抓到的）。
                     gap_written = True
+                    data_gap = True
                     drop_ts = time.strftime("%Y-%m-%d %H:%M:%S")
                     try:
                         f.write("\n--------- [logcat] 设备于 %s 断开连接，等待重连 ---------\n"
@@ -1058,6 +1105,7 @@ class LogcatCapture:
                     f, "抓取进程于 %s 意外中断（设备仍在线），第 %d 次自动重连…"
                        % (restart_ts, restarts))
                 gap_written = True
+                data_gap = True
                 self.bus.push("logcat_capture",
                               {"serial": serial, "status": "reconnecting",
                                "path": path,
@@ -1110,6 +1158,12 @@ class LogcatCapture:
                 self._gone.discard(serial)
                 self._reconn_wake.pop(serial, None)
                 flags = self._flags.pop(serial, {"zip_on_stop": False})
+                # 把本轮会话的可验证事实留档，供录屏收尾判断覆盖度（只读快照）。
+                fact = self._facts.get(serial)
+                if fact is not None:
+                    fact["lines"] = lines
+                    fact["data_gap"] = bool(fact.get("data_gap") or data_gap)
+                    fact["error"] = write_error or outcome_error
             # 打包条件：仅「结束后打包 zip」——抓取过程不做任何按大小的自动
             # 打包（旧「超 15M 自动打包」已整体移除），停止时是否打包
             # 完全由用户在界面上勾选的这一个开关决定。

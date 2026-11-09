@@ -1521,8 +1521,16 @@ def test_capture_uses_T_from_now_by_default(tmp_path, monkeypatch):
     """默认抓取命令必须带 -T：不再从设备历史缓冲区头部开始灌。"""
     seen = []
     proc = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"], block_after=1)
-    monkeypatch.setattr(ls.subprocess, "Popen",
-                        lambda cmd, **kw: (seen.append(list(cmd)), proc)[1])
+
+    def fake_popen(cmd, **kw):
+        if "logcat" not in cmd:
+            # 别的用例可能残留 worker（会调 adb devices 等）：给个立刻 EOF 的
+            # 替身，别让它混进本用例的断言。
+            return _FakeLogcatProc([], eof_after=0)
+        seen.append(list(cmd))
+        return proc
+
+    monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
 
     bus = _FakeBus()
     cap = ls.LogcatCapture(bus, adb_path="adb")
@@ -1548,6 +1556,9 @@ def test_capture_falls_back_when_logcat_rejects_T(tmp_path, monkeypatch):
                            block_after=1)
 
     def fake_popen(cmd, **kw):
+        if "logcat" not in cmd:
+            # 别的用例残留 worker 的 adb 调用（如 adb devices）不参与本次分配
+            return _FakeLogcatProc([], eof_after=0)
         calls.append(list(cmd))
         return bad if len(calls) == 1 else good
 
@@ -1569,6 +1580,12 @@ def test_capture_falls_back_when_logcat_rejects_T(tmp_path, monkeypatch):
 
     cap.stop("D", zip_on_stop=False)
     assert _wait_not_running(cap, "D")
+    # 会话事实：判断覆盖度靠这三项，不再依赖设备时钟
+    facts = cap.capture_facts("D")
+    assert facts.get("compat") is True, facts
+    assert facts.get("data_gap") is False, facts
+    assert facts.get("started_host"), facts
+    assert cap.capture_facts("不存在的设备") == {}
 
 
 def test_capture_fallback_is_one_shot_for_transient_failure(tmp_path, monkeypatch):
@@ -1581,6 +1598,8 @@ def test_capture_fallback_is_one_shot_for_transient_failure(tmp_path, monkeypatc
     good = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I Tag: ok\n"], block_after=1)
 
     def fake_popen(cmd, **kw):
+        if "logcat" not in cmd:
+            return _FakeLogcatProc([], eof_after=0)
         calls.append(list(cmd))
         return flaky if len(calls) == 1 else good
 
