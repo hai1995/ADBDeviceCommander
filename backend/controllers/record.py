@@ -152,8 +152,8 @@ class RecordMixin:
         sess_ts = time.strftime("%Y%m%d_%H%M%S")
         self._rec_session = {
             "ts": sess_ts, "dir": save_dir,
-            # 会话开始的本机时刻：收尾校验「日志有没有覆盖录制时段」要用它
-            # 换算设备时钟下的开始时间（见 _logcat_coverage_notes）。
+            # 会话开始的本机时刻：收尾校验「配套 logcat 有没有晚于录制起点启动」
+            # 的基准（见 _logcat_coverage_notes）。
             "start_host": time.time(),
             "with_devaudio": with_devaudio, "with_mic": with_mic,
             "with_logcat": bool(with_logcat), "with_zip": bool(zip_on_stop),
