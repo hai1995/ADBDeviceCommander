@@ -27,6 +27,7 @@
 - **第二十九轮**（本文末「第二十九轮」一节）：车机截图报「分辨率有问题」——**不是没 root**（`screencap` 普通 shell 权限即可）。真因是 `adb exec-out` 的 PNG 字节在个别 Windows adb / 车机上被换行转换，签名还认得、IHDR 的宽高与 CRC 已坏，旧实现照旧落盘成坏图。现在落盘前校验 PNG 头，坏头当场拒绝并给出 `adb shell screencap -p` + `adb pull` 的替代路径。
 - **第三十轮**（本文末「第三十轮」一节）：把上一轮的「建议你手敲 adb pull」升级为**自动降级重试**（exec-out 坏 → 设备端落盘 + pull → 清理远端与 `.part`）；并新增 `adb shell echo` 探测，把**车机 shell 需要授权密码**（adbd 停在 `Password:`，所有命令都只是「没有输出」）与**定制系统收紧 shell 权限**、**USB 调试未授权**、**设备掉线**分开报——四种情况各有各的提示语，都不再说「截图失败」了事，也不再让人误以为是「没 root」。
 - **第三十一轮**（见文末「2026-11-09 — 车机重启前后数据全保留」）：修复车机重启后「只剩重启后的视频与日志」——设备掉线超过宽限即被孤儿回收强停、收尾只等 60 秒；改为主动转入等待重启并自动续录，分段缩到 60 秒，停止后按重启轮次分别成片（`_r2` / `_r3`）。
+- **第三十二轮**（见文末「2026-11-09 — 内置命令改为扁平列表」）：内置命令去掉按用途的二级分组 / 折叠，只留顶部适用设备筛选（全部 / 通用 / 车机 / 手机）与每条命令后的 车机 / 手机 / 通用 小标签。
 
 ---
 
@@ -4434,3 +4435,31 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
 - 限制（必须知道）：设备断电瞬间**正在写入的那一段**（≤60 秒）缺 moov 头，
   物理上无法恢复；程序会把它作为残片**保留在保存目录**并在收尾提示里点名，
   不会静默删除。设备端「连续循环录屏」以进一步压缩段间接缝，留待后续实测。
+
+---
+
+# 2026-11-09 — 内置命令改为扁平列表（顶部筛选 + 卡片小标签）
+
+用户反馈：车机内置命令不要再按用途做二级分组 / 折叠，只要顶部一排筛选 tab，
+以及每条命令后面的 车机 / 手机 / 通用 小标签。
+
+## 改动
+
+- `frontend/js/app.js`：`renderCmdGroups` 的「内置」分支改为**一条扁平
+  `.cmd-chips`**，保留顶部 `.cmd-scope-bar`（全部 / 通用 / 车机 / 手机）；
+  删除 `BUILTIN_SECTIONS` / `BUILTIN_SECTION_TAIL` / `builtinFolded` /
+  `builtinSectionsOf` / `sectionNameOf` / `mkFoldAllBtn` /
+  `appendBuiltinSections`，以及启动时读取 `builtin_folded` 的逻辑
+  （旧配置里的该键不再读取，也不影响其他配置）。
+- 搜索仍把 `section`（用途名）纳入匹配：分组去掉后，「搜网络能出那批命令」
+  的能力不变。
+- `frontend/css/app.css`：删除 `.cmd-sections` / `.cmd-section*` /
+  `.cmd-fold-all` 样式，只保留 `.cmd-scope-bar` / `.cmd-scope` / `.chip-scope*`。
+- 文档：`使用说明.txt` / `README.md` 同步为「扁平列表 + 顶部筛选 + 小标签」。
+- 测试：
+  - 删除 `tests/frontend/builtin_sections.test.cjs`（折叠 / 分组行为已移除）；
+  - 新增 `tests/frontend/builtin_flat.test.cjs`：锁定「无任何段结构 / 一条
+    chips / 筛选条在顶部 / 每条带标签 / 搜用途名仍命中」；
+  - `tests/frontend/builtin_scope.test.cjs` 去掉段结构断言，改为「筛选后仍是
+    扁平列表」。
+- 验证：前端 **89 个用例文件、0 失败**；`pyflakes` 0（本轮仅前端与文档改动）。

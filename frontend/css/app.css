@@ -942,44 +942,7 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 .cmd-chips { display: flex; flex-wrap: wrap; gap: 7px; }
 
-/* 内置命令的二级分组（可折叠）：一条竖脊 + 一个小三角，视觉上从属于
-   「内置」分组标题，不与一级分组抢层级。 */
-.cmd-sections { display: flex; flex-direction: column; gap: 9px;
-  border-left: 1px solid var(--line); margin-left: 2px; padding-left: 10px; }
-.cmd-section-h {
-  display: flex; align-items: center; gap: 6px; width: 100%;
-  background: none; border: 0; padding: 2px 0; margin-bottom: 5px;
-  font: 500 var(--fs-sm)/1 var(--font-body); color: var(--muted);
-  cursor: pointer; text-align: left;
-}
-.cmd-section-h:hover { color: var(--text-2); }
-.cmd-section-h:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-.cmd-section-h .cs-caret {
-  width: 0; height: 0; flex: none;
-  border-left: 5px solid currentColor;
-  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
-  transform: rotate(90deg); transition: transform var(--dur-fast) ease;
-}
-.cmd-section-h .cs-name { letter-spacing: .04em; }
-.cmd-section-h .cs-n {
-  color: var(--faint); font: 400 var(--fs-xs)/1 var(--font-mono);
-  padding: 1px 5px; border-radius: 999px; background: var(--surface-2);
-}
-.cmd-section.is-folded .cs-caret { transform: rotate(0deg); }
-/* 折叠只藏 chips，标题行留着——否则「怎么突然多出一块」比藏起来更困惑 */
-.cmd-section.is-folded .cmd-chips { display: none; }
-.cmd-section.is-folded .cmd-section-h { margin-bottom: 0; }
-/* 「内置」组标题右侧的一键全折 / 全展：常驻但极轻，不抢分组标题的分量 */
-.cmd-fold-all {
-  margin-left: auto; margin-right: 2px; flex: none;
-  background: none; border: 1px solid transparent; border-radius: 999px;
-  padding: 1px 8px; cursor: pointer;
-  font: 500 var(--fs-xs)/1.4 var(--font-body); letter-spacing: .04em;
-  color: var(--muted);
-}
-.cmd-fold-all:hover { color: var(--accent); border-color: var(--line-strong); }
-.cmd-fold-all:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-/* 「内置」组内的设备类型筛选条（全部 / 通用 / 车机 / 手机）。
+/* 「内置」命令顶部的设备类型筛选条（全部 / 通用 / 车机 / 手机）。
    比一级标签条更轻：它是内置命令内部的二次收窄，不参与顶部标签过滤。 */
 .cmd-scope-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 9px; }
 .cmd-scope {

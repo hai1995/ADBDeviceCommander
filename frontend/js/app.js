@@ -1240,12 +1240,6 @@
     // 指令卡手动排序（拖动后落盘）：必须在 renderCommands 之前读进来，
     // 否则首屏按点击频次排完、再被重排一次，用户会看到卡片跳一下。
     if (typeof s.cmd_order === "string") loadCmdOrder(s.cmd_order);
-    // 内置二级分组的折叠状态：同样要在 renderCommands 之前读进来，否则首屏
-    // 全展开、紧随其后又折回去，用户会看到指令区抽动一下。
-    if (typeof s.builtin_folded === "string") {
-      builtinFolded = new Set(s.builtin_folded.split(",")
-        .map((x) => x.trim()).filter(Boolean));
-    }
     // 内置命令的设备类型筛选（通用 / 车机 / 手机）：同样要先于首屏渲染恢复，
     // 否则用户上次选的是「车机」，启动后却先看到全部、再被筛一次。
     // 非法值（手改 config.json）直接忽略，保持「全部」。
@@ -1629,15 +1623,7 @@
     return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
   }
 
-  /* 「内置」组内的二级分组：49 条平铺要横跨两三屏，按用途分开一次只看一类。
-     顺序只由这里决定（后端只写「归属」，见 core/builtin_commands.py 的 section），
-     刻意不复用 labels —— 顶部标签条要是塞进六个细分，「通用 / 常用」反而不好点。 */
-  const BUILTIN_SECTIONS = ["连接与投屏", "显示辅助", "按键", "屏幕状态", "网络", "应用与信息"];
-  const BUILTIN_SECTION_TAIL = "其他";
-  let builtinFolded = new Set();       // 已折叠的二级分组名（落 config.json 的 builtin_folded）
-
-  /* 「内置」命令的适用设备轴（与 section 正交）：section 回答「干什么用」，
-     scope 回答「在哪类设备上有意义」。卡片上打小角标，组内再给一排筛选按钮。
+  /* 「内置」命令的适用设备轴：卡片上打小角标，顶部给一排筛选按钮。
      缺省（后端没写 scope）一律按「通用」——绝大多数命令两类设备都能用，
      只有明确偏向某一类的才显式标注（见 core/builtin_commands.py）。 */
   const BUILTIN_SCOPES = ["通用", "车机", "手机"];
@@ -1677,8 +1663,9 @@
         if (!labels.some((l) => ws.tags.has(l))) return false;
       }
       if (kw) {
-        // 搜索域含 section（二级分组名）与 scope（适用设备）：想找「网络」相关
-        // 的一批命令、或只记得「车机专用」时，记不住具体名字也能筛出来。
+        // 搜索域含 section（用途名，已不再作为界面分组）与 scope（适用设备）：
+        // 想找「网络」相关的一批命令、或只记得「车机专用」时，记不住具体名字
+        // 也能筛出来。
         // 代价是搜「按键」会多命中两条命令名里带「按键」的条目——可接受，
         // 因为结果仍是该类的子集。
         const hay = (c.name + " " + (c.section || "") + " "
@@ -1688,8 +1675,7 @@
       }
       return true;
     });
-    // 筛选中时内置二级分组一律展开：命中项藏在折叠块里等于告诉用户「没找到」
-    renderCmdGroups(filtered, !!kw || ws.tags.size > 0, ws);
+    renderCmdGroups(filtered, ws);
     if (ws.countEl) {
       // 设备类型筛选只作用于内置命令：计数要跟着可见卡片走，否则「手机」
       // 只剩 4 张卡、右上角却还写着 12 条，用户会以为筛坏了。
@@ -1711,7 +1697,7 @@
     ws.filterTimer = setTimeout(() => { ws.filterTimer = null; applyCmdFilter(ws); }, 120);
   }
 
-  function renderCmdGroups(list, filtering, ws) {
+  function renderCmdGroups(list, ws) {
     ws = ws || curWs();
     if (!ws || !ws.groupsEl) return;
     const host = ws.groupsEl;
@@ -1733,19 +1719,18 @@
       const title = document.createElement("div");
       title.className = "cmd-group-title"; title.textContent = label;
       box.appendChild(title);
-      // 「内置」再分一层：49 条平铺要横跨两三屏，其余分组照旧是一条扁平的 chips
+      // 「内置」命令：顶部一排适用设备筛选 + 一条扁平 chips（每条带
+      // 通用 / 车机 / 手机 小标签）。不再按用途做二级分组 —— 找命令靠
+      // 顶部筛选与关键字就够了，多一层折叠反而要多点一次。
       if (label === "内置") {
-        // 先按设备类型（scope）收窄，再按用途分段：两级都是纯展示筛选，
-        // 段数与段头条数都只统计当前范围内可见的命令，不会出现「空段占位」。
         const scoped = filterByScope(items);
-        const secs = builtinSectionsOf(scoped);
-        // 段数 ≥2 才给「一键全折 / 全展」：只有一段时这个按钮没有意义
-        if (secs.length > 1) title.appendChild(mkFoldAllBtn(secs, ws));
         box.appendChild(mkScopeBar());
         if (!scoped.length) {
           pushLine(box, "（该子标签下暂无内置命令）", "dim");
         } else {
-          appendBuiltinSections(box, scoped, !!filtering, ws);
+          const chips = document.createElement("div"); chips.className = "cmd-chips";
+          scoped.forEach((c) => chips.appendChild(mkCmdChip(c, ws.id)));
+          box.appendChild(chips);
         }
       } else {
         const chips = document.createElement("div"); chips.className = "cmd-chips";
@@ -1754,19 +1739,6 @@
       }
       host.appendChild(box);
     }
-  }
-
-  /* 「内置」组内的二级分组（可折叠）。折叠状态落 config.json 的 builtin_folded
-     （逗号串，与 cmd_order 同一套约定），下次启动照旧——每次都要重新折一遍
-     的话，这个功能等于不存在。 */
-  function builtinSectionsOf(items) {
-    const seen = new Set();
-    items.forEach((c) => seen.add(sectionNameOf(c)));
-    return BUILTIN_SECTIONS.concat([BUILTIN_SECTION_TAIL]).filter((s) => seen.has(s));
-  }
-
-  function sectionNameOf(c) {
-    return BUILTIN_SECTIONS.indexOf(c.section) >= 0 ? c.section : BUILTIN_SECTION_TAIL;
   }
 
   /* 命令的适用设备：后端缺省 / 手写坏值一律按「通用」——宁可多显示，
@@ -1780,7 +1752,7 @@
     return items.filter((c) => scopeNameOf(c) === builtinScope);
   }
 
-  /* 「内置」组内的设备类型筛选条：全部 / 通用 / 车机 / 手机。
+  /* 「内置」命令顶部的设备类型筛选条：全部 / 通用 / 车机 / 手机。
      纯展示层筛选（不影响命令本身可用性），状态全局共享并落 config.json
      的 builtin_scope；切换后所有工作区一起重渲，避免切 tab 才「突然变」。 */
   function mkScopeBar() {
@@ -1803,63 +1775,6 @@
       bar.appendChild(btn);
     });
     return bar;
-  }
-
-  // 「全部折叠 / 全部展开」：六段逐个点太费事，而真正想干的事通常只有一个
-  function mkFoldAllBtn(secs, ws) {
-    const allFolded = secs.every((s) => builtinFolded.has(s));
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "cmd-fold-all";
-    btn.textContent = allFolded ? "全部展开" : "全部折叠";
-    btn.title = allFolded ? "展开全部 " + secs.length + " 个分组" : "折叠全部 " + secs.length + " 个分组";
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      secs.forEach((s) => (allFolded ? builtinFolded.delete(s) : builtinFolded.add(s)));
-      applyCmdFilter(ws);
-      persistPref("builtin_folded", Array.from(builtinFolded).join(","));
-    });
-    return btn;
-  }
-
-  function appendBuiltinSections(box, items, filtering, ws) {
-    const buckets = new Map();
-    items.forEach((c) => {
-      const sec = sectionNameOf(c);
-      if (!buckets.has(sec)) buckets.set(sec, []);
-      buckets.get(sec).push(c);
-    });
-    const wrap = document.createElement("div");
-    wrap.className = "cmd-sections";
-    BUILTIN_SECTIONS.concat([BUILTIN_SECTION_TAIL]).forEach((sec) => {
-      const list = buckets.get(sec);
-      if (!list || !list.length) return;      // 过滤后空的分组不占位
-      const folded = !filtering && builtinFolded.has(sec);
-      const secBox = document.createElement("div");
-      secBox.className = "cmd-section" + (folded ? " is-folded" : "");
-      secBox.dataset.section = sec;
-      const head = document.createElement("button");
-      head.type = "button";
-      head.className = "cmd-section-h";
-      head.setAttribute("aria-expanded", folded ? "false" : "true");
-      head.title = (folded ? "展开" : "折叠") + "「" + sec + "」（" + list.length + " 条）";
-      head.innerHTML = '<span class="cs-caret" aria-hidden="true"></span>'
-        + '<span class="cs-name">' + escHtml(sec) + "</span>"
-        + '<span class="cs-n">' + list.length + "</span>";
-      head.addEventListener("click", () => {
-        // 筛选态不让折：折了也会被下一次 applyCmdFilter 重新展开，徒增困惑
-        if (filtering) return;
-        if (builtinFolded.has(sec)) builtinFolded.delete(sec);
-        else builtinFolded.add(sec);
-        applyCmdFilter(ws);
-        persistPref("builtin_folded", Array.from(builtinFolded).join(","));
-      });
-      const chips = document.createElement("div"); chips.className = "cmd-chips";
-      list.forEach((c) => chips.appendChild(mkCmdChip(c, ws && ws.id)));
-      secBox.appendChild(head); secBox.appendChild(chips);
-      wrap.appendChild(secBox);
-    });
-    box.appendChild(wrap);
   }
 
   /* 最近的「会裁剪内容」的祖先（overflow 非 visible），用于判断菜单能往哪弹。
@@ -1932,9 +1847,7 @@
     closeOpenChipMenus(null);
   });
 
-  /* 单张指令卡。抽成函数是因为「内置」组要按二级分组渲染（见
-     appendBuiltinSections）——同一套卡片逻辑不能抄两遍，否则改角标 / 菜单时
-     必然漏掉一边。 */
+  /* 单张指令卡：用户命令与内置命令共用，内置卡片额外带适用设备小标签。 */
   function mkCmdChip(c, wsId) {
     const chip = document.createElement("button");
     chip.type = "button";
