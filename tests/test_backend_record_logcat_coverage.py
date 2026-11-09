@@ -329,3 +329,45 @@ def test_skip_gap_when_device_timezone_unknown(tmp_path, monkeypatch):
         "时区未知时不该猜一个缺口出来：%r" % (notes,)
     infos = [t for lvl, t in notes if lvl == "info"]
     assert infos and "设备时钟" in infos[0], notes
+
+
+def test_notes_blame_pre_recording_backlog_not_missing_tail(tmp_path, monkeypatch):
+    """日志整份落在录制开始之前：必须说「没覆盖本次录制」，而不是按 gap 报
+    「距录屏结束还有 10 分 49 秒」——那个时长全在录制开始之前，用户只录了
+    十几秒却被告知丢了十几分钟（实报）。
+
+    真机成因：`adb logcat` 先从头灌设备历史缓冲区，短录制结束时还没灌到
+    当下，文件里全是录制前的日志（采集起点已改为 -T，见 logcat 抓取用例）。
+    这条判据是收尾校验的第二道防线：即便出现，也要把话说准。
+    """
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 1300), _ts(now - 1260)])
+    _fake_clock(monkeypatch, now)
+
+    # 20 秒前开始录制（设备与本机时钟一致）：最后一条日志早于开始录制约 20 分钟
+    sess = {"start_host": now - 20}
+    warns = [t for lvl, t in api._logcat_coverage_notes(sess, {"A1": p}) if lvl == "warn"]
+    assert warns, "整份日志都没覆盖录制时段，必须告警"
+    msg = warns[0]
+    assert "没有覆盖本次录制" in msg, msg
+    assert "历史缓冲" in msg, msg
+    assert "距录屏结束" not in msg, "不能把录制前的时间算成录制中的缺口：" + msg
+
+
+def test_notes_still_reports_real_gap_with_start_host(tmp_path, monkeypatch):
+    """日志确实覆盖了录制开头、只是后段停了：仍按真实缺口告警。
+
+    防止新判据把「真丢日志」也一并吞掉——那是更严重的问题。
+    """
+    api = _make_api()
+    now = int(time.time())
+    p = str(tmp_path / "logcat_A1.txt")
+    _write_log(p, [_ts(now - 1500), _ts(now - 1440)])
+    _fake_clock(monkeypatch, now)
+
+    sess = {"start_host": now - 1500}   # 25 分钟前开始录制，日志只到 24 分钟前
+    warns = [t for lvl, t in api._logcat_coverage_notes(sess, {"A1": p}) if lvl == "warn"]
+    assert warns, "真缺口必须照报"
+    assert "只跟到" in warns[0] and "24 分钟" in warns[0], warns[0]

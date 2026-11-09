@@ -111,16 +111,41 @@ def _now_mono():
     return time.monotonic()
 
 
-def _logcat_cmd(adb, serial, buffers):
-    """构造 `adb -s <serial> logcat -v threadtime [-b <buf>]...` 命令。
+def _logcat_cmd(adb, serial, buffers, from_now_lines=None):
+    """构造 `adb -s <serial> logcat -v threadtime [-T <n>] [-b <buf>]...` 命令。
 
     监控（实时渲染）与抓取（落盘）共用同一份构造：两边曾各自抄了一份，
     改格式（如换 -v 参数）时只改一处就会漏掉另一处，且两份行为悄然漂移。
+
+    from_now_lines：仅**抓取**（落盘）用。传正整数时加 `-T <n>`——logcat 只让
+    最近 n 行作为起点，随后实时追加。这是「短录制抓不到日志」的根治点：
+
+    不带 -T 时，每个 adb logcat 进程都会先把设备环形缓冲区**从头**灌一遍。
+    车机 `-b all` 的历史缓冲动辄几十 MB，经 ADB 传输要十几秒到几十秒。用户
+    只录十几秒就点停止时，缓冲区还没灌到「现在」——文件里全是录制开始**之前**
+    的历史日志，录制期间一条都没有；收尾校验再拿「设备当前时刻 - 最后一条
+    日志」算缺口，就报出「距录屏结束还有 10 分 49 秒没有日志」这种与录制
+    时长完全不成比例的假缺口（用户实报）。
+
+    加 -T 后处于「实时跟流」状态，第一行就落在录制起点附近，录制期间逐行
+    追加，既不存在追赶窗口，也不再白写几十 MB 历史。重启 / 重连后的新会话
+    同样从当时刻开始，正是「断点之后续写」要的语义。
     """
     cmd = [adb, "-s", serial, "logcat", "-v", "threadtime"]
+    if from_now_lines is not None and int(from_now_lines) > 0:
+        cmd += ["-T", str(int(from_now_lines))]
     for b in buffers:
         cmd += ["-b", b]
     return cmd
+
+
+# 抓取起点：`-T 1` = 只取「最近 1 行」当起点，随后实时追加。
+# 不用 -T 0（部分 logcat 版本对 0 的解释不一致），1 行也不会多写什么。
+LOGCAT_CAP_FROM_NOW_LINES = 1
+# -T 是 Android 5.0+ 的 logcat 选项；老车机 / 被裁剪的 logcat 可能不认。
+# 不做事前探测（探测要真起进程，反而干扰测试替身与忙碌设备），改为：
+# 带上 -T 后若一行日志都没拿到就 EOF，且报错原文指向「选项不认识」，
+# 就地回落兼容命令重试一次，并把这台设备记进 _no_T（见 _worker）。
 
 # 启动爆发期保护：`adb logcat` 不带 -t，启动瞬间会把设备缓冲区里的历史日志
 # （动辄上万行）一次性吐出来，前端即便增量渲染也会被这次尖峰打满而卡死。
@@ -507,6 +532,10 @@ class LogcatCapture:
         # 等一个轮询间隔（3s）才生效——「录屏停、日志同步停」就会被拖成两条对不齐
         # 的时间线，正是日志与视频要按时间轴对照时最忌讳的。
         self._reconn_wake = {}
+        # 已实测「不认 -T」的设备序列号（老车机 / 裁剪版 logcat）。
+        # 一旦某台设备带 -T 一行日志都拿不到就 EOF，就把它记进来，本次进程内
+        # 后续抓取直接走兼容命令——不再每次都先撞一次墙。
+        self._no_T = set()
 
     def is_running(self, serial):
         with self._lock:
@@ -635,7 +664,16 @@ class LogcatCapture:
 
     def _worker(self, serial, path, buffers, levels=None):
         adb = self.adb_path
-        cmd = _logcat_cmd(adb, serial, buffers)
+        # 从「现在」开始抓，而不是先把设备整个历史缓冲区灌一遍：否则录屏一短，
+        # 缓冲区还没灌到当下就停止了，文件里全是录制前的历史日志（见 _logcat_cmd）。
+        with self._lock:
+            from_now = serial not in self._no_T
+        cmd = _logcat_cmd(
+            adb, serial, buffers,
+            LOGCAT_CAP_FROM_NOW_LINES if from_now else None)
+        # 是否已经为「不认 -T」回落过一次（每台设备每次抓取最多回落一次，
+        # 避免老设备上无限重试）。
+        fallback_tried = False
         lines = 0
         # 一行都没写进去时留下的前几行原文（多为 adb 的报错：device not found 等），
         # 供末段判断「设备没连上」时把原因带出来。
@@ -890,7 +928,32 @@ class LogcatCapture:
                     if serial in self._stopreq:
                         break
                 if not logish:
-                    # 一行真日志都没解析到就 EOF：设备离线 / 序列号失效 / logd 未运行。
+                    # 一行真日志都没解析到就 EOF：设备离线 / 序列号失效 / logd 未运行，
+                    # 也可能是**老 logcat 不认 -T**（打印用法后立刻退出）。
+                    # 后者必须能自愈：回落一次兼容命令继续抓，否则老车机上日志
+                    # 一条都抓不到。判定依据不只看「0 行」——设备抖动也会 0 行 EOF，
+                    # 所以优先看 adb/logcat 的报错原文里有没有「选项不认识」。
+                    if from_now and not fallback_tried:
+                        fallback_tried = True
+                        blob = "".join(err_lines).lower()
+                        bad_opt = any(k in blob for k in (
+                            "invalid option", "unknown option", "unrecognized option",
+                            "unrecognised option", "usage:"))
+                        if bad_opt:
+                            with self._lock:
+                                self._no_T.add(serial)
+                        from_now = False
+                        cmd = _logcat_cmd(adb, serial, buffers, None)
+                        if bad_opt:
+                            text = ("logcat 抓取：设备 %s 不支持 -T（从当前时刻起抓），"
+                                    "已改用兼容命令重新开始（本次会先带出缓冲区里的历史日志）"
+                                    % serial)
+                        else:
+                            text = ("logcat 抓取：设备 %s 本会话未产出日志（%s），"
+                                    "已用兼容命令重试一次"
+                                    % (serial, (err_lines[0] if err_lines else "无输出")))
+                        self.bus.push("status", {"type": "info", "text": text})
+                        continue
                     # 此前这行被原样写进 txt，紧接着推 stopped —— 前端弹「✓ 抓取完毕：
                     # 0 行」，一个完美的假成功。这里不再尝试重连（从来没连上过的设备
                     # 重连也没意义），留待 finally 按「设备离线」报错。

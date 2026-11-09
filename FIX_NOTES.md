@@ -4694,3 +4694,63 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 - [builtin_scope.test.cjs](file:///workspace/tests/frontend/builtin_scope.test.cjs)
   撤掉段结构断言，32 通过 / 0 失败；
 - 全量：后端 **1390 passed / 1 skipped**；前端 **89 文件 0 失败**。
+
+---
+
+# 第六十六轮（录屏配套 logcat 从「现在」开始抓，并修正覆盖度判据）
+
+## 用户反馈
+
+正常录了十几秒就停止，没有重启车机、没有拔线，收尾却提示
+「logcat 只跟到 11-09 17:34:14.931，距录屏结束还有约 10 分 49 秒没有日志」。
+打开 txt 一看 433536 行 / 56 MB，末行时间戳比录制开始（17:44:52）还早 10 分钟。
+
+## 根因
+
+抓取命令是 `adb logcat -v threadtime -b all`，**不带 `-T` / `-t`**。这种形态会先把
+设备环形缓冲区**从最旧一行开始整段灌出**，灌完才接着实时跟流。车机 `-b all`
+的缓冲动辄几十 MB，经 ADB 传输要十几秒到几十秒：
+
+- 短录制（十几秒）在「灌历史」还没到当下时就停止了 → 文件里**全是录制开始前**
+  的日志，录制期间一行都没采到；
+- 收尾校验用 `设备当前时刻 - 最后一条日志` 算缺口，于是把录制开始前的那一大段
+  误报成「距录屏结束还有 10 分 49 秒没有日志」——数字与录制时长完全不成比例。
+
+## 修复
+
+### 1. 抓取从「现在」开始（backend/logcat_service.py）
+
+- [_logcat_cmd](file:///workspace/backend/logcat_service.py#L114-L139) 新增
+  `from_now_lines` 参数：`logcat -T <n>` = 只取最近 n 行作为起点，**且不隐含
+  `-d`**，随即进入实时跟流。抓取默认 `-T 1`（`LOGCAT_CAP_FROM_NOW_LINES`），
+  第一行即落在录制起点附近，既没有追赶窗口，也不再白写几十 MB 历史；
+- 实时监控（`LogcatMonitor`）不传该参数，行为完全不变（它需要历史）；
+- 老车机 / 被裁剪的 logcat 不认 `-T`（打印用法后秒退）时自动回落：读循环
+  0 行 EOF 且 `from_now` 尚未回落过 → 检查报错原文是否含 `invalid option` /
+  `unknown option` / `unrecognized option` / `usage:`，命中则把设备记进
+  `_no_T`（后续抓取直接走兼容命令），本次改用不带 `-T` 的命令**重试一次**；
+  回落不写缺口标记、不计入「意外中断」；
+- 设备抖动造成的 0 行 EOF（报错与选项无关）同样重试一次，但**不**记住
+  `_no_T`，避免把偶发断连误判成「老设备」而永久退回慢路径。
+
+### 2. 覆盖度判据（backend/controllers/record.py）
+
+- `_rec_session` 增加 `start_host`（录制开始的宿主时刻）；
+- [_logcat_coverage_notes](file:///workspace/backend/controllers/record.py#L898-L934)
+  用「此刻设备-本机偏移」把 `start_host` 换算成 `start_dev`。若最后一条日志
+  早于 `start_dev - 5 秒`，说明整份文件都是录制前的历史缓冲，改报：
+  「没有覆盖本次录制：最后一条日志停在 X，比开始录制还早约 N —— 抓到的都是
+  录制开始前的历史缓冲，本次录制期间没有采到日志」，不再拿假缺口吓人；
+- 真正在录制中途断掉的，仍按原逻辑报「只跟到…距录屏结束还有约 N 没有日志」。
+
+## 测试
+
+- [test_backend_logcat.py](file:///workspace/tests/test_backend_logcat.py)：
+  `-T` 只在该加时加；抓取默认带 `-T`；不认 `-T` 时回落一次且记住设备；
+  偶发失败只重试不记住。假进程补 `eof_after` 语义（自然 EOF）——
+  `block_after` 是「停在读循环等 terminate」，用它模拟「秒退」会让 worker
+  永远读不到 EOF、回落分支永不执行（本次两个用例先因此失败）；
+- [test_backend_record_logcat_coverage.py](file:///workspace/tests/test_backend_record_logcat_coverage.py)：
+  新增「末行早于录制起点 → 报历史缓冲、不报假缺口」与「有 start_host 时
+  真实缺口照样报」；
+- 全量：后端 **1396 passed / 1 skipped**；pyflakes 干净；前端 **89 文件 0 失败**。

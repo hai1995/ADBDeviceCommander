@@ -57,15 +57,21 @@ class _FakeLogcatProc:
     block_after：产出前 N 行后挂起（等待 terminate），用于「长时间抓取」场景，
     保证 worker 停在循环里，使 stop() 的 zip_on_stop 必然在其运行期内生效。
     不传则无限循环产出，用于验证「抓取过程不因行数/大小发生任何自动动作」。
+
+    eof_after：产出前 N 行后**自然 EOF**（StopIteration），模拟 adb 打印报错/
+    用法后自己退出。它和 block_after 是两种不同语义，不能混用：block_after 是
+    「停在循环里等 terminate」，worker 永远读不到 EOF，也就走不到 EOF 之后的
+    判定分支（如「不认 -T」的自动回落）——用它模拟「秒退」会把测试挂死在这里。
     """
 
-    def __init__(self, lines, block_after=None):
+    def __init__(self, lines, block_after=None, eof_after=None):
         self._lines = list(lines) if lines else [""]
         self._i = 0
         self._stop = False
         self._block = threading.Event()
         self._parked = threading.Event()   # 已产出 block_after 行并停在 wait
         self._max = block_after
+        self._eof = eof_after
         self.returncode = 0
 
     @property
@@ -78,6 +84,8 @@ class _FakeLogcatProc:
     def __next__(self):
         if self._stop:
             raise StopIteration
+        if self._eof is not None and self._i >= self._eof:
+            raise StopIteration           # 自然 EOF：模拟 adb 进程自己退出
         if self._max is not None and self._i >= self._max:
             self._parked.set()             # 标记已停在循环里（供测试等待）
             self._block.wait()             # 停在循环里，直到 terminate
@@ -1484,3 +1492,105 @@ def test_stop_during_restart_backoff_takes_effect_immediately(tmp_path, monkeypa
     dt = time.time() - t0
     assert stopped is not None, _statuses(bus, "logcat_capture")
     assert dt < 1.0, "退避期间停止耗时 %.2fs，说明还在傻等而不是被唤醒" % dt
+
+
+# ---------------- 抓取起点：从「现在」开始，而不是先灌历史缓冲区 ----------------
+#
+# 真机回归（用户实报）：一次只录了十几秒，收尾却提示「logcat 只跟到 10 分 49 秒
+# 前」。原因是 `adb logcat -b all` 默认先把设备环形缓冲区**从头**灌一遍——车机
+# 的历史缓冲动辄几十 MB，经 ADB 传要十几秒到几十秒；用户点停止时缓冲区还没灌
+# 到当下，于是文件里全是录制**开始前**的历史日志，录制期间一条都没有。
+#
+# 修法：抓取命令加 `-T <n>`（只取最近 n 行作为起点，随后实时追加）。老 logcat
+# 不认该选项时会打印用法后秒退，此时自动回落兼容命令重试一次（不写缺口标记、
+# 不计入「意外中断」次数），并把该设备记进 _no_T 供后续抓取直接走兼容命令。
+# 监控（实时渲染）不受影响，仍保留历史。
+
+def test_logcat_cmd_appends_T_only_when_asked():
+    cmd = ls._logcat_cmd("adb", "A1", ["all"], ls.LOGCAT_CAP_FROM_NOW_LINES)
+    assert "-T" in cmd, cmd
+    assert cmd[cmd.index("-T") + 1] == str(ls.LOGCAT_CAP_FROM_NOW_LINES), cmd
+    assert cmd.index("-T") < cmd.index("-b"), cmd
+
+    # 监控 / 未显式要求时不得带 -T（监控要历史，行为不变）
+    plain = ls._logcat_cmd("adb", "A1", ["main"])
+    assert "-T" not in plain and "-t" not in plain, plain
+
+
+def test_capture_uses_T_from_now_by_default(tmp_path, monkeypatch):
+    """默认抓取命令必须带 -T：不再从设备历史缓冲区头部开始灌。"""
+    seen = []
+    proc = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I Tag: hi\n"], block_after=1)
+    monkeypatch.setattr(ls.subprocess, "Popen",
+                        lambda cmd, **kw: (seen.append(list(cmd)), proc)[1])
+
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("C", str(tmp_path / "logcat_C_001.txt"), ["all"]) is True
+    assert proc.parked(5), "worker 未进入读循环"
+    assert seen and "-T" in seen[0], seen
+
+    cap.stop("C", zip_on_stop=False)
+    assert _wait_not_running(cap, "C")
+
+
+def test_capture_falls_back_when_logcat_rejects_T(tmp_path, monkeypatch):
+    """老 logcat 不认 -T（打印用法后秒退）：必须自动回落兼容命令继续抓。
+
+    回归：不做这个回落，老车机上 `-T` 直接被拒，抓取 0 行就结束，用户
+    得到的是「✓ 抓取完毕：0 行」的假成功。
+    """
+    calls = []
+    bad = _FakeLogcatProc(["logcat: invalid option -- 'T'\n",
+                           "usage: logcat ...\n"],
+                          eof_after=2)
+    good = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I Tag: recovered\n"],
+                           block_after=1)
+
+    def fake_popen(cmd, **kw):
+        calls.append(list(cmd))
+        return bad if len(calls) == 1 else good
+
+    monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    path = str(tmp_path / "logcat_D_001.txt")
+    assert cap.start("D", path, ["all"]) is True
+    assert good.parked(5), "回落后的第二次会话未进入读循环"
+
+    assert len(calls) == 2, "必须回落重试一次（实际 %d 次）" % len(calls)
+    assert "-T" in calls[0] and "-T" not in calls[1], calls
+    assert "D" in cap._no_T, "不认 -T 的设备要记住，后续抓取直接走兼容命令"
+    # 回落不该被当成「意外中断」写缺口标记
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    assert "意外中断" not in text, text
+    assert "Tag: recovered" in text, text
+
+    cap.stop("D", zip_on_stop=False)
+    assert _wait_not_running(cap, "D")
+
+
+def test_capture_fallback_is_one_shot_for_transient_failure(tmp_path, monkeypatch):
+    """0 行 EOF 但报错与选项无关（设备抖动）：仍重试一次，但不记住「不认 -T」。
+
+    避免把偶发断连误判成「老设备」，让后续抓取永远退回慢路径。
+    """
+    calls = []
+    flaky = _FakeLogcatProc(["error: device offline\n"], eof_after=1)
+    good = _FakeLogcatProc(["08-29 10:23:45.123  1234  1234 I Tag: ok\n"], block_after=1)
+
+    def fake_popen(cmd, **kw):
+        calls.append(list(cmd))
+        return flaky if len(calls) == 1 else good
+
+    monkeypatch.setattr(ls.subprocess, "Popen", fake_popen)
+    bus = _FakeBus()
+    cap = ls.LogcatCapture(bus, adb_path="adb")
+    assert cap.start("E", str(tmp_path / "logcat_E_001.txt"), ["all"]) is True
+    assert good.parked(5)
+    assert len(calls) == 2, calls
+    assert "E" not in cap._no_T, "偶发失败不该被记成「设备不支持 -T」"
+
+    cap.stop("E", zip_on_stop=False)
+    assert _wait_not_running(cap, "E")

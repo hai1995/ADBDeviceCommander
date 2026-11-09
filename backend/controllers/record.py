@@ -152,6 +152,9 @@ class RecordMixin:
         sess_ts = time.strftime("%Y%m%d_%H%M%S")
         self._rec_session = {
             "ts": sess_ts, "dir": save_dir,
+            # 会话开始的本机时刻：收尾校验「日志有没有覆盖录制时段」要用它
+            # 换算设备时钟下的开始时间（见 _logcat_coverage_notes）。
+            "start_host": time.time(),
             "with_devaudio": with_devaudio, "with_mic": with_mic,
             "with_logcat": bool(with_logcat), "with_zip": bool(zip_on_stop),
             "mic_path": None, "mic_started": False,
@@ -892,14 +895,38 @@ class RecordMixin:
                 # 主机时区解释，两边时区不同就会算出整小时的**假**缺口。宁可
                 # 不报缺口，也不给一个按猜测得到的结论 —— 假告警会让用户之后
                 # 连真的那条都不信（时钟偏差那条仍可给，它只比 epoch）。
+                # 会话开始的设备时钟：本机开始时刻 + 此刻「设备 - 本机」的偏移。
+                # 收尾只有几十秒，两边同步推进，用同一时刻的偏移换算足够准。
+                # 没有 start_host（老调用 / 单测）时保持旧行为，不启用这条判据。
+                start_dev = None
+                start_host = sess.get("start_host") if isinstance(sess, dict) else None
+                if start_host:
+                    try:
+                        start_dev = float(start_host) + (dev_now - host_now)
+                    except (TypeError, ValueError):
+                        start_dev = None
                 gap = None
+                last_ep = None
                 if tz_off is not None:
                     last_ep = ts_epoch(last, ref=dev_now, tz_offset=tz_off)
                     if last_ep is not None:
                         # 扣掉「停止之后收尾花了多久」：日志停在下发停止那一刻，
                         # 之后的拉段 / 合并 / 打包不属于日志缺口。
                         gap = dev_now - elapsed - last_ep
-                if gap is not None and gap >= LOGCAT_COVERAGE_WARN_S:
+                if (gap is not None and start_dev is not None
+                        and last_ep < start_dev - LOGCAT_COVERAGE_WARN_S):
+                    # 最后一条日志比「开始录制」还早：整份文件都是录制前的历史
+                    # 缓冲，录制时段一条都没有。**绝不能**按 gap 报「距录屏结束
+                    # 还有 N 分钟没有日志」——那个 N 完全落在录制开始之前，用户
+                    # 只录十几秒却被告知丢了 10 分 49 秒（实报）。这里单独说清
+                    # 「日志覆盖的是录制前，不是录制中」。
+                    out.append((
+                        "warn",
+                        "⚠ %s 的配套 logcat 没有覆盖本次录制：最后一条日志停在 %s，"
+                        "比开始录制还早约 %s——抓到的都是录制开始前的历史缓冲，"
+                        "本次录制期间没有采到日志" % (
+                            s, last, _fmt_span(start_dev - last_ep))))
+                elif gap is not None and gap >= LOGCAT_COVERAGE_WARN_S:
                     out.append((
                         "warn",
                         "⚠ %s 的 logcat 只跟到 %s，距录屏结束还有约 %s 没有日志："
