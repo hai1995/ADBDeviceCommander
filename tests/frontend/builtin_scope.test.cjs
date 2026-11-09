@@ -101,9 +101,6 @@ const chipByName = (doc, name) =>
 const scopeBtn = (doc, txt) =>
   Array.from(doc.querySelectorAll("#cmd-groups .cmd-scope"))
     .find((b) => b.textContent === txt);
-const sectionNames = (doc) =>
-  Array.from(doc.querySelectorAll("#cmd-groups .cmd-section"))
-    .map((el) => el.dataset.section);
 const click = (doc, el) => el.dispatchEvent(
   new doc.defaultView.Event("click", { bubbles: true }));
 const savedPrefs = (calls) =>
@@ -155,7 +152,7 @@ const savedPrefs = (calls) =>
        "同一时刻只有一个筛选项高亮");
   }
 
-  console.log("\n[4] 点「车机」：只剩车机命令，段结构跟着收窄，并落盘");
+  console.log("\n[4] 点「车机」：只剩车机命令，并落盘");
   {
     click(doc, scopeBtn(doc, "车机"));
     await sleep(80);
@@ -164,10 +161,8 @@ const savedPrefs = (calls) =>
     ok(names.indexOf("[内置] root") >= 0 && names.indexOf("[内置] remount") >= 0,
        "两条车机命令都在");
     ok(names.indexOf("[内置] 息屏") < 0, "通用命令被筛掉");
-    ok(JSON.stringify(sectionNames(doc)) === JSON.stringify(["连接与投屏"]),
-       "只剩车机命令所在的「连接与投屏」段（实际：" + sectionNames(doc).join(" / ") + "）");
-    ok(!doc.querySelector("#cmd-groups .cmd-fold-all"),
-       "只剩一段时不显示「全部折叠」按钮");
+    ok(!doc.querySelector("#cmd-groups .cmd-section"),
+       "结果平铺展示（二级分组已撤，不出现段结构）");
     const w = savedPrefs(calls).filter((p) => "builtin_scope" in p).pop();
     ok(w && w.builtin_scope === "车机", "落盘 builtin_scope=车机（实际：" +
        (w || {}).builtin_scope + "）");
@@ -178,20 +173,17 @@ const savedPrefs = (calls) =>
     ok(!!chipByName(doc, "[通用] 我的命令"), "用户分组照常展示");
   }
 
-  console.log("\n[5] 点「手机」：手机命令 + 两段；再点「全部」恢复");
+  console.log("\n[5] 点「手机」：手机命令；再点「全部」恢复");
   {
     click(doc, scopeBtn(doc, "手机"));
     await sleep(80);
     const names = chips(doc).map((c) => c.querySelector(".chip-label").textContent);
     ok(names.length === 3, "2 条手机内置 + 1 条用户命令（实际 " + names.length + "）");
     ok(names.indexOf("[内置] 电池与温度信息") >= 0, "手机命令「电池与温度信息」在");
-    ok(JSON.stringify(sectionNames(doc)) === JSON.stringify(["按键", "应用与信息"]),
-       "段结构随 scope 收窄（实际：" + sectionNames(doc).join(" / ") + "）");
 
     click(doc, scopeBtn(doc, "全部"));
     await sleep(80);
     ok(chips(doc).length === 7, "「全部」恢复 7 张卡片");
-    ok(sectionNames(doc).length === 3, "段结构恢复（实际 " + sectionNames(doc).length + " 段）");
     const last = savedPrefs(calls).filter((p) => "builtin_scope" in p).pop();
     ok(last && last.builtin_scope === "", "「全部」落盘空串");
   }

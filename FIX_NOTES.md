@@ -4651,3 +4651,46 @@ Windows 恢复优雅停止 + 写回 moov。
 - 全量：后端 **1390 passed / 1 skipped**；前端 **89 文件 0 失败**（含
   checkbox_switch_style 的全局开关断言——本次只加了 `.device-card` 作用域
   规则，未动全局）。
+
+---
+
+# 第六十五轮（撤掉「内置」命令的二级分组，组内平铺）
+
+## 用户反馈
+
+内置命令里的「连接与投屏 / 显示辅助 / 按键 / 屏幕状态 / 网络 / 应用与信息」
+子分类太多，找命令反而费劲——取消掉。
+
+## 改动
+
+### 前端（app.js / app.css）
+
+- [renderCmdGroups](file:///workspace/frontend/js/app.js#L1707-L1749)「内置」
+  分支与其余分组同构：scope 收窄后直接平铺 chips，删掉
+  `BUILTIN_SECTIONS` / `builtinFolded` / `builtinSectionsOf` / `sectionNameOf` /
+  `mkFoldAllBtn` / `appendBuiltinSections` 整套段结构代码（含「全部折叠 /
+  全部展开」按钮与段头折叠逻辑）；`renderCmdGroups` 的 `filtering` 参数随之
+  删除（唯一用途是筛选时强制展开段）；
+- **scope 筛选条保留**（全部 / 通用 / 车机 / 手机 + 卡片角标）——它是设备
+  类型轴，与被撤的用途分组正交，也是组内唯一的二次收窄；
+- **搜索仍按用途命中**：后端数据的 `section` 字段保留（不再参与界面分组），
+  搜索域继续拼进关键词——搜「网络」照样捞出一排 WiFi 命令；
+- CSS 删除 `.cmd-sections` / `.cmd-section-h` / `.cs-*` / `.cmd-fold-all`
+  全部死样式；`prefs.py` 删除 `builtin_folded` 默认键（旧 config.json 残留
+  值按「未知键」原样保留，不报错不生效）。
+
+### 文档
+
+README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类型筛选 + 按用途
+搜索」；builtin_commands.py 头注释同步。
+
+## 测试
+
+- 旧的 [builtin_sections.test.cjs]（段结构 / 折叠 / 落盘）整体替换为
+  [builtin_flat.test.cjs](file:///workspace/tests/frontend/builtin_flat.test.cjs)：
+  平铺同构（单一 chips 容器、无段头 / 徽章 / 全折按钮）、scope 筛选可用、
+  section 关键词搜索仍命中、**不再写 builtin_folded 落盘**、CSS 无死样式
+  残留——**19 通过 / 0 失败**；
+- [builtin_scope.test.cjs](file:///workspace/tests/frontend/builtin_scope.test.cjs)
+  撤掉段结构断言，32 通过 / 0 失败；
+- 全量：后端 **1390 passed / 1 skipped**；前端 **89 文件 0 失败**。
