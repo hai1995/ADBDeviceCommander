@@ -623,8 +623,11 @@
   /* 全局 API 调用超时（秒）。pywebview bridge 不一定支持 AbortController，
      这里用 Promise.race 实现——超时后前端不再 await，按钮/等待态立即恢复；
      后端请求仍可能在跑（对于 refresh 等后台操作，后端会通过事件总线推送
-     结果，不受超时影响）。某些长操作（如 take_events）应显式传 timeout=0
-     禁用超时（它只是从 deque 取事件，正常情况下微秒级返回）。 */
+     结果，不受超时影响）。某些长操作应显式传 timeout=0 禁用超时：
+     · take_events —— 只是从 deque 取事件，正常情况下微秒级返回；
+     · screen_record_stop / screen_record_cancel —— 收尾链路（拉视频 /
+       ffmpeg 合并 / 打包）远超 15 秒，超时只会制造「假失败 + 真成功」并存的
+       报错，还会提前解锁按钮；后端各步有界、promise 必然落定，不怕等。 */
   const API_TIMEOUT_S = 15;
 
   async function callApi(promise, timeout = API_TIMEOUT_S) {
@@ -7120,7 +7123,14 @@
       pushStatus("info", "⏹ 正在停止录屏并收尾（停止设备端 → 拉取视频 → 打包），请稍候…");
       let res = null;
       try {
-        res = await callApi(api.screen_record_stop());
+        /* timeout=0：收尾链路是「停设备端 → 等写回 moov → 拉视频 → ffmpeg 合并
+           → 打包 zip」，多段大视频 + 慢 USB 时远超 15 秒。默认超时会让前端先报
+           一条「请求超时（15s）」的假失败（后端其实还在跑、最终会成功），还会
+           提前解锁按钮 —— 此时用户再点「开始录制」会撞上后端还没清完的会话。
+           后端全程通过事件总线推送各阶段进度（拉取 / 合并 / 打包），且整条链路
+           各步都有界（moov 等待、pull 重试、ffmpeg 自身退出），promise 一定会
+           落定，禁用超时不会挂死 UI。 */
+        res = await callApi(api.screen_record_stop(), 0);
       } finally {
         setRecInFlight(false);
         if (els.toolRecStop) els.toolRecStop.title = "";
@@ -7172,7 +7182,10 @@
         pushStatus("info", "🗑 正在取消录制并删除本次产生的文件…");
         let res = null;
         try {
-          res = await callApi(api.screen_record_cancel());
+          /* timeout=0：与「停止录制」同理 —— 取消也要「停设备端（等 moov）→
+             删文件」，多设备逐台收尾可能超 15 秒；后端有界且会推进度事件，
+             禁用超时避免假失败 + 提前解锁按钮。 */
+          res = await callApi(api.screen_record_cancel(), 0);
         } finally {
           setRecInFlight(false);
           if (els.toolRecCancel) {

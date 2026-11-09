@@ -32,7 +32,7 @@ async function waitFor(fn, ms = 3000, label = "") {
   return false;
 }
 
-function boot(overrides) {
+function boot(overrides, srcTransform) {
   const dom = new JSDOM(html, { runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/" });
   const { window } = dom;
   window.pywebview = {
@@ -51,7 +51,7 @@ function boot(overrides) {
     }),
   };
   Object.defineProperty(window.document, "readyState", { value: "complete", configurable: true });
-  window.eval(js);
+  window.eval(srcTransform ? srcTransform(js) : js);
   return window;
 }
 
@@ -102,6 +102,47 @@ function boot(overrides) {
 
   releaseStop({ ok: true });
   await sleep(50);
+
+  // ---------- 3) 回归：停止收尾超过全局超时不得报「请求超时」假失败 ----------
+  /* 真机场景：收尾（拉视频 → ffmpeg 合并 → 打包）远超 15 秒，全局超时让前端
+     先弹一条「调用后端失败：请求超时（15s）」，随后后端事件又把「✓ 已合并 /
+     ✓ 已打包」推回来 —— 用户看到假失败与真成功并存，还会在按钮提前解锁后
+     误点「开始录制」撞上未清完的会话。修复：stop / cancel 显式传 timeout=0。
+     测试手法：把全局超时缩到 0.05s，让停止 mock 300ms 才返回 —— 修复前的
+     代码会在 50ms 处把「请求超时」写进状态栏；修复后安静等 promise 落定。
+     断言核心是状态栏全文无报错（✓ 文案来自后端事件而非前端，mock 里没有）；
+     按钮终态仅作同步点 —— 注意 mock 里没有受控设备，setRecRunning(false) →
+     syncToolButtons() 会把「开始」按钮禁掉，这与真机行为一致，不能拿来断言。 */
+  {
+    let stopSettled = false;
+    const win3 = boot(
+      { screen_record_stop: () => new Promise((r) => setTimeout(() => { stopSettled = true; r({ ok: true }); }, 300)) },
+      (src) => src.replace("const API_TIMEOUT_S = 15;", "const API_TIMEOUT_S = 0.05;"),
+    );
+    const doc3 = win3.document;
+    ok(await waitFor(() => doc3.querySelector("#tool-rec") && !doc3.querySelector("#tool-rec").disabled,
+      3000, "缩短超时后启动"), "缩短超时后应用可正常启动");
+    doc3.querySelector("#tool-rec").click();
+    ok(await waitFor(() => doc3.querySelector("#tool-rec-stop") && !doc3.querySelector("#tool-rec-stop").disabled,
+      3000, "进入录制中"), "缩短超时后仍可进入录制中");
+
+    doc3.querySelector("#tool-rec-stop").click();
+    // 同步点：等停止处理器完整跑完（300ms 落定 + in-flight 解除 + 余量）
+    ok(await waitFor(() => {
+        const stopBtn = doc3.querySelector("#tool-rec-stop");
+        return stopBtn && stopBtn.disabled && !stopBtn.classList.contains("is-loading");
+      }, 3000, "停止处理器落定") && stopSettled,
+      "收尾慢于全局超时时处理器仍完整跑完（mock promise 已落定）");
+    ok(stopSettled, "慢停止的 mock promise 确实已 resolve（测试等待时间足够）");
+    /* pushStatus 经 pushLine 入队、requestAnimationFrame 批量刷进 #status DOM
+       （见 app.js pushLine 的 rAF 节流）——等态一解除就立刻读会漏掉刚入队的
+       行，这里等几帧再读，保证队列已 flush。 */
+    await sleep(150);
+    const statusText = (doc3.querySelector("#status") || {}).textContent || "";
+    ok(!/请求超时/.test(statusText) && !/调用后端失败/.test(statusText),
+      "不得出现「请求超时 / 调用后端失败」假失败");
+    win3.close();
+  }
 
   console.log("\n==============================================");
   console.log("结果：" + pass + " 通过 / " + fail + " 失败");
