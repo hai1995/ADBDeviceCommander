@@ -62,7 +62,6 @@ from backend.screen_service import (
 )
 from backend.audio_service import (
     MicRecorder, DeviceAudioCapture, ffmpeg_mux, _have_ffmpeg,
-    mic_probe, open_mic_privacy_settings,
 )
 from backend.file_service import FileService
 from backend.scrcpy_service import ScrcpyLauncher, find_scrcpy, probe as scrcpy_probe_info
@@ -125,8 +124,6 @@ __all__ = [
     "LogcatCapture",
     "LogcatMonitor",
     "MicRecorder",
-    "mic_probe",
-    "open_mic_privacy_settings",
     "PERF_CRIT_RATIO",
     "PERF_MAX_DEVICES",
     "PERF_MAX_INTERVAL",

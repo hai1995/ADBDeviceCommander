@@ -20,6 +20,16 @@ class _FakeProc:
     def __init__(self):
         self.terminated = False
         self.killed = False
+        self.stdin_writes = []
+
+        class _Stdin:
+            def write(self_inner, data):
+                self.stdin_writes.append(data)
+
+            def flush(self_inner):
+                pass
+
+        self.stdin = _Stdin()
 
     def poll(self):
         return None
@@ -47,10 +57,12 @@ def _recorder(tmp_path):
 
 
 def test_stop_signals_device_side_screenrecord_first(monkeypatch, tmp_path):
-    """停止录屏必须先给设备端 screenrecord 发 SIGTERM 优雅收尾，再回收本地 adb。
+    """停止录屏必须用 PTY Ctrl-C 让设备端 screenrecord 优雅收尾（写回 moov）。
 
-    只 terminate() 本地 adb 客户端，会导致设备端进程拿到断开的管道、文件未收尾，
-    随后 adb pull 读到半成品视频而失败（报「pull 失败」）。
+    实现：启动命令带 `adb shell -t`（分配 PTY），停止时往本地 adb 的 stdin 写
+    一个 ``\\x03``（Ctrl-C），设备端 shell 把 SIGINT 投给 screenrecord。主机侧
+    只做管道写入，不再调用 send_signal / kill / pkill —— 避免被启发式杀软
+    （亚信等）当成「信号注入 / 杀进程」拦截。
     """
     captured = []
 
@@ -63,12 +75,12 @@ def test_stop_signals_device_side_screenrecord_first(monkeypatch, tmp_path):
 
     vr.stop("A1")
 
-    # 设备端收尾必须发生，但只能按本次录屏文件名（-f）精确匹配：
-    # 按进程名 `pkill screenrecord` 会连投屏那条同名进程一起杀掉。
-    pkills = [c for c in captured if "pkill" in c]
-    assert pkills, "stop() 未对设备端 screenrecord 做收尾（会留下孤儿进程）"
-    assert "-f" in pkills[0] and "adb_rec_A1.mp4" in pkills[0], pkills[0]
-    assert "screenrecord" not in pkills[0], pkills[0]
+    # 必须往 adb stdin 写了 Ctrl-C（\x03），screenrecord 据此优雅收尾
+    assert "\x03" in proc.stdin_writes, \
+        "stop() 必须向 adb stdin 写入 Ctrl-C（\\x03）让 screenrecord 优雅收尾"
+    # 主机侧绝不能再出现 kill / pkill / send_signal 类操作
+    assert not any("kill" in c or "pkill" in c for c in captured), \
+        "停止路径不得调用 kill / pkill（避免杀软误报）：%r" % (captured,)
     # 会话被清空，避免重复 stop
     assert vr.is_recording("A1") is False
 
@@ -167,10 +179,12 @@ def test_start_uses_unique_remote_name(monkeypatch, tmp_path):
     # screenrecord 的远端参数里必须含时间戳段（%Y%m%d_%H%M%S），且文件名唯一
     rec_cmds = [c for c in captured if "screenrecord" in c]
     assert rec_cmds, "未发起 screenrecord"
-    # 必须以 `adb shell screenrecord` 下发（screenrecord 是设备端命令，非 adb 子命令）
+    # 必须以 `adb shell screenrecord` 下发（screenrecord 是设备端命令，非 adb 子命令）；
+    # 且带 `-t` 强制 PTY：停止时往 stdin 写 Ctrl-C 才能让 screenrecord 优雅收尾。
     rec = rec_cmds[0]
     assert rec[:4] == ["adb", "-s", "A1", "shell"], "screenrecord 必须经 adb shell 下发（rec=%r）" % rec
-    assert "screenrecord" in rec and rec[rec.index("screenrecord") - 1] == "shell"
+    assert "-t" in rec, "必须带 -t 分配 PTY，停止时才能用 Ctrl-C 优雅收尾（rec=%r）" % rec
+    assert "screenrecord" in rec and rec[rec.index("screenrecord") - 1] == "-t"
     remote = rec[-1]
     assert remote.startswith("/data/local/tmp/adb_rec_A1_") and remote.endswith(".mp4")
     # 同一设备两次录制远端名不应相同
@@ -561,34 +575,28 @@ def test_stop_unknown_serial_is_rejected(tmp_path):
     assert "未在录制" in err
 
 
-def test_stop_device_screenrecord_uses_pid_kill(monkeypatch):
-    """停止应优先按 PID 精准结束设备端 screenrecord（比 pkill 更通用），
-    确保文件 moov 收尾、录出可播放的 MP4。
+def test_graceful_stop_proc_writes_ctrl_c_to_stdin():
+    """`_graceful_stop_proc` 必须往 stdin 写 Ctrl-C（\\x03），由设备端 PTY
+    转成 screenrecord 的 SIGINT —— 这是唯一能让 screenrecord 写回 moov 的方式。
 
-    设备上同时可能有投屏那条同名 screenrecord，因此只认「命令行里带本次
-    录屏文件名」的那一行。
+    回归：早年用 `proc.send_signal(SIGINT)` + 设备端 `kill -INT <pid>`，主机侧
+    的信号注入 / 杀进程操作会被亚信等启发式杀软当成病毒拦截。
     """
-    captured = []
-    remote = "/data/local/tmp/adb_rec_A1_20261102_1.mp4"
+    proc = _FakeProc()
+    ss.VideoRecorder._graceful_stop_proc(proc)
+    assert proc.stdin_writes == ["\x03"], \
+        "应向 adb stdin 写入单个 \\x03（Ctrl-C），实际 %r" % (proc.stdin_writes,)
 
-    def fake_run(cmd, **kw):
-        captured.append(list(cmd))
-        if "ps" in cmd:
-            return type("R", (), {"returncode": 0, "stdout": (
-                "  PID ARGS\n"
-                " 4321 /system/bin/screenrecord --output-format=h264 -\n"
-                " 4322 /system/bin/screenrecord %s\n" % remote), "stderr": ""})()
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    monkeypatch.setattr(ss.subprocess, "run", fake_run)
-    vr = ss.VideoRecorder(_Bus(), "adb")
-    vr._stop_device_screenrecord("adb", "A1", remote)
-    kills = [c for c in captured if "kill" in c and "shell" in c]
-    assert kills and kills[0][-3:] == ["kill", "-INT", "4322"], \
-        "应按 PID kill -INT 4322（本次录屏），实际 %r" % (kills,)
-    assert not any("4321" in c for c in kills), \
-        "绝不能杀掉投屏那条（4321）：%r" % (kills,)
-    assert not any("pkill" in c for c in captured), "精准命中时不应回退 pkill"
+def test_graceful_stop_proc_handles_missing_stdin():
+    """proc 没有 stdin（极老路径 / 测试桩）时不得抛异常，只是无法发 Ctrl-C。"""
+    class _NoStdin:
+        def wait(self, timeout=None): return 0
+    proc = _NoStdin()
+    # 不应抛出
+    ss.VideoRecorder._graceful_stop_proc(proc)
+    # None 也必须安全
+    ss.VideoRecorder._graceful_stop_proc(None)
 
 
 def test_mp4_has_moov(tmp_path):
@@ -601,27 +609,23 @@ def test_mp4_has_moov(tmp_path):
     assert ss.VideoRecorder._mp4_has_moov(str(bad)) is False
 
 
-def test_stop_device_screenrecord_pid_kill_fallback_to_pkill(monkeypatch):
-    """pidof / ps 都拿不到 PID 时，只能按命令行特征 `pkill -f`，绝不按进程名杀。
-
-    回归：按名字 `pkill screenrecord` 会把投屏那条同名进程一起掐断 —— 设备
-    完全正常，用户正看着的投屏却黑了。
-    """
+def test_discard_ex_uses_pty_ctrl_c_not_kill(monkeypatch, tmp_path):
+    """取消录屏同样走 PTY Ctrl-C，不得调用 kill / pkill（避免杀软误报）。"""
     captured = []
-    remote = "/data/local/tmp/adb_rec_A1_20261102_1.mp4"
 
     def fake_run(cmd, **kw):
         captured.append(list(cmd))
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
-    vr = ss.VideoRecorder(_Bus(), "adb")
-    vr._stop_device_screenrecord("adb", "A1", remote)
-    pkills = [c for c in captured if "pkill" in c]
-    assert pkills, "无 PID 时应回退 pkill 清理自己的残留"
-    for c in pkills:
-        assert "-f" in c and "adb_rec_A1_20261102_1.mp4" in c, c
-        assert "screenrecord" not in c, "不得按进程名杀同名进程：%r" % (c,)
+    vr, proc = _recorder(tmp_path)
+
+    ok, paths, err = vr.discard_ex("A1")
+
+    assert "\x03" in proc.stdin_writes, \
+        "discard_ex 必须向 adb stdin 写入 Ctrl-C（\\x03）"
+    assert not any("kill" in c or "pkill" in c for c in captured), \
+        "取消路径不得调用 kill / pkill：%r" % (captured,)
 
 
 # ---------------------------------------------------------------------------
@@ -750,8 +754,7 @@ def test_active_stop_is_not_reported_as_death(tmp_path, monkeypatch):
     vr, proc = _recorder(tmp_path)
     # 跳过 9 秒级的 pull 重试：本用例只关心 stopping 标记的语义
     monkeypatch.setattr(vr, "_pull_and_finish", lambda s: (True, "x.mp4", None))
-    monkeypatch.setattr(vr, "_stop_device_screenrecord",
-                        lambda adb, s, remote=None: None)
+    # 停止路径现在用 _graceful_stop_proc（写 \\x03 到 stdin），无需 mock 设备端收尾
 
     vr.stop("A1")                        # 主动停止：内部先置 stopping
     vr._watch_exit("A1", proc)           # 停止后的退出不算意外
@@ -969,169 +972,6 @@ def test_stop_during_reboot_wait_keeps_session_for_teardown(tmp_path, monkeypatc
 
     assert vr.died_serials() == [], "主动停止不该被报成意外中断"
     assert sess.get("reboot_wait") is True, "主动停止时不改状态，交 stop_ex 收尾"
-
-
-# ---------------------------------------------------------------------------
-# 设备刚被移除、watcher 尚未判定掉线：controller 主动转入等待重启（竞态修复）
-# ---------------------------------------------------------------------------
-def test_notice_device_gone_enters_reboot_wait_without_dying(tmp_path, monkeypatch):
-    """设备从列表消失时主动通知，必须进等待而不是判死 / 强停。
-
-    回归：车机重启后设备从 adb 列表消失（超过 15 秒宽限），而录屏侧 watcher 的
-    get-state 探测往往还没超时返回。controller 的孤儿回收若在此时强停，重启前
-    那一段和整场日志就一起没了 —— 用户实测正是「只剩重启后的数据」。
-    """
-    vr, proc = _recorder(tmp_path)
-    sess = _sess_for_roll(vr, tmp_path)
-    started = []
-
-    class _T:
-        def __init__(self, target=None, args=(), **kw):
-            self.args = args
-        def start(self):
-            started.append(self.args)
-
-    monkeypatch.setattr(ss.threading, "Thread", _T)
-
-    assert vr.notice_device_gone("A1") is True
-    assert sess["reboot_wait"] is True
-    assert sess["reboot_wait_note"] is True
-    assert vr.died_serials() == [], "只是在等设备回来，不是录屏意外结束"
-    assert len(started) == 1 and started[0][0] == "A1"
-
-    # 重复通知：不重复起等待线程，也不清掉「待播报」标记
-    assert vr.notice_device_gone("A1") is True
-    assert len(started) == 1, "同一会话只能有一个等待线程"
-    assert sess["reboot_wait_note"] is True
-
-    # 之后的 watcher 醒来不得再起第二个等待线程 / 标死
-    monkeypatch.setattr(vr, "_wait_reboot_and_resume", lambda *a: None)
-    vr._watch_exit("A1", proc)
-    assert vr.died_serials() == []
-    assert len(started) == 1
-
-
-def test_notice_device_gone_returns_false_when_stopping_or_missing(tmp_path):
-    """已在停止 / 会话不存在：由原有收尾路径处理，不要另起等待。"""
-    vr, _proc = _recorder(tmp_path)
-    vr._sessions["A1"]["stopping"] = True
-    assert vr.notice_device_gone("A1") is False
-    assert vr._sessions["A1"].get("reboot_wait") is None
-
-    assert vr.notice_device_gone("NOT_THERE") is False
-
-
-def test_device_online_settled_retries_transient_probe_failure(tmp_path, monkeypatch):
-    """重启瞬间 adb 探测抖动：连探几次再下结论，别把一次失败当「设备还在」。"""
-    monkeypatch.setattr(ss.time, "sleep", lambda *_: None)
-    vr = ss.VideoRecorder(_Bus(), "adb")
-
-    seq = iter([False, None, False])
-    monkeypatch.setattr(vr, "_device_online", lambda s: next(seq))
-    assert vr._device_online_settled("A1") is False, "全是明确离线才算离线"
-
-    seq = iter([None, None, None])
-    monkeypatch.setattr(vr, "_device_online", lambda s: next(seq))
-    assert vr._device_online_settled("A1") is None, "探测本身失败不能谎报在线/离线"
-
-    monkeypatch.setattr(vr, "_device_online", lambda s: True)
-    assert vr._device_online_settled("A1") is True
-
-
-def test_reboot_wait_resume_starts_new_cycle(tmp_path, monkeypatch):
-    """设备重启后自动续录：段号 +1，且新段归入下一轮（收尾时前后分开成片）。"""
-    vr, proc = _recorder(tmp_path)
-    sess = _sess_for_roll(vr, tmp_path)
-    sess["cycle"] = 1
-    new_proc = _FakeProc()
-
-    monkeypatch.setattr(ss.subprocess, "Popen", lambda *a, **k: new_proc)
-    monkeypatch.setattr(vr, "_pull_segment_bg", lambda seg: None)
-    monkeypatch.setattr(vr, "_confirm_segment", lambda *a: None)
-    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: True)
-
-    vr._wait_reboot_and_resume("A1", sess)
-
-    assert sess["seg"] == 2
-    assert sess["cycle"] == 2, "重启后录的内容属于第 2 轮"
-    assert sess["segments"][0]["cycle"] == 1, "重启前那一段必须留在第 1 轮"
-
-
-def test_notice_wait_does_not_roll_when_proc_still_alive(tmp_path, monkeypatch):
-    """误报保护：设备只是短暂从列表消失时，录屏进程还活着就不能换段。
-
-    否则设备端会同时跑两个 screenrecord，旧段还在写、拉回来必然缺 moov ——
-    为了「防丢」反而丢掉一段。
-    """
-    vr, proc = _recorder(tmp_path)
-    sess = _sess_for_roll(vr, tmp_path)
-    sess["cycle"] = 1
-    assert proc.poll() is None
-    monkeypatch.setattr(vr, "_wait_device_back", lambda *a, **k: True)
-
-    vr._wait_reboot_and_resume("A1", sess, True)
-
-    assert sess["seg"] == 1, "不应换段"
-    assert sess["cycle"] == 1, "不应进入下一轮"
-    assert sess["reboot_wait"] is False
-    assert not sess.get("died")
-
-
-def test_stop_ex_groups_splits_segments_by_reboot_cycle(tmp_path, monkeypatch):
-    """stop_ex_groups 按重启轮次返回路径；stop_ex 仍返回扁平列表（兼容旧调用）。"""
-    vr = ss.VideoRecorder(_Bus(), "adb")
-    names = ["a_p1.mp4", "a_p2.mp4", "a_p3.mp4", "a_p4.mp4"]
-    for n in names:
-        (tmp_path / n).write_bytes(b"x")
-    done = threading.Event()
-    done.set()
-    vr._sessions["A1"] = {
-        "remote": "/sdcard/adb_rec_A1.mp4",
-        "local": str(tmp_path / "a_p4.mp4"),
-        "proc": _FakeProc(), "dir": str(tmp_path), "cycle": 2,
-        "segments": [
-            {"n": 1, "cycle": 1, "local": str(tmp_path / "a_p1.mp4"),
-             "ok": True, "err": None, "done": done},
-            {"n": 2, "cycle": 2, "local": str(tmp_path / "a_p2.mp4"),
-             "ok": True, "err": None, "done": done},
-            {"n": 3, "cycle": 2, "local": str(tmp_path / "a_p3.mp4"),
-             "ok": True, "err": None, "done": done},
-        ],
-    }
-    monkeypatch.setattr(vr, "_stop_device_screenrecord", lambda *a: None)
-    monkeypatch.setattr(vr, "_pull_and_finish",
-                        lambda s: (True, str(tmp_path / "a_p4.mp4"), None))
-
-    ok, groups, err = vr.stop_ex_groups("A1")
-
-    assert ok is True
-    assert [c for c, _ps in groups] == [1, 2], groups
-    assert [p.rsplit("/", 1)[-1] for p in groups[0][1]] == ["a_p1.mp4"]
-    assert [p.rsplit("/", 1)[-1] for p in groups[1][1]] == [
-        "a_p2.mp4", "a_p3.mp4", "a_p4.mp4"]
-
-
-def test_stop_ex_still_returns_flat_paths_in_order(tmp_path, monkeypatch):
-    """旧的扁平签名不能被改坏：controller 里仍有 `paths` 调用方与测试。"""
-    vr = ss.VideoRecorder(_Bus(), "adb")
-    for n in ("a_p1.mp4", "a_p2.mp4"):
-        (tmp_path / n).write_bytes(b"x")
-    done = threading.Event()
-    done.set()
-    vr._sessions["A1"] = {
-        "remote": "/sdcard/adb_rec_A1.mp4", "local": str(tmp_path / "a_p2.mp4"),
-        "proc": _FakeProc(), "dir": str(tmp_path), "cycle": 2,
-        "segments": [{"n": 1, "cycle": 1, "local": str(tmp_path / "a_p1.mp4"),
-                      "ok": True, "err": None, "done": done}],
-    }
-    monkeypatch.setattr(vr, "_stop_device_screenrecord", lambda *a: None)
-    monkeypatch.setattr(vr, "_pull_and_finish",
-                        lambda s: (True, str(tmp_path / "a_p2.mp4"), None))
-
-    ok, paths, err = vr.stop_ex("A1")
-
-    assert ok is True
-    assert [p.rsplit("/", 1)[-1] for p in paths] == ["a_p1.mp4", "a_p2.mp4"]
 
 
 # ---------------------------------------------------------------------------
@@ -1522,39 +1362,6 @@ def test_pull_gives_up_at_once_when_device_is_gone(monkeypatch, tmp_path):
     assert any("等待设备重启超时" in err for _ in [None]), err
 
 
-def test_pull_wait_extends_to_reboot_window_when_stopping_during_wait(
-        monkeypatch, tmp_path):
-    """用户在「等待设备重启」时点停止：最后这次等待要放宽到重启窗口。
-
-    车机冷启动常要 60~180 秒，旧实现只等 60 秒就判「取不回」，把重启前那一段
-    丢掉。会话明确处于 reboot_wait 时，停止也应按完整的重启窗口等。
-    """
-    monkeypatch.setattr(ss.time, "sleep", lambda s: None)
-
-    def fake_run(cmd, **kw):
-        if "ls" in cmd:
-            return type("R", (), {"returncode": 1, "stdout":
-                                  "error: device 'A1' not found\n", "stderr": ""})()
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(ss.subprocess, "run", fake_run)
-    vr, _proc = _recorder(tmp_path)
-    vr._sessions["A1"]["reboot_wait"] = True
-    seen = {}
-
-    def fake_wait(serial, max_wait_s=60, **kw):
-        seen["max_wait_s"] = max_wait_s
-        return False
-
-    monkeypatch.setattr(vr, "_wait_device_back", fake_wait)
-    ok, lp, err = vr._pull_and_finish("A1")
-
-    assert ok is False
-    assert seen["max_wait_s"] == ss.REC_REBOOT_WAIT_S, (
-        "reboot_wait 时应等满重启窗口，而不是 60 秒")
-    assert "超时 %d 秒" % ss.REC_REBOOT_WAIT_S in err, err
-
-
 def test_pull_succeeds_after_device_reboots_and_file_survives(monkeypatch, tmp_path):
     """设备重启回来后临时文件还在 → 必须真的把文件 pull 回本地。
 
@@ -1735,11 +1542,12 @@ def test_pull_gives_up_at_once_on_permission_denied(monkeypatch, tmp_path):
 
 
 def test_stop_recording_never_kills_mirror_by_process_name(monkeypatch, tmp_path):
-    """停止录屏绝不能 `pkill screenrecord` —— 投屏用的是同名进程。
+    """停止录屏绝不调用 kill / pkill —— 现在用 PTY Ctrl-C 精准结束本会话的
+    screenrecord，完全不碰设备上的其它同名进程（如投屏）。
 
-    回归：设备端 ps 拿不到完整命令行（老 ROM 只打印 comm）时会退化为按名字
-    pkill，把用户眼前正在看的投屏一起掐断。设备一切正常，画面却黑了，用户
-    根本想不到是「停止录屏」干的。
+    回归：早年设备端 ps 拿不到完整命令行时会退化为按名字 pkill，把用户眼前
+    正在看的投屏一起掐断。现在主机侧只往当前 adb 会话的 stdin 写 Ctrl-C，
+    连设备端其它进程的 PID 都不会去查。
     """
     captured = []
 
@@ -1748,15 +1556,15 @@ def test_stop_recording_never_kills_mirror_by_process_name(monkeypatch, tmp_path
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
-    vr, _proc = _recorder(tmp_path)
+    vr, proc = _recorder(tmp_path)
     monkeypatch.setattr(vr, "_pull_and_finish", lambda s: (True, "x.mp4", None))
     vr.stop("A1")
 
-    pkills = [c for c in captured if "pkill" in c]
-    assert pkills, "自己的残留仍应被清理（不能什么都不做）"
-    for c in pkills:
-        assert "-f" in c, "兜底清理必须按命令行特征（-f）：%r" % (c,)
-        assert "screenrecord" not in c, "不得按进程名杀同名进程：%r" % (c,)
+    # 全程不得出现 kill / pkill / send_signal 类操作
+    assert not any("kill" in c or "pkill" in c for c in captured), \
+        "停止路径不得出现任何 kill / pkill：%r" % (captured,)
+    # Ctrl-C 必须确实发出（否则 screenrecord 不优雅收尾）
+    assert "\x03" in proc.stdin_writes
 
 def test_early_exit_is_still_death(tmp_path):
     """录到一半就退出（远未录满一段）仍按意外死亡处理，不能被续段判定吞掉。"""

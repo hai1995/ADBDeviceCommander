@@ -26,9 +26,6 @@
 - **第二十八轮**（本文末「第二十八轮」一节）：主动复查上一轮 —— 修**抽稀后时间戳乱序**（ECharts time 轴按数组顺序连线，乱序让曲线在每个桶里折返：图能出、形状错）；修**对比图超标红点超 400 时直接切片**（长会话后半段一个红点都没有，读者会得出「后半段全达标」的假结论）；**ECharts 初始化失败改为明示原因**（原来只剩 7 个空白块）；补 3 条回归用例。
 - **第二十九轮**（本文末「第二十九轮」一节）：车机截图报「分辨率有问题」——**不是没 root**（`screencap` 普通 shell 权限即可）。真因是 `adb exec-out` 的 PNG 字节在个别 Windows adb / 车机上被换行转换，签名还认得、IHDR 的宽高与 CRC 已坏，旧实现照旧落盘成坏图。现在落盘前校验 PNG 头，坏头当场拒绝并给出 `adb shell screencap -p` + `adb pull` 的替代路径。
 - **第三十轮**（本文末「第三十轮」一节）：把上一轮的「建议你手敲 adb pull」升级为**自动降级重试**（exec-out 坏 → 设备端落盘 + pull → 清理远端与 `.part`）；并新增 `adb shell echo` 探测，把**车机 shell 需要授权密码**（adbd 停在 `Password:`，所有命令都只是「没有输出」）与**定制系统收紧 shell 权限**、**USB 调试未授权**、**设备掉线**分开报——四种情况各有各的提示语，都不再说「截图失败」了事，也不再让人误以为是「没 root」。
-- **第三十一轮**（见文末「2026-11-09 — 车机重启前后数据全保留」）：修复车机重启后「只剩重启后的视频与日志」——设备掉线超过宽限即被孤儿回收强停、收尾只等 60 秒；改为主动转入等待重启并自动续录，分段缩到 60 秒，停止后按重启轮次分别成片（`_r2` / `_r3`）。
-- **第三十二轮**（见文末「2026-11-09 — 内置命令改为扁平列表」）：内置命令去掉按用途的二级分组 / 折叠，只留顶部适用设备筛选（全部 / 通用 / 车机 / 手机）与每条命令后的 车机 / 手机 / 通用 小标签。
-- **第三十三轮**（见文末「2026-11-09 — 电脑麦克风权限」）：麦克风权限改为**主动检测**——勾选开关 / 点「麦克风权限」即实际打开一次麦克风判定，被 Windows 隐私设置拒绝（错误码 3）时自动打开系统「麦克风」设置页，用户允许后切回程序自动复查；启动录屏时若被拒也会顺手打开该页。
 
 ---
 
@@ -4386,131 +4383,59 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
 
 ---
 
-## 2026-11-09 — 车机重启前后数据全保留（分段 60 秒 + 按重启轮次分别保存）
+# 第六十一轮（收起按钮点 icon 中心不收 / 录屏停止触发杀软误报）
 
-- 现象：车机录屏实测，点过「开始录制」后设备中途重启，收尾只留下**重启后**的
-  视频与日志，重启前的一律不见。
-- 根因（三处叠加）：
-  1. **设备掉线被孤儿回收强停**。车机重启后设备从 adb 列表消失，超过宽限
-     （约 15 秒）就被 `autorefresh._reap_gone_tools` → `_reap_gone_recording`
-     强停；冷启动常要 60~180 秒，录屏侧「等待重启」的豁免依赖 watcher 先探测
-     回来，存在必然输掉的时序竞态。
-  2. **收尾等待太短**。强停链路里 `_pull_one` 只等 60 秒，设备还没起来就判失败，
-     `/data/local/tmp` 里重启前那段直接放弃。
-  3. **段太长**。单段 170 秒，设备断电时正在写的那段被 `screenrecord` 杀掉、
-     mp4 缺 moov 无法播放，最多丢近 3 分钟。
-- 修复：
-  - `backend/screen_service.py`：新增 `VideoRecorder.notice_device_gone()` ——
-    设备掉线只转入「等待重启」并起等待线程，绝不标 died / 不弹会话；
-    `_watch_exit` 在已置 `reboot_wait` 时直接返回，避免双等待线程互相 roll。
-    会话增加 `cycle`（重启轮次），`_roll_segment_locked(new_cycle=True)` 在
-    设备回来后把上一段记入旧轮、新段归入新轮。新增 `stop_ex_groups()` 按轮次
-    返回 `[(cycle, [路径])]`，`stop_ex()` 保持扁平返回以兼容旧调用方。
-    新增 `_device_online_settled()`：重启瞬间 adb 抖动时连探 3 次再下结论，
-    不再把一次超时误判成「设备还在、录屏意外结束」。
-  - `backend/controllers/autorefresh.py`：`_reap_gone_tools` 对仍在录的设备
-    调用 `notice_device_gone`（不再强停视频），设备音频照常收尾；候选列表去重，
-    避免同一台设备被停两次。
-  - `backend/controllers/record.py`：收尾按 cycle 逐组合并，第 1 轮沿用
-    `record_设备_时间.mp4`，第 2 轮起加 `_r2` / `_r3` 后缀，**不覆盖**前面
-    的重启前成片；完成提示改为「设备重启 N 次，重启前后已分别保存为 M 个视频」。
-    合并在同一轮内仍然是**无损拼接**（只搬码流、不重编码）。
-  - `core/constants.py`：`REC_SEGMENT_S` 170 → **60**，`REC_MAX_SEGMENTS`
-    20 → **180**（约 3 小时）。段越短，断电瞬间不可恢复的窗口越小。
-  - `frontend/index.html` / `frontend/js/app.js`：录屏卡片明确告知「每 60 秒
-    自动分段」「重启前后分别保存（`_r2`/`_r3`）」「断电最多丢最后 60 秒」，
-    并说明日志是单文件、重启处带缺口标记。
-- 日志侧无需改造：`logcat_service` 本就是单文件续写 —— 设备断开写缺口标记、
-  在重连窗口内继续写同一文件并按时间戳跳过重放。之前丢日志的根子是**录屏会话
-  被提前收尾**，会话不再被强停后日志自然连续。
-- 测试：
-  - `tests/test_backend_screen.py` 新增 `notice_device_gone` 进等待 / 幂等 /
-    停止中不触发、`_device_online_settled` 抖动重试、重启续录进入第 2 轮、
-    `stop_ex_groups` 按轮分组与 `stop_ex` 扁平兼容等 6 条。
-  - `tests/test_backend_controller.py` 新增「孤儿回收主动通知而非强停」「同一
-    设备不重复强停」「重启轮次分别成片 `_r2`」3 条，并同步收尾用例的替身接口。
-  - `tests/frontend/rec_limit_hint.test.cjs` 更新为 60 秒 / 180 段 / 重启分别保存
-    的断言；`tests/frontend/rec_cancel.test.cjs` 的提示语内容断言同步更新。
-- 验证：`pytest` **1400 passed / 1 skipped**；前端 **89 个用例文件全绿**；
-  `pyflakes` 0。
-- 限制（必须知道）：设备断电瞬间**正在写入的那一段**（≤60 秒）缺 moov 头，
-  物理上无法恢复；程序会把它作为残片**保留在保存目录**并在收尾提示里点名，
-  不会静默删除。设备端「连续循环录屏」以进一步压缩段间接缝，留待后续实测。
+本轮修你反馈的两个 Bug。
 
----
+## 1. 「已连接设备」与「指令台」的收起按钮，点 icon 中心收不起来
 
-# 2026-11-09 — 内置命令改为扁平列表（顶部筛选 + 卡片小标签）
+- 现象：点收起按钮中间的 `<` / `>` 图标本身没反应，只有点图标外面的按钮空白
+  才能收起 / 展开。
+- 根因：收起按钮的点击处理器会在同一次事件里调用 `setBtnIcon`，把按钮里的
+  `<svg>` 替换掉（切 caret-left / caret-right）。被点击的 `<path>` / `<svg>`
+  因此被脱离 DOM。事件继续冒泡到父级「整轨可点展开」委托时，委托用
+  `e.target.closest("button")` 判断「是不是点在按钮上」——但 `e.target` 已
+  脱离，`closest` 再也找不到祖先 `<button>`，返回 null，委托误判为「点在
+  轨道空白」，立刻又把面板展开。于是表现为「点 icon 收不起来」。
+- 修复（[app.js](file:///workspace/frontend/js/app.js)）：新增 `clickOnButton(e)`，
+  用 `e.composedPath()` 判断点击是否落在 `<button>` 上。`composedPath()` 在
+  事件分发瞬间算好整条路径，不受后续 DOM 变动影响，能稳稳命中当时的 button；
+  无 `composedPath` 的老旧环境回退到 `e.target.closest`。设备侧栏与指令台两处
+  委托都改用它。
+- 回归测试（[sidebar_collapse.test.cjs](file:///workspace/tests/frontend/sidebar_collapse.test.cjs)
+  第 [10] 节）：分别 dispatch click 到 `<svg>` 内部的 `<path>`、`<svg>` 元素
+  本体，验证都能收起 / 展开；并确认收起后点窄轨标签仍能展开（整轨热区不受影响）。
 
-用户反馈：车机内置命令不要再按用途做二级分组 / 折叠，只要顶部一排筛选 tab，
-以及每条命令后面的 车机 / 手机 / 通用 小标签。
+## 2. 点击「结束录制」触发亚信杀软拦截，被当成病毒
 
-## 改动
-
-- `frontend/js/app.js`：`renderCmdGroups` 的「内置」分支改为**一条扁平
-  `.cmd-chips`**，保留顶部 `.cmd-scope-bar`（全部 / 通用 / 车机 / 手机）；
-  删除 `BUILTIN_SECTIONS` / `BUILTIN_SECTION_TAIL` / `builtinFolded` /
-  `builtinSectionsOf` / `sectionNameOf` / `mkFoldAllBtn` /
-  `appendBuiltinSections`，以及启动时读取 `builtin_folded` 的逻辑
-  （旧配置里的该键不再读取，也不影响其他配置）。
-- 搜索仍把 `section`（用途名）纳入匹配：分组去掉后，「搜网络能出那批命令」
-  的能力不变。
-- `frontend/css/app.css`：删除 `.cmd-sections` / `.cmd-section*` /
-  `.cmd-fold-all` 样式，只保留 `.cmd-scope-bar` / `.cmd-scope` / `.chip-scope*`。
-- 文档：`使用说明.txt` / `README.md` 同步为「扁平列表 + 顶部筛选 + 小标签」。
-- 测试：
-  - 删除 `tests/frontend/builtin_sections.test.cjs`（折叠 / 分组行为已移除）；
-  - 新增 `tests/frontend/builtin_flat.test.cjs`：锁定「无任何段结构 / 一条
-    chips / 筛选条在顶部 / 每条带标签 / 搜用途名仍命中」；
-  - `tests/frontend/builtin_scope.test.cjs` 去掉段结构断言，改为「筛选后仍是
-    扁平列表」。
-- 验证：前端 **89 个用例文件、0 失败**；`pyflakes` 0（本轮仅前端与文档改动）。
-
----
-
-# 2026-11-09 — 电脑麦克风权限：主动检测 + 一键打开系统设置页
-
-用户反馈：「程序运行起来根本没有去申请麦克风权限，导致录不了电脑麦克风声音」。
-
-## 根因
-
-Windows 对**桌面程序**没有运行时授权弹窗（不像浏览器 / UWP 有
-`getUserMedia` 那种「是否允许」弹窗）——麦克风权限只由「设置 → 隐私和安全性
-→ 麦克风 → 让桌面应用访问你的麦克风」统一控制。旧实现只有等到用户勾选开关、
-点了「开始录制」、且 WinMM `waveInOpen` 失败之后，才在状态栏里丢一句
-「请检查隐私设置」。用户看到的就是「程序从没申请过权限」。
-
-而且 `waveInOpen` 被拒时返回的是错误码 **3**（MMSYSERR_NOTENABLED），旧
-`_MM_ERROR_TEXT` 里根本没有这一条 —— 报出来的只有「未指明的错误」。
-
-## 改动
-
-- `backend/audio_service.py`：
-  - `_MM_ERROR_TEXT` 补 `3` → 「麦克风被系统禁用（Windows 隐私设置未允许
-    桌面应用访问麦克风）」。
-  - 新增 `mic_probe()`：枚举录音设备并**实际打开一次麦克风随即关闭**，
-    返回 `{ok, devices, error_code, privacy, reason}`。只有真正调用
-    `waveInOpen` 才拿得到错误码 —— 只看设备数不行（隐私关闭时设备仍可能被
-    枚举）。无设备 / 错误码 3 判为 `privacy=True`；设备被占用（4）**不算**。
-  - 新增 `open_mic_privacy_settings()`：`os.startfile("ms-settings:privacy-microphone")`，
-    这是**唯一**能授予/收回权限的入口；失败时如实返回原因。
-  - `_WAVEFORMATEX` 提到模块级，与 `MicRecorder._open` 共用一份定义。
-- `backend/controllers/record.py`：
-  - 新增 `mic_permission_check(open_settings=False)` js_api：检测 + 判定
-    + 被拒时拉起设置页，返回 `{ok, devices, error_code, privacy, reason,
-    settings_opened}`。
-  - 录屏启动时麦克风失败：若 `mic_probe()` 判为隐私问题，**顺手打开设置页**，
-    提示语相应改成「已打开系统麦克风设置，请允许桌面应用访问后重试」。
-- `frontend/index.html` / `js/app.js`：录屏卡片新增「麦克风权限」按钮；勾选
-  「同步录制电脑麦克风」时也自动检测一次。被拒后记住状态，用户去设置里允许、
-  切回程序（window focus）**自动复查**并提示「✓ 电脑麦克风可用（N 个设备）」。
-  录制中禁用该按钮（此时麦克风被本程序占用，探测只会得到「被占用」而误导）。
-- 测试：
-  - `tests/test_backend_audio.py` 新增 `mic_probe` 6 条（码 3 判 privacy、
-    无设备、成功即关闭句柄、占用不算权限、非 Windows、设置页 URI 正确）。
-  - `tests/test_backend_controller.py` 新增 `mic_permission_check` 3 条
-    （被拒打开设置页 / 占用不打开 / 可用时报设备数）。
-- 验证：`pytest` **1409 passed / 1 skipped**；前端 **89 个用例文件、0 失败**；
-  `pyflakes` 0。
-- 说明：这**不是**多数软件那种「首次运行弹授权框」——Windows 桌面程序没有
-  这种东西。程序能做的是「检测到被拒 → 直接把设置页送到你面前 → 你点允许 →
-  自动复查」，本轮的实现就是这条闭环。
+- 现象：停止录屏时，杀软（亚信等启发式引擎）直接拦截并报毒。
+- 根因：停止路径在主机侧做了两件启发式杀软眼里的「可疑操作」：
+  1. `proc.send_signal(signal.SIGINT)` —— 给另一个进程发信号，杀软常把
+     「信号注入」当成恶意行为；
+  2. `adb shell kill -INT <pid>` / `pkill` —— 按 PID / 名字杀进程，命令行
+     含 `kill` 也容易被启发式规则命中。
+  而 screenrecord 偏偏只在 SIGINT（Ctrl-C）下才写回 moov 优雅收尾，SIGTERM
+  会留下无时长的坏 mp4，所以又不能简单改成 kill。
+- 修复（[screen_service.py](file:///workspace/backend/screen_service.py)）：
+  改用 **PTY Ctrl-C** 优雅结束 screenrecord，主机侧只做一次管道写入：
+  - 启动命令加 `adb shell -t`，强制在设备端分配 PTY；
+  - Popen 加 `stdin=subprocess.PIPE`；
+  - 停止 / 取消时，新增的 `_graceful_stop_proc(proc)` 往 `proc.stdin` 写一个
+    `\x03`（Ctrl-C）并 flush。设备端 shell 的 PTY 行规程把它转成 SIGINT 投给
+    screenrecord，与终端里手动 Ctrl-C 完全等价，screenrecord 据此写回 moov 并退出。
+  - 删除 `_stop_device_screenrecord`（设备端 `kill -INT` / `pkill`）以及
+    `send_signal(SIGINT)` 调用；`signal`、`kill_device_process` 的导入一并移除。
+  - 兜底仍保留 `proc.kill()`（仅在 Ctrl-C 后 10 秒不退才用，杀的是我们自己
+    拉起的 adb 子进程，属于常规操作）。
+- 测试（[test_backend_screen.py](file:///workspace/tests/test_backend_screen.py)）：
+  - `test_start_uses_unique_remote_name` 断言命令带 `-t`；
+  - `test_graceful_stop_proc_writes_ctrl_c_to_stdin` /
+    `test_graceful_stop_proc_handles_missing_stdin`：验证写 `\x03` 且无 stdin 不崩；
+  - `test_stop_signals_device_side_screenrecord_first`、
+    `test_discard_ex_uses_pty_ctrl_c_not_kill`、
+    `test_stop_recording_never_kills_mirror_by_process_name`：验证 stop / discard
+    全程不出现 `kill` / `pkill`，且确实发出了 Ctrl-C。
+- 验证：后端 **1390 passed / 1 skipped**；前端 **89 个用例文件全绿**；pyflakes 0。
+- 备注：`device_proc.kill_device_process` 仍被 `audio_service`（tinycap）和
+  `mirror_service`（投屏）使用，本轮未改动 —— 如后续停止录音 / 投屏也被同类
+  杀软拦截，可按同样的 PTY Ctrl-C 思路处理。

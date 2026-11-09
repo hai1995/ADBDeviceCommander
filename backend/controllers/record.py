@@ -5,7 +5,6 @@ from backend.controller import (
     DeviceAudioCapture, KEY_POINTER_LOCATION, KEY_SHOW_TOUCHES, MicRecorder,
     PipeMirror, SnapMirror, _have_ffmpeg, ffmpeg_mux,
     find_player, find_scrcpy, load_prefs, os,
-    mic_probe, open_mic_privacy_settings,
     plan_size, probe_player, safe_name, scrcpy_probe_info,
     ThreadPoolExecutor, time, zipfile
 )
@@ -77,47 +76,6 @@ class RecordMixin:
             return False, p
         return True, p
 
-    def mic_permission_check(self, open_settings=False):
-        """检查电脑麦克风能不能真录（含 Windows 隐私权限），供前端勾选时调用。
-
-        背景：Windows 对桌面程序**没有**「是否允许使用麦克风」的运行时弹窗——
-        权限由「设置 → 隐私和安全性 → 麦克风 → 让桌面应用访问你的麦克风」统一
-        控制，关掉时 waveInOpen 直接返回 3。用户看到的就只有「启动失败」，
-        观感上就是「程序根本没申请权限」。
-
-        这里做三件事（都不录音）：
-          1) 枚举设备并实际打开一次麦克风，随即关闭；
-          2) 判定是不是被隐私策略拦住的（错误码 3 / 没有任何录音设备）；
-          3) open_settings=True 且确实被拦时，直接拉起系统设置页 —— 用户点一下
-             「允许桌面应用访问麦克风」，回到程序会自动复查。
-
-        返回 {ok, devices, error_code, privacy, reason, settings_opened}。
-        """
-        info = mic_probe()
-        opened = False
-        if open_settings and not info.get("ok") and info.get("privacy"):
-            opened, open_err = open_mic_privacy_settings()
-            if not opened:
-                self._push_toast(
-                    "warn", "⚠ 无法自动打开系统麦克风设置（%s）：请手动打开"
-                            "「设置 → 隐私和安全性 → 麦克风」，允许桌面应用"
-                            "访问麦克风。" % open_err)
-        if info.get("ok"):
-            self._push_status(
-                "info", "✓ 电脑麦克风可用（检测到 %d 个录音设备）"
-                        % int(info.get("devices") or 0))
-        else:
-            self._push_status(
-                "warn", "⚠ %s。%s"
-                        % (info.get("reason") or "电脑麦克风不可用",
-                           "已打开系统「麦克风」设置：请打开「让桌面应用访问"
-                           "你的麦克风」，回到本程序会自动复查。" if opened else
-                           "请在「设置 → 隐私和安全性 → 麦克风」中允许桌面应用"
-                           "访问麦克风后重试。"))
-        res = dict(info)
-        res["settings_opened"] = opened
-        return res
-
     def screen_record_start(self, serial=None,
                             with_devaudio=False, with_mic=False, save_dir=None,
                             with_logcat=False, zip_on_stop=False,
@@ -126,7 +84,7 @@ class RecordMixin:
         """启动录屏会话（可含设备音频 / 麦 / logcat）。
 
         整场录制由用户**手动停止**（点「停止」或关窗口），中间不需要任何操作：
-        单段到 60 秒会自动接下一段（Android screenrecord 单段硬上限 180 秒），
+        单段到 170 秒会自动接下一段（Android screenrecord 单段硬上限 180 秒），
         产物落在同一目录、按 _p2 / _p3 顺序命名，收尾时一并打包。早年的
         「固定时长」（到点结束整场录制）已移除，与自动分段不是一回事。
         _rec_lock 保护整个会话生命周期，与 screen_record_stop / shutdown
@@ -220,23 +178,14 @@ class RecordMixin:
                         "合成）。安装 ffmpeg 并加入 PATH 后重启本程序即可自动合成。")
             else:
                 self._rec_session["mic_started"] = False
-                # 桌面程序没有运行时授权弹窗：被隐私设置拦住（错误码 3 /
-                # 没有录音设备）时，用户只能去系统设置里点一下。这里顺手
-                # 替他打开那一页 —— 否则界面上只有一句「启动失败」，而他
-                # 甚至不知道 Windows 有这么一个开关。
-                info = mic_probe()
-                opened = False
-                if info.get("privacy"):
-                    opened, _open_err = open_mic_privacy_settings()
+                # 最常见的两种失败是「系统隐私设置没允许桌面应用用麦克风」和
+                # 「设备被别的程序占用」—— 错误码本身（如 4 / 1）用户看不懂，
+                # 这两句直接告诉人该去哪里改。
                 self._push_toast(
                     "warn",
-                    "⚠ 电脑麦克风启动失败：%s（%s；本次录屏将继续，但没有"
-                    "麦克风声音）"
-                    % (p,
-                       "已打开系统「麦克风」设置，请允许桌面应用访问麦克风"
-                       "后重试" if opened else
-                       "请检查系统「隐私和安全性 → 麦克风」是否允许桌面应用"
-                       "访问，以及麦克风是否被其它程序占用"))
+                    "⚠ 电脑麦克风启动失败：%s（请检查系统「隐私和安全性 → 麦克风」"
+                    "是否允许桌面应用访问，以及麦克风是否被其它程序占用；"
+                    "本次录屏将继续，但没有麦克风声音）" % p)
         ok_any = False
 
         def _spawn(s):
@@ -531,13 +480,7 @@ class RecordMixin:
             merged_n = sum(int(n) for n in
                            ((sess or {}).get("merged_segs") or {}).values()
                            if n)
-            reboot_n = int((sess or {}).get("reboot_cycles") or 0)
-            if reboot_n:
-                # 重启前后的数据是分开保存的：说清「重启了几次、存成了几份」，
-                # 用户才不会以为程序漏掉了中间那段（那几秒/几分钟本来就没录到）。
-                seg_tip = "（设备重启 %d 次，重启前后已分别保存为 %d 个视频）" % (
-                    reboot_n, mp4_n)
-            elif merged_n > 1:
+            if merged_n > 1:
                 seg_tip = "（%d 段已合并为 1 个完整视频）" % merged_n
             elif mp4_n > 1:
                 seg_tip = "（%d 段视频，未能合并）" % mp4_n
@@ -751,52 +694,25 @@ class RecordMixin:
         teardown = self._teardown_devices(
             serials, dead, videos_map, devaudio_map,
             pretaken=sess.get("video_segs") or {})
-        # 自动分段是**实现手段**，不是用户要的东西：先把同一轮的多个段合并成
-        # 一个完整 mp4，再走下面的音频合成 / 打包。但**设备重启前后的录像必须
-        # 分开**：重启期间设备端什么都没录到，硬拼成一个文件会让用户看到一次
-        # 几分钟的画面跳跃、却没有任何文件层面的痕迹说明中间断过。所以按
-        # cycle 逐组合并，重启前一份、重启后一份、重启几次就有几份。
         local_videos = {}
+        for s, (vs, _a) in teardown.items():
+            keep = [p for p in (vs or []) if p and os.path.exists(p)]
+            if keep:
+                local_videos[s] = keep
+        # 自动分段是**实现手段**，不是用户要的东西：先把多段合并成一个完整 mp4，
+        # 再走下面的音频合成 / 打包。合并失败时保持分段原样（见
+        # _merge_device_segments：宁可给 N 个能播的段，也不给一个坏成片）。
         merged_segs = {}
-        cycle_files = {}
-        reboot_total = 0
-        for s, (groups, _a) in teardown.items():
-            cycs = [int(c or 1) for c, _ps in (groups or [])]
-            if cycs:
-                # 重启次数按「到过的最大轮次」算，而不是按有文件的组数：
-                # 第 1 轮的段全丢、只剩第 2 轮时，重启仍然发生过一次。
-                reboot_total += max(cycs) - 1
-            finals = []
-            used_total = 0
-            n_cycles = 0
-            for cyc, plist in groups or []:
-                plist = [p for p in (plist or []) if p and os.path.exists(p)]
-                if not plist:
-                    continue
-                n_cycles += 1
-                if len(plist) == 1:
-                    finals.append(plist[0])
-                    continue
-                one, n_used, _skipped = self._merge_device_segments(
-                    s, plist, cycle=cyc)
-                if one and os.path.exists(one):
-                    finals.append(one)
-                    used_total += n_used
-                else:
-                    # 合并失败 → 分段一个都不删：宁可给 N 个能播的段，
-                    # 也不给一个坏成片（见 _merge_device_segments）。
-                    finals.extend(plist)
-            if finals:
-                local_videos[s] = finals
-                if used_total > 1:
-                    merged_segs[s] = used_total
-                cycle_files[s] = n_cycles
+        for s in list(local_videos.keys()):
+            one, n_used, _skipped = self._merge_device_segments(
+                s, local_videos[s])
+            if one:
+                local_videos[s] = [one]
+                if n_used > 1:
+                    merged_segs[s] = n_used
         # 完成提示要按「几段拼成的」说话：合并之后目录里只剩 1 个 mp4，
         # 用户对不上「我录了 8 分钟」和「为什么文件只有一个」。
         sess["merged_segs"] = merged_segs
-        sess["cycle_files"] = cycle_files
-        # 本次会话里设备一共重启了几次（>0 时收尾提示要明确说「前后分别保存」）。
-        sess["reboot_cycles"] = reboot_total
         local_devaudio = {s: a for s, (_v, a) in teardown.items() if a}
         mic_path = None
         if self._mic is not None:
@@ -818,17 +734,7 @@ class RecordMixin:
                 audios.append(mic_path)
             # 拼接前的段数（合并后 vlist 只剩 1 个文件，看不出原本被切过几段）
             n_seg = merged_segs.get(s) or len(vlist)
-            n_cyc = cycle_files.get(s) or 1
-            if audios and n_cyc > 1:
-                # 视频是按「设备重启轮次」分开保存的：重启期间设备端什么都没
-                # 录到，缺口是几分钟而不是分段那 1 秒。音频却是整场连续的一条，
-                # 只能并进第 1 个文件，这一点必须说清（不然用户会以为后面的
-                # 视频合成失败、丢了声音）。
-                self._push_status(
-                    "warn", "⚠ %s 的视频按设备重启分成 %d 个文件（重启期间的画面"
-                            "本就录不到，前后不连续）；音频是整场连续录的，只并入"
-                            "第 1 个文件" % (s, n_cyc))
-            elif audios and n_seg > 1:
+            if audios and n_seg > 1:
                 if s in merged_segs:
                     # 音频是**整场连续**的一条，画面却在那 N-1 处拼接点各缺了
                     # 约 1 秒：声音不会跟着跳，于是从第 2 段起会一点点超前画面。
@@ -1059,33 +965,26 @@ class RecordMixin:
             return stem[:i]
         return stem
 
-    def _merge_device_segments(self, serial, vlist, cycle=1):
-        """把一台设备**同一轮**的多段录像合并为一个完整 mp4。
+    def _merge_device_segments(self, serial, vlist):
+        """把一台设备的多段录像合并为一个完整 mp4。
 
         返回 (成品路径或 None, 参与合并的段数, 未并进成片的残缺段列表)。
 
         为什么必须在收尾里做（而不是留给用户手动拼）：分段是程序为了绕开
         180 秒硬上限自己选的实现方式，用户从来没要求「几个 `_p2` 文件」。
         把实现细节原样抛给用户，等于把「用 ffmpeg concat 还是别的方式」这种
-        内部决策变成他的作业 —— 而且几百个分段的正确顺序、`-c copy` 的解码
+        内部决策变成他的作业 —— 而且 20 个分段的正确顺序、`-c copy` 的解码
         参数一致性，都不是普通使用者该关心的事。
 
-        cycle：设备重启轮次。第 1 轮沿用不带后缀的文件名
-        `record_设备_时间.mp4`；第 2 轮起加 `_r2`、`_r3`，避免覆盖前面的成品
-        —— 重启前后是两次独立的数据，必须各留一份。
-
-        单段（绝大多数录制，不足 60 秒）直接返回原路径，不起 ffmpeg 进程。
+        单段（绝大多数录制，不足 170 秒）直接返回原路径，不起 ffmpeg 进程。
         """
         vlist = [p for p in (vlist or []) if p]
         if len(vlist) <= 1:
             return (vlist[0] if vlist else None), len(vlist), []
         stem = self._merged_stem(vlist)
-        suffix = "" if int(cycle or 1) <= 1 else "_r%d" % int(cycle)
-        out = stem + suffix + "_full.mp4"
+        out = stem + "_full.mp4"
         self._push_status(
-            "info", "⏳ %s 共 %d 段，正在合并为一个完整视频%s…"
-                    % (serial, len(vlist),
-                       "（第 %d 轮）" % int(cycle) if suffix else ""))
+            "info", "⏳ %s 共 %d 段，正在合并为一个完整视频…" % (serial, len(vlist)))
         res = join_segments(vlist, out)
         if not res.get("ok") or not res.get("path"):
             # 合并失败 → **分段一个都不删**。用户拿到的是「N 个能播的段」，
@@ -1111,7 +1010,7 @@ class RecordMixin:
                         os.remove(p)
                     except Exception:
                         pass
-            want = stem + suffix + ".mp4"
+            want = stem + ".mp4"
             try:
                 os.replace(merged, want)
                 final = want
@@ -1161,23 +1060,6 @@ class RecordMixin:
             return False, [], "%s（残片：%s）" % (err or "收尾失败", lp)
         return False, [], err
 
-    def _stop_video_groups(self, serial):
-        """停止单台设备并取回全部段，**按设备重启轮次分组**。
-
-        返回 (ok, [(cycle, [本地路径...]), ...], err)；cycle 1 是开始录到第一次
-        重启之间，之后每重启一次 +1。收尾时每组各自合并成一个视频，重启前后
-        分别保存 —— 设备重启期间那几分钟本来就没录到，硬拼进同一个文件只会
-        让用户看到一次莫名其妙的画面跳跃。
-
-        旧实现 / 测试替身没有 stop_ex_groups 时退化为扁平列表，整体算第 1 轮。
-        """
-        fn = getattr(self.video, "stop_ex_groups", None)
-        if fn is not None:
-            return fn(serial)
-        ok, paths, err = self._stop_video(serial)
-        paths = [p for p in (paths or []) if p]
-        return ok, ([(1, paths)] if paths else []), err
-
     def _teardown_devices(self, serials, dead, videos_map, devaudio_map,
                           pretaken=None):
         """逐设备收尾（拉视频 + 拉设备端音频），**多台设备并行**。
@@ -1189,23 +1071,19 @@ class RecordMixin:
         以上才见到「录屏已完成」，其间 _rec_lock 一直被占着，别的录屏动作全
         排不上。各设备之间是彼此独立的 adb 调用、没有共享状态，直接并行。
 
-        返回 {serial: ([(cycle, [本地视频路径...]), ...], 本地音频路径或 None)}。
-        列表是因为自动分段：一台设备的一场录制会有多段（每段约 60 秒），每一段
-        都要落盘、合成与打包，只留最后一段等于把前几段直接扔掉。再按 cycle
-        分组是因为设备重启（典型是车机重启）前后是两次独立的数据，收尾时要
-        分别成片、分别保存。逐台兜住异常：一台收尾炸了不该让其余设备连文件
-        都拉不回来。
+        返回 {serial: (本地视频路径列表, 本地音频路径或 None)}。列表是因为自动
+        分段：一台设备的一场录制会有多段（每段约 170 秒），每一段都要落盘、合成
+        与打包，只留最后一段等于把前几段直接扔掉。逐台兜住异常：一台收尾炸了
+        不该让其余设备连文件都拉不回来。
         """
         def one(s):
-            groups = []
+            local_vs = []
             if s in videos_map:
                 if self.video.is_recording(s):
-                    ok, groups, err = self._stop_video_groups(s)
-                    groups = [(int(c or 1), [p for p in (ps or []) if p])
-                              for c, ps in (groups or [])]
-                    groups = [g for g in groups if g[1]]
-                    local_vs = [p for _c, ps in groups for p in ps]
+                    ok, paths, err = self._stop_video(s)
+                    paths = [p for p in (paths or []) if p]
                     if ok:
+                        local_vs = paths
                         if err:
                             # 有段没取回来、当前段却是好的：不能静默。用户以为
                             # 录了 8 分钟，包里只有 5 分钟，缺的那 3 分钟他会以为
@@ -1213,9 +1091,10 @@ class RecordMixin:
                             self._push_toast(
                                 "warn", "⚠ %s 部分分段未取回：%s" % (s, err))
                     else:
-                        # groups 里全是**已正常收尾**的段（残片只在 err 里说明），
+                        # paths 里全是**已正常收尾**的段（残片只在 err 里说明），
                         # 必须整体保留：只报一句「收尾失败」会让用户把前面几段
                         # 本来完好的视频一并扔掉。
+                        local_vs = paths
                         where = ""
                         kept = ("已完成的 %d 段完整保留：%s。"
                                 % (len(local_vs),
@@ -1240,12 +1119,11 @@ class RecordMixin:
                     # 强停）时，这里再用 stop() 只会得到「该设备未在录制」。必须用
                     # 之前记录的路径兜底，否则这段视频既不合成音频、也不进 zip、
                     # 界面也无提示。pretaken 是「设备被移除时已经取回的那几段」，
-                    # 没有它就只能拿到第一段（历史扁平列表，整体算第 1 轮）。
+                    # 没有它就只能拿到第一段。
                     local_vs = list((pretaken or {}).get(s) or [])
                     if not local_vs:
                         first = videos_map.get(s)
                         local_vs = [first] if first else []
-                    groups = [(1, local_vs)] if local_vs else []
             local_a = None
             if s in devaudio_map:
                 try:
@@ -1255,7 +1133,7 @@ class RecordMixin:
                     self._push_status(
                         "warn", "⚠ %s 设备音频收尾失败：%s" % (s, e))
                     local_a = None
-            return s, (groups, local_a)
+            return s, (local_vs, local_a)
 
         if len(serials) <= 1:
             return dict(one(s) for s in serials)

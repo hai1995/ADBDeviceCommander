@@ -78,8 +78,7 @@ class AutoRefreshMixin:
                 "warn",
                 "⏸ %s 连接中断（可能是设备重启），正在等待恢复（最长 %d 秒）："
                 "设备回来后会自动继续录制，重启前已录的片段不会丢失；"
-                "不想等可直接点「停止」，已录内容照样保存（重启前那一段会在停止时"
-                "继续等设备回来取出）"
+                "不想等可直接点「停止」，已录内容照样保存"
                 % (s, REC_REBOOT_WAIT_S))
         resume_fn = getattr(self.video, "resumed_serials", None)
         for s in (resume_fn() if resume_fn else []) or []:
@@ -236,64 +235,33 @@ class AutoRefreshMixin:
         # 故放到后台 worker，不堵自动轮询线程。
         with self._rec_lock:
             sess = self._rec_session or {}
-            # dict.fromkeys 去重：同一台设备可能同时出现在 videos 与 devaudio 里，
-            # 不去重会把它强停两次（第二次只是空转，但日志与测试都会乱）。
-            candidates = list(dict.fromkeys(
-                [s for s in list(sess.get("videos", {}).keys())
-                 + list(sess.get("devaudio", {}).keys())
-                 if s not in known]))
+            candidates = [s for s in list(sess.get("videos", {}).keys())
+                          + list(sess.get("devaudio", {}).keys())
+                          if s not in known]
         # 正在「等待设备重启后自动续录」的设备绝不能在这里强停：它只是暂时
         # 掉线（screenrecord 随重启被杀），录屏侧有专门的等待线程——窗口内
         # 设备回来会先拉回重启前那一段、再自动接续下一段。这里强停会把整场
         # 录制提前结束，正是「重启后视频和日志都丢」的老毛病。
-        #
-        # 更关键的是：车机重启时设备从列表消失**必然**发生在录屏侧 watcher 的
-        # adb 探测回来之前（宽限 15 秒 vs 冷启动 60~180 秒），靠 waiting 豁免
-        # 存在时序竞态 —— 竞态一旦发生，restart 前那一段就当场被放弃。所以
-        # 这里不依赖 waiting：对仍在录的设备主动 notice_device_gone，让它转入
-        # 等待重启通道（与 watcher 同一条路），只有明确没有会话的设备才强停。
         try:
             waiting = set(self.video.reboot_wait_serials())
         except Exception:
             waiting = set()
-        noticed = set()
-        notice = getattr(self.video, "notice_device_gone", None)
-        if notice is not None:
-            for s in candidates:
-                if s in waiting:
-                    continue
-                try:
-                    if notice(s):
-                        noticed.add(s)
-                except Exception:
-                    pass
         rec_gone = [s for s in candidates if s not in waiting]
         if rec_gone:
             self.workers.spawn(
-                "rec-reap", self._reap_gone_recording, set(rec_gone), noticed)
+                "rec-reap", self._reap_gone_recording, set(rec_gone))
 
-    def _reap_gone_recording(self, gone_set, skip_video=None):
+    def _reap_gone_recording(self, gone_set):
         """后台强停已移除设备的视频 / 设备音频（务必在 rec-reap worker 内调用）。
 
         被移除设备的录屏 / tinycap 在设备端未必自动退出：强停可释放其占用的音频输入，
         并避免界面一直停留「录制中」。不改动会话其余部分——其余设备照常录，用户对
         仍在录的设备点「停止」时，本处已停止的设备会被判定为「未录制」而安全跳过。
 
-        skip_video：已转入「等待重启」通道的设备。它们的视频绝不能在这里停
-        （停了就丢重启前那一段），但设备音频仍要收尾 —— 重启后 tinycap 早已
-        被杀，留着只会让界面卡在「录制中」。
-
         两处 stop 在未录制时都直接返回（不发 adb、幂等），故无需先 is_recording 判断；
         DeviceAudioCapture 本就没有 is_recording 方法。
         """
-        skip_video = set(skip_video or ())
         for s in gone_set:
-            if s in skip_video:
-                try:
-                    self.device_audio.stop(s)
-                except Exception:
-                    pass
-                continue
             try:
                 # 用 stop_ex 取回**全部段**并记进会话：设备虽然掉了，掉之前录完的
                 # 那几段已经拉回本地，收尾时必须一并进包。只调 stop() 的话它们

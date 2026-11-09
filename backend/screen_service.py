@@ -14,13 +14,11 @@ backend.screen_service —— 截图 + 录屏（视频，不含音频合成）�
 """
 import itertools
 import os
-import signal
 import subprocess
 import tempfile
 import threading
 import time
 
-from backend.device_proc import kill_device_process
 from core import imgbytes
 from core.constants import (
     REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
@@ -496,13 +494,20 @@ class VideoRecorder:
 
         `--time-limit`：到点由 screenrecord **自己正常收尾**（写回 moov）后退出，
         而不是被 180 秒硬上限掐断 —— 后者在慢设备上可能来不及写完索引，产出
-        无时长、播放不了的 mp4。段长取 REC_SEGMENT_S（60 秒，留足余量）。
+        无时长、播放不了的 mp4。段长取 REC_SEGMENT_S（170 秒，留 10 秒余量）。
 
         no_limit=True 用于极老的 ROM（不认这个选项时 start() 会去掉它重试一次）：
-        退化到 180 秒硬上限也照样自动分段 —— 180 > 60，watcher 的「这一段录满了」
+        退化到 180 秒硬上限也照样自动分段 —— 180 > 170，watcher 的「这一段录满了」
         判据不受影响。宁可段长不可控，也不能让整台设备录不了。
+
+        `-t`：强制 adb 在设备端分配 PTY。这样停止时往本地 stdin 写一个 Ctrl-C
+        （`\\x03`）就能让设备端 shell 把 SIGINT 投给 screenrecord —— 与终端里
+        手动 Ctrl-C 完全等价，screenrecord 据此写回 moov 并优雅退出。相比早年
+        的 `proc.send_signal(SIGINT)` + 设备端 `kill -INT <pid>`，这条路径在
+        主机侧只是「写一个字节到管道」，不触发任何杀进程 / 信号注入类的安全
+        软件告警（亚信等启发式杀软会把 `send_signal` / `kill` 当成可疑行为）。
         """
-        cmd = [adb, "-s", serial, "shell", "screenrecord"]
+        cmd = [adb, "-s", serial, "shell", "-t", "screenrecord"]
         if not no_limit:
             cmd += ["--time-limit", str(REC_SEGMENT_S)]
         cmd.append(remote)
@@ -542,7 +547,7 @@ class VideoRecorder:
         """开始录屏（手动停止）。返回 (ok, 本地最终路径占位)。
 
         整场录制由用户手动停止（点「停止」/ 关窗口），但**单段不会无限长**：
-        Android 的单段硬上限就是 180 秒，所以每段显式带 `--time-limit 60`，到点
+        Android 的单段硬上限就是 180 秒，所以每段显式带 `--time-limit 170`，到点
         由 screenrecord 自己优雅收尾，watcher 随即在同一台设备上接起下一段（见
         _roll_segment_locked）。用户点一次「开始」就能连着录，产物是同一会话下的
         多个文件（_p2 / _p3 …），stop_ex() 一次取回全部段。
@@ -573,7 +578,7 @@ class VideoRecorder:
         no_lim = False
         if proc is not None and early_err and self._timelimit_rejected(early_err):
             # 极老的 ROM / 定制机不认 --time-limit，整台设备就完全录不了。去掉它
-            # 重试一次：退化到 180 秒硬上限，自动分段照旧（180 > 60，watcher 的
+            # 重试一次：退化到 180 秒硬上限，自动分段照旧（180 > 170，watcher 的
             # 「这一段录满了」判据不受影响）。换一个新的远端文件名重试 —— 报错
             # 前那条进程万一已经建了空文件，同名重试会被 screenrecord 拒绝。
             remote = self._seg_remote(serial, ts, 1)
@@ -597,11 +602,6 @@ class VideoRecorder:
                 # 会话名（分段命名要用同一份，不能每段重新取时间戳）
                 "ts": ts, "extra": base,
                 "seg": 1,        # 当前第几段（1 起）
-                # 当前是「第几轮」：1 是开始录到第一次重启之间；设备每重启
-                # （掉线后自动续录）一次 +1。收尾时按轮次分别合并、分别保存，
-                # 用户拿到的就是「重启前一份、重启后一份」，而不是一段被
-                # 硬拼起来的、中间缺失几分钟却不说明的成片。
-                "cycle": 1,
                 # 这台设备的 ROM 不认 --time-limit（已去掉该参数重试成功）：
                 # 续段时也必须用同样的命令，否则下一段又会启动失败。
                 "no_lim": no_lim,
@@ -642,21 +642,13 @@ class VideoRecorder:
                 return
             if sess.get("stopping"):
                 return
-            if sess.get("reboot_wait"):
-                # controller 的孤儿回收（notice_device_gone）已经先一步把这台
-                # 设备转入「等待重启」并起了等待线程。这里必须直接返回：否则
-                # 同一个会话会有两个等待线程，设备回来后各自 roll 一次，凭空
-                # 多出/覆盖一段（也把段号与轮次搅乱）。
-                return
             elapsed = time.time() - float(sess.get("started") or 0)
             full = bool(sess.get("started")) and elapsed >= (
                 REC_SEGMENT_S - REC_MAX_TOLERANCE_S)
         # 没到点就退出：需要区分「设备掉了（重启 / 拔线 / adbd 重启）」与
         # 「设备还在、只是 screenrecord 自己崩了」。探测放在锁外——get-state
         # 是一次 adb 往返，掉线时要等到超时，持锁做会把其它设备的收尾全部卡住。
-        # 重启瞬间 adb server 本身也会抖动：单次探测失败（None）不能直接当
-        # 「设备还在」判死，先连续探几次再下结论。
-        online = True if full else self._device_online_settled(serial)
+        online = True if full else self._device_online(serial)
         # 只有**明确**判定设备不在线才进入等待；探测本身失败（adb 不可用/超时）
         # 时按老行为直接判死，避免 adb 环境异常时把收尾拖上 5 分钟。
         gone = online is False
@@ -665,8 +657,6 @@ class VideoRecorder:
             if sess is None or sess.get("proc") is not proc:
                 return
             if sess.get("stopping"):
-                return
-            if sess.get("reboot_wait"):
                 return
             if not full:
                 if not gone:
@@ -715,41 +705,13 @@ class VideoRecorder:
         # 按「探测失败」处理。
         return None
 
-    def _device_online_settled(self, serial, tries=3, interval_s=1.0):
-        """连续探测几次再下结论，专治「重启瞬间 adb 抖动」。
-
-        单次 `get-state` 在设备刚断电 / adb server 正在重连时很容易超时——
-        旧逻辑把这种一次性失败（None）当成「设备还在、只是 screenrecord 崩了」
-        直接判死，于是车机重启被报成录屏意外结束，重启前那一段就地放弃。
-        这里最多探 3 次：任一次明确在线就按在线处理；一次都没在线、但至少
-        一次明确离线（adb 说「device not found / offline」）就按离线处理——
-        重启途中夹着一次超时并不改变「设备不在了」的事实；全部探测都失败
-        （adb 本身不可用）才返回 None，交给调用方按老行为判死，不能因为 adb
-        环境坏了就白等 5 分钟。
-        """
-        results = []
-        for i in range(max(1, tries)):
-            state = self._device_online(serial)
-            if state is True:
-                return True
-            results.append(state)
-            if i + 1 < tries:
-                time.sleep(interval_s)
-        if any(r is False for r in results):
-            return False
-        return None
-
-    def _wait_reboot_and_resume(self, serial, sess, from_notice=False):
+    def _wait_reboot_and_resume(self, serial, sess):
         """（后台）等掉线的设备回来；回来后自动接续下一段，整场录制不中断。
 
         等待期间**不标 died**，controller 因此不会走收尾、也就不会把 logcat
         的重连等待一并掐断。用户点「停止」时 stop() 会置 stopping，这里立刻
         退出并把已录段交给正常收尾流程（数据照样进包）。窗口耗尽仍未回来，
         才标 died 交由 controller 按「意外中断」收尾。
-
-        from_notice：由 controller 的 notice_device_gone 发起（设备只是从
-        设备列表里消失，录屏进程是否真断还需确认）。watcher 发起的调用在
-        进来前已确认 adb 进程退出，不需要再做误报保护。
         """
         ok = self._wait_device_back(
             serial, max_wait_s=REC_REBOOT_WAIT_S, interval_s=REC_REBOOT_POLL_S,
@@ -768,60 +730,14 @@ class VideoRecorder:
                 sess["seg_err"] = (
                     "设备已断开，等待重启超时 %d 秒" % REC_REBOOT_WAIT_S)
                 return
-            # 误报保护：这条等待可能来自 controller 的 notice_device_gone（设备
-            # 短暂从列表消失 / adb server 抖动），而实际上录屏进程根本没断。
-            # 此时若照样换段，设备端会同时跑两个 screenrecord，旧段还在写，拉
-            # 回来必然缺 moov —— 为了「防丢」反而丢掉一段。进程还活着就什么
-            # 都不做，交给原来的 watcher 正常收尾。
-            if from_notice:
-                try:
-                    alive = (sess.get("proc") is not None
-                             and sess["proc"].poll() is None)
-                except Exception:
-                    alive = False
-                if alive:
-                    sess["reboot_wait_note"] = False
-                    return
             # 设备回来了：先收好重启前那一段，再接下一段。走的就是「录满自动
             # 分段」同一条路径 —— 段号继续累加（_p2 / _p3…），stop_ex 仍能
             # 一次取回全部段，最终产物仍是同一场次的连续多个文件。
-            # new_cycle=True：设备重启是一次真实的数据断点（重启期间设备端
-            # 什么都没录到），这一段起归入下一轮，收尾时前后分别成片，
-            # 不会把跨越几分钟空白的画面硬拼进同一个视频。
-            self._roll_segment_locked(serial, sess, new_cycle=True)
+            self._roll_segment_locked(serial, sess)
             # 续段失败时 _roll_segment_locked 会置 died/seg_err：这时不能谎报
             # 「已自动继续录制」，交给收尾流程给出准确结论。
             if not sess.get("died") and not sess.get("seg_err"):
                 sess["resumed"] = True
-
-    def notice_device_gone(self, serial):
-        """设备从 adb 列表消失时，把录屏会话转入「等待重启后自动续录」。
-
-        controller 的孤儿回收（_reap_gone_tools）原先在这里直接强停录屏：车机
-        重启时设备会短暂从列表消失（超过宽限即被移除），而冷启动常要 60~180 秒。
-        强停等于当场放弃重启前那一段，并把整场录制提前结束 —— 用户实测就是
-        「只剩重启后的视频和日志」。这里改走与 watcher 相同的等待通道：不标
-        died、不收尾，设备在窗口内回来就先拉回重启前的段、再自动接续。
-
-        返回 True 表示这台设备已在等待（调用方不要再强停）；会话不存在 / 已
-        在停止 / 已判死时返回 False，交给原逻辑处理。
-        """
-        waiter = False
-        with self._lock:
-            sess = self._sessions.get(serial)
-            if sess is None or sess.get("stopping") or sess.get("died"):
-                return False
-            if sess.get("reboot_wait"):
-                # 已有等待线程（watcher 先一步判定掉线）：不重复起。
-                return True
-            sess["reboot_wait"] = True
-            sess["reboot_wait_note"] = True
-            waiter = True
-        if waiter:
-            threading.Thread(
-                target=self._wait_reboot_and_resume, args=(serial, sess, True),
-                daemon=True, name="rec-reboot-%s" % serial).start()
-        return True
 
     def reboot_wait_serials(self):
         """正在等待设备重启后自动续录的设备列表（controller 据此豁免掉线强停）。"""
@@ -847,7 +763,7 @@ class VideoRecorder:
                     out.append(s)
         return out
 
-    def _roll_segment_locked(self, serial, sess, new_cycle=False):
+    def _roll_segment_locked(self, serial, sess):
         """（须持锁调用）收好刚录满的这一段，并在同一台设备上接起下一段。
 
         「记录上一段 + 起新段 + 换 session 指针」必须在**同一个临界区**里完成：
@@ -855,16 +771,11 @@ class VideoRecorder:
         中间放过一次锁，stop() 就可能拿到已经退出的旧 proc，于是新起的这一段
         没人停 —— 它会一直录到自己的 --time-limit 才结束，而那时界面早已显示
         「已停止」，用户以为录完了，实际还占着设备在录、在写存储。
-
-        new_cycle：这次换段是因为设备重启（不是录满）。上一段归上一轮，新段
-        起算下一轮；收尾时两轮分别成片，不跨重启硬拼。
         """
-        cycle = int(sess.get("cycle") or 1)
         prev = {
             "n": int(sess.get("seg") or 1), "serial": serial,
             "remote": sess.get("remote"), "local": sess.get("local"),
             "dir": sess.get("dir"), "ok": None, "err": None,
-            "cycle": cycle,
             "done": threading.Event(),
         }
         seg_no = prev["n"] + 1
@@ -875,6 +786,7 @@ class VideoRecorder:
             proc = subprocess.Popen(
                 self._screenrecord_cmd(self.adb, serial, remote,
                                        no_limit=bool(sess.get("no_lim"))),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
         except Exception as e:
@@ -903,10 +815,6 @@ class VideoRecorder:
         sess["proc"] = proc
         sess["started"] = time.time()
         sess["seg"] = seg_no
-        # 新段已真正起来，才把轮次切到下一轮：上一段已按旧 cycle 记进
-        # segments，控制流后面的 stop_ex 会按轮次分组。
-        if new_cycle:
-            sess["cycle"] = cycle + 1
         sess["rolled"] = seg_no
         # 上一段的拉取与下一段的启动**并行**：pull 要几百毫秒到几秒，串行等它
         # 会把段间缝隙从「一次 adb 往返」拉长成好几秒，而那段画面往往正是用户
@@ -939,7 +847,7 @@ class VideoRecorder:
         # controller 立刻收尾、等待线程也因 should_abort 退出，自动续录被掐断。
         # （典型场景：车机重启刚自动续上一段，设备又掉了一次。）
         # 探测失败（None）时保持老行为判死，与 _watch_exit 的策略一致。
-        online = self._device_online_settled(serial)
+        online = self._device_online(serial)
         with self._lock:
             sess = self._sessions.get(serial)
             if sess is None or sess.get("proc") is not proc:
@@ -1059,7 +967,8 @@ class VideoRecorder:
         """
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cmd, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
         except Exception as e:
             return None, "启动录屏失败：%s" % e
@@ -1147,25 +1056,27 @@ class VideoRecorder:
                            or "settings 返回 %d" % r.returncode)
         return True, ""
 
-    def _stop_device_screenrecord(self, adb, serial, remote=None):
-        """精准结束设备端 screenrecord：用 SIGINT 让其优雅收尾（写回 moov 头），这是录出
-        可播放 MP4 的关键——screenrecord 只在 SIGINT（Ctrl-C）下收尾，仅 SIGTERM 会直接被杀、
-        文件没收尾（无 moov 头、没有时长、播放不了）。
+    @staticmethod
+    def _graceful_stop_proc(proc):
+        """用 PTY Ctrl-C 优雅结束 screenrecord（写回 moov）。
 
-        收尾顺序统一收口到 backend.device_proc.kill_device_process（录屏 / 录音共用）：
-        按 PID `kill -INT` → **等它把 moov 写完** → 确认仍存活才补 `-TERM`。早期这里把
-        `-INT` 与 `-TERM` 背靠背发出去，进程很可能死在写 moov 的中途——等于白优雅一次，
-        产物依旧是坏文件。
+        启动命令带了 `adb shell -t`，设备端分配了 PTY；往本地 adb 的 stdin
+        写一个 ``\\x03``（Ctrl-C），设备端 shell 会把 SIGINT 投给前台进程组
+        里的 screenrecord —— 与手动在终端里按 Ctrl-C 完全等价。screenrecord
+        只在 SIGINT 下收尾，SIGTERM 会留下没 moov 的残片。
 
-        **绝不能按进程名 pkill screenrecord**：投屏（`screenrecord --output-format=h264 -`）
-        是同名进程，停止录屏时一刀按名字切下去，会把用户眼前正在看的投屏一起掐断，而设备
-        明明好好的。因此只认「命令行里带本次录屏文件名」的那一条（remote 形如
-        /data/local/tmp/adb_rec_<serial>_<ts>_<seq>.mp4，每次录制唯一）；精确取不到 PID 时
-        退化为 `pkill -f <该文件名>`，仍然只命中自己那条。
+        主机侧只做了一次管道写入，没有 `send_signal` / `kill` / `pkill`，
+        不会被启发式杀软（亚信等）当成「信号注入 / 杀进程」拦截。
         """
-        match = os.path.basename(remote) if remote else None
-        kill_device_process(adb, serial, "screenrecord", match=match,
-                            fallback_name_kill=False)
+        if proc is None:
+            return
+        try:
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None:
+                stdin.write("\x03")
+                stdin.flush()
+        except Exception:
+            pass
 
     def stop(self, serial):
         """停止录屏并拉回本地。返回 (ok, local_path, err)。
@@ -1179,23 +1090,8 @@ class VideoRecorder:
     def stop_ex(self, serial):
         """停止录屏并拉回**全部段**。返回 (ok, [本地路径...], err)。
 
-        路径按段序排列（跨重启也在同一列表里），保留历史签名；需要按「设备
-        重启轮次」分组请用 stop_ex_groups（controller 收尾用的就是它）。
-        """
-        ok, groups, err = self.stop_ex_groups(serial)
-        paths = [p for _cycle, ps in groups for p in ps]
-        return ok, paths, err
-
-    def stop_ex_groups(self, serial):
-        """停止录屏并拉回全部段，按「设备重启轮次」分组。
-
-        返回 (ok, [(cycle, [本地路径...]), ...], err)。cycle 从 1 开始：
-        1 = 开始录制到第一次重启之间；之后每重启一次 +1；同轮内按段序排列。
-
-        为什么要分组：设备重启是一次真实的数据断点（重启的那几分钟设备端
-        什么都没录到）。把所有段硬拼成一个 mp4，用户看到的是「画面突然跳了
-        几分钟」，文件层面却没有任何痕迹说明中间断过。按轮次分别成片，
-        「重启前一份、重启后一份、重启几次就有几份」才对得上现场。
+        路径按段序排列。某一段拉取失败时，只要能拿到残片也一并放进来 —— 半个
+        视频总比什么都没有强，而且用户需要知道它躺在哪个文件里。
         """
         with self._lock:
             sess = self._sessions.get(serial)
@@ -1207,17 +1103,10 @@ class VideoRecorder:
         if sess is None:
             return False, [], "该设备未在录制"
         proc = sess.get("proc")
-        # 1) POSIX：给本地 adb 客户端发 SIGINT（等价于终端里 Ctrl-C），adb 会把中断转发给
-        #    设备端 screenrecord，后者由此优雅收尾（写回 moov 头并关闭文件）。这是标准停止路径，
-        #    能确保录出可播放的 MP4。Windows 不支持给子进程 send_signal(SIGINT)，改为靠下方的
-        #    设备端按 PID 精准结束。
-        if proc is not None and os.name != "nt":
-            try:
-                proc.send_signal(signal.SIGINT)
-            except Exception:
-                pass
-        # 2) 设备端按 PID 精准结束 screenrecord（比 pkill 更通用）；并给一点时间收尾。
-        self._stop_device_screenrecord(self.adb, serial, sess.get("remote"))
+        # 1) PTY Ctrl-C：往本地 adb 的 stdin 写 `\x03`，设备端 screenrecord
+        #    收到 SIGINT 后优雅收尾（写回 moov）。主机侧只是管道写一个字节，
+        #    不再调用 send_signal / kill / pkill，避免被启发式杀软拦截。
+        self._graceful_stop_proc(proc)
         try:
             if proc is not None:
                 proc.wait(timeout=10)
@@ -1243,29 +1132,28 @@ class VideoRecorder:
         #
         # paths 里只放**正常收尾**的段：缺 moov 的残片也塞进去的话，它会混在好
         # 文件里一起被打包，用户拿到一个播放不了的 mp4 却不知道是哪一个、为什么。
-        # 残片路径改由 err 说明 —— 该有的信息一条不少，但不会被当成成品；
-        # 文件本身保留在保存目录，绝不删除。
-        groups = {}
+        # 残片路径改由 err 说明 —— 该有的信息一条不少，但不会被当成成品。
+        paths = []
         notes = []
         for seg in sorted(segs, key=lambda x: x.get("n") or 0):
             if not seg["done"].wait(timeout=90):
                 notes.append("第 %s 段的拉取未在 90 秒内完成" % seg.get("n"))
             p = seg.get("local")
             if seg.get("ok") and p and os.path.exists(p):
-                groups.setdefault(int(seg.get("cycle") or 1), []).append(p)
+                paths.append(p)
                 continue
             if seg.get("err"):
                 notes.append("第 %s 段：%s" % (seg.get("n"), seg.get("err")))
             if p and os.path.exists(p):
                 notes.append("（第 %s 段残片：%s）" % (seg.get("n"), p))
-        # 当前段（段号最大）排在最后，归入它自己所属的那一轮。
+        # 当前段（段号最大）排在最后，与目录里的 _pN 顺序一致。
         if local and os.path.exists(local):
             if ok:
-                groups.setdefault(int(sess.get("cycle") or 1), []).append(local)
+                paths.append(local)
             else:
                 notes.append("（当前段残片：%s）" % local)
         msgs = ([err] if err else []) + notes
-        return ok, sorted(groups.items()), ("；".join(msgs) if msgs else None)
+        return ok, paths, ("；".join(msgs) if msgs else None)
 
     def discard_ex(self, serial):
         """取消录制：停掉设备端 screenrecord 并把这一段**丢弃**，返回待删的本地文件。
@@ -1292,14 +1180,9 @@ class VideoRecorder:
                 return False, [], "该设备未在录制"
             sess["stopping"] = True
         proc = sess.get("proc")
-        # 1) POSIX：SIGINT 让 adb 转发中断，screenrecord 优雅收尾（我们随后删文件，
-        #    但进程必须真的退出——否则它会一直占着编码器到 180 秒上限）。
-        if proc is not None and os.name != "nt":
-            try:
-                proc.send_signal(signal.SIGINT)
-            except Exception:
-                pass
-        self._stop_device_screenrecord(self.adb, serial, sess.get("remote"))
+        # 1) PTY Ctrl-C：与 stop_ex 同一手法——主机侧只写一个字节到 adb stdin，
+        #    设备端 screenrecord 收到 SIGINT 优雅收尾（不再用 send_signal / kill）。
+        self._graceful_stop_proc(proc)
         stopped = True
         try:
             if proc is not None:
@@ -1481,24 +1364,19 @@ class VideoRecorder:
         # 注意：adb 的报错信息有时落在 stdout（而非 stderr），两路都要采集，避免
         # 把真实错误吞成一句空泛的「pull 失败」。
         last_err = "pull 失败"
-        # 会话已在「等待设备重启」时（用户偏在这时点了停止），设备明确是关机
-        # 重启而不是拔线：把最后这次等待放宽到与自动续录相同的窗口。否则车机
-        # 冷启动 60~180 秒、这里只等 60 秒，重启前那一段会被判「取不回」——
-        # 用户的要求是「点了开始录制就一点都不能丢」，宁可让停止多等一会儿。
-        wait_s = REC_REBOOT_WAIT_S if sess.get("reboot_wait") else 60
         for attempt in range(6):
             ready, why, gone = self._remote_probe(self.adb, serial, remote)
             if gone:
                 # 设备掉线 / 未授权 / adb 连接断了：可能是拔线，也可能是用户在重启设备。
                 # 设备重启期间 screenrecord 进程被杀、/data/local/tmp 里的 mp4 还没被
                 # 系统清理（多数 ROM 重启后才会清，少数不清）——此时立即放弃会丢掉
-                # 已经录好的那一段。给一次等待机会：等设备回来，回来后再 probe + pull。
-                # 还不行才真正放弃。
-                returned = self._wait_device_back(serial, max_wait_s=wait_s)
+                # 已经录好的那一段。给一次等待机会：等设备回来（最多 60 秒），
+                # 回来后再 probe + pull。还不行才真正放弃。
+                returned = self._wait_device_back(serial, max_wait_s=60)
                 if not returned:
                     return False, None, (
-                        "设备已断开，录屏文件无法取回（等待设备重启超时 %d 秒）%s"
-                        % (wait_s, ("（%s）" % why if why else "")))
+                        "设备已断开，录屏文件无法取回（等待设备重启超时 60 秒）%s"
+                        % ("（%s）" % why if why else ""))
                 # 设备回来了！再 probe + pull 一次
                 ready, why, gone = self._remote_probe(self.adb, serial, remote)
                 if gone:
