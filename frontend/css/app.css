@@ -727,6 +727,20 @@ input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
   font: 400 9px/1 var(--font-mono); letter-spacing: .3em;
   color: var(--faint); margin-top: 10px; white-space: nowrap;
 }
+/* 红色警示铭牌：收起后没有任何受控（勾选）设备时，竖排文字改显
+   「未选中任何设备」。此时用户的每一发操作都没有目标，但收起态看不到
+   列表里的勾选框——若还显示「已连接设备」会产生「有设备可用」的错觉。
+   用告警红 + 轻微文字光晕 + 呼吸提醒，让「没有操作目标」在窄轨上一眼可见。 */
+.main-row.sidebar-collapsed .sidebar-title-text.warn {
+  color: var(--err);
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(255, 95, 107, .45);
+  animation: warn-breathe 2.4s ease-in-out infinite;
+}
+@keyframes warn-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
 /* 窄轨里设备数徽章仍可见（一屏几台设备，收起也看得到），但只留数字 */
 .main-row.sidebar-collapsed .count-unit { display: none; }
 .main-row.sidebar-collapsed .side-sub,
@@ -797,6 +811,54 @@ input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
 .device-card .dev-info:focus-visible {
   color: var(--accent); border-color: var(--accent); opacity: 1;
   outline: none;
+}
+
+/* ---------------- 设备卡勾选：印章式 ✅（区别于全局 iOS 开关） ----------------
+   设备行是「选目标仪器」的场景，滑动开关的语义不直观（一排开关像设置项，
+   用户实报「选中效果不显眼」）。改为印章式对勾徽章：
+     · 未选：深色内嵌底 + 发丝描边的「空槽」，安静不抢戏；
+     · 选中：翡翠绿渐变印章 + 白色粗对勾 + 绿色辉光 + 盖章式 pop 动画
+       （缩放过冲回弹），延续 ✅ 的视觉直觉——一眼看出「这台已就绪」。
+     对勾仍用 ::after 画「右 + 下」两条边再旋转 45°（纯 CSS，无额外 DOM）；
+     尺寸比文件区的 17px 方块大一档（20px），列首位置也更醒目。 */
+.device-card input[type="checkbox"] {
+  width: 20px; height: 20px; border-radius: 6px;
+  background: var(--surface-2);
+  border: 1.5px solid var(--line-strong);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .4);
+  transition: background .16s ease, border-color .16s ease,
+              box-shadow .16s ease, transform .16s ease;
+}
+.device-card input[type="checkbox"]:hover {
+  border-color: rgba(61, 220, 132, .55);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .4), 0 0 0 3px rgba(61, 220, 132, .10);
+}
+.device-card input[type="checkbox"]::after {
+  content: ""; position: absolute; top: 50%; left: 50%;
+  width: 5px; height: 10px;
+  border: solid #fff; border-width: 0 2.5px 2.5px 0;
+  background: none; box-shadow: none;
+  transform: translate(-50%, -60%) rotate(45deg);
+  opacity: 0;
+  transition: opacity .14s ease;
+}
+.device-card input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, #4be48a 0%, #2ecc71 48%, #1fa25c 100%);
+  border-color: rgba(255, 255, 255, .38);
+  box-shadow: 0 0 0 1px rgba(46, 204, 113, .32),
+              0 0 13px rgba(46, 204, 113, .5),
+              inset 0 1px 0 rgba(255, 255, 255, .4);
+  animation: devcheck-pop .3s cubic-bezier(.34, 1.56, .64, 1);
+}
+.device-card input[type="checkbox"]:checked::after {
+  left: 50%;
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, .55));
+}
+@keyframes devcheck-pop {
+  0% { transform: scale(.72); }
+  55% { transform: scale(1.16); }
+  100% { transform: scale(1); }
 }
 
 /* ---------------- 可拖动分隔条（发丝线，拖动时点亮磷光青） ---------------- */

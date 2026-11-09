@@ -1,8 +1,10 @@
 /* jsdom 前端行为测试：设备栏折叠态铭牌随勾选联动
    回归背景：窄轨折叠后底部铭牌恒显「N / 已连接设备」，但收起后所有操作都
-   作用于受控（勾选）设备，「选中几台」反而看不到。现约定：
+   作用于受控（勾选）设备，「选中几台」反而看不到；一台没选时若还显示
+   「已连接设备」会让用户误以为有操作目标（用户实报）。现约定：
      折叠 + 有勾选  →  徽章=勾选数，竖排文字「已选中设备」；
-     折叠 + 无勾选  →  回落「N / 已连接设备」（否则永远「已选中0」）；
+     折叠 + 无勾选  →  徽章清空，竖排文字红色警示「未选中任何设备」（挂
+                       .warn 类：告警红 + 呼吸动画，CSS 呈现）；
      展开态        →  恒为「N 台 + 已连接设备」，不受勾选影响。 */
 const fs = require("fs");
 const path = require("path");
@@ -71,6 +73,7 @@ async function boot() {
   const doc = window.document;
   const badge = () => doc.getElementById("dev-count").textContent;
   const label = () => doc.querySelector(".sidebar-title-text").textContent;
+  const labelEl = () => doc.querySelector(".sidebar-title-text");
   const unitHidden = () => doc.getElementById("dev-count-unit").hidden;
   const collapsed = () => doc.querySelector(".main-row").classList.contains("sidebar-collapsed");
 
@@ -91,22 +94,26 @@ async function boot() {
   ok(badge() === "1", "徽章改为勾选数 1（实际 " + badge() + "）");
   ok(label() === "已选中设备", "文字为「已选中设备」");
 
-  console.log("\n[3] 折叠 + 全部取消勾选：回落「已连接 N」");
+  console.log("\n[3] 折叠 + 全部取消勾选：红色警示「未选中任何设备」");
   batches.push([{ kind: "devices", payload: { items: [dev("A1", false), dev("B2", false)] } }]);
-  ok(await waitFor(() => badge() === "2" && label() === "已连接设备", 4000, "回落已连接"),
-     "无勾选时回落徽章 2 /「已连接设备」（实际 " + badge() + " / " + label() + "）");
+  ok(await waitFor(() => badge() === "" && label() === "未选中任何设备", 4000, "警示铭牌"),
+     "无勾选时铭牌改为「未选中任何设备」且徽章清空（实际 " + badge() + " / " + label() + "）");
+  ok(labelEl().classList.contains("warn"), "竖排文字挂 .warn 类（红色警示，CSS 呈现）");
+  ok(unitHidden(), "「台」单位一并隐藏");
 
-  console.log("\n[4] 折叠 + 重新勾选两台：徽章跟随为 2");
+  console.log("\n[4] 折叠 + 重新勾选两台：徽章跟随为 2，警示撤销");
   batches.push([{ kind: "devices", payload: { items: [dev("A1", true), dev("B2", true)] } }]);
   ok(await waitFor(() => badge() === "2" && label() === "已选中设备", 4000, "勾选数联动"),
      "两台全勾选时徽章 2 /「已选中设备」（实际 " + badge() + " / " + label() + "）");
+  ok(!labelEl().classList.contains("warn"), "有勾选后 .warn 类移除");
 
-  console.log("\n[5] 重新展开：铭牌恢复「已连接 N 台」");
+  console.log("\n[5] 重新展开：铭牌恢复「已连接 N 台」，警示样式撤干净");
   doc.getElementById("btn-sidebar-collapse").click();
   await sleep(80);
   ok(!collapsed(), "回到展开态");
   ok(badge() === "2", "徽章恢复连接数 2（实际 " + badge() + "）");
   ok(label() === "已连接设备", "文字恢复「已连接设备」");
+  ok(!labelEl().classList.contains("warn"), "展开态不挂 .warn 类");
   ok(unitHidden() === false, "「台」单位恢复可见");
 
   console.log("\n" + "=".repeat(46));

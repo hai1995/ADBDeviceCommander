@@ -5895,23 +5895,33 @@
   /* 折叠态铭牌随勾选联动：窄轨底部是「徽章 + 竖排文字」的小铭牌，默认显示
      「N / 已连接设备」。但收起后用户的每一发操作都作用于**受控（勾选）**
      设备，此时「选中几台」比「连了几台」更值得贴在铭牌上——所以有勾选时
-     改显「N / 已选中设备」，一台没选时回落「已连接设备」（否则收起态永远
-     「已选中0」，信息量为零）。展开态列表就摊在旁边，勾选状态一目了然，
-     铭牌恒为「N 台 + 已连接设备」，不受勾选影响。
+     改显「N / 已选中设备」；一台没选时改显红色「未选中任何设备」——收起后
+     用户看不到列表里的勾选框，若还显示「已连接设备」会让用户误以为当前
+     操作有目标设备，一发指令下去只会撞上「未选择设备」的报错（用户实报）。
+     红色 + 告警色块让「现在没有任何操作目标」一眼可见。
+     展开态列表就摊在旁边，勾选状态一目了然，铭牌恒为「N 台 + 已连接设备」，
+     不受勾选影响。
      renderDevices（设备事件 / 勾选广播）与 applySidebarCollapsed（收起 /
      展开）都调这里，保证两条触发路径收敛到同一份显示逻辑。 */
   function refreshSidebarNameplate() {
     const collapsed = sidebarCollapsed();
     const sel = devices.filter((d) => d.checked).length;
     const showSel = collapsed && sel > 0;
-    const n = showSel ? sel : devices.length;
-    if (els.devCount) els.devCount.textContent = n ? String(n) : "";
-    if (els.devCountUnit) els.devCountUnit.hidden = n === 0;
+    const warn = collapsed && sel === 0;   // 收起但没有任何受控设备 → 红色警示
+    if (els.devCount) {
+      els.devCount.textContent = warn
+        ? ""
+        : (showSel ? String(sel) : (devices.length ? String(devices.length) : ""));
+    }
+    if (els.devCountUnit) els.devCountUnit.hidden = warn || !devices.length;
     const label = els.deviceSidebar
       && els.deviceSidebar.querySelector(".sidebar-title-text");
     if (label) {
-      const want = showSel ? "已选中设备" : "已连接设备";
+      const want = warn ? "未选中任何设备" : (showSel ? "已选中设备" : "已连接设备");
       if (label.textContent !== want) label.textContent = want;
+      if (label.classList.contains("warn") !== warn) {
+        label.classList.toggle("warn", warn);
+      }
     }
   }
   function applySidebarCollapsed(collapsed, persist = true) {

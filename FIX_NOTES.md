@@ -4601,3 +4601,53 @@ Windows 恢复优雅停止 + 写回 moov。
 
 - 前端 **89 个用例文件全绿**（含新增回归：旧代码 3 断言失败、新代码全过）
 - 后端 `test_backend_screen.py` **69 passed**（本轮无后端改动）
+
+---
+
+# 第六十四轮（收起态红色警示「未选中任何设备」+ 设备卡勾选改印章式 ✅）
+
+## 用户反馈
+
+1. 没勾选任何设备时，设备列表收起后只显示「N / 已连接设备」，用户感知不到
+   「当前没有操作目标」，一发指令就撞上「未选择设备」的报错；
+2. 设备行的选中效果是 iOS 滑动开关，不显眼——要换成视觉效果更强的 ✅
+   （好看艺术点的）。
+
+## 改动 1：收起 + 无勾选 → 红色警示铭牌
+
+[refreshSidebarNameplate](file:///workspace/frontend/js/app.js#L5906-L5926)
+新增 warn 态：`collapsed && sel === 0` 时——
+
+- 徽章清空（`:has(.count-num:empty)` 自动把 pill 藏掉），「台」一并隐藏；
+- 竖排文字改「未选中任何设备」，挂 `.warn` 类；
+- CSS（[app.css](file:///workspace/frontend/css/app.css#L730-L743)）：告警红
+  `var(--err)` + 600 字重 + 红色文字光晕 + 2.4s 呼吸动画（`warn-breathe`），
+  收起态一眼可见「现在没有任何操作目标」。
+
+约定变为四态：折叠+有勾选 → 「N / 已选中设备」；折叠+无勾选 → 红色「未选中
+任何设备」；展开态 → 恒「N 台 + 已连接设备」。
+
+## 改动 2：设备卡勾选从滑动开关改为印章式 ✅
+
+设备行是「选目标仪器」，一排滑动开关语义像设置项（文件区此前同样理由改过
+方块复选框）。本次（[app.css](file:///workspace/frontend/css/app.css#L816-L862)）
+给 `.device-card input[type="checkbox"]` 专门一套样式，全局开关 / Logcat
+小开关 / 文件区方块互不影响：
+
+- 未选：20px 圆角「空槽」——深色内嵌底 + 发丝描边，hover 绿描边提亮；
+- 选中：翡翠绿三段渐变印章（#4be48a → #2ecc71 → #1fa25c）+ 白色粗对勾
+  （::after 右+下两边旋转 45°，2.5px 笔画 + 白光晕 drop-shadow）+ 绿色外辉光
+  + 盖章式 pop 回弹动画（`devcheck-pop`，scale .72 → 1.16 → 1，弹性曲线）；
+- 键盘 focus-visible 焦点环沿用全局规则；`prefers-reduced-motion: reduce`
+  的全局降级规则自动关掉两个新动画；
+- 选中后卡片的磷光青描边 / 辉光不变——青（卡）+ 绿（✅）相邻色相不冲突，
+  ✅ 的「已就绪」直觉一眼可读。
+
+## 测试
+
+- [sidebar_nameplate.test.cjs](file:///workspace/tests/frontend/sidebar_nameplate.test.cjs)
+  第 [3]/[4]/[5] 节改为新约定：无勾选 → 徽章空 + 文案 + `.warn` 类；重新
+  勾选 → 徽章 2 + warn 撤销；展开 → warn 撤净。**18 通过 / 0 失败**；
+- 全量：后端 **1390 passed / 1 skipped**；前端 **89 文件 0 失败**（含
+  checkbox_switch_style 的全局开关断言——本次只加了 `.device-card` 作用域
+  规则，未动全局）。
