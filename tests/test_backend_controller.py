@@ -5134,3 +5134,57 @@ def test_device_clock_returns_none_when_unavailable(monkeypatch):
         raise FileNotFoundError("adb")
     monkeypatch.setattr(screen_service.subprocess, "run", boom)
     assert screen_service.device_clock("adb", "A1") is None
+
+
+# ---------------------------------------------------------------------------
+# 麦克风权限：Windows 桌面程序没有运行时授权弹窗，被拒时必须替用户打开
+# 系统设置页（唯一能授权的入口），而不是只丢一句「启动失败」
+# ---------------------------------------------------------------------------
+def test_mic_permission_check_opens_settings_when_denied(monkeypatch):
+    """被隐私设置拦住时自动打开设置页，并说明下一步该点什么。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "mic_probe", lambda: {
+        "ok": False, "devices": 1, "error_code": 3, "privacy": True,
+        "reason": "麦克风无法打开：错误码 3（麦克风被系统禁用）"})
+    opened = []
+
+    def _open():
+        opened.append(1)
+        return True, ""
+
+    patch_ctrl(monkeypatch, "open_mic_privacy_settings", _open)
+    res = api.mic_permission_check(True)
+    assert res["ok"] is False
+    assert res["settings_opened"] is True
+    assert opened == [1]
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("已打开系统「麦克风」设置" in t for t in texts), texts
+
+
+def test_mic_permission_check_does_not_open_settings_when_busy(monkeypatch):
+    """设备被占用不是权限问题：不能把用户引到隐私设置页去瞎改。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "mic_probe", lambda: {
+        "ok": False, "devices": 1, "error_code": 4, "privacy": False,
+        "reason": "麦克风无法打开：错误码 4（设备已被占用）"})
+
+    def _open():
+        raise AssertionError("设备占用时不应打开隐私设置")
+
+    patch_ctrl(monkeypatch, "open_mic_privacy_settings", _open)
+    res = api.mic_permission_check(True)
+    assert res["ok"] is False and res["settings_opened"] is False
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("占用" in t for t in texts), texts
+
+
+def test_mic_permission_check_reports_available(monkeypatch):
+    """可用时明确报出设备数，用户才知道「权限已经没问题」。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "mic_probe", lambda: {
+        "ok": True, "devices": 2, "error_code": 0,
+        "privacy": False, "reason": ""})
+    res = api.mic_permission_check(True)
+    assert res["ok"] is True and res["settings_opened"] is False
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("电脑麦克风可用" in t and "2 个" in t for t in texts), texts

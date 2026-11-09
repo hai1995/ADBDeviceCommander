@@ -49,6 +49,7 @@
     toolRecStop: $("tool-rec-stop"),
     toolRecCancel: $("tool-rec-cancel"),
     recLogcat: $("rec-logcat"), recMic: $("rec-mic"), recZip: $("rec-zip"),
+    recMicPerm: $("rec-mic-perm"),
     recPointerLocation: $("rec-pointer-location"), recShowTouches: $("rec-show-touches"),
     // 应用安装（APK）
     apkPick: $("apk-pick"), apkInstall: $("apk-install"), apkFile: $("apk-file"),
@@ -2870,6 +2871,9 @@
     if (els.toolRecCancel) els.toolRecCancel.disabled = !running;
     els.recLogcat.disabled = running;
     if (els.recMic) els.recMic.disabled = running;
+    // 录制中不让人做权限探测：麦克风已被本程序占用，此时探测只会得到
+    // 「设备被占用」，反而误导用户。
+    if (els.recMicPerm) els.recMicPerm.disabled = running;
     els.recZip.disabled = running;
     els.recPointerLocation.disabled = running;
     els.recShowTouches.disabled = running;
@@ -6728,6 +6732,29 @@
      ["recPointerLocation", "rec_pointer_location"],
      ["recShowTouches", "rec_show_touches"]].forEach(([el, key]) => {
       if (els[el]) els[el].addEventListener("change", () => persistPref(key, !!els[el].checked));
+    });
+    /* 麦克风权限：Windows 对桌面程序**没有**运行时授权弹窗（权限在系统隐私
+       设置里统一开关），所以「勾选了却没声音」时用户完全无处可点。勾选开关
+       或点「麦克风权限」时让后端实际打开一次麦克风做判定；被系统拒绝就直接
+       拉起设置页 —— 这是唯一能申请到权限的入口。用户去设置里允许后切回本
+       程序（window focus）会自动复查，成功即提示可用。 */
+    let micPermPending = false;
+    async function checkMicPermission() {
+      const res = await callApi(api.mic_permission_check(true));
+      if (!res) return;
+      micPermPending = !res.ok && !!res.privacy;
+    }
+    if (els.recMic) {
+      els.recMic.addEventListener("change", () => {
+        if (els.recMic.checked) checkMicPermission();
+      });
+    }
+    if (els.recMicPerm) {
+      els.recMicPerm.addEventListener("click", () => checkMicPermission());
+    }
+    window.addEventListener("focus", () => {
+      // 只在「上次被判为被隐私设置拦住」时复查：普通获得焦点不打扰麦克风。
+      if (micPermPending) checkMicPermission();
     });
     // 工具区子 tab：点击切换 + 长按拖动排序（与指令卡同一套长按手势）
     bindToolSubtabs();

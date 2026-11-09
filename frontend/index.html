@@ -348,6 +348,8 @@
             <div class="rec-opts">
               <label class="chk"><input type="checkbox" id="rec-logcat" checked>同步录制 logcat</label>
               <label class="chk" title="录制本机麦克风的说话声（不是电脑正在播放的声音）；仅 Windows，需在系统「隐私和安全性 → 麦克风」里允许桌面应用访问，停止后需本机 ffmpeg 才能合成进视频"><input type="checkbox" id="rec-mic">同步录制电脑麦克风</label>
+              <button class="btn tiny" id="rec-mic-perm" type="button"
+                      title="检查麦克风是否可用；若被系统隐私设置拒绝，会直接打开 Windows「麦克风」设置页">麦克风权限</button>
               <label class="chk"><input type="checkbox" id="rec-zip" checked>结束录制后自动压缩为 zip</label>
               <!-- 可视化回放辅助（默认开启）：回顾录像时能直观看到「手点了哪儿」。
                    两项都是设备系统设置的屏幕 overlay（系统开发者选项同款），
@@ -356,7 +358,7 @@
               <label class="chk"><input type="checkbox" id="rec-pointer-location" checked>指针位置（画面常驻准星，跟随触摸）</label>
               <label class="chk"><input type="checkbox" id="rec-show-touches" checked>触摸圆点（触摸时屏幕出圆点）</label>
             </div>
-            <div class="tool-desc dim">logcat 走落盘抓取：<b>全部缓冲区</b>（main / system / events / crash / radio …）＋ <b>全部级别</b>（V/D/I/W/E/F），不做任何过滤与截断，结束录制时随视频一并打包（若勾选压缩）。<b>电脑麦克风</b>录的是<b>本机麦克风</b>的说话声，不是电脑正在播放的声音（系统声音回环暂不支持）；仅 Windows 可用，需在系统「隐私和安全性 → 麦克风」允许桌面应用访问，且停止时需本机 <code>ffmpeg</code> 才能把声音合成进视频（缺 ffmpeg 时保留无音轨视频并提示）。指针位置 / 触摸圆点为设备系统 overlay（settings put system pointer_location / show_touches），停止录屏时自动恢复设备原设置。取消录制 = 停止并删除本次已产生的文件（不合并、不打包）。</div>
+            <div class="tool-desc dim">logcat 走落盘抓取：<b>全部缓冲区</b>（main / system / events / crash / radio …）＋ <b>全部级别</b>（V/D/I/W/E/F），不做任何过滤与截断，结束录制时随视频一并打包（若勾选压缩）。<b>电脑麦克风</b>录的是<b>本机麦克风</b>的说话声，不是电脑正在播放的声音（系统声音回环暂不支持）；仅 Windows 可用，需在系统「隐私和安全性 → 麦克风」允许桌面应用访问（勾选开关或点「麦克风权限」时会实际检测；被拒时自动打开该设置页），且停止时需本机 <code>ffmpeg</code> 才能把声音合成进视频（缺 ffmpeg 时保留无音轨视频并提示）。指针位置 / 触摸圆点为设备系统 overlay（settings put system pointer_location / show_touches），停止录屏时自动恢复设备原设置。取消录制 = 停止并删除本次已产生的文件（不合并、不打包）。</div>
             <!-- 录制时长 / 自动分段 / 拼接说明（常驻，放在操作区块**下方**）：
                  Android 的 screenrecord 单段硬上限就是 180 秒，不传 --time-limit
                  时到点是被系统掐断的。这段话必须常驻 —— 用户往往录到一半才发现

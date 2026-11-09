@@ -25,6 +25,7 @@ from core.constants import (
 _MM_ERROR_TEXT = {
     1: "未指明的错误",
     2: "设备号越界（这台机器上没有这个录音设备）",
+    3: "麦克风被系统禁用（Windows 隐私设置未允许桌面应用访问麦克风）",
     4: "设备已被占用（别的程序正在录音？）",
     5: "句柄无效",
     6: "没有可用的音频驱动",
@@ -44,6 +45,96 @@ _MM_ERROR_TEXT = {
 # 声道」的顺序逐个试，**只有 32 才换下一种**：设备被占用（4）、无驱动（6）
 # 这类错误换格式也不会好，必须原样报出来，否则用户永远查不到真正原因。
 _MIC_FORMATS = ((2, 44100), (2, 48000), (1, 48000), (1, 44100), (1, 16000))
+
+# waveInOpen 在「系统隐私设置禁止桌面应用访问麦克风」时返回 3
+# （MMSYSERR_NOTENABLED：驱动没加载 / 设备未启用）。Windows 对桌面程序
+# **不会**弹「是否允许使用麦克风」的授权框——没有 UWP 那样的运行时请求，
+# 权限只能由系统设置页统一控制。这个错误码就是用户唯一能拿到的「被拒」信号，
+# 必须翻译成「去哪儿点一下」，而不是一句「启动失败」。
+_PRIVACY_MM_ERROR = 3
+
+
+class _WAVEFORMATEX(ctypes.Structure):
+    """WinMM PCM 采集格式。MicRecorder._open 与 mic_probe 共用一份定义。"""
+
+    _fields_ = [
+        ("wFormatTag", ctypes.c_ushort),
+        ("nChannels", ctypes.c_ushort),
+        ("nSamplesPerSec", ctypes.c_uint),
+        ("nAvgBytesPerSec", ctypes.c_uint),
+        ("nBlockAlign", ctypes.c_ushort),
+        ("wBitsPerSample", ctypes.c_ushort),
+        ("cbSize", ctypes.c_ushort),
+    ]
+
+
+def mic_probe():
+    """实际打开一次麦克风（随即关闭，不录音）以判定「能不能录」。
+
+    为什么不能只数设备：隐私开关关掉时设备仍可能被枚举，只有真正调用
+    waveInOpen 才拿得到错误码。返回：
+
+        {"ok", "devices", "error_code", "privacy", "reason"}
+
+    ``privacy`` 表示「像是被系统隐私策略拦住了」（错误码 3 或一个设备都没有），
+    调用方据此决定要不要替用户打开设置页；设备被占用（4）不在此列。
+    """
+    if os.name != "nt":
+        return {"ok": False, "devices": 0, "error_code": None, "privacy": False,
+                "reason": "电脑麦克风录音仅支持 Windows（依赖 WinMM waveIn）"}
+    try:
+        winmm = ctypes.windll.winmm
+    except Exception as e:
+        return {"ok": False, "devices": 0, "error_code": None, "privacy": False,
+                "reason": "无法加载 WinMM：%s" % e}
+    try:
+        devices = int(winmm.waveInGetNumDevs())
+    except Exception:
+        devices = 0
+    if devices <= 0:
+        return {"ok": False, "devices": 0, "error_code": None, "privacy": True,
+                "reason": "系统没有可用的录音设备（没有麦克风，或系统隐私设置"
+                          "关闭了桌面应用的访问权限）"}
+    last_err = None
+    for channels, rate in _MIC_FORMATS:
+        block_align = channels * (16 // 8)
+        fmt = _WAVEFORMATEX(
+            1, channels, rate, rate * block_align, block_align, 16, 0)
+        phwi = ctypes.c_void_p()
+        # 轮询模式（不带回调、不 Start）：只验证「能不能打开」，随即关闭。
+        mr = winmm.waveInOpen(
+            ctypes.byref(phwi), 0, ctypes.byref(fmt), 0, 0, 0)
+        if not mr:
+            try:
+                winmm.waveInClose(phwi)
+            except Exception:
+                pass
+            return {"ok": True, "devices": devices, "error_code": 0,
+                    "privacy": False, "reason": ""}
+        last_err = mr
+        if mr != 32:      # 只有「格式不支持」才值得换下一种，见 _MIC_FORMATS
+            break
+    return {"ok": False, "devices": devices, "error_code": last_err,
+            "privacy": last_err == _PRIVACY_MM_ERROR,
+            "reason": "麦克风无法打开：错误码 %s（%s）"
+                      % (last_err,
+                         _MM_ERROR_TEXT.get(last_err, "未知错误"))}
+
+
+def open_mic_privacy_settings():
+    """打开 Windows「麦克风」隐私设置页；返回 (ok, 原因)。
+
+    桌面程序没有运行时授权弹窗，这个设置页是**唯一**能授予/收回麦克风权限的
+    地方（「让桌面应用访问你的麦克风」）。打不开时如实返回原因，由调用方提示
+    用户手动前往，绝不假装已经申请过。
+    """
+    if os.name != "nt":
+        return False, "仅 Windows 支持系统麦克风隐私设置"
+    try:
+        os.startfile("ms-settings:privacy-microphone")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 def _check_mmresult(mr, what):
@@ -494,17 +585,8 @@ class MicRecorder:
         WAVE_FORMAT_PCM = 1
         CALLBACK_FUNCTION = 0x30000
 
-        class WAVEFORMATEX(ctypes.Structure):
-            _fields_ = [
-                ("wFormatTag", ctypes.c_ushort),
-                ("nChannels", ctypes.c_ushort),
-                ("nSamplesPerSec", ctypes.c_uint),
-                ("nAvgBytesPerSec", ctypes.c_uint),
-                ("nBlockAlign", ctypes.c_ushort),
-                ("wBitsPerSample", ctypes.c_ushort),
-                ("cbSize", ctypes.c_ushort),
-            ]
-
+        # 结构体定义在模块级（mic_probe 也用同一份）；这里只取别名。
+        WAVEFORMATEX = _WAVEFORMATEX
         self._winmm = winmm
         self._WAVEFORMATEX = WAVEFORMATEX
         WAVE_CALLBACK = ctypes.CFUNCTYPE(

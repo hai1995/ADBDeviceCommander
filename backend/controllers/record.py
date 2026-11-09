@@ -5,6 +5,7 @@ from backend.controller import (
     DeviceAudioCapture, KEY_POINTER_LOCATION, KEY_SHOW_TOUCHES, MicRecorder,
     PipeMirror, SnapMirror, _have_ffmpeg, ffmpeg_mux,
     find_player, find_scrcpy, load_prefs, os,
+    mic_probe, open_mic_privacy_settings,
     plan_size, probe_player, safe_name, scrcpy_probe_info,
     ThreadPoolExecutor, time, zipfile
 )
@@ -75,6 +76,47 @@ class RecordMixin:
             self._mic = None
             return False, p
         return True, p
+
+    def mic_permission_check(self, open_settings=False):
+        """检查电脑麦克风能不能真录（含 Windows 隐私权限），供前端勾选时调用。
+
+        背景：Windows 对桌面程序**没有**「是否允许使用麦克风」的运行时弹窗——
+        权限由「设置 → 隐私和安全性 → 麦克风 → 让桌面应用访问你的麦克风」统一
+        控制，关掉时 waveInOpen 直接返回 3。用户看到的就只有「启动失败」，
+        观感上就是「程序根本没申请权限」。
+
+        这里做三件事（都不录音）：
+          1) 枚举设备并实际打开一次麦克风，随即关闭；
+          2) 判定是不是被隐私策略拦住的（错误码 3 / 没有任何录音设备）；
+          3) open_settings=True 且确实被拦时，直接拉起系统设置页 —— 用户点一下
+             「允许桌面应用访问麦克风」，回到程序会自动复查。
+
+        返回 {ok, devices, error_code, privacy, reason, settings_opened}。
+        """
+        info = mic_probe()
+        opened = False
+        if open_settings and not info.get("ok") and info.get("privacy"):
+            opened, open_err = open_mic_privacy_settings()
+            if not opened:
+                self._push_toast(
+                    "warn", "⚠ 无法自动打开系统麦克风设置（%s）：请手动打开"
+                            "「设置 → 隐私和安全性 → 麦克风」，允许桌面应用"
+                            "访问麦克风。" % open_err)
+        if info.get("ok"):
+            self._push_status(
+                "info", "✓ 电脑麦克风可用（检测到 %d 个录音设备）"
+                        % int(info.get("devices") or 0))
+        else:
+            self._push_status(
+                "warn", "⚠ %s。%s"
+                        % (info.get("reason") or "电脑麦克风不可用",
+                           "已打开系统「麦克风」设置：请打开「让桌面应用访问"
+                           "你的麦克风」，回到本程序会自动复查。" if opened else
+                           "请在「设置 → 隐私和安全性 → 麦克风」中允许桌面应用"
+                           "访问麦克风后重试。"))
+        res = dict(info)
+        res["settings_opened"] = opened
+        return res
 
     def screen_record_start(self, serial=None,
                             with_devaudio=False, with_mic=False, save_dir=None,
@@ -178,14 +220,23 @@ class RecordMixin:
                         "合成）。安装 ffmpeg 并加入 PATH 后重启本程序即可自动合成。")
             else:
                 self._rec_session["mic_started"] = False
-                # 最常见的两种失败是「系统隐私设置没允许桌面应用用麦克风」和
-                # 「设备被别的程序占用」—— 错误码本身（如 4 / 1）用户看不懂，
-                # 这两句直接告诉人该去哪里改。
+                # 桌面程序没有运行时授权弹窗：被隐私设置拦住（错误码 3 /
+                # 没有录音设备）时，用户只能去系统设置里点一下。这里顺手
+                # 替他打开那一页 —— 否则界面上只有一句「启动失败」，而他
+                # 甚至不知道 Windows 有这么一个开关。
+                info = mic_probe()
+                opened = False
+                if info.get("privacy"):
+                    opened, _open_err = open_mic_privacy_settings()
                 self._push_toast(
                     "warn",
-                    "⚠ 电脑麦克风启动失败：%s（请检查系统「隐私和安全性 → 麦克风」"
-                    "是否允许桌面应用访问，以及麦克风是否被其它程序占用；"
-                    "本次录屏将继续，但没有麦克风声音）" % p)
+                    "⚠ 电脑麦克风启动失败：%s（%s；本次录屏将继续，但没有"
+                    "麦克风声音）"
+                    % (p,
+                       "已打开系统「麦克风」设置，请允许桌面应用访问麦克风"
+                       "后重试" if opened else
+                       "请检查系统「隐私和安全性 → 麦克风」是否允许桌面应用"
+                       "访问，以及麦克风是否被其它程序占用"))
         ok_any = False
 
         def _spawn(s):
