@@ -3,7 +3,8 @@
    收起状态跨会话记忆（config.json 的 sidebar_collapsed），重启恢复。
 
    这里锁定：
-     1. 收起按钮位于设备栏头部、标题之前（箭头 « / » 随状态翻转）；
+     1. 收起按钮位于设备栏头部、标题之前（图标与指令台同一套
+        caret-left / caret-right，随状态翻转——不再用 « » 文本）；
      2. CSS 收起态规则：48px 窄轨 / 分隔条隐藏 / 设备列表与 DEVICES、
         按钮组隐藏，但设备数徽章保留（只藏单位「台」）、标题文字转为
         竖排「铭牌」标签；整轨可点展开（热区委托，按钮目标除外）；
@@ -43,6 +44,15 @@ async function waitFor(fn, ms = 4000, label = "") {
 function cssBlock(sel) {
   const i = css.indexOf(sel + " {");
   return i < 0 ? "" : css.slice(i, css.indexOf("}", i));
+}
+
+/* 收起钮的图标：与指令台同一套 inline SVG（caret-left / caret-right）。
+   取 path 的 d 来判断方向，避免依赖文本字符（« » 已移除）。 */
+const CARET_LEFT = "M15 5l-7 7 7 7";
+const CARET_RIGHT = "M9 5l7 7-7 7";
+function iconPath(btn) {
+  const p = btn && btn.querySelector("svg path");
+  return p ? p.getAttribute("d") : "";
 }
 
 /** 起一个带调用记录的假后端：booted 载荷可指定 settings。 */
@@ -150,7 +160,9 @@ async function booted(win, calls) {
     const row = doc.querySelector(".main-row");
     const btn = doc.getElementById("btn-sidebar-collapse");
     ok(!row.classList.contains("sidebar-collapsed"), "默认展开（无 collapsed class）");
-    ok(btn.textContent === "«", "展开态箭头为 «（实际 " + btn.textContent + "）");
+    ok(iconPath(btn) === CARET_LEFT, "展开态图标为 caret-left（与指令台同一套，实际 "
+       + iconPath(btn) + "）");
+    ok(btn.textContent === "", "按钮内不再有 « » 文本（纯矢量图标）");
     ok(btn.getAttribute("aria-expanded") === "true", "aria-expanded=true");
     ok(saved(calls, "sidebar_collapsed").length === 0,
        "settings 缺省时不写盘（保持界面默认即可）");
@@ -167,7 +179,7 @@ async function booted(win, calls) {
 
     btn.click();
     ok(row.classList.contains("sidebar-collapsed"), "点一下 → 收起（class 加上）");
-    ok(btn.textContent === "»", "收起态箭头翻转为 »");
+    ok(iconPath(btn) === CARET_RIGHT, "收起态图标翻转为 caret-right");
     ok(btn.title === "展开设备栏", "tooltip 变为「展开设备栏」");
     ok(btn.getAttribute("aria-expanded") === "false", "aria-expanded=false");
     ok(await waitFor(() => {
@@ -178,8 +190,8 @@ async function booted(win, calls) {
 
     btn.click();
     ok(!row.classList.contains("sidebar-collapsed"), "再点一下 → 展开（class 移除）");
-    ok(btn.textContent === "«" && btn.getAttribute("aria-expanded") === "true",
-       "箭头与 aria 回到展开态");
+    ok(iconPath(btn) === CARET_LEFT && btn.getAttribute("aria-expanded") === "true",
+       "图标与 aria 回到展开态");
     ok(await waitFor(() => {
       const hit = saved(calls, "sidebar_collapsed").pop();
       return hit && hit.args[0].sidebar_collapsed === false;
@@ -238,13 +250,13 @@ async function booted(win, calls) {
     const btn = doc.getElementById("btn-sidebar-collapse");
     ok(row.classList.contains("sidebar-collapsed"),
        "上次收起 → 重启后保持收起（class 由回填加上）");
-    ok(btn.textContent === "»", "回填后箭头为 »（与收起态一致）");
+    ok(iconPath(btn) === CARET_RIGHT, "回填后图标为 caret-right（与收起态一致）");
     ok(saved(calls, "sidebar_collapsed").length === 0,
        "回填不反向写盘（刚读出来的值不再 save 回去）");
     window.close();
   }
 
-  console.log("\n[8] 收起态：点窄轨可展开，点 « 按钮不被委托顶回");
+  console.log("\n[8] 收起态：点窄轨可展开，点收起按钮不被委托顶回");
   {
     const { window, calls } = mkEnv();
     const doc = window.document;
@@ -257,18 +269,18 @@ async function booted(win, calls) {
     doc.querySelector(".sidebar-title-text")
        .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     ok(!row.classList.contains("sidebar-collapsed"),
-       "点窄轨内的标签 → 展开（整轨热区，不只 » 按钮可展开）");
+       "点窄轨内的标签 → 展开（整轨热区，不只收起/展开按钮可展开）");
     ok(await waitFor(() => {
       const hit = saved(calls, "sidebar_collapsed").pop();
       return hit && hit.args[0].sidebar_collapsed === false;
     }, 3000, "save false via rail"),
        "点轨展开同样落盘 sidebar_collapsed=false");
-    // 再收起：点 « 按钮后事件冒泡到轨委托，必须因目标在按钮内而被跳过，
+    // 再收起：点收起按钮后事件冒泡到轨委托，必须因目标在按钮内而被跳过，
     // 否则会「刚收起又被展开」，表现为按钮失灵
     btn.click();
     await sleep(50);
     ok(row.classList.contains("sidebar-collapsed"),
-       "点 « 按钮只收起（轨委托跳过按钮目标，不会把它顶回展开）");
+       "点收起按钮只收起（轨委托跳过按钮目标，不会把它顶回展开）");
     window.close();
   }
 

@@ -233,6 +233,9 @@ def test_real_source_zip_is_lean(tmp_path):
     assert top + "frontend/index.html" in names, "界面文件必须随源码分发"
     assert not any("__pycache__" in n for n in names)
     assert not any("node_modules" in n for n in names)
+    # 开发期上传的截图 / 临时素材（.uploads/ 常有数 MB）不得混进分发包
+    assert not any(n.startswith(top + "/.uploads/") for n in names), \
+        ".uploads（开发期截图）不得随源码分发"
     assert not any(n.endswith(".pyc") for n in names)
     # 同上：这里必须带 top 前缀，否则断言恒真
     assert top + "settings.json" not in names, "个人运行配置不进分发包"

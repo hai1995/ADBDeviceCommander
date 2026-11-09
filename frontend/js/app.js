@@ -1016,6 +1016,21 @@
     });
   }
 
+  /* 等待某个桥接方法真正可调用：window.pywebview.api 可能先出现、方法后注入，
+     只看 api 对象在不在（hasApi）并不足以保证 api.boot 已是函数。 */
+  function waitForApiMethod(name, timeoutMs) {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      const timer = setInterval(() => {
+        if (api && typeof api[name] === "function") {
+          clearInterval(timer); resolve(true);
+        } else if (Date.now() > deadline) {
+          clearInterval(timer); resolve(false);
+        }
+      }, 100);
+    });
+  }
+
   async function start() {
     if (!hasApi()) await waitForApi(5000);
     if (!hasApi()) {
@@ -1030,14 +1045,37 @@
     }
     api = window.pywebview.api;
     bindUI();
-    // 保存目录默认值向后端索取（单一数据源，避免前后端两份公式漂移）。
-    // 浏览器里没有 process / 环境变量，前端绝不自行拼接路径；取不到就留空，
-    // 后端会用同一份默认目录兜底。
-    await initSaveDirDefault();
-    const res = await callApi(api.boot());
-    if (res && res.ok === false && res.reason === "shutting_down") {
-      setPill("已退出", "err"); return;
+    /* 事件轮询与「booted 5s 兜底」必须先于任何一次初始化调用就位：它们是整个
+       界面唯一的两条自愈通道。放在初始化之后时，只要其中一步抛异常 / 不返回，
+       轮询就没机会启动 —— 界面永久停在「连接中…」，没有任何提示、也不会自己
+       恢复（用户实报的偶发症状）。 */
+    startEventLoop();
+    try {
+      /* 桥接对象就绪 ≠ 方法可调用。方法还没注入时直接 api.boot() 会抛
+         TypeError 把 start() 整个中断（同样是永久「连接中…」），先等它出现。 */
+      await waitForApiMethod("boot", 8000);
+      await initSaveDirDefault();
+      const res = await callApi(api.boot());
+      if (res && res.ok === false && res.reason === "shutting_down") {
+        setPill("已退出", "err");
+      } else if (!res) {
+        /* 调用失败 / 超时：后端可能其实已经启动，只是这次响应丢了。
+           3 秒后重试一次 —— 后端 boot 幂等，已启动会重发 booted 载荷，
+           于是前端仍能回到「已就绪」，而不是干等在「连接中…」。 */
+        pushStatus("warn", "启动请求未完成，3 秒后自动重试…");
+        setPill("启动重试中…", "warn");
+        setTimeout(() => { if (!booted) callApi(api.boot()); }, 3000);
+      }
+    } catch (e) {
+      // 兜底：宁可给出「启动失败 + 真实原因」，也不能安静地停在「连接中…」
+      setPill("启动失败", "err");
+      pushStatus("err", "启动初始化失败：" + (e && e.message ? e.message : e));
     }
+  }
+
+  /* 事件轮询 + 启动兜底。抽出来是为了让它在任何初始化动作**之前**就跑起来：
+     轮询链一旦断了，界面就没有任何自愈路径。 */
+  function startEventLoop() {
     // 事件轮询：空闲时退避到 500ms（降低无事件时的 IPC 频率，省 CPU/电池），
     // 一旦收到事件立即回到 400ms（日志/控制台/状态流动时保持跟手）。用递归
     // setTimeout 而非 setInterval，便于动态调整间隔。
@@ -1069,7 +1107,7 @@
       }
     };
     setTimeout(pollOnce, pollMs);
-    // boot() 返回后 5s 内没收到 booted 事件的兜底：强制启用设备按钮，
+    // 启动后 5s 内没收到 booted 事件的兜底：强制启用设备按钮，
     // 防止「boot 成功了但 booted 事件丢失/延迟」导致按钮永远 disabled。
     setTimeout(() => {
       if (!booted) {
@@ -1083,13 +1121,15 @@
   }
 
   /* 保存目录默认值：来自后端 WebApi.default_save_dir（= 后端 _default_save_dir），
-     与截图/录屏/下载实际写入的位置严格同源。失败时静默留空，不打扰用户。 */
+     与截图/录屏/下载实际写入的位置严格同源。失败时静默留空，不打扰用户。
+     必须带超时：这是启动阶段第一个桥接调用，若桥接尚未真正接通，它的 Promise
+     可能永不 resolve —— 无超时会把 start() 永久挡在这里（界面停在「连接中…」）。 */
   async function initSaveDirDefault() {
     if (els.toolDir.value) return;
     let dir = "";
     try {
-      if (api && api.default_save_dir) {
-        const r = await api.default_save_dir();
+      if (api && typeof api.default_save_dir === "function") {
+        const r = await callApi(api.default_save_dir(), 5);
         if (r && r.dir) dir = String(r.dir);
       }
     } catch (e) { dir = ""; }
@@ -5886,11 +5926,14 @@
     }
     const btn = els.sidebarCollapseBtn;
     if (btn) {
-      btn.textContent = collapsed ? "»" : "«";
+      // 与指令台的收起钮共用同一套图标（caret-left / caret-right）：两处
+      // 表示同一件事，风格必须一致。data-icon 只在启动时注入一次，改它不会
+      // 重绘，所以这里直接替换 svg（与 applyCmdCollapsed 同一手法）。
+      setBtnIcon(btn, collapsed ? "caret-right" : "caret-left");
       btn.title = collapsed ? "展开设备栏" : "收起设备栏";
       btn.setAttribute("aria-expanded", String(!collapsed));
     }
-    // 收起态给整条窄轨挂 title 与 pointer 光标（CSS 配合）：除了 » 按钮，
+    // 收起态给整条窄轨挂 title 与 pointer 光标（CSS 配合）：除了展开钮，
     // 点轨道空白 / 徽章 / 竖排标签也能展开——窄轨没有第二个可点目标，
     // 整轨即热区（见 bindUI 里的 click 委托）。
     if (els.deviceSidebar) {

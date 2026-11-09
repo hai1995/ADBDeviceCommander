@@ -171,6 +171,37 @@ def test_boot_initializes_and_broadcasts(monkeypatch):
     assert sess.killed == 1
 
 
+def test_boot_replay_after_reload(monkeypatch):
+    """页面重载 / 前端重试 boot：必须重发 booted 载荷，而不是一句 already_booted。
+
+    回归：booted 事件只在首次启动时下发一次。前端页面重载（或上一次 boot 响应
+    超时后的自动重试）再调 boot 时，若只拿到 already_booted，就永远等不到
+    booted —— 界面永久停在「连接中…」，命令台 / 配置 / 设备全都恢复不了。
+    重发必须幂等：不重复建会话、不重复起自动轮询 / 首刷。
+    """
+    patch_ctrl(monkeypatch, "load_commands", lambda: (list(CMDS), []))
+    monkeypatch.setattr(
+        ds.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": ""})())
+
+    api = WebApi(session_factory=FakeSession, auto_update=False)
+    assert api.boot() == {"ok": True}
+    sess = api.session
+    api.bus.take()                      # 模拟前端已消费首批事件
+
+    assert api.boot() == {"ok": True, "replayed": True}
+    by_kind = _events_by_kind(api)
+    assert "booted" in by_kind, "重放必须重新广播 booted，否则前端永远停在连接中"
+    replay = by_kind["booted"][0]
+    assert [c["id"] for c in replay["commands"]] == ["pc", "dev"]
+    assert "settings" in replay and "config_path" in replay
+    assert "devices" in by_kind, "设备快照也要重发，否则列表停在空"
+    # 幂等：会话没有重建，自动轮询仍在（且只有原来那一条）
+    assert api.session is sess
+    assert api.workers.is_running("auto_refresh") is True
+    api.shutdown()
+
+
 def test_boot_refuses_after_shutdown(monkeypatch):
     patch_ctrl(monkeypatch, "load_commands", lambda: ([], []))
     api = WebApi(session_factory=FakeSession, auto_update=False)

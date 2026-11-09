@@ -676,8 +676,8 @@ input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
 }
 
 /* ---------------- 设备栏收起态（侧边栏折叠） ----------------
-   点标题前的 « 按钮，整栏缩为一条 48px 的「仪器脊柱」：顶部是方块化的
-   » 展开钮（悬停点磷光青辉光），底部用一发丝线钉住铭牌区——设备数徽章
+   点标题前的 caret 按钮，整栏缩为一条 48px 的「仪器脊柱」：顶部是方块化的
+   展开钮（悬停点磷光青辉光），底部用一发丝线钉住铭牌区——设备数徽章
    （只留等宽数字，「台」由 .count-unit 藏掉）+ 竖排的「已连接设备」
    标签，栏虽收了，身份与在线数还在，像面板上贴着的一张窄铭牌。
    整条轨同时是展开热区（cursor:pointer，js 侧 click 委托；按钮除外）。
@@ -701,10 +701,10 @@ input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
   flex-direction: column; align-items: center;
   padding: 12px 0 14px; border-bottom: none;   /* 没有列表要分隔，横线多余 */
 }
-/* » 展开钮：从文字小按钮升级为 28px 方块控件，磷光青悬停辉光 */
+/* 展开钮：从文字小按钮升级为 28px 方块控件，磷光青悬停辉光。
+   图标与指令台的收起 / 展开钮共用 caret-left / caret-right（矢量，12px）。 */
 .main-row.sidebar-collapsed .sidebar-collapse-btn {
   width: 28px; height: 28px; min-width: 0; padding: 0;
-  font-family: var(--font-mono); font-size: 13px; font-weight: 500;
   color: var(--text-2); background: var(--surface-2);
   border: 1px solid var(--line-strong); border-radius: var(--r-sm);
   box-shadow: none;

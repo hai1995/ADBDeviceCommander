@@ -169,7 +169,15 @@ class WebApiBase:
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
         if self.state.booted:
-            return {"ok": False, "reason": "already_booted"}
+            # 页面重载 / 前端重试 boot（例如上一次响应超时）：booted 事件只在
+            # 首次启动时下发过一次、早已被消费，这里若只回 already_booted，
+            # 前端就永远停在「连接中…」—— 所有配置、命令、设备都无从恢复。
+            # 幂等地把同一份载荷重发一遍；首刷设备 / 预热 adb / 自动轮询等
+            # 副作用不重复执行。命令列表按当前 state 重建（点击计数等是最新值）。
+            payload = self.state.mark_booted(
+                self.state.commands, self.state.cmd_warnings)
+            self._push_boot_events(self._boot_extras(payload))
+            return {"ok": True, "replayed": True}
         commands, warnings = load_commands()
         payload = self.state.mark_booted(
             commands, warnings, adb_path=self.state.adb_path)
@@ -178,35 +186,10 @@ class WebApiBase:
             self.session = self._session_factory(
                 output_callback=self._on_session_output,
                 on_dir_change=self._on_session_dir_change)
-        # adb 就绪状态：about 页展示用；缺失时不阻断启动，改用引导提示
-        adb_info = self._probe_adb()
-        payload["adb_ok"] = adb_info["ok"]
-        payload["adb"] = (adb_info["version"] or adb_info["path"]
-                          if adb_info["ok"] else "adb 未就绪（未在 PATH 中找到）")
-        # 用户配置（config.json）随 booted 下发，前端回填相关控件；
-        # 被防错机制纠正过的字段（手写错类型 / 非法级别等）一并带上下发提示，
-        # 让用户知道「某项配置没生效、已恢复默认」，而不是莫名发现开关复位。
-        settings, settings_warnings = load_prefs_checked()
-        payload["settings"] = settings
-        payload["settings_warnings"] = settings_warnings
-        # 配置文件位置（本机实际落盘路径）与本机实际生效的保存目录。
-        # 前者让用户能在「关于」页看到并拷贝 config.json 去别的电脑同步；
-        # 后者用于路径失效时告知「已改用默认目录」（配置文件里的原值不动）。
-        payload["config_path"] = prefs_path()
-        eff_dir, eff_note = resolve_save_dir(settings)
-        payload["save_dir_effective"] = eff_dir
-        payload["save_dir_note"] = eff_note
-        # 广播：booted（命令列表）+ 初始设备快照（可能为空，前端照常渲染）
-        items = self.devices.get_items()
-        self.bus.push("booted", payload)
-        self.bus.push("devices", {
-            "items": items,
-            "usable": [i["serial"] for i in items if i["ok"]],
-            "added": [], "gone": [], "stat_changed": [],
-            "dropped": [], "changed": True, "count": len(items),
-        })
+        self._push_boot_events(self._boot_extras(payload))
         self._start_auto_refresh()
         # 首刷设备（后台线程，失败也会自行广播错误状态）
+        # （注意：以下副作用只在首次 boot 执行，重发路径不重复）
         self.workers.spawn("refresh", self.devices.refresh,
                            self.state.adb_path, True)
         # adb server 预热：server 不在时要拉起来（冷启一次数百 ms），
@@ -224,6 +207,41 @@ class WebApiBase:
             self.workers.spawn("update_loop", self._update_loop)
         # adb 缺失的引导提示由前端 onBooted（adb_ok=false）统一弹出
         return {"ok": True}
+
+    def _boot_extras(self, payload):
+        """补齐 booted 载荷里的环境 / 配置字段（首次启动与重发共用）。
+
+        adb 就绪状态供关于页展示，缺失时不阻断启动，改用引导提示；
+        用户配置（config.json）随 booted 下发，前端回填相关控件，被防错
+        机制纠正过的字段一并带上下发提示。重发时重新读盘，避免页面重载后
+        看到启动瞬间的旧配置。
+        """
+        adb_info = self._probe_adb()
+        payload["adb_ok"] = adb_info["ok"]
+        payload["adb"] = (adb_info["version"] or adb_info["path"]
+                          if adb_info["ok"] else "adb 未就绪（未在 PATH 中找到）")
+        settings, settings_warnings = load_prefs_checked()
+        payload["settings"] = settings
+        payload["settings_warnings"] = settings_warnings
+        # 配置文件位置（本机实际落盘路径）与本机实际生效的保存目录。
+        # 前者让用户能在「关于」页看到并拷贝 config.json 去别的电脑同步；
+        # 后者用于路径失效时告知「已改用默认目录」（配置文件里的原值不动）。
+        payload["config_path"] = prefs_path()
+        eff_dir, eff_note = resolve_save_dir(settings)
+        payload["save_dir_effective"] = eff_dir
+        payload["save_dir_note"] = eff_note
+        return payload
+
+    def _push_boot_events(self, payload):
+        """广播 booted（命令 / 配置）+ 初始设备快照（可能为空，前端照常渲染）。"""
+        items = self.devices.get_items()
+        self.bus.push("booted", payload)
+        self.bus.push("devices", {
+            "items": items,
+            "usable": [i["serial"] for i in items if i["ok"]],
+            "added": [], "gone": [], "stat_changed": [],
+            "dropped": [], "changed": True, "count": len(items),
+        })
 
     def shutdown(self):
         """窗口关闭：幂等收尾——停全部后台任务、杀会话、等线程退出。"""

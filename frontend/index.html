@@ -56,12 +56,14 @@
     <aside class="device-sidebar" id="device-sidebar">
       <div class="sidebar-head">
         <!-- 设备栏收起 / 展开：收起后整栏缩为窄轨（见 app.css 的
-             .main-row.sidebar-collapsed）——只留 » 展开钮、设备数徽章与
+             .main-row.sidebar-collapsed）——只留展开钮、设备数徽章与
              一条竖排「已连接设备」标签，点窄轨空白处也可展开；
-             状态落盘 config.json（sidebar_collapsed），重启恢复。 -->
+             状态落盘 config.json（sidebar_collapsed），重启恢复。
+             图标与指令台的收起钮共用同一套 caret-left / caret-right，
+             两处风格一致（不再用 « » 文本字符，避免字体差异导致大小不一）。 -->
         <button id="btn-sidebar-collapse" class="btn tiny sidebar-collapse-btn"
                 type="button" title="收起设备栏（再点一次展开）"
-                aria-expanded="true">«</button>
+                aria-expanded="true" data-icon="caret-left"></button>
         <!-- 计数拆成 数字 + 单位 两个 span：收起态用 CSS 藏掉「台」，
              窄轨里只留等宽数字徽章；展开态两者合起来仍是「N 台」。 -->
         <span class="sidebar-title"><span class="sidebar-title-text">已连接设备</span> <span class="count"><span class="count-num" id="dev-count"></span><span class="count-unit" id="dev-count-unit">台</span></span></span>

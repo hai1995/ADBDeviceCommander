@@ -115,6 +115,9 @@ SOURCE_ZIP_EXCLUDE_DIRS = (
     "node_modules", "__pycache__", ".pytest_cache", "build", "dist",
     "dist_stage", ".git", ".svn", ".venv", "venv", "__pypackages__",
     ".idea", ".vscode",
+    # 开发期上传的截图 / 临时素材（几 MB 的 png），只属于本机会话，
+    # 一旦混进源码包会让分发包凭空膨胀数 MB。
+    ".uploads",
 )
 SOURCE_ZIP_EXCLUDE_FILES = (
     "*.pyc", "*.pyo", "*.spec", ".DS_Store", "Thumbs.db", "desktop.ini",

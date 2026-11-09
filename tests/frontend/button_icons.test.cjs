@@ -98,7 +98,7 @@ const watchdog = setTimeout(() => {
       "#btn-cmd-new 去掉全角＋，标签为「新建」");
   }
 
-  console.log("\n[C] 文案会变的按钮不加图标（避免被 textContent 覆盖 / 干扰精确断言）");
+  console.log("\n[C] 运行时会改写的按钮：文案保持纯文字，图标走矢量替换");
   {
     const { window } = mkEnv();
     const doc = window.document;
@@ -106,8 +106,11 @@ const watchdog = setTimeout(() => {
       "#btn-copy-status 无 data-icon");
     ok(doc.getElementById("btn-copy-status").textContent === "复制",
       "#btn-copy-status 仍为纯文字「复制」");
-    ok(doc.getElementById("btn-sidebar-collapse").textContent === "«",
-      "侧栏收起按钮仍为纯箭头 «");
+    // 侧栏收起钮与指令台收起钮共用同一套矢量图标（caret-left / caret-right），
+    // 由 JS 在状态切换时替换 svg，因此这里不再有 « » 文本。
+    const sb = doc.getElementById("btn-sidebar-collapse");
+    ok(!sb.textContent.trim() && !!sb.querySelector("svg path"),
+      "侧栏收起按钮使用矢量图标（不再用 « » 文本）");
     ok(doc.getElementById("modal-close").textContent.trim() === "×", "关闭按钮仍为 ×");
   }
 

@@ -4329,3 +4329,54 @@ should_abort 退出，「设备回来后自动继续录制」当场被掐断，�
 - `tests/test_backend_audio.py`：两个用例删掉未使用的
   `import backend.audio_service as au`（复制粘贴残留）。
 - 验证：`pyflakes` 退出码 0；后端 **1388 passed / 1 skipped**。
+
+## 2026-11-09 — 修复偶发永久「连接中…」+ 统一收起/展开图标
+
+### 1. 偶发一直显示「连接中…」（前端启动链无自愈路径）
+
+现场：启动后顶部状态永久停在「连接中…」，设备不刷新、命令台空白、无任何报错。
+根因是 `start()` 把「事件轮询 + 5s 兜底」放在初始化**之后**，而初始化链上有两个
+可以抛错 / 永不返回的点：
+
+- `api.default_save_dir()` 没有超时：桥接尚未真正接通时 Promise 可能永不 resolve，
+  `start()` 被永久挡住 —— 这是启动阶段第一个桥接调用，风险最高；
+- `window.pywebview.api` 可能先出现、`boot` 方法后注入：此时 `api.boot()` 直接抛
+  `TypeError`，`start()` 整个中断，轮询永远不会启动。
+
+两种情况的表现完全相同：界面停在「连接中…」，既不报错也不会自己恢复。
+修复（[app.js](file:///workspace/frontend/js/app.js#L1034-L1121)）：
+
+- 事件轮询与 5s 兜底抽成 `startEventLoop()`，在**任何**初始化调用之前启动，
+  自愈通道先就位；
+- `default_save_dir` 走 `callApi(..., 5)`，5s 超时放行；
+- 新增 `waitForApiMethod("boot", 8000)`，等方法真正可调用再下发；
+- boot 调用失败 / 超时 → 状态显示「启动重试中…」并 3s 后自动重试一次；
+  抛异常 → 显示「启动失败：<原因>」，不再静默卡死。
+
+后端配合（[base.py](file:///workspace/backend/controllers/base.py#L187-L206)）：
+`boot()` 改为幂等 —— 已启动时不再只回 `already_booted`（那会让页面重载 / 重试的
+前端永远等不到已消费掉的 booted 事件），而是按当前 state 重建载荷、重发
+`booted` + 设备快照；首刷 / 预热 / 自动轮询等副作用不重复执行。
+
+### 2. 「已连接设备」与「指令台」的收起/展开图标统一
+
+- 侧栏原来用文本字符 `«` / `»`，指令台用矢量 `caret-left` / `caret-right`，
+  字体差异下大小、基线都不一致。侧栏改为同一套矢量图标（同一 12px 尺寸），
+  状态切换时由 `setBtnIcon` 替换（[app.js](file:///workspace/frontend/js/app.js#L5992)）。
+- CSS 去掉只为文本字符保留的 font 规则，展开钮仍是 28px 方块控件。
+
+### 3. 顺带修复：源码分发包误打开发期截图
+
+`build.py --zip` 用 `os.walk` 打包，`.uploads/`（开发期上传的截图，常有数 MB）
+不在排除列表里，导致源码包从 1MB 级膨胀到 4.4MB 并顶破 `test_build` 的体积断言。
+已把 `.uploads` 加入 `SOURCE_ZIP_EXCLUDE_DIRS`，并补一条显式断言。
+
+### 测试
+
+- 后端新增 `test_boot_replay_after_reload`（重发 booted/设备快照、会话不重建、
+  轮询不重复）；`test_real_source_zip_is_lean` 补 `.uploads` 断言。
+- 前端新增 [boot_stuck_connection.test.cjs](file:///workspace/tests/frontend/boot_stuck_connection.test.cjs)
+  （7 条断言）：A) `default_save_dir` 永不返回仍能完成启动；B) `boot` 方法迟到注入
+  不中断启动；C) boot 失败有可见提示且 3s 重试可自愈。
+- 同步更新 `button_icons` / `sidebar_collapse` 的图标断言。
+- 验证：后端 **1389 passed / 1 skipped**；前端 **89 个用例文件全绿**；pyflakes 0。
