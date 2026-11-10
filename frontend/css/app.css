@@ -325,6 +325,15 @@ html { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; 
 :root[data-theme="light"] .chip-scope--phone {
   color: #9a5400; background: rgba(154, 84, 0, .10); border-color: rgba(154, 84, 0, .18);
 }
+/* .btn.warn:hover 硬编码 color:#ffd9a0 在浅色主题背景 (surface-2=#f1f4f8) 上对比度
+   < 2:1（几乎看不见）。warn 按钮默认就是淡琥珀底，hover 也该保持可读——
+   用 var(--warn) 深琥珀色（#b5700a），白底上对比度 > 5:1。 */
+:root[data-theme="light"] .btn.warn:hover { color: var(--warn); }
+/* 删除菜单项 hover：color:#ff8585 淡红底 + 淡红字，浅色下对比度 2.7:1 < WCAG AA。
+   用 var(--err) 深红（#cf3540），对比度 > 6:1。 */
+:root[data-theme="light"] .cmd-chip .chip-popup-item--del:hover {
+  color: var(--err);
+}
 /* 连接状态 LED 胶囊：点亮的灯 + 等宽文案 */
 .pill {
   display: inline-flex; align-items: center; gap: 8px; align-self: center;
