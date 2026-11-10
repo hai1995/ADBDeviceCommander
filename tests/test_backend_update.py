@@ -262,6 +262,16 @@ def test_update_unskip_clears(api):
     assert ctrl.get_pref("update_skipped_version") == ""
 
 
+def test_update_info_reports_skipped_version(api):
+    """update_info 必须带出当前被跳过的版本号：关于页据此显示「恢复提示」出口，
+    否则「跳过此版本」一旦点下就在界面里无处可撤。"""
+    assert api.update_info()["skipped"] == ""          # 默认没跳过任何版本
+    ctrl.save_prefs({"update_skipped_version": V_NEW})
+    assert api.update_info()["skipped"] == V_NEW
+    api.update_unskip()
+    assert api.update_info()["skipped"] == ""
+
+
 # --------------------------------------------------------------------------- #
 # 打开下载页
 # --------------------------------------------------------------------------- #

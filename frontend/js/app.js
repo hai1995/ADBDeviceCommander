@@ -123,6 +123,7 @@
     // 版本更新：关于页一行（自动检查 + 上次结果 + 手动检查）+ 新版本弹窗
     aboutUpdateAuto: $("about-update-auto"),
     aboutUpdateState: $("about-update-state"),
+    aboutUpdateSkipped: $("about-update-skipped"),
     aboutUpdateCheck: $("about-update-check"),
     updateModal: $("update-modal"), updateTitle: $("update-title"),
     updateCurrent: $("update-current"), updateLatest: $("update-latest"),
@@ -6204,6 +6205,20 @@
     }
   }
 
+  /* 「跳过此版本」的恢复出口：关于页更新行出现一颗小按钮（已跳过 vX · 恢复），
+     点了调 update_unskip 把该版本从屏蔽名单放出。skipped 为空串时藏起。
+     之前后端 update_unskip 已就绪但前端没有任何入口 —— 用户误点「跳过此版本」
+     后只能手改 config.json，等于不可逆。 */
+  function renderUpdateSkipped(version) {
+    const b = els.aboutUpdateSkipped;
+    if (!b) return;
+    const v = (typeof version === "string") ? version.trim() : "";
+    if (!v) { b.hidden = true; return; }
+    b.hidden = false;
+    b.textContent = "已跳过 " + v + " · 恢复";
+    b.title = "「跳过此版本」后该版本不再自动弹窗；点此恢复提示";
+  }
+
   /* 拉一次版本信息（只读，不发网络请求）：回填开关与「上次检查结果」。 */
   async function loadUpdateInfo() {
     const info = await callApi(api.update_info());
@@ -6214,6 +6229,7 @@
     setUpdateChecking(!!info.checking);
     // 已有实时结果就不回填（回填是上次会话的旧数据，会盖掉刚到的结果）
     if (!updateEventSeen) setUpdateStateText(info.last || null);
+    renderUpdateSkipped(info.skipped || "");
   }
 
   async function checkUpdateManual() {
@@ -7885,10 +7901,21 @@
       });
     }
     if (els.updateSkip) {
-      els.updateSkip.addEventListener("click", () => {
+      els.updateSkip.addEventListener("click", async () => {
         const v = updateShown && updateShown.version;
-        if (v) callApi(api.update_skip(v));
+        // 先关窗（即时反馈），写盘结果只决定「已跳过 · 恢复」出口亮不亮。
         hideUpdateModal();
+        if (v) {
+          const res = await callApi(api.update_skip(v));
+          // 写盘成功才亮出口；失败（只读目录等）后端已报错，这里不能装出已跳过。
+          if (res && res.ok !== false) renderUpdateSkipped(v);
+        }
+      });
+    }
+    if (els.aboutUpdateSkipped) {
+      els.aboutUpdateSkipped.addEventListener("click", async () => {
+        const res = await callApi(api.update_unskip());
+        if (res && res.ok !== false) renderUpdateSkipped("");
       });
     }
     // files

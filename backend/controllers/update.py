@@ -27,6 +27,10 @@ class UpdateMixin:
             enabled = bool(get_pref("update_check", True))
         except Exception:
             enabled = True
+        try:
+            skipped = str(get_pref("update_skipped_version", "") or "").strip()
+        except Exception:
+            skipped = ""
         last = self._update_last
         return {"ok": True,
                 "version": VERSION,
@@ -35,7 +39,10 @@ class UpdateMixin:
                 "feed": self._update_feed() or updater.FEED_URL,
                 "interval_s": updater.CHECK_INTERVAL_S,
                 "checking": self._update_busy,
-                "last": dict(last) if isinstance(last, dict) else None}
+                "last": dict(last) if isinstance(last, dict) else None,
+                # 当前被「跳过此版本」屏蔽的版本号（空串 = 没跳过任何版本）：
+                # 关于页据此显示「已跳过 vX · 恢复」出口，否则用户跳过后无从反悔。
+                "skipped": skipped}
 
     def update_check(self, force=None):
         """检查更新：主线程立即返回，结果经 `update` 事件异步送达。

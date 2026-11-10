@@ -5212,3 +5212,35 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   合法渲染、非法忽略、只设底色、弹窗改色保存只写 bg、点默认清空。
 
 全量：后端 **1424 passed / 1 skipped**；前端 **92 文件 0 失败**；pyflakes 干净。
+
+# 第七十八轮（「跳过此版本」补恢复出口）
+
+## 发现
+
+全局交叉核对前端 `api.*` 调用与后端 `WebApi` 公开方法时发现：`update_unskip`
+后端早已实现、注释里写明「关于页提供一个『恢复提示』出口」，但前端关于页
+从来没有这个入口，`update_info` 也不返回当前被跳过的版本号 —— 用户在新
+版本弹窗点过「跳过此版本」后，除了手改 config.json 没有任何办法撤销，
+等于一个不可逆操作。
+
+## 修复
+
+- [update.py](file:///workspace/backend/controllers/update.py#L24-L45)：
+  `update_info` 新增 `skipped` 字段（当前被屏蔽的版本号，空串 = 无）。
+- [index.html](file:///workspace/frontend/index.html#L701-L702)：
+  更新行新增 `#about-update-skipped` 小按钮，默认 `hidden`。
+- [app.js](file:///workspace/frontend/js/app.js#L6208-L6220)：
+  新增 `renderUpdateSkipped(version)` —— 非空显示「已跳过 vX · 恢复」，
+  空串藏起；`loadUpdateInfo` 启动回填时同步（重启后仍能反悔）；
+  「跳过此版本」写盘成功后立即亮起（先关弹窗保即时反馈，出口亮灭由
+  写盘结果决定，失败不装假成功）；点出口调 `update_unskip`，成功后藏起。
+
+## 测试
+
+- 后端补 `test_update_info_reports_skipped_version`：默认空 → 落盘后带出 →
+  unskip 后清空。
+- 前端 [update_modal.test.cjs](file:///workspace/tests/frontend/update_modal.test.cjs)
+  新增 [I] 段 6 条：结构存在且默认藏起；启动回填亮起并带版本号；跳过后
+  立即亮起；点恢复调 `update_unskip` 并藏起；写盘失败不亮出口。
+
+全量：后端 **1425 passed / 1 skipped**；前端 **92 文件 0 失败**；pyflakes 干净。

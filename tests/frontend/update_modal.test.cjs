@@ -86,6 +86,10 @@ function mkEnv(opts) {
       calls.push({ fn: "update_skip", args: [v] });
       return Promise.resolve({ ok: true, version: v });
     },
+    update_unskip: () => {
+      calls.push({ fn: "update_unskip", args: [] });
+      return Promise.resolve({ ok: true, version: "" });
+    },
   };
   window.pywebview = {
     api: new Proxy(impl, {
@@ -121,6 +125,9 @@ const watchdog = setTimeout(() => {
     ok(doc.getElementById("about-update-auto").checked,
       "自动检查默认勾选（与 core.prefs 的 update_check 默认 True 对齐）");
     ok(!!doc.getElementById("about-update-state"), "关于页有上次检查结果");
+    ok(!!doc.getElementById("about-update-skipped"), "关于页有「已跳过 · 恢复」出口");
+    ok(doc.getElementById("about-update-skipped").hidden,
+      "未跳过任何版本时恢复出口藏起");
     ok(!!doc.getElementById("about-update-check"), "关于页有「检查」按钮");
   }
 
@@ -283,6 +290,71 @@ const watchdog = setTimeout(() => {
                   4000, "回填开关");
     ok(doc.getElementById("about-update-auto").checked === false,
       "config.json 里关掉过 → 复选框回填为未勾选");
+  }
+
+  console.log("\n[I] 跳过版本的恢复出口：跳过可见、点了调 update_unskip、随后藏起");
+  {
+    // 启动回填：update_info 带着 skipped → 出口直接亮出来（重启后仍能反悔）
+    const { doc } = mkEnv({ info: { skipped: "2026.1103.1200" } });
+    const b = doc.getElementById("about-update-skipped");
+    const shown = await waitFor(() => !b.hidden, 4000, "回填 skipped");
+    ok(shown, "config.json 里记过跳过版本 → 启动后恢复出口亮起");
+    ok(/2026\.1103\.1200/.test(b.textContent), "出口带上被跳过的版本号");
+  }
+  {
+    // 点「跳过此版本」→ 弹窗关闭后，关于页出口同步亮起（不用等重启）
+    const { doc, window, calls, pending } = mkEnv();
+    await waitFor(() => !doc.getElementById("about-update-check").disabled, 4000, "初始化完成");
+    pending.push({ kind: "update", payload: Object.assign({}, RES_UPDATE) });
+    await waitFor(() => !doc.getElementById("update-modal").classList.contains("hidden"),
+                  4000, "弹窗打开");
+    click(window, doc.getElementById("update-skip"));
+    const b = doc.getElementById("about-update-skipped");
+    const shown = await waitFor(() => !b.hidden, 4000, "跳过后出口亮起");
+    ok(shown, "跳过成功后关于页出现「已跳过 · 恢复」");
+    // 点出口 → 调 update_unskip → 出口藏起（该版本恢复自动弹窗资格）
+    click(window, b);
+    const got = await waitFor(() => calls.some((c) => c.fn === "update_unskip"),
+                              3000, "update_unskip");
+    ok(got, "点「恢复」调用了后端 update_unskip");
+    const hid = await waitFor(() => b.hidden, 3000, "出口藏起");
+    ok(hid, "恢复成功后出口藏起");
+  }
+  {
+    // 跳过写盘失败（只读目录）：后端回 ok=false，出口不得亮起（不能装出已跳过）
+    const dom2 = new JSDOM(html, {
+      runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/",
+    });
+    const w2 = dom2.window, d2 = w2.document;
+    const pend2 = [
+      { kind: "booted", payload: { version: "2026.1029.1931", warnings: [], adb: "adb",
+                                   commands: [], settings: {} } },
+      { kind: "devices", payload: { items: DEVICES } },
+    ];
+    w2.pywebview = {
+      api: new Proxy({
+        boot: () => Promise.resolve({ version: "2026.1029.1931", warnings: [], adb: "adb",
+                                      commands: [], settings: {} }),
+        take_events: () => Promise.resolve(pend2.splice(0)),
+        default_save_dir: () => Promise.resolve({ dir: "" }),
+        update_info: () => Promise.resolve({ ok: true, version: "2026.1029.1931",
+                                             enabled: true, checking: false,
+                                             last: null, skipped: "" }),
+        update_skip: () => Promise.resolve({ ok: false, reason: "配置无法写入" }),
+      }, { get(t, k) { if (k === "then") return undefined;
+                       if (k in t) return t[k];
+                       return () => Promise.resolve({ ok: true }); } }),
+    };
+    Object.defineProperty(d2, "readyState", { value: "complete", configurable: true });
+    w2.eval(js);
+    await waitFor(() => !d2.getElementById("about-update-check").disabled, 4000, "初始化完成");
+    pend2.push({ kind: "update", payload: Object.assign({}, RES_UPDATE) });
+    await waitFor(() => !d2.getElementById("update-modal").classList.contains("hidden"),
+                  4000, "弹窗打开");
+    click(w2, d2.getElementById("update-skip"));
+    await sleep(300);
+    ok(d2.getElementById("about-update-skipped").hidden,
+      "跳过写盘失败时出口不亮（假成功会让用户以为已屏蔽）");
   }
 
   clearTimeout(watchdog);
