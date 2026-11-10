@@ -6,7 +6,7 @@ from backend.controller import (
     FileService, FrameServer, LogcatCapture, LogcatMonitor,
     Path, ScrcpyLauncher, ShellSession, VideoRecorder,
     Workers, itertools, load_commands, load_prefs_checked, perf_stop_monitors,
-    prefs_path, resolve_save_dir, resource_path, save_click_deltas,
+    prefs_path, program_dir, resolve_save_dir, resource_path, save_click_deltas,
     threading, tmpfiles
 )
 
@@ -185,7 +185,11 @@ class WebApiBase:
         if self.session is None:
             self.session = self._session_factory(
                 output_callback=self._on_session_output,
-                on_dir_change=self._on_session_dir_change)
+                on_dir_change=self._on_session_dir_change,
+                # 让 shell 主动 cd 到程序根目录：打包态下进程 cwd 常是快捷方式
+                # 的「起始位置」(C:\Users\...)，与 exe 目录不一致 —— prompt 因此
+                # 显示错路径，相对路径命令也会跑错位置。
+                start_dir=program_dir())
         self._push_boot_events(self._boot_extras(payload))
         self._start_auto_refresh()
         # 首刷设备（后台线程，失败也会自行广播错误状态）
@@ -416,7 +420,8 @@ class WebApiBase:
                         output_callback=lambda text, w=wid:
                             self._on_session_output(text, w),
                         on_dir_change=lambda path, w=wid:
-                            self._on_session_dir_change(path, w))
+                            self._on_session_dir_change(path, w),
+                        start_dir=program_dir())
                     self._ws_sessions[wid] = sess
         return sess
 

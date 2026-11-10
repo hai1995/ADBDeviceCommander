@@ -29,7 +29,7 @@ CMDS = [
 class FakeSession:
     """替身 ShellSession：记录 run 调用，不启动 powershell。"""
 
-    def __init__(self, output_callback=None, on_dir_change=None):
+    def __init__(self, output_callback=None, on_dir_change=None, **kw):
         self.output_callback = output_callback
         self.on_dir_change = on_dir_change
         self.current_dir = r"C:\adb_ws"
@@ -56,8 +56,8 @@ class FakeSession:
 class BlockingSession(FakeSession):
     """模拟卡在长命令里的会话：run() 阻塞到 kill() 放行（与真实 PowerShell 会话一致）。"""
 
-    def __init__(self, output_callback=None):
-        super().__init__(output_callback)
+    def __init__(self, output_callback=None, on_dir_change=None, **kw):
+        super().__init__(output_callback, on_dir_change=on_dir_change, **kw)
         self.started = threading.Event()
         self.release = threading.Event()
 

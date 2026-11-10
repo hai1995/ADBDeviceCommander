@@ -36,6 +36,10 @@ class ShSession(ShellSession):
     def _sentinel_stmt(tag):
         return 'echo "%s|done"' % tag
 
+    @staticmethod
+    def _cd_stmt(path):
+        return 'cd "%s"' % (path or "/")
+
 
 @pytest.fixture
 def sess():

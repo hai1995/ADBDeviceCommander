@@ -58,7 +58,21 @@ class ShellSession:
         """
         return 'Write-Output ("%s|" + (Get-Location).Path)' % tag
 
-    def __init__(self, output_callback=None, on_dir_change=None):
+    @staticmethod
+    def _cd_stmt(path):
+        """切换工作目录的语句（不含换行）。
+
+        打包态下，Python 进程的 cwd 可能是快捷方式的「起始位置」（常见为
+        `C:\\Users\\...`），与 exe 所在目录不一致 —— 用户对着指令台执行
+        相对路径命令（`ls` / `.\adb.exe`）时会被绕晕。这里让 shell 主动
+        cd 到 start_dir（通常是程序根目录），让 prompt 显示的路径与用户
+        直觉一致。子类（测试里用的 sh）按需 override。
+        """
+        # PowerShell 的 Set-Location 接受 UNC / 带空格路径都无压力
+        return 'Set-Location -LiteralPath "%s"' % (path or "")
+
+    def __init__(self, output_callback=None, on_dir_change=None,
+                 start_dir=None):
         self.proc = None
         self.reader = None
         self.out_queue = queue.Queue()
@@ -75,8 +89,12 @@ class ShellSession:
         self._lock = threading.Lock()
         # 是否处于交互式子 shell（如 adb shell）中；kill/_start 后重置
         self.in_interactive_shell = False
+        # 会话启动后要主动 cd 到的目录。打包态下进程 cwd 往往是快捷方式的
+        # 「起始位置」（C:\Users\...），与 exe 目录不一致 —— 让 shell 主动
+        # cd 到 exe 同目录，prompt 就与用户直觉对齐。
+        self._start_dir = start_dir
         # 当前工作目录（CMD 风格提示符用）。每条非交互命令结束后由 sentinel 行带回。
-        self.current_dir = os.getcwd()
+        self.current_dir = os.path.abspath(start_dir) if start_dir else os.getcwd()
         # 最近一次 run() 失败的原因（人话，供调用方拼进提示）。成功时清空。
         self.last_error = ""
         self._start()
@@ -126,6 +144,26 @@ class ShellSession:
             self._pending.remove((init_tag, init_ev))
         except ValueError:
             pass
+        # 若指定了 start_dir，主动 cd 过去 —— 打包态下进程 cwd 常是快捷方式
+        # 的「起始位置」(C:\Users\...)，与 exe 目录不一致，prompt 因此显示错
+        # 路径。靠 sentinel 回传路径，current_dir 与 prompt 同步更新。
+        sd = self._start_dir
+        if sd:
+            cd_tag = "__CD_DONE_%s__" % uuid.uuid4().hex
+            cd_ev = threading.Event()
+            self._pending.append((cd_tag, cd_ev))
+            try:
+                self.proc.stdin.write(
+                    self._cd_stmt(sd) + '\n'
+                    + self._sentinel_stmt(cd_tag) + '\n')
+                self.proc.stdin.flush()
+            except Exception:
+                pass
+            cd_ev.wait(timeout=3.0)
+            try:
+                self._pending.remove((cd_tag, cd_ev))
+            except ValueError:
+                pass
 
     def _emit(self, text, kind="out"):
         """把一行面向用户的文本交给上层：**优先走回调**，没有回调才入队。
