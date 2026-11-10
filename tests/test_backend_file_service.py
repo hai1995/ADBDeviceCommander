@@ -65,6 +65,83 @@ def test_list_dir_parses_toybox_default_format(monkeypatch):
     assert ln["is_link"] and ln["target"] == "/system/hw"
 
 
+def _R(stdout="", stderr="", returncode=0):
+    return type("R", (), {"stdout": stdout, "stderr": stderr,
+                          "returncode": returncode})()
+
+
+ROOT_LS_WITH_LINKS = (
+    "total 40\n"
+    "drwxr-xr-x 2 root root 3483 2024-01-01 02:02 vendor_dlkm\n"
+    "lrw-r--r-- 1 root root   21 2009-01-01 08:00 "
+    "sdcard -> /storage/self/primary\n"
+    "lrwxrwxrwx 1 root root    7 2009-01-01 08:00 hw -> /system/hw\n"
+)
+
+
+def test_list_dir_marks_symlink_to_directory_as_dir(monkeypatch):
+    """`/sdcard` 这类「链到目录」的符号链接必须标成目录。
+
+    回归：`ls -la` 只能看到链接本身（权限位 l 开头），旧实现统一按文件渲染，
+    于是 `/sdcard` 点不进去，还给出「下载 / 查看」。list_dir 会用**一次**批量
+    探测（[ -d ]）确认链接目标类型，而不是每个链接各跑一次 adb。
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if len(calls) == 1:
+            return _R(stdout=ROOT_LS_WITH_LINKS)
+        return _R(stdout="D\nF\n")      # sdcard -> 目录；hw -> 文件
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    items, err = FileService().list_dir("SERIAL", "/")
+    assert err is None
+    by = {i["name"]: i for i in items}
+    assert by["sdcard"]["is_dir"] is True, "指向目录的链接应可进入"
+    assert by["sdcard"]["is_link"] is True, "仍然保留「这是符号链接」的信息"
+    assert by["sdcard"]["target"] == "/storage/self/primary"
+    assert by["hw"]["is_dir"] is False, "指向文件的链接不能被当成目录"
+    names = [i["name"] for i in items]
+    assert names.index("hw") > names.index("sdcard"), "现在应排到目录组"
+    assert len(calls) == 2, "链接探测必须合成一次调用，实际 %d 次" % len(calls)
+    assert "for f in" in calls[1][-1] and "'sdcard'" in calls[1][-1]
+
+
+def test_list_dir_keeps_entries_when_link_probe_fails(monkeypatch):
+    """链接探测失败时保持原判断（按文件），列表本身不能失败。"""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if len(calls) == 1:
+            return _R(stdout=ROOT_LS_WITH_LINKS)
+        return _R(stdout="", returncode=1)
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    items, err = FileService().list_dir("SERIAL", "/")
+    assert err is None and items
+    by = {i["name"]: i for i in items}
+    assert by["sdcard"]["is_dir"] is False
+
+
+def test_list_dir_link_probe_quotes_dir_path(monkeypatch):
+    """探测命令里的目录要整体加引号，含空格的目录才不会 cd 失败。"""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if len(calls) == 1:
+            return _R(stdout="lrwxrwxrwx 1 root root 7 2009-01-01 08:00 "
+                              "link -> /data\n")
+        return _R(stdout="D\n")
+
+    monkeypatch.setattr(fs_mod.subprocess, "run", fake_run)
+    items, err = FileService().list_dir("SERIAL", "/sdcard/My Folder")
+    assert err is None and items[0]["is_dir"] is True
+    assert "cd '/sdcard/My Folder'" in calls[1][-1]
+
+
 def test_list_dir_falls_back_when_first_parse_empty(monkeypatch):
     """若首次 ls -la 解析为空，list_dir 应自动重试 ls -l。"""
     records = []
@@ -83,8 +160,8 @@ def test_list_dir_falls_back_when_first_parse_empty(monkeypatch):
     svc = FileService()
     items, err = svc.list_dir("SERIAL", "/sdcard")
     assert err is None
-    # 两次调用：第一次 -la，第二次 -l
-    assert len(records) == 2
+    # 前两次：-la 解析为空，随后用 -l 兜底；之后可能还有一次「符号链接是否指向
+    # 目录」的探测（本次替身只有两份输出，探测会因取不到响应而被忽略）。
     assert "-la" in records[0]
     assert "-l" in records[1] and "-la" not in records[1]
     # 第二次成功解析

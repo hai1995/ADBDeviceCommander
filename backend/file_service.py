@@ -92,8 +92,38 @@ class FileService:
                               "该设备的 ls 格式可能与预期不同" % len(lines))
         # 排掉 . 和 ..
         items = [i for i in items if i["name"] not in (".", "..")]
+        self._mark_link_dirs(serial, path, items)
         items.sort(key=lambda i: (not i["is_dir"], i["name"].lower()))
         return items, None
+
+    def _mark_link_dirs(self, serial, path, items):
+        """把「指向目录的符号链接」标成目录。
+
+        `ls -la` 对符号链接只看得到链接本身（权限位以 `l` 开头），无法区分
+        `/sdcard` 这种「链到目录」和链到普通文件的情况。旧实现统一按文件处理，
+        于是 `/sdcard`、`/bin`、`/etc` 都被画成文件：点不进去，还给出「下载 /
+        查看」。这里对本次列出的链接做**一次**额外探测（不是每个链接一次），
+        目标为目录的改成 is_dir=True；指向普通文件 / 断链保持原样。
+        探测失败或输出行数对不上时不做任何修改，绝不让整个目录列表失败。
+        """
+        links = [i for i in items if i.get("is_link")]
+        if not links:
+            return
+        names = " ".join(shq(i["name"]) for i in links)
+        script = ('cd %s && for f in %s; do [ -d "$f" ] && echo D || echo F; done'
+                  % (shq(path), names))
+        try:
+            r = self._shell(serial, [script], timeout=20)
+        except Exception:
+            return
+        if getattr(r, "returncode", 0) != 0:
+            return
+        lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        if len(lines) != len(links):
+            return
+        for item, flag in zip(links, lines):
+            if flag == "D":
+                item["is_dir"] = True
 
     def make_dir(self, serial, path):
         r = self._shell(serial, ["mkdir", "-p", shq(path)], timeout=20)

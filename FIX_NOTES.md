@@ -4965,3 +4965,42 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 等下拉的选项数 —— HTML 自带「（无）」一项，按选项数等待会抢在配置恢复前开始断言。
 
 全量：前端 **92 文件 0 失败**；后端未改动（1416 passed / 1 skipped）；pyflakes 干净。
+
+---
+
+# 第七十一轮（文件区：指向目录的符号链接被视为文件）
+
+## 问题
+
+截图里 `/sdcard` 实际是目录（`lrw-r--r-- sdcard -> /storage/self/primary`），
+文件区却把它当文件：不能点进去，还给出「下载 / 查看」。`/bin`、`/etc`、
+`/d`、`/cache` 等根目录项同理。
+
+## 原因
+
+`ls -la` 只看得到符号链接自身（权限位 `l` 开头），`parse_ls_output` 的
+`is_dir = perm.startswith("d")` 必然为 False。普通目录本来就正常（截图里
+`vendor_dlkm` / `vr` / `vr_res` 已按目录排序、只给「重命名 / 删除」）。
+
+## 修复
+
+[file_service.py](file:///workspace/backend/file_service.py#L99-L126) 新增
+`_mark_link_dirs`：本次列出的链接**合并成一次**额外探测
+
+    cd <目录> && for f in <链接名...>; do [ -d "$f" ] && echo D || echo F; done
+
+`[ -d ]` 会跟随链接，指到目录的标 `is_dir=True`，指到文件 / 断链保持原样；
+随后重新排序，链接目录自然排到目录组。探测失败 / 输出行数对不上时**不做任何
+修改**，列表照常返回 —— 宁可显示成文件，也不能因为一条链接把整页目录打挂。
+
+只对「本次有链接」的目录多发一次 adb 往返（根目录约 0~10 条链接；`/sdcard`
+这类目录通常没有），不影响普通浏览速度。
+
+## 测试
+
+[test_backend_file_service.py](file:///workspace/tests/test_backend_file_service.py#L82-L142)
+新增 3 条：链接到目录被标成目录且仍保留 `is_link`/`target`、探测失败保持原判断、
+含空格目录的探测命令正确加引号。原有「兜底重试」用例改为不再断言总调用次数
+（多出的那次正是链接探测）。
+
+全量：后端 **1419 passed / 1 skipped**；pyflakes 干净（本轮未改前端）。
