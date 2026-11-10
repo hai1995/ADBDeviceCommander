@@ -89,12 +89,19 @@ function bootRecording(calls) {
        "监控卡标题为「实时监控」");
 
     // 监控卡：控制条 + 过滤条 + 日志视图都在卡内
-    for (const id of ["lc-start", "lc-stop", "lc-clear", "lc-save", "lc-status",
+    for (const id of ["lc-start", "lc-stop", "lc-clear", "lc-status",
                       "lc-counter", "lc-filter", "lc-levels", "lc-only-exc",
                       "lc-autoscroll", "lc-view"]) {
       ok(monCard && monCard.querySelector("#" + id) !== null,
          "监控元素 #%s 位于监控卡内", id);
     }
+    // 「保存到文件」已彻底移除：监控只负责看，完整日志走「落盘抓取」
+    ok(monCard && monCard.querySelector("#lc-save") === null,
+       "监控卡不再有「保存到文件」按钮");
+    const hint = monCard && monCard.querySelector(".lc-hint");
+    ok(!!hint && /舍弃部分日志/.test(hint.textContent)
+       && /落盘抓取/.test(hint.textContent),
+       "监控卡顶部说明「会舍弃部分日志、完整日志请落盘抓取」");
     // 抓取卡：开关 + 开始/停止 + 状态都在卡内
     for (const id of ["lc-cap-zipstop", "lc-cap-start", "lc-cap-stop", "lc-cap-status"]) {
       ok(capCard && capCard.querySelector("#" + id) !== null,

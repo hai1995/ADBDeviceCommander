@@ -28,7 +28,7 @@
     themeSwitch: $("theme-switch"),
     // logcat
     lcStart: $("lc-start"), lcStop: $("lc-stop"),
-    lcClear: $("lc-clear"), lcSave: $("lc-save"), lcStatus: $("lc-status"),
+    lcClear: $("lc-clear"), lcStatus: $("lc-status"),
     lcCounter: $("lc-counter"), lcDev: $("lc-dev"), lcFilter: $("lc-filter"),
     lcPkg: $("lc-pkg"),
     lcPreset: $("lc-preset"), lcPresetSave: $("lc-preset-save"),
@@ -3213,46 +3213,6 @@
     }
     if (p.status === "error") { lcCapRunning = false; lcCapSerial = null; els.lcCapStatus.textContent = "错误"; els.lcCapStop.disabled = true; els.lcCapStart.disabled = !checkedDevices().length; markBtnBusy(els.lcCapStop, false); pushStatus("err", "⚠ " + (p.text || "抓取错误")); }
   }
-  function bufToText(serial) {
-    const buf = lcBuffers[serial]; if (!buf) return "";
-    return buf.lines.map((l) => l.raw).join("\n") + "\n";
-  }
-  /* 文件名净化：与后端 core.constants.safe_name 同语义（Windows 非法字符 +
-     首尾空白/点）。无线 ADB 序列号形如 192.168.1.5:5555 含冒号，直接拼进
-     a.download 会让「保存到文件」下载失败或被静默改名——后端所有落盘路径
-     （截图/录屏/logcat 抓取）早已过 safe_name，前端导出同样不能漏。 */
-  function safeFileName(s) {
-    const cleaned = String(s == null ? "" : s)
-      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
-      .replace(/^[.\s]+/, "")
-      .replace(/[.\s]+$/, "");
-    return cleaned || "device";
-  }
-  function saveLogcat() {
-    if (!lcSerial) { pushStatus("warn", "请先开始监控并选择设备"); return; }
-    const text = bufToText(lcSerial);
-    if (!text.trim()) {
-      pushStatus("warn", "当前没有可保存的日志（先开始监控并等待日志产生）");
-      return;
-    }
-    // 走后端写盘：前端的 a.click() + Blob 下载在 WebView2 下会被静默吞掉
-    // （点了没反应）。后端落到保存目录并回传路径，前端据此给出明确成功提示。
-    // 整屏日志可能有几万行，写盘 + 编码是秒级操作，期间给按钮转圈。
-    markBtnBusy(els.lcSave, true);
-    callApi(api.logcat_save(lcSerial, text)).then((res) => {
-      markBtnBusy(els.lcSave, false);
-      if (res && res.ok) {
-        pushStatus("ok", "✓ 日志已保存到 " + (res.path || "保存目录"));
-      } else if (res && res.reason === "empty") {
-        // 后端已就空内容给出提示，这里不再重复
-      } else if (res && res.reason === "no_device") {
-        pushStatus("warn", "请先开始监控并选择设备");
-      } else {
-        pushStatus("err", "⚠ 保存日志失败：" + ((res && res.text) || (res && res.reason) || "未知原因"));
-      }
-    });
-  }
-
   /* ---------------- 工具 ---------------- */
   function syncToolButtons() {
     const any = checkedDevices().length > 0;
@@ -7210,7 +7170,6 @@
       renderLogcat();
       callApi(api.logcat_clear(lcSerial));
     });
-    els.lcSave.addEventListener("click", saveLogcat);
     // 日志右键菜单（选中复制 / 复制该行）：依赖 els.lcView，绑一次即可
     initLcContextMenu();
     // 关键字输入防抖：每敲一个字都全量重建 DOM 会明显卡顿（与
@@ -8105,8 +8064,8 @@
     els.lcView.innerHTML = "";
     clearLcQueue();
     // 同时丢弃上一轮的日志缓冲：否则新会话的 append 会接在旧 lines 数组尾部，
-    // 一旦触发重渲染（改级别 / 关键字 / 仅异常）或「保存到文件」，上一轮的日志
-    // 会重新冒出来（视图已清空，缓冲却还留着旧行）。
+    // 一旦触发重渲染（改级别 / 关键字 / 仅异常），上一轮的日志会重新冒出来
+    // （视图已清空，缓冲却还留着旧行）。
     if (lcSerial) lcBuffers[lcSerial] = { lines: [], total: 0, exc: 0 };
     updateLcCounter(null);
     // 返回 Promise：调用方据此判断后端是否真的启动了（失败要回滚按钮态）

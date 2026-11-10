@@ -1381,6 +1381,12 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .lc-card-sub {
   font: 400 var(--fs-sm)/1 var(--font-display); letter-spacing: .08em; color: var(--faint);
 }
+/* 监控卡顶部的性能说明：这里是「采样视图」而不是全量日志，必须让用户先看到
+   这句话，才不会把「少了行」当成程序丢日志的 bug。需要全量走「落盘抓取」。 */
+.lc-hint {
+  margin: 2px 0 8px; color: var(--muted); font-size: var(--fs-sm);
+  line-height: 1.55;
+}
 /* 卡内控制条去盒化：卡本身已是仪器盒，条上不再叠 surface / 边框 / 阴影 */
 .lc-card .lc-ctrls {
   background: transparent; border: 0; box-shadow: none;

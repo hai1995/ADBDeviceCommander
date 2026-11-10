@@ -296,13 +296,12 @@ function mkEnv(overrides) {
     window.close();
   }
 
-  console.log("\n[8] 设备刷新 / 监控启动 / 日志保存：按钮等待态");
+  console.log("\n[8] 设备刷新 / 监控启动：按钮等待态");
   {
-    let resolveRefresh = null, resolveLcStart = null, resolveSave = null;
+    let resolveRefresh = null, resolveLcStart = null;
     const { window } = mkEnv({
       refresh_devices: () => new Promise((r) => { resolveRefresh = r; }),
       logcat_start: () => new Promise((r) => { resolveLcStart = r; }),
-      logcat_save: () => new Promise((r) => { resolveSave = r; }),
     });
     const doc = window.document;
     const refresh = doc.getElementById("btn-refresh");
@@ -321,19 +320,6 @@ function mkEnv(overrides) {
     resolveLcStart({ ok: true });
     ok(await waitFor(() => !start.classList.contains("is-loading"), 3000, "监控启动"),
        "监控启动后收掉转圈");
-
-    window.__push({ kind: "logcat", payload: {
-      serial: "A1", status: "append",
-      lines: [{ raw: "11-06 12:00:00.000 I/Test: hello", level: "I", exc: false }],
-    } });
-    await waitFor(() => doc.querySelectorAll("#lc-view .lc-line").length > 0,
-                   4000, "日志行到达");
-    const save = doc.getElementById("lc-save");
-    save.dispatchEvent(new window.Event("click", { bubbles: true }));
-    ok(save.classList.contains("is-loading"), "保存日志到文件时按钮转圈");
-    resolveSave({ ok: true, path: "/tmp/a.log" });
-    ok(await waitFor(() => !save.classList.contains("is-loading"), 3000, "保存完成"),
-       "保存返回后收掉转圈");
     window.close();
   }
 

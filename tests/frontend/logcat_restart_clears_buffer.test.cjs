@@ -5,8 +5,7 @@
    接在**上一轮的 lines 数组**尾部：
 
      · 用户改一下级别 / 关键字 / 仅异常 → renderLogcat() 从缓冲全量重建，
-       早已「清空」的旧日志（最多 3000 行）又整片冒出来；
-     · 「保存到文件」→ bufToText() 会把上一轮 + 本轮的行写进同一个文件。
+       早已「清空」的旧日志（最多 3000 行）又整片冒出来。
 
    修复：startLc 里一并把该设备的缓冲置空。 */
 const fs = require("fs");
@@ -112,22 +111,6 @@ function click(window, el) {
   await sleep(60);
   ok(view.childNodes.length === 5,
      "重渲染后仍只有本轮 5 行，上一轮日志不回流（实际 " + view.childNodes.length + " 行）");
-
-  // ---- 「保存到文件」的内容同样不应混入上一轮 ----
-  // 现在「保存到文件」走后端写盘：api.logcat_save(serial, text) 把当前视图文本
-  // 交给后端落盘（见 saveLogcat）。这里断言传给后端的文本只含本轮 5 行（第100~104行），
-  // 不混入上一轮的 30 行（第0~29行）。
-  click(env.window, doc.getElementById("lc-save"));
-  await waitFor(
-    () => env.calls.some((c) => c.fn === "logcat_save"), 2000, "logcat_save 调用");
-  const saveCall = env.calls.find((c) => c.fn === "logcat_save");
-  const savedText = (saveCall && saveCall.args[1]) || "";
-  ok(!savedText.includes("第0行"),
-     "「保存到文件」不含上一轮的行（第0行）");
-  ok(savedText.includes("第100行"),
-     "「保存到文件」包含本轮的行（第100行）");
-  ok((savedText.match(/第\d+行/g) || []).length === 5,
-     "「保存到文件」只含本轮 5 行（实际 " + (savedText.match(/第\d+行/g) || []).length + " 行）");
 
   console.log("\n结果：" + pass + " 通过 / " + fail + " 失败");
   process.exit(fail ? 1 : 0);

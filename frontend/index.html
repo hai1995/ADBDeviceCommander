@@ -230,13 +230,13 @@
                吃满剩余高度，日志视图在卡内生长。 -->
           <div class="tool-pane" id="lc-pane-monitor" role="tabpanel" aria-labelledby="lc-tab-monitor" data-lc-pane="monitor" hidden>
         <div class="lc-card grow">
-          <div class="lc-card-h">实时监控<span class="lc-card-sub">MONITOR · 仅查看，不写文件</span></div>
+          <div class="lc-card-h">实时监控<span class="lc-card-sub">MONITOR · 实时视图</span></div>
+          <p class="lc-hint">为保持性能稳定，实时监控会舍弃部分日志的显示；需要完整日志请在「落盘抓取」中抓取。</p>
           <div class="lc-ctrls">
             <span class="lc-dev" id="lc-dev">未选设备</span>
             <button id="lc-start" class="btn ok" data-icon="play">开始监控</button>
             <button id="lc-stop" class="btn" disabled data-icon="stop">停止</button>
             <button id="lc-clear" class="btn" data-icon="trash">清空</button>
-            <button id="lc-save" class="btn" data-icon="download">保存到文件</button>
             <span class="lc-status" id="lc-status">空闲</span>
             <span class="lc-counter" id="lc-counter">行数: 0 · 异常: 0</span>
           </div>

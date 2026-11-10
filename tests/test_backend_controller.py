@@ -1696,48 +1696,6 @@ def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
         "日志必须在视频收尾之前就下发停止，否则会比视频多跑数秒：%r" % (order,))
 
 
-def test_logcat_save_writes_file_and_returns_path(monkeypatch, tmp_path):
-    """「保存到文件」改走后端写盘：文本落盘到保存目录并回传路径。
-
-    回归：前端原先用 a.click() + Blob 下载，在 WebView2 下被静默吞掉（点了没反应）。
-    现在由后端落到保存目录，落盘真实发生、调用方拿到路径，前端据此提示成功。
-    """
-    api = _make_api()
-    # 保存目录固定到 tmp_path，便于断言文件真写出来了
-    patch_ctrl(monkeypatch, "load_prefs", lambda: {"save_dir": str(tmp_path)})
-    monkeypatch.setattr(api, "_default_save_dir",
-                        lambda: str(tmp_path), raising=False)
-
-    res = api.logcat_save("A1",
-                          "08-29 10:00:00.000  1  1 I Tag: 账号绑定成功\n"
-                          "08-29 10:00:01.000  1  1 W Tag: 电量低\n")
-
-    assert res["ok"] is True, res
-    assert "path" in res and res["path"]
-    p = res["path"]
-    assert os.path.isfile(p), "文件应当真实落盘"
-    with open(p, "r", encoding="utf-8") as f:
-        saved = f.read()
-    assert "账号绑定成功" in saved and "电量低" in saved, saved
-    assert p.startswith(str(tmp_path)), "应落在保存目录：%s" % p
-    # 返回路径应被回传给前端做提示（这里以事件形式体现：toast 推了出去）
-    toasts = [e["payload"]["text"] for e in api.bus.take()
-              if e["kind"] == "status" and e["payload"].get("toast")]
-    assert any("已保存" in t for t in toasts), toasts
-
-
-def test_logcat_save_empty_is_rejected(monkeypatch, tmp_path):
-    """没有可保存内容时不写空文件，而是明确告知。"""
-    api = _make_api()
-    patch_ctrl(monkeypatch, "load_prefs", lambda: {"save_dir": str(tmp_path)})
-    monkeypatch.setattr(api, "_default_save_dir",
-                        lambda: str(tmp_path), raising=False)
-
-    res = api.logcat_save("A1", "   \n  ")
-    assert res["ok"] is False
-    assert res["reason"] == "empty"
-
-
 def test_devaudio_remote_path_safe_for_wireless_serial(monkeypatch, tmp_path):
     """含设备音频录屏时，设备端 wav 路径必须过 safe_name。
 

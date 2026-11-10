@@ -5097,3 +5097,39 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
 新增第 9 组：解析为空 → 状态栏出现提示；重复输入同一表达式后该提示仍只出现 1 次。
 
 前端 **92 文件 0 失败**（本文件 21 条全过）。
+
+---
+
+# 第七十五轮（实时监控撤掉「保存到文件」，补性能说明）
+
+## 需求
+
+实时监控区不再提供「保存到文件」；同时在监控卡顶部说明：为保持性能稳定会舍弃
+部分日志的显示，需要完整日志请走「落盘抓取」。
+
+## 改动
+
+- [index.html](file:///workspace/frontend/index.html#L255-L260)：删掉 `#lc-save`
+  按钮；标题副文案由「仅查看，不写文件」改为「实时视图」；新增 `.lc-hint`
+  常驻说明：「为保持性能稳定，实时监控会舍弃部分日志的显示；需要完整日志请在
+  「落盘抓取」中抓取。」
+- [app.css](file:///workspace/frontend/css/app.css#L1266-L1272)：`.lc-hint`
+  使用 `--muted` / `--fs-sm`，深浅色主题都自动适配。
+- [app.js](file:///workspace/frontend/js/app.js)：删除 `saveLogcat()`、
+  `bufToText()`（仅它使用）、`safeFileName()`（仅导出功能时代的死代码）、
+  `els.lcSave` 与按钮点击绑定。
+- [logcat.py](file:///workspace/backend/controllers/logcat.py)：删除后端
+  `logcat_save`（前端已无调用方；落盘能力仍在「落盘抓取」里）。
+- 文档：README 的 Logcat 行与「耗时操作等待态」清单、`使用说明.txt` 第 4 条
+  同步更新（去掉保存到文件，补性能说明）。
+
+## 测试
+
+- 删除 `logcat_save_filename.test.cjs` 与后端两条 `logcat_save` 用例。
+- [logcat_tab_cards.test.cjs](file:///workspace/tests/frontend/logcat_tab_cards.test.cjs#L91-L104)
+  反向断言监控卡**不再有** `#lc-save`，并要求 `.lc-hint` 同时包含
+  「舍弃部分日志」「落盘抓取」两个关键词。
+- 清理 `loading_states.test.cjs` / `logcat_restart_clears_buffer.test.cjs`
+  中依赖保存按钮的段落。
+
+全量：后端 **1418 passed / 1 skipped**；前端 **91 文件 0 失败**；pyflakes 干净。
