@@ -210,6 +210,51 @@
   let mirrorFrameUrl = "";          // 低帧率预览的帧地址（非空 = 预览在跑）
   let mirrorTimer = null;           // 低帧率预览的刷新定时器
 
+  /* 指令台历史（跨工作区共享、落盘）。
+     用一个环形数组：每次执行成功 push 新命令，同一命令紧跟重复执行不重复入队
+     （翻 ↑ 时看到的是「上次真敲过的那一条」，不是一堆一模一样的 adb devices）。
+     持久化键 cmd_history，启动恢复时截到最后 N 条。
+     每个工作区各自记 _histIdx（翻 ↑↓ 的当前位置）与 _histDraft（翻之前编辑中的
+     原样）——不共享这俩状态，否则 w1 翻到第 3 条切到 w2 也会继承它的位置。 */
+  const CMD_HIST_MAX = 200;
+  let cmdHistory = [];
+  let cmdHistoryLoaded = false;
+  function _loadCmdHistory(s) {
+    if (cmdHistoryLoaded) return;
+    cmdHistoryLoaded = true;
+    // 启动时从 booted.settings.cmd_history 读（config.json 落盘，下次启动恢复）。
+    // 用 Array.isArray 兼容未来可能升级成数组（现在是 JSON 字符串也 parse）。
+    try {
+      if (Array.isArray(s)) cmdHistory = s.slice(-CMD_HIST_MAX);
+      else if (typeof s === "string" && s.trim()) {
+        const arr = JSON.parse(s);
+        if (Array.isArray(arr)) cmdHistory = arr.slice(-CMD_HIST_MAX);
+      }
+    } catch (e) {}
+  }
+  function _pushCmdHistory(text) {
+    text = (text || "").trim();
+    if (!text) return;
+    const last = cmdHistory[cmdHistory.length - 1];
+    if (last === text) return;                 // 紧邻重复不重复入队
+    cmdHistory.push(text);
+    if (cmdHistory.length > CMD_HIST_MAX)
+      cmdHistory.splice(0, cmdHistory.length - CMD_HIST_MAX);
+    // 节流落盘：翻历史时不会持续持久化，只有 Enter 执行时才走到这里
+    try { persistPref("cmd_history", JSON.stringify(cmdHistory)); } catch (e) {}
+  }
+  // 预注册一批常见 adb 命令作为 Tab 补全候选（第一词补全用）。
+  // allCommands 里是用户的卡片命令，而 adb / powershell 原生命令不属于
+  // 那一类——Tab 补全第一词时应该都列出来。
+  const BUILTIN_CMD_FIRST_WORDS = [
+    "adb","Get-Location","Set-Location","Get-ChildItem","Get-Process","Get-Service",
+    "Stop-Process","Stop-Service","Start-Service","Get-NetAdapter","Get-NetIPAddress",
+    "Select-String","Get-Content","Get-ItemProperty","Set-ItemProperty",
+    "Get-WmiObject","Get-CimInstance","Invoke-WebRequest","curl","dir","ls","pwd",
+    "Get-History","Clear-History","Remove-Item","Copy-Item","Move-Item","New-Item",
+    "Get-Volume","Get-Disk","ipconfig","netstat","tasklist","taskkill","ping"
+  ];
+
   // 主 tab（设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于）当前停留项。
   // 落盘 main_active_tab，下次启动由 restoreMainTab 恢复（与工具区子 tab 同一套约定）。
   let mainActiveTab = "cmd";
@@ -1168,6 +1213,8 @@
     }
     renderCommands(p.commands || []);
     onAbout(p);
+    // 指令台历史（跨工作区共享、持久化）：从 config.json 恢复。
+    _loadCmdHistory(p.settings && p.settings.cmd_history);
     // 主 tab 回到上次停留项：必须排在 renderCommands 之后 —— 切到「性能监控」
     // 要按已勾选的设备渲染目标设备条，切到「设备指令」要求指令卡已经画好。
     // 设备勾选态若还没下发，devices 事件到达时 renderPerfDev 会再补一次。
@@ -2366,6 +2413,12 @@
     const text = ws.inputEl.value.trim();
     if (!text) return;
     callApi(api.run_custom(text, ws.id));
+    // 命令历史（跨工作区共享、落盘）：每次执行后推入数组，↑↓ 翻历史时用。
+    // 紧邻重复不重复入队（否则连发 10 次 adb devices 会让历史里全是一样的）。
+    _pushCmdHistory(text);
+    // 翻历史状态复位：Enter 执行后下次按 ↑ 应该回到「最新一条」。
+    ws._histIdx = -1;
+    ws._histDraft = "";
     // 「保留输入内容」勾选项（默认开启）：
     //  * 开启 —— 执行后保留输入框内容，方便改几个字再重发（长命令尤其顺手）；
     //  * 关闭 —— 每次执行后清空输入框，适合连发一条条不同的命令。
@@ -2374,6 +2427,91 @@
       ws.inputEl.value = "";
       if (ws.inputClearEl) ws.inputClearEl.hidden = true;
     }
+  }
+
+  /* ---------------- 指令台：↑↓ 翻历史 + Tab 补全 ----------------
+     ↑↓：每个工作区各自记 _histIdx / _histDraft，草稿在翻出第一条之前原样保存、
+     翻回去（↓ 超过最新一条）恢复。跨工作区共享的是 cmdHistory 数组本身（落盘）。
+     Tab：只做「第一词命令名补全」，候选来自 BUILTIN_CMD_FIRST_WORDS + 用户卡片里
+     的命令。连续 Tab 在同一前缀下循环候选；前缀一变重置循环。 */
+  function _cmdHistoryNav(ws, dir) {
+    if (!ws || !ws.inputEl || !cmdHistory.length) return;
+    _loadCmdHistory();
+    // 翻之前先原样保存草稿（还没存过 / 位置刚被重置时）
+    if (ws._histIdx < 0) ws._histDraft = ws.inputEl.value;
+    ws._histIdx = Math.min(cmdHistory.length - 1, ws._histIdx + dir);
+    if (ws._histIdx < -1) ws._histIdx = -1;
+    if (ws._histIdx < 0) {
+      // ↓ 越过最新一条：回到用户原来的草稿
+      ws.inputEl.value = ws._histDraft;
+    } else {
+      ws.inputEl.value = cmdHistory[cmdHistory.length - 1 - ws._histIdx];
+    }
+    if (ws.inputClearEl) ws.inputClearEl.hidden = !ws.inputEl.value;
+    // 循环 Tab 补全的前缀也跟着翻历史重置：翻完再按 Tab 应该从新前缀重新补全
+    ws._tabCycleIdx = -1;
+    ws._tabCyclePrefix = ws.inputEl.value.trim();
+  }
+
+  function _collectCmdCompletions(prefix) {
+    // 候选来源：① BUILTIN_CMD_FIRST_WORDS 里的 adb/PowerShell 命令
+    //          ② allCommands 里用户卡片的命令（label / name / 每条 .command 首部词）
+    //          ③ cmdHistory 里敲过的命令（可能有用户自己定义的、上面两类没有的）
+    const p0 = (prefix || "").toLowerCase();
+    const seen = new Set();
+    const out = [];
+    function push(x) {
+      const v = (x || "").trim();
+      if (!v) return;
+      if (seen.has(v)) return;
+      seen.add(v);
+      out.push(v);
+    }
+    // ① 内置 adb / PowerShell 命令名（前缀匹配）
+    BUILTIN_CMD_FIRST_WORDS.forEach((c) => {
+      if (!p0 || c.toLowerCase().startsWith(p0)) push(c);
+    });
+    // ② 用户卡片里的命令名
+    (allCommands || []).forEach((c) => {
+      if (!c || !c.name) return;
+      if (!p0 || c.name.toLowerCase().startsWith(p0)) push(c.name);
+      (c.commands || []).forEach((e) => {
+        const first = ((e && e.command) || "").trim().split(/\s+/)[0];
+        if (first && (!p0 || first.toLowerCase().startsWith(p0))) push(first);
+      });
+    });
+    // ③ 历史里敲过的（去重 + 前缀匹配）
+    cmdHistory.forEach((h) => {
+      const first = (h || "").trim().split(/\s+/)[0];
+      if (first && (!p0 || first.toLowerCase().startsWith(p0))) push(first);
+    });
+    out.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    return out;
+  }
+
+  function _cmdTabComplete(ws, shiftBackward) {
+    if (!ws || !ws.inputEl) return false;
+    const val = ws.inputEl.value;
+    // 光标必须在第一词范围（或刚好在第一词末尾）——否则是在补参数/路径，这版不做
+    const firstSpace = val.search(/\s/);
+    const firstWord = (firstSpace < 0 ? val : val.slice(0, firstSpace));
+    if (/\s/.test(firstWord)) return false;          // 第一词含空格，说明已经在补参数
+    const candidates = _collectCmdCompletions(firstWord);
+    if (!candidates.length) return false;
+    // 连续 Tab 循环：按原始前缀重置；Shift+Tab 反向
+    if (ws._tabCyclePrefix !== firstWord.toLowerCase()) {
+      ws._tabCycleIdx = -1;
+      ws._tabCyclePrefix = firstWord.toLowerCase();
+    }
+    if (shiftBackward) ws._tabCycleIdx -= 1;
+    else ws._tabCycleIdx += 1;
+    if (ws._tabCycleIdx >= candidates.length) ws._tabCycleIdx = 0;
+    if (ws._tabCycleIdx < 0) ws._tabCycleIdx = candidates.length - 1;
+    const picked = candidates[ws._tabCycleIdx];
+    ws.inputEl.value = picked + val.slice(firstWord.length);
+    if (ws.inputClearEl) ws.inputClearEl.hidden = !ws.inputEl.value;
+    // 补全完还在第一词范围：再按一次 Tab 继续循环
+    return true;
   }
 
   /* ---------------- Logcat ---------------- */
@@ -6090,10 +6228,46 @@
   /* 一个工作区里所有交互都在这儿绑一次（默认工作区与克隆体共用同一套代码，
      不会出现「第 2 个 tab 的按钮点了没反应」这种分叉 bug）。 */
   function bindWorkspace(ws) {
+    // 每个工作区自己的翻历史状态：切 tab 翻到第 3 条，切回来应该还是第 3 条
+    // 而不是回到第 1 条；但历史数组本身是全局共享的。
+    ws._histIdx = -1;
+    ws._histDraft = "";
+    ws._tabCycleIdx = -1;           // 当前 Tab 补全会话在候选列表里的位置
+    ws._tabCyclePrefix = "";        // 本轮补全的原始前缀（换了就重置循环）
+
     if (ws.runBtn) ws.runBtn.addEventListener("click", () => runInput(ws));
     if (ws.inputEl) {
       ws.inputEl.addEventListener("keydown", (e) => {
         if (e.key === "Enter") runInput(ws);
+        else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          _cmdHistoryNav(ws, e.key === "ArrowUp" ? -1 : +1);
+          e.preventDefault();
+        } else if (e.key === "Tab") {
+          // Tab 补全：只做「第一词命令名」——路径/参数补全需要后端逐目录探测，
+          // 复杂度远高于收益。Shift+Tab 反向循环；连续 Tab 在同一前缀下循环候选。
+          const ok = _cmdTabComplete(ws, !!(e.shiftKey));
+          if (ok) e.preventDefault();
+        } else if (e.key === "Escape") {
+          // Esc：清输入 + 清翻历史状态（像终端那样）。
+          if (ws.inputEl.value) {
+            ws.inputEl.value = "";
+            ws._histIdx = -1;
+            ws._histDraft = "";
+            ws._tabCycleIdx = -1;
+            ws._tabCyclePrefix = "";
+            if (ws.inputClearEl) ws.inputClearEl.hidden = true;
+            e.preventDefault();
+          }
+        } else {
+          // 任何其它按键都属于「用户正在编辑草稿」：翻历史位置立刻失效，
+          // 下一次按 ↑ 应该回到「最新一条」（与 PowerShell 的 Get-History 行为一致）。
+          // 但别把方向键 / 修饰键也覆盖掉。
+          if (!e.ctrlKey && !e.metaKey && !e.altKey
+              && e.key.length === 1) {
+            ws._histIdx = -1;
+          }
+          // Tab 循环状态也仅在下一次 Tab 到来时按前缀匹配判定，这里不用动。
+        }
       });
       ws.inputEl.addEventListener("input", () => {
         if (ws.inputClearEl) ws.inputClearEl.hidden = !ws.inputEl.value;
