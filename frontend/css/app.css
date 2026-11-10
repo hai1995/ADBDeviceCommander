@@ -1261,6 +1261,11 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   max-width: 240px; min-width: 120px; font-family: var(--font-mono);
   font-size: var(--fs-sm); text-overflow: ellipsis;
 }
+/* 「预设」下拉：名称通常是用户自己起的短语，限宽避免把「按包 / 级别」挤到下一行 */
+.lc-preset {
+  max-width: 180px; min-width: 100px; font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+}
 .lc-dev { color: var(--accent); font-size: var(--fs-sm); font-family: var(--font-mono); }
 .lc-counter {
   margin-left: auto; color: var(--muted); font-size: var(--fs-sm);

@@ -244,6 +244,14 @@
             <label class="lbl">过滤</label>
             <input id="lc-filter" type="text" class="inp"
              placeholder="空格=AND；- 排除；tag: msg: pid: tid: level: pkg:">
+            <label class="lbl" title="把常用的过滤表达式存成预设，下次一键切换">预设</label>
+            <select id="lc-preset" class="inp lc-preset" title="选择已保存的过滤预设">
+              <option value="">（无）</option>
+            </select>
+            <button id="lc-preset-save" class="btn" data-icon="save"
+                    title="把当前过滤表达式存为预设（可覆盖同名）">存为预设</button>
+            <button id="lc-preset-del" class="btn" data-icon="trash"
+                    title="删除当前选中的预设" disabled>删除</button>
             <label class="lbl" title="按包名过滤：选中后自动解析该包当前 pid 并只看它的日志">按包</label>
             <select id="lc-pkg" class="inp lc-pkg" title="选择要过滤的包（仅列第三方应用）">
               <option value="">（全部）</option>

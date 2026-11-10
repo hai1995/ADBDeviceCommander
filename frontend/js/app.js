@@ -31,6 +31,8 @@
     lcClear: $("lc-clear"), lcSave: $("lc-save"), lcStatus: $("lc-status"),
     lcCounter: $("lc-counter"), lcDev: $("lc-dev"), lcFilter: $("lc-filter"),
     lcPkg: $("lc-pkg"),
+    lcPreset: $("lc-preset"), lcPresetSave: $("lc-preset-save"),
+    lcPresetDel: $("lc-preset-del"),
     lcLevels: $("lc-levels"), lcOnlyExc: $("lc-only-exc"),
     lcAuto: $("lc-autoscroll"), lcBuf: $("lc-buf"), lcView: $("lc-view"),
     lcCapZipstop: $("lc-cap-zipstop"),
@@ -1218,6 +1220,8 @@
     _loadCmdHistory(p.settings && p.settings.cmd_history);
     // 按包过滤的下拉：启动时先把包列表拉回来（设备可能是上次记住的）
     refreshLcPackages();
+    // 过滤预设（自定义的常用表达式，落盘在 config.json 的 lc_presets）
+    _loadLcPresets(p.settings && p.settings.lc_presets);
     // 主 tab 回到上次停留项：必须排在 renderCommands 之后 —— 切到「性能监控」
     // 要按已勾选的设备渲染目标设备条，切到「设备指令」要求指令卡已经画好。
     // 设备勾选态若还没下发，devices 事件到达时 renderPerfDev 会再补一次。
@@ -2842,6 +2846,111 @@
     if (parts.indexOf(term) >= 0) return;
     els.lcFilter.value = cur ? (cur + " " + term) : term;
     triggerLcFilter();
+  }
+
+  /* ---------------- 过滤预设 ----------------
+     常用的过滤表达式（例如「只看我的包 + 排除噪音」）每次手敲不现实。预设存的
+     就是**表达式文本**（kw），不存级别 / 仅异常 —— 那两项是全局视图偏好，切预设
+     时用户通常不想连带变化。落盘为 config.json 的 lc_presets（JSON 字符串，
+     与 cmd_history 同一套约定：后端按未知键原样保留，不需要改 prefs 白名单）。
+     上限 30 条：防止误操作把配置文件撑大，也够覆盖日常场景。 */
+  const LC_PRESET_MAX = 30;
+  let lcPresets = [];        // [{ name, kw }, ...]
+
+  function _loadLcPresets(raw) {
+    let list = [];
+    try {
+      const v = typeof raw === "string" && raw ? JSON.parse(raw) : [];
+      if (Array.isArray(v)) list = v;
+    } catch (_) { list = []; }   // 手改坏了就当没有，不让启动报错
+    lcPresets = list.filter((p) => p && typeof p.name === "string"
+      && p.name && typeof p.kw === "string").slice(0, LC_PRESET_MAX);
+    renderLcPresets();
+    // 上次的表达式若正好等于某个预设，启动时把它选上（免得多点一次）；
+    // 只做「展示」不做应用 —— 表达式本身（lc_keyword）已经恢复，无需重渲染。
+    const kw = (els.lcFilter.value || "").trim();
+    const hit = lcPresets.findIndex((p) => p.kw.trim() === kw);
+    if (kw && hit >= 0) selectLcPreset(String(hit));
+  }
+  function _persistLcPresets() {
+    persistPref("lc_presets", JSON.stringify(lcPresets));
+  }
+  function selectLcPreset(value) {
+    if (!els.lcPreset) return;
+    els.lcPreset.value = lcPresets[Number(value)] ? value : "";
+    if (els.lcPresetDel) els.lcPresetDel.disabled = els.lcPreset.value === "";
+  }
+  function renderLcPresets() {
+    if (!els.lcPreset) return;
+    const keep = els.lcPreset.value;
+    els.lcPreset.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "（无）";
+    els.lcPreset.appendChild(none);
+    lcPresets.forEach((p, i) => {
+      const o = document.createElement("option");
+      o.value = String(i); o.textContent = p.name;
+      els.lcPreset.appendChild(o);
+    });
+    selectLcPreset(keep);
+  }
+  async function saveLcPreset() {
+    const kw = (els.lcFilter.value || "").trim();
+    if (!kw) {
+      pushStatus("warn", "过滤条件为空，先写一条表达式再保存为预设");
+      return;
+    }
+    const name = await askInput({
+      title: "保存过滤预设",
+      label: "预设名称",
+      placeholder: "例如：我的应用 + 排除噪音",
+      hint: "保存后可在「预设」下拉里一键切换；同名会提示覆盖",
+      maxLength: 40,
+    });
+    if (!name) return;
+    const dup = lcPresets.findIndex((p) => p.name === name);
+    if (dup >= 0) {
+      const yes = await askConfirm({
+        title: "覆盖预设",
+        text: "已存在同名预设「" + name + "」，用当前过滤条件覆盖它？",
+        yes: "覆盖", danger: true,
+      });
+      if (!yes) return;
+    }
+    const item = { name: name, kw: kw };
+    if (dup >= 0) lcPresets[dup] = item;
+    else lcPresets.push(item);
+    if (lcPresets.length > LC_PRESET_MAX) {
+      lcPresets.splice(0, lcPresets.length - LC_PRESET_MAX);
+    }
+    _persistLcPresets();
+    renderLcPresets();
+    selectLcPreset(String(lcPresets.indexOf(item)));
+    pushStatus("ok", "✓ 已保存过滤预设「" + name + "」");
+  }
+  async function deleteLcPreset() {
+    const idx = els.lcPreset ? els.lcPreset.value : "";
+    const p = idx === "" ? null : lcPresets[Number(idx)];
+    if (!p) return;
+    const yes = await askConfirm({
+      title: "删除预设",
+      text: "删除过滤预设「" + p.name + "」？（不影响当前过滤条件）",
+      yes: "删除", danger: true,
+    });
+    if (!yes) return;
+    lcPresets.splice(Number(idx), 1);
+    _persistLcPresets();
+    renderLcPresets();
+    pushStatus("ok", "已删除预设「" + p.name + "」");
+  }
+  function applyLcPreset() {
+    const idx = els.lcPreset ? els.lcPreset.value : "";
+    const p = idx === "" ? null : lcPresets[Number(idx)];
+    if (els.lcPresetDel) els.lcPresetDel.disabled = !p;
+    if (!p) return;
+    els.lcFilter.value = p.kw;
+    triggerLcFilter();
+    pushStatus("ok", "已应用预设「" + p.name + "」");
   }
   function renderLogcat() {
     // 全量重建前丢弃待渲染队列，否则残留的行会在重建后插入，顺序错乱
@@ -7059,9 +7168,20 @@
         // 表达式里可能刚出现/改掉 pkg:（这是唯一需要异步解析的字段）
         lcRefreshPkgPids();
         syncLcPkgTimer();
+        // 手工改过条件：与已选预设不再一致时把下拉退回「（无）」
+        const idx = els.lcPreset ? els.lcPreset.value : "";
+        const preset = idx === "" ? null : lcPresets[Number(idx)];
+        if (preset && preset.kw.trim() !== els.lcFilter.value.trim()) {
+          selectLcPreset("");
+        }
         if (lcSerial) renderLogcat();
       }, LC_DEBOUNCE_MS);
     });
+    // 预设：选中即应用；手改表达式后若与预设不再一致，下拉自动回到「（无）」，
+    // 否则界面会显示「当前是预设 A」而实际过滤条件已经变了。
+    if (els.lcPreset) els.lcPreset.addEventListener("change", applyLcPreset);
+    if (els.lcPresetSave) els.lcPresetSave.addEventListener("click", saveLcPreset);
+    if (els.lcPresetDel) els.lcPresetDel.addEventListener("click", deleteLcPreset);
     els.lcLevels.addEventListener("change", () => {
       persistPref("lc_levels", levelsOf(els.lcLevels));
       if (lcSerial) renderLogcat();

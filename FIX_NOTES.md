@@ -4927,3 +4927,41 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
   16 条前端行为断言，覆盖六个字段、排除与包含混合、按包下拉写入、右键菜单四项。
 
 全量：后端 **1416 passed / 1 skipped**；前端 **91 文件 0 失败**；pyflakes 干净。
+
+---
+
+# 第七十轮（Logcat 过滤预设：常用表达式一键保存 / 切换）
+
+## 需求
+
+「可做 常用过滤条件另存为预设。暂时不考虑多设备同时监控，因为需要保持程序整体的
+轻量、运行速度快、内存占用低」。
+
+## 实现
+
+预设存的是**表达式文本**（`kw`），不存级别 / 仅异常 —— 那两项是全局视图偏好，
+切预设时不应连带变化。
+
+- [index.html](file:///workspace/frontend/index.html#L247-L254)：过滤框右侧新增
+  「预设」下拉 + 「存为预设」「删除」两个按钮。
+- [app.js](file:///workspace/frontend/js/app.js#L2851-L2954)：`lcPresets` 状态与
+  `_loadLcPresets` / `renderLcPresets` / `saveLcPreset` / `deleteLcPreset` /
+  `applyLcPreset`：
+  - 保存走应用内输入弹窗（不用 `window.prompt`）；同名保存弹确认后**覆盖**，上限 30 条；
+  - 选中即回填表达式并立即重渲染；删除需二次确认，且明说「不影响当前过滤条件」；
+  - 表达式被手工改动、与已选预设不再一致时，下拉自动退回「（无）」；
+  - 启动恢复时若 `lc_keyword` 正好等于某个预设，自动选上该预设。
+- 落盘 `config.json` 的 `lc_presets`（JSON 字符串，与 `cmd_history` 同一套约定：
+  后端对未知键原样保留，不必改 prefs 白名单）；手改坏 / 非数组 / 元素缺字段一律
+  当空列表处理，不影响启动。
+- [app.css](file:///workspace/frontend/css/app.css#L1264-L1268)：下拉限宽，长名称不把
+  「按包 / 级别」挤到下一行。
+
+## 测试
+
+新增 [logcat_presets.test.cjs](file:///workspace/tests/frontend/logcat_presets.test.cjs)
+（18 条）：保存并落盘、切换回填、同名覆盖（数量不增）、删除确认与落盘、启动按配置
+恢复并自动选中、手改表达式后退回「（无）」。测试里等待 `#pill` 变成「已就绪」而不是
+等下拉的选项数 —— HTML 自带「（无）」一项，按选项数等待会抢在配置恢复前开始断言。
+
+全量：前端 **92 文件 0 失败**；后端未改动（1416 passed / 1 skipped）；pyflakes 干净。
