@@ -390,18 +390,20 @@ class LogcatMonitor:
             while True:
                 if stop_ev.is_set():
                     break
+                now = time.time()
+                # pkg: 的 pid 会随应用重启变化，按墙钟每 PKG_PID_REFRESH_S 重解析。
+                # 必须放在循环顶部：早前放在「队列超时（这段没有新日志）」分支里，
+                # 日志持续不断时那个分支永远进不去，pid 就一直停在启动时那一份 ——
+                # 应用重启后按包过滤突然「一行都没有」，而界面看不出任何原因。
+                if pkg_refresh_at and now >= pkg_refresh_at:
+                    pkg_pids = self._resolve_pkg_pids(serial, keyword)
+                    pkg_refresh_at = time.time() + PKG_PID_REFRESH_S
                 try:
                     raw = q.get(timeout=_FLUSH_MS)
                 except queue.Empty:
                     # 这段时间没有新日志：把攒下的行按时推出去（爆发期则按时
                     # 结束，避免尾部历史行等不到「下一行」而滞留）。
                     now = time.time()
-                    # pkg: 的 pid 会随应用重启变化：空闲时定期重解析一次。
-                    # 放在这里而不是读循环里，是因为它要起一个 adb 子进程，
-                    # 不能卡在每行日志的关键路径上。
-                    if pkg_refresh_at and now >= pkg_refresh_at:
-                        pkg_pids = self._resolve_pkg_pids(serial, keyword)
-                        pkg_refresh_at = now + PKG_PID_REFRESH_S
                     if in_boot:
                         if now - t0 >= BOOT_WINDOW_SEC:
                             _end_boot(now)

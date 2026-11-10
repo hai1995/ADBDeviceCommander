@@ -1633,7 +1633,16 @@
     // Logcat 自动联动：未监控时跟随左侧第一个勾选设备，监控中不打断
     if (!lcRunning) {
       const next = firstChecked();   // 受控设备第一个（与文件 tab 同源）
-      if (next !== lcSerial) { lcSerial = next; renderLogcat(); refreshLcPackages(); }
+      if (next !== lcSerial) {
+        lcSerial = next;
+        renderLogcat();
+        refreshLcPackages();
+        // 表达式里可能有 pkg:，换了设备就必须按新设备重新解析 pid：
+        // 只重绘的话缓存里没有这台设备的映射，会一直显示「命中 0 行」，
+        // 而界面看上去一切正常（这两台设备的缓存还互相不通用）。
+        lcRefreshPkgPids();
+        syncLcPkgTimer();
+      }
     }
     syncToolButtons();
     // 抓取开始按钮：不在抓取中且至少有一个受控设备时可点（与监控按钮解耦）
@@ -2592,11 +2601,17 @@
        空格分隔 = AND；- 前缀 = 排除；
        tag:/msg:/pid:/tid:/level:/pkg: 指定字段；无前缀 = 整行原文包含。 */
   const LC_FILTER_FIELDS = ["tag:", "msg:", "pid:", "tid:", "level:", "pkg:"];
-  // pkg:包名 -> [pid...]，由后端 adb shell pidof 解析后缓存。pid 会随应用重启
-  // 变化，所以监控中每 PKG_PID_REFRESH_MS 重新解析一次（见 lcRefreshPkgPids）。
+  // 「设备 + 包名」-> [pid...]，由后端 adb shell pidof 解析后缓存。pid 会随应用
+  // 重启变化，所以监控中每 PKG_PID_REFRESH_MS 重新解析一次（见 lcRefreshPkgPids）。
+  // 必须带上设备序列号：同一包名在不同设备上的 pid 毫无关系，只按包名缓存会在
+  // 切换设备后拿上一台设备的 pid 去过滤，界面显示 0 行且看起来像过滤坏了。
   let lcPkgPids = {};
   let lcPkgTimer = null;
   const PKG_PID_REFRESH_MS = 5000;
+
+  function lcPkgPidKey(serial, name) {
+    return (serial || "") + "\n" + name;
+  }
 
   function lcSplitTerms(kw) {
     const out = [];
@@ -2621,7 +2636,7 @@
       if (p === "tid:") return String(ln.tid || "") === pat;
       if (p === "level:") return pat.indexOf(String(ln.level || "").toLowerCase()) >= 0;
       if (p === "pkg:") {
-        const pids = lcPkgPids[pat] || [];
+        const pids = lcPkgPids[lcPkgPidKey(lcSerial, pat)] || [];
         return pids.indexOf(String(ln.pid || "")) >= 0;
       }
     }
@@ -2772,7 +2787,8 @@
       const low = t.term.toLowerCase();
       if (low.indexOf("pkg:") !== 0) return;
       const name = low.slice(4).trim();
-      if (name && lcPkgPids[name] === undefined && out.indexOf(name) < 0) {
+      if (name && lcPkgPids[lcPkgPidKey(lcSerial, name)] === undefined
+          && out.indexOf(name) < 0) {
         out.push(name);
       }
     });
@@ -2780,16 +2796,22 @@
   }
   function lcRefreshPkgPids() {
     if (!lcSerial) return;
+    const serial = lcSerial;          // 固定本次请求对应的设备，供迟到响应比对
     const names = lcPkgNamesToResolve(lcSplitTerms(els.lcFilter.value));
     if (!names.length) return;
     names.forEach((name) => {
-      callApi(api.logcat_pidof(lcSerial, name)).then((r) => {
+      callApi(api.logcat_pidof(serial, name)).then((r) => {
         // 解析失败（设备忙 / 包没在跑）也记成空数组：否则每次重渲染都会
         // 重新发一遍请求，形成「一直在转圈」的假象。用户能看到「命中 0 行」，
         // 比毫无反馈更接近事实。
-        lcPkgPids[name] = (r && Array.isArray(r.pids)) ? r.pids : [];
-        if (lcSerial) renderLogcat();
-      }).catch(() => { lcPkgPids[name] = []; });
+        lcPkgPids[lcPkgPidKey(serial, name)] =
+          (r && Array.isArray(r.pids)) ? r.pids : [];
+        // 迟到响应只入缓存，不重绘：此时界面已经切到别的设备了
+        if (serial === lcSerial) renderLogcat();
+      }).catch(() => {
+        lcPkgPids[lcPkgPidKey(serial, name)] = [];
+        if (serial === lcSerial) renderLogcat();
+      });
     });
   }
   // 监控中且表达式含 pkg: 时，按固定间隔重解析 pid（应用重启后 pid 会变）
@@ -2802,8 +2824,11 @@
     }
     if (lcPkgTimer === null) {
       lcPkgTimer = setInterval(() => {
-        // 强制重解析：清掉缓存再走一次 lcRefreshPkgPids
-        Object.keys(lcPkgPids).forEach((k) => { delete lcPkgPids[k]; });
+        // 强制重解析：只清当前设备的缓存，别的设备的缓存留着（切回去还能用）
+        const prefix = (lcSerial || "") + "\n";
+        Object.keys(lcPkgPids).forEach((k) => {
+          if (k.indexOf(prefix) === 0) delete lcPkgPids[k];
+        });
         lcRefreshPkgPids();
       }, PKG_PID_REFRESH_MS);
     }
@@ -7198,8 +7223,10 @@
         const name = els.lcPkg.value;
         if (!name) return;
         if (!lcSerial) return;
-        callApi(api.logcat_pidof(lcSerial, name)).then((r) => {
+        const serial = lcSerial;      // 响应回来时用户可能已切设备，缓存要记在发起方设备上
+        callApi(api.logcat_pidof(serial, name)).then((r) => {
           const pids = (r && Array.isArray(r.pids)) ? r.pids : [];
+          if (serial !== lcSerial) return;   // 迟到的解析结果不再改写当前过滤框
           if (!pids.length) {
             // 包没在跑：明确说出来，否则用户以为过滤坏了
             pushStatus("warn", "⚠ 包 " + name + " 当前没有在运行（pid 为空），"
@@ -7211,7 +7238,7 @@
           if (pids.length === 1) {
             els.lcFilter.value = "pid:" + pids[0];
           } else {
-            lcPkgPids[name.toLowerCase()] = pids;
+            lcPkgPids[lcPkgPidKey(lcSerial, name.toLowerCase())] = pids;
             els.lcFilter.value = "pkg:" + name;
           }
           triggerLcFilter();

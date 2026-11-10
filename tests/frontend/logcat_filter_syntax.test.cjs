@@ -218,6 +218,49 @@ const hitCount = (doc) => {
     }
   }
 
+  console.log("\n[8] pkg: 缓存按设备隔离，切设备后重新解析");
+  {
+    // 回归：缓存曾经只按包名存，且切设备时只重绘不重解析 —— 两台设备的 pid
+    // 互相不通用，切过去就一直是「命中 0 行」，界面看起来却一切正常。
+    const batches = [
+      [{ kind: "booted", payload: { version: "v-test", warnings: [], commands: [] } },
+       { kind: "devices", payload: { items: [
+         Object.assign(dev("A1"), { checked: true }),
+         Object.assign(dev("B2"), { checked: false }),
+       ] } }],
+      [{ kind: "logcat", payload: {
+        serial: "A1", status: "append", lines: [line("I", "T", "on-a", 5417, 1)],
+        total: 1, exc: 0 } }],
+      [{ kind: "logcat", payload: {
+        serial: "B2", status: "append", lines: [line("I", "T", "on-b", 6000, 1)],
+        total: 1, exc: 0 } }],
+    ];
+    const { window } = mkEnv(batches, {
+      logcat_packages: () => Promise.resolve({ ok: true, packages: ["com.demo.app"] }),
+      // 同一包在 A1 是 5417，在 B2 是 6000
+      logcat_pidof: (serial) =>
+        Promise.resolve({ ok: true, pids: serial === "A1" ? ["5417"] : ["6000"] }),
+    });
+    const doc = window.document;
+    await waitFor(() => doc.getElementById("lc-counter").textContent.indexOf("行数: 1") === 0,
+                  8000, "A1 缓冲就绪");
+    await applyFilter(doc, "pkg:com.demo.app");
+    await waitFor(() => hitCount(doc) === 1, 4000, "A1 上命中 1");
+    ok(hitCount(doc) === 1, "A1 上 pkg: 解析到 5417，命中 1 行", counterOf(doc));
+
+    // 切到 B2（取消 A1、勾选 B2），事件循环下一轮才会处理
+    batches.push([{ kind: "devices", payload: { items: [
+      Object.assign(dev("A1"), { checked: false }),
+      Object.assign(dev("B2"), { checked: true }),
+    ] } }]);
+    const switched = await waitFor(
+      () => doc.getElementById("lc-dev").textContent.indexOf("B2") >= 0, 4000, "切到 B2");
+    ok(switched, "设备切换后 logcat 联动到 B2",
+       doc.getElementById("lc-dev").textContent);
+    const rehit = await waitFor(() => hitCount(doc) === 1, 4000, "B2 重新解析后命中 1");
+    ok(rehit, "B2 上不能用 A1 的 5417，要按 B2 解析出的 6000 命中", counterOf(doc));
+  }
+
   console.log("\n" + "=".repeat(46));
   console.log(`结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);

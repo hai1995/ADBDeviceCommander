@@ -1828,3 +1828,30 @@ def test_pkg_pids_of_returns_empty_on_failure(monkeypatch):
         raise FileNotFoundError("adb")
     monkeypatch.setattr(ls.subprocess, "run", boom)
     assert ls.pkg_pids_of("adb", "S1", "com.demo.app") == set()
+
+
+def test_pkg_pid_refresh_runs_while_logs_keep_flowing(monkeypatch):
+    """日志持续不断时，pkg: 的 pid 也要按墙钟定期重解析。
+
+    回归：刷新原先只写在「队列超时（这段时间没有新日志）」分支里。日志洪流下
+    该分支永远进不去，pid 就一直停在启动时那一份 —— 应用重启后按包过滤会
+    突然「一行都没有」，而界面看不出任何原因。
+    """
+    bus = _FakeBus()
+    mon = ls.LogcatMonitor(bus, adb_path="adb")
+    calls = []
+    monkeypatch.setattr(
+        mon, "_resolve_pkg_pids",
+        lambda serial, kw: (calls.append(time.time())
+                            or {"com.demo.app": {"100"}}))
+    monkeypatch.setattr(ls, "PKG_PID_REFRESH_S", 0.15)
+    monkeypatch.setattr(ls, "BOOT_WINDOW_SEC", 0.05)
+    line = "08-29 10:00:00.000  100  100 I Tag: flood\n"
+    monkeypatch.setattr(ls.subprocess, "Popen",
+                        lambda cmd, **kw: _FakeLogcatProc([line]))
+    assert mon.start("A1", ["main"], keyword="pkg:com.demo.app") is True
+    time.sleep(0.9)
+    mon.stop("A1")
+    time.sleep(0.2)
+    assert len(calls) >= 3, (
+        "持续日志下 pkg: 的 pid 未定期刷新（只解析了 %d 次）" % len(calls))

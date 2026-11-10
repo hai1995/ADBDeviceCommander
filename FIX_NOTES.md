@@ -5031,3 +5031,40 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 静态断言新增一条：收起态 `.main-row` 必须有 12px gap。
 
 全量：前端 **92 文件 0 失败**（47 条 sidebar_collapse 用例全过）。
+
+---
+
+# 第七十三轮（pkg: 过滤的两处时效问题）
+
+## 一、日志不断流时 pid 永不刷新
+
+第七十轮把「按包过滤」的 pid 解析做成了监控中每 5 秒刷新，但代码放在
+worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志」才会走到的分支。
+真实场景日志几乎不断，这个分支永远进不去，pid 就停在启动时那一份：应用重启
+（pid 变了）后按包过滤突然一行都没有，界面也看不出任何原因。
+
+修复：刷新判断移到 worker 循环顶部，按墙钟执行，与队列是否空闲无关
+（[logcat_service.py](file:///workspace/backend/logcat_service.py#L388-L404)）。
+代价是每 5 秒一次 `pidof`（约几十毫秒），比「过滤悄悄失效」划算。
+
+## 二、pid 缓存没带设备号 + 切设备不重解析
+
+前端缓存原本是 `包名 -> [pid]`，切换设备后仍拿上一台的 pid 去过滤；且设备切换
+分支只调了 `renderLogcat()`，没有触发重解析 —— 未监控时也没有 5 秒定时器在跑，
+于是切过去就**永久**停在「命中 0 行」。
+
+修复（[app.js](file:///workspace/frontend/js/app.js)）：
+- 缓存键改为「设备 + 包名」，两台设备的 pid 互不污染；
+- 设备联动切换时补 `lcRefreshPkgPids()` + `syncLcPkgTimer()`；
+- 定时器只清当前设备的缓存，切回去还能先用旧值；
+- 迟到的 `logcat_pidof` 响应只写缓存、不重绘（此时界面可能已换设备）；
+- 请求失败也写入空数组并重绘，避免「一直转圈」的假象。
+
+## 测试
+
+- 后端新增 [test_pkg_pid_refresh_runs_while_logs_keep_flowing](file:///workspace/tests/test_backend_logcat.py#L1833-L1857)：
+  用持续吐行的假 `adb logcat` 缩小刷新周期，断言多次解析（旧实现只会解析 1 次）。
+- 前端 [logcat_filter_syntax.test.cjs](file:///workspace/tests/frontend/logcat_filter_syntax.test.cjs#L221-L262)
+  新增第 8 组：A1 解析到 5417、切到 B2 后必须按 6000 命中，验证「缓存隔离 + 切换重解析」。
+
+全量：后端 **1420 passed / 1 skipped**；前端 **92 文件 0 失败**；pyflakes 干净。
