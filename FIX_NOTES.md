@@ -5133,3 +5133,41 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   中依赖保存按钮的段落。
 
 全量：后端 **1418 passed / 1 skipped**；前端 **91 文件 0 失败**；pyflakes 干净。
+
+---
+
+# 第七十六轮（内置「获取/杀掉当前 Activity」加固与可见性回归）
+
+## 问题
+
+用户反馈内置命令区里看不到「获取当前 Activity」「杀掉当前 Activity」。
+
+## 排查
+
+后端 `load_commands` 实测返回 49 条内置命令，两条 Activity 命令都在；
+`merge_builtins` 的「同名压制」只在用户命令核心名相同时才会抑制内置。
+若用户 `commands.json` 里已有同名命令（哪怕只是空格差异），内置会被隐藏。
+前端渲染链路经测试可正常显示这两条命令。
+
+## 加固
+
+既然命令已在源码里，本轮做了两处稳健性改进，避免「命令在但不好用」：
+
+- [builtin_commands.py](file:///workspace/core/builtin_commands.py#L55-L69)：
+  - 「获取当前 Activity」改为同时匹配 `mCurrentFocus` 与 `mFocusedApp`：
+    新版 Android 上 `mCurrentFocus` 可能只给 Window 句柄，`mFocusedApp`
+    才有完整包名/Activity，两条都打出来便于排查。
+  - 「杀掉当前 Activity」加 `Select-Object -First 1`，只取第一条焦点行，
+    避免历史焦点行导致对多个包重复 `force-stop`；`mCurrentFocus=null`
+    时正则不匹配、不动作。
+
+## 测试
+
+- [test_load_commands.py](file:///workspace/tests/test_load_commands.py#L303-L315)
+  重命名为 `test_builtin_kill_activity_command_text`，断言新命令文本含
+  `Select-Object -First 1` 且正则反斜杠完整。
+- [builtin_command_badge.test.cjs](file:///workspace/tests/frontend/builtin_command_badge.test.cjs#L129-L148)
+  新增第 4 段：用两条 Activity 命令的真实 id/name 起 payload，断言前端
+  渲染链路不会把它们过滤掉。
+
+全量：后端 **1418 passed / 1 skipped**；前端 **91 文件 0 失败**。

@@ -300,15 +300,19 @@ def test_core_sources_have_no_invalid_escape_sequences():
             compile(text, str(src), "exec")
 
 
-def test_builtin_regex_command_text_unchanged():
-    r"""回归：把含正则的命令改为 raw 字符串时，命令文本必须逐字节不变
-    （ PowerShell 的 -match '(\S+)/' 少一个反斜杠就匹配不到包名/Activity ）。"""
+def test_builtin_kill_activity_command_text():
+    r"""「杀掉当前 Activity」命令文本：
+    - 只取第一条 mCurrentFocus 行（Select-Object -First 1），避免历史焦点行
+      导致对多个包重复 force-stop；
+    - 正则 '(\S+)/' 从 '包名/.Activity' 截出包名，mCurrentFocus=null 时不匹配、
+      不动作。raw 字符串里的反斜杠不能少一个。"""
     cmd = next(
         e["command"] for b in BUILTIN_COMMANDS if b["id"] == "bi.kill-activity"
         for e in b["commands"])
+    assert "Select-Object -First 1" in cmd
     assert cmd == (
-        r"adb shell dumpsys window | sls mCurrentFocus | %{ if ($_ -match '(\S+)/') "
-        r"{ adb shell am force-stop $Matches[1] } }")
+        r"adb shell dumpsys window | sls mCurrentFocus | Select-Object -First 1 "
+        r"| %{ if ($_ -match '(\S+)/') { adb shell am force-stop $Matches[1] } }")
 
 
 def test_builtin_wake_unlock_uses_wakeup_not_power():

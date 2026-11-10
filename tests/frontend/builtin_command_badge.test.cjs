@@ -126,6 +126,27 @@ function chipOf(doc, text) {
     w2.close();
   }
 
+  console.log("\n[4] 内置「获取当前 Activity / 杀掉当前 Activity」必须渲染出来");
+  {
+    // 回归：用户反馈内置命令区里看不到这两条。这里直接用真实内置命令的
+    // id / name 起一份最小 payload，确认前端渲染链路没有把它们过滤掉。
+    const activityCmds = [
+      { id: "bi.current-activity", name: "[内置] 获取当前 Activity",
+        labels: ["内置"], builtin: true, section: "应用与信息",
+        commands: [{ command: "adb shell dumpsys window | findstr mCurrentFocus", delay: 100 }] },
+      { id: "bi.kill-activity", name: "[内置] 杀掉当前 Activity",
+        labels: ["内置"], builtin: true, section: "应用与信息",
+        commands: [{ command: "adb shell am force-stop", delay: 100 }] },
+    ];
+    const { window: w3 } = await boot(activityCmds);
+    const d3 = w3.document;
+    ok(await waitFor(
+      () => chipOf(d3, "[内置] 获取当前 Activity") && chipOf(d3, "[内置] 杀掉当前 Activity"),
+      4000, "两条 Activity 命令"),
+      "获取当前 Activity / 杀掉当前 Activity 都已渲染到内置命令区");
+    w3.close();
+  }
+
   console.log("\n" + "=".repeat(46));
   console.log(`结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);

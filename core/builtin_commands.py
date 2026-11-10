@@ -56,12 +56,17 @@ BUILTIN_COMMANDS = [
         "id": "bi.current-activity", "name": "获取当前 Activity", "labels": ["内置"], "section": "应用与信息",
         "clickCount": 0, "builtin": True,
         "commands": [{"delay": 100, "command":
-            'adb shell dumpsys window | findstr "mCurrentFocus"'}]},
+            # 同时取 mCurrentFocus（窗口焦点）与 mFocusedApp（应用焦点）；
+            # 新版 Android 上 mCurrentFocus 可能只给 Window 句柄，mFocusedApp
+            # 才有完整的 包名/Activity，两条都打出来便于排查。
+            'adb shell dumpsys window | findstr "mCurrentFocus mFocusedApp"'}]},
     {
         "id": "bi.kill-activity", "name": "杀掉当前 Activity", "labels": ["内置"], "section": "应用与信息",
         "clickCount": 0, "builtin": True,
         "commands": [{"delay": 100, "command":
-            r'''adb shell dumpsys window | sls mCurrentFocus | %{ if ($_ -match '(\S+)/') { adb shell am force-stop $Matches[1] } }'''}]},
+            # 只取第一条 mCurrentFocus 行，避免历史焦点行导致重复 force-stop；
+            # 正则从 '包名/.Activity' 里截出包名，mCurrentFocus=null 时不匹配、不动作。
+            r'''adb shell dumpsys window | sls mCurrentFocus | Select-Object -First 1 | %{ if ($_ -match '(\S+)/') { adb shell am force-stop $Matches[1] } }'''}]},
     {
         "id": "bi.update-time", "name": "更新设备时间", "labels": ["内置"], "section": "应用与信息",
         "scope": "车机",
