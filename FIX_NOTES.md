@@ -5004,3 +5004,30 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 （多出的那次正是链接探测）。
 
 全量：后端 **1419 passed / 1 skipped**；pyflakes 干净（本轮未改前端）。
+
+---
+
+# 第七十二轮（设备栏收起态与右侧面板贴太紧）
+
+## 问题
+
+设备栏收起成 48px 窄轨后，右侧内容区直接贴着窄轨，两块圆角面板之间没有任何
+留白，视觉上很挤。
+
+## 原因
+
+展开态这段留白是由 12px 的分隔条 `.splitter` 占着的；收起时
+`#sidebar-splitter { display:none }` 把它整个隐藏，行容器的 `gap` 又是 0，
+于是留白一起消失。
+
+## 修复
+
+[app.css](file:///workspace/frontend/css/app.css#L734-L737) 给收起态的行容器补
+`gap: 12px`（与分隔条同宽），视觉节奏与展开态一致。展开态不受影响。
+
+## 测试
+
+[sidebar_collapse.test.cjs](file:///workspace/tests/frontend/sidebar_collapse.test.cjs#L125-L130)
+静态断言新增一条：收起态 `.main-row` 必须有 12px gap。
+
+全量：前端 **92 文件 0 失败**（47 条 sidebar_collapse 用例全过）。

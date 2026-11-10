@@ -124,6 +124,10 @@ async function booted(win, calls) {
     ok(!!rail && /cursor:\s*pointer/.test(rail), "收起态整轨 pointer 光标（点轨即展开）");
     const sp = cssBlock(".main-row.sidebar-collapsed #sidebar-splitter");
     ok(!!sp && /display:\s*none/.test(sp), "收起态隐藏分隔条（拖着 48px 的轨没意义）");
+    // 分隔条隐藏后窄轨会与右侧面板贴死：收起态必须补上与分隔条等宽的间距
+    const rowGap = cssBlock(".main-row.sidebar-collapsed");
+    ok(!!rowGap && /gap:\s*12px/.test(rowGap),
+       "收起态窄轨与右侧面板之间留 12px 间距（替代被隐藏的分隔条）");
     const hidden = cssBlock(".main-row.sidebar-collapsed .device-list");
     ok(!!hidden && /display:\s*none/.test(hidden), "收起态隐藏设备列表本体");
     // 同一条规则的选择器列表（在 { 之前）应收掉 DEVICES / 按钮组 / 设备列表，

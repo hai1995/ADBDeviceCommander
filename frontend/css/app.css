@@ -731,6 +731,10 @@ input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
   cursor: pointer;                 /* 整轨可点：展开（按钮自身负责收起） */
   transition: background var(--dur-fast) ease;
 }
+/* 收起态补上间距：展开时这段留白由 12px 的分隔条占着（见 .splitter），
+   收起后分隔条整个隐藏，窄轨就和右侧面板贴在一起了——两块圆角面板紧挨着
+   会显得很挤。给行容器补 12px gap，视觉节奏与展开态一致。 */
+.main-row.sidebar-collapsed { gap: 12px; }
 .main-row.sidebar-collapsed .device-sidebar:hover { background: var(--surface-2); }
 .main-row.sidebar-collapsed #sidebar-splitter { display: none; }
 /* 头部撑满整条轨：列表已隐藏，「按钮在顶、铭牌在底」的纵向编排要靠它 */
