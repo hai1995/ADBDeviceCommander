@@ -261,6 +261,24 @@ const hitCount = (doc) => {
     ok(rehit, "B2 上不能用 A1 的 5417，要按 B2 解析出的 6000 命中", counterOf(doc));
   }
 
+  console.log("\n[9] pkg: 解析为空 → 状态栏提示一次（不刷屏）");
+  {
+    const lines = [line("I", "T", "x", 1, 1)];
+    const { doc } = await bootWith(lines, {
+      logcat_pidof: () => Promise.resolve({ ok: true, pids: [] }),
+    });
+    await applyFilter(doc, "pkg:com.gone");
+    const statusOf = () => doc.getElementById("status").textContent || "";
+    const warned = await waitFor(
+      () => statusOf().indexOf("没找到包 com.gone") >= 0, 4000, "未运行提示");
+    ok(warned, "解析为空时说明「包没在跑」，而不是只显示命中 0 行", statusOf());
+
+    // 重复输入同样的表达式：缓存里已有空数组，不应再解析、更不该重复刷警告
+    await applyFilter(doc, "pkg:com.gone");
+    const n = statusOf().split("没找到包 com.gone").length - 1;
+    ok(n === 1, "重复输入 / 定期重解析不重复刷同一条警告", "出现 " + n + " 次");
+  }
+
   console.log("\n" + "=".repeat(46));
   console.log(`结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);

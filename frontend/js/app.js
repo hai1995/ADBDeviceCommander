@@ -1640,7 +1640,7 @@
         // 表达式里可能有 pkg:，换了设备就必须按新设备重新解析 pid：
         // 只重绘的话缓存里没有这台设备的映射，会一直显示「命中 0 行」，
         // 而界面看上去一切正常（这两台设备的缓存还互相不通用）。
-        lcRefreshPkgPids();
+        lcRefreshPkgPids(true);
         syncLcPkgTimer();
       }
     }
@@ -2594,6 +2594,9 @@
     els.lcStop.classList.toggle("live", running);
     // 开工/收工都重算 pkg: 的定时解析（停机后不必再起 adb 子进程刷 pid）
     syncLcPkgTimer();
+    // 开工这一下强制重解析：停机期间应用可能已经重启过，缓存里的 pid 早失效了，
+    // 等 5 秒定时器才第一次解析的话，刚点开始会先看到一段「命中 0 行」。
+    if (running) lcRefreshPkgPids(true);
   }
 
   /* 过滤表达式（与后端 core/logcat.py 的 split_filter_terms / match_filter
@@ -2607,6 +2610,9 @@
   // 切换设备后拿上一台设备的 pid 去过滤，界面显示 0 行且看起来像过滤坏了。
   let lcPkgPids = {};
   let lcPkgTimer = null;
+  // 已经提示过「这个包没解析到 pid」的「设备 + 包名」：pid 每 5 秒重解析一次，
+  // 不去重的话状态栏会被同一句警告刷屏。
+  let lcPkgEmptyWarned = {};
   const PKG_PID_REFRESH_MS = 5000;
 
   function lcPkgPidKey(serial, name) {
@@ -2794,22 +2800,47 @@
     });
     return out;
   }
-  function lcRefreshPkgPids() {
+  // 解析结果落缓存；解析为空（包没在跑 / 设备读不到进程）时在状态栏说明一次。
+  // 否则界面上只有「命中 0 行」，用户会以为过滤表达式写坏了。
+  function lcApplyPkgPids(serial, name, pids) {
+    const key = lcPkgPidKey(serial, name);
+    lcPkgPids[key] = pids;
+    if (pids.length) { delete lcPkgEmptyWarned[key]; return; }
+    // 已切到别的设备：先不提示，等切回来那一轮再提示（否则提示与界面上的设备不符）
+    if (serial !== lcSerial || lcPkgEmptyWarned[key]) return;
+    lcPkgEmptyWarned[key] = true;
+    pushStatus("warn", "⚠ 没找到包 " + name + " 的运行中进程"
+              + "（按包过滤将显示 0 行）");
+  }
+  function lcRefreshPkgPids(force) {
     if (!lcSerial) return;
     const serial = lcSerial;          // 固定本次请求对应的设备，供迟到响应比对
     const names = lcPkgNamesToResolve(lcSplitTerms(els.lcFilter.value));
+    if (force) {
+      // 上次解析为空（包当时没跑）的也重来一次：重新启用过滤 / 切回这台设备 /
+      // 开始监控时，包可能已经起来了，不能因为缓存里躺着一个空数组就一直 0 行。
+      lcSplitTerms(els.lcFilter.value).forEach((t) => {
+        const low = t.term.toLowerCase();
+        if (low.indexOf("pkg:") !== 0) return;
+        const name = low.slice(4).trim();
+        const key = lcPkgPidKey(serial, name);
+        if (name && lcPkgPids[key] && !lcPkgPids[key].length
+            && names.indexOf(name) < 0) {
+          names.push(name);
+        }
+      });
+    }
     if (!names.length) return;
     names.forEach((name) => {
       callApi(api.logcat_pidof(serial, name)).then((r) => {
         // 解析失败（设备忙 / 包没在跑）也记成空数组：否则每次重渲染都会
-        // 重新发一遍请求，形成「一直在转圈」的假象。用户能看到「命中 0 行」，
-        // 比毫无反馈更接近事实。
-        lcPkgPids[lcPkgPidKey(serial, name)] =
-          (r && Array.isArray(r.pids)) ? r.pids : [];
+        // 重新发一遍请求，形成「一直在转圈」的假象。
+        lcApplyPkgPids(serial, name,
+                       (r && Array.isArray(r.pids)) ? r.pids : []);
         // 迟到响应只入缓存，不重绘：此时界面已经切到别的设备了
         if (serial === lcSerial) renderLogcat();
       }).catch(() => {
-        lcPkgPids[lcPkgPidKey(serial, name)] = [];
+        lcApplyPkgPids(serial, name, []);
         if (serial === lcSerial) renderLogcat();
       });
     });
@@ -2840,7 +2871,7 @@
     if (lcFilterTimer !== null) { clearTimeout(lcFilterTimer); lcFilterTimer = null; }
     persistPref("lc_keyword", els.lcFilter.value);
     // pkg: 条件先解析 pid 再渲染（否则第一次填进去会显示 0 行，随后才跳出来）
-    lcRefreshPkgPids();
+    lcRefreshPkgPids(true);
     syncLcPkgTimer();
     if (lcSerial) renderLogcat();
   }
@@ -7228,7 +7259,9 @@
           const pids = (r && Array.isArray(r.pids)) ? r.pids : [];
           if (serial !== lcSerial) return;   // 迟到的解析结果不再改写当前过滤框
           if (!pids.length) {
-            // 包没在跑：明确说出来，否则用户以为过滤坏了
+            // 包没在跑：明确说出来，否则用户以为过滤坏了。同时记下「已提示」，
+            // 免得监控中的 5 秒重解析再补一句重复的警告。
+            lcPkgEmptyWarned[lcPkgPidKey(serial, name.toLowerCase())] = true;
             pushStatus("warn", "⚠ 包 " + name + " 当前没有在运行（pid 为空），"
                       + "先把它启动起来再过滤");
             return;
@@ -7238,7 +7271,7 @@
           if (pids.length === 1) {
             els.lcFilter.value = "pid:" + pids[0];
           } else {
-            lcPkgPids[lcPkgPidKey(lcSerial, name.toLowerCase())] = pids;
+            lcApplyPkgPids(lcSerial, name.toLowerCase(), pids);
             els.lcFilter.value = "pkg:" + name;
           }
           triggerLcFilter();
