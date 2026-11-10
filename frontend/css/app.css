@@ -1255,6 +1255,12 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   margin-bottom: 8px; padding: 7px 10px;
 }
 .lc-status { color: var(--muted); font-size: var(--fs-sm); font-family: var(--font-mono); }
+/* 「按包」下拉：限制最大宽度，长包名（com.xxx.xxx.dashboard）不把工具栏撑爆；
+   超出部分用省略号。字体统一走等宽，和过滤框、日志正文风格一致。 */
+.lc-pkg {
+  max-width: 240px; min-width: 120px; font-family: var(--font-mono);
+  font-size: var(--fs-sm); text-overflow: ellipsis;
+}
 .lc-dev { color: var(--accent); font-size: var(--fs-sm); font-family: var(--font-mono); }
 .lc-counter {
   margin-left: auto; color: var(--muted); font-size: var(--fs-sm);

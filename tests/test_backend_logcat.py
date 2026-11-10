@@ -1697,3 +1697,134 @@ def test_filter_backward_compat_no_prefix():
     rec = ls.LogcatMonitor._classify_and_filter(
         line, set("VDIWEF"), "zzz", False)
     assert rec is None       # 都不在
+
+
+# ---------------------------------------------------------------------------
+# 过滤表达式：排除（- 前缀）、level 多字母、pid 精确、pkg 集合
+# ---------------------------------------------------------------------------
+
+def test_filter_exclusion_tag():
+    """-tag:Noise 表示「含 Noise 这个 tag 的行一律不要」。"""
+    line_noise = "11-10 11:23:59.667  5417  5430 I NoiseTag: hi"
+    line_ok = "11-10 11:23:59.667  5417  5430 I AppTag: hi"
+    assert ls.LogcatMonitor._classify_and_filter(
+        line_noise, set("VDIWEF"), "-tag:NoiseTag", False) is None
+    assert ls.LogcatMonitor._classify_and_filter(
+        line_ok, set("VDIWEF"), "-tag:NoiseTag", False) is not None
+
+
+def test_filter_exclusion_combined_with_include():
+    """包含 + 排除共存：只看 AppTag，同时排掉其中的 Verbose 噪音。"""
+    kw = "tag:AppTag -msg:keepalive"
+    keep = "11-10 11:23:59.667  5417  5430 I AppTag: something wrong"
+    drop_msg = "11-10 11:23:59.667  5417  5430 I AppTag: keepalive ping"
+    drop_tag = "11-10 11:23:59.667  5417  5430 I OtherTag: something wrong"
+    assert ls.LogcatMonitor._classify_and_filter(
+        keep, set("VDIWEF"), kw, False) is not None
+    assert ls.LogcatMonitor._classify_and_filter(
+        drop_msg, set("VDIWEF"), kw, False) is None
+    assert ls.LogcatMonitor._classify_and_filter(
+        drop_tag, set("VDIWEF"), kw, False) is None
+
+
+def test_filter_level_multi_letter():
+    """level:EWF 只看 W/E/F —— 这是回归点：旧实现写成 `pat in level`，
+    于是 "level:EWF" 永远不会命中任何单字母级别。"""
+    for lv in ("W", "E", "F"):
+        line = "11-10 11:23:59.667  1  1 %s Tag: hi" % lv
+        rec = ls.LogcatMonitor._classify_and_filter(
+            line, set("VDIWEF"), "level:EWF", False)
+        assert rec is not None, "level:EWF 应该命中 %s" % lv
+    for lv in ("V", "D", "I"):
+        line = "11-10 11:23:59.667  1  1 %s Tag: hi" % lv
+        assert ls.LogcatMonitor._classify_and_filter(
+            line, set("VDIWEF"), "level:EWF", False) is None, \
+            "level:EWF 不该命中 %s" % lv
+
+
+def test_filter_pid_is_exact_not_substring():
+    """pid 必须精确匹配：子串会让 "pid:41" 命中 4170，做排除时误伤一片。"""
+    line = "11-10 11:23:59.667  4170  5430 I Tag: hi"
+    assert ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "pid:4170", False) is not None
+    assert ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "pid:41", False) is None
+    # 排除也一样：-pid:41 不该把 4170 排掉
+    assert ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "-pid:41", False) is not None
+
+
+def test_filter_pkg_uses_resolved_pid_set():
+    """pkg: 依赖调用方解析好的 pid 集合；多进程包要全部命中。"""
+    line_main = "11-10 11:23:59.667  5417  5430 I Tag: hi"
+    line_remote = "11-10 11:23:59.667  5518  5530 I Tag: hi"
+    line_other = "11-10 11:23:59.667  9999  9990 I Tag: hi"
+    pkg_pids = {"com.demo.app": {"5417", "5518"}}
+    for ln in (line_main, line_remote):
+        assert ls.LogcatMonitor._classify_and_filter(
+            ln, set("VDIWEF"), "pkg:com.demo.app", False, None, pkg_pids
+        ) is not None
+    assert ls.LogcatMonitor._classify_and_filter(
+        line_other, set("VDIWEF"), "pkg:com.demo.app", False, None, pkg_pids
+    ) is None
+
+
+def test_filter_pkg_without_resolution_matches_nothing():
+    """没解析出 pid 时 pkg: 必须不命中，而不是退化成「全部放行」。"""
+    line = "11-10 11:23:59.667  5417  5430 I Tag: hi"
+    assert ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "pkg:com.demo.app", False, None, {}
+    ) is None
+
+
+def test_split_filter_terms_handles_spaces_and_lone_dash():
+    """连续空格、首尾空格、孤立 '-' 都要稳定切分（前端/后端共用同一规则）。"""
+    assert ls.split_filter_terms("  a   b  ") == [(False, "a"), (False, "b")]
+    # 孤立 '-' 不当排除符：用户可能真的想搜连字符
+    assert ls.split_filter_terms("-") == [(False, "-")]
+    assert ls.split_filter_terms("-tag:X") == [(True, "tag:X")]
+    assert ls.split_filter_terms("") == []
+
+
+def test_pkg_pids_of_prefers_pidof(monkeypatch):
+    """pidof 有结果就直接用，不再走 ps 回落（少一次 adb 调用）。"""
+    calls = []
+
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return R("5417 5518\n")
+
+    monkeypatch.setattr(ls.subprocess, "run", fake_run)
+    assert ls.pkg_pids_of("adb", "S1", "com.demo.app") == {"5417", "5518"}
+    assert len(calls) == 1 and "pidof" in calls[0]
+
+
+def test_pkg_pids_of_falls_back_to_ps(monkeypatch):
+    """老车机没有 pidof：回落到 ps，取末列为包名那几行的 pid。"""
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    def fake_run(cmd, **kw):
+        if "pidof" in cmd:
+            return R("", 1)
+        return R(
+            "USER  PID  PPID  NAME\n"
+            "u0_a12  5417  421  com.demo.app\n"
+            "u0_a13  5518  421  com.demo.app:remote\n"
+            "root  1  0  init\n")
+
+    monkeypatch.setattr(ls.subprocess, "run", fake_run)
+    assert ls.pkg_pids_of("adb", "S1", "com.demo.app") == {"5417"}
+
+
+def test_pkg_pids_of_returns_empty_on_failure(monkeypatch):
+    """adb 抛异常时返回空集（而不是 None）：调用方据此判定「不命中」。"""
+    def boom(*a, **k):
+        raise FileNotFoundError("adb")
+    monkeypatch.setattr(ls.subprocess, "run", boom)
+    assert ls.pkg_pids_of("adb", "S1", "com.demo.app") == set()

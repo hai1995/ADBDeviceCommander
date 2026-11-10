@@ -243,7 +243,11 @@
           <div class="lc-ctrls">
             <label class="lbl">过滤</label>
             <input id="lc-filter" type="text" class="inp"
-             placeholder="关键字（空格=AND）；tag:Tag名 msg:内容 pid:123 level:IW">
+             placeholder="空格=AND；- 排除；tag: msg: pid: tid: level: pkg:">
+            <label class="lbl" title="按包名过滤：选中后自动解析该包当前 pid 并只看它的日志">按包</label>
+            <select id="lc-pkg" class="inp lc-pkg" title="选择要过滤的包（仅列第三方应用）">
+              <option value="">（全部）</option>
+            </select>
             <label class="lbl">级别</label>
             <span id="lc-levels" class="levels">
               <label><input type="checkbox" value="V" checked>V</label>

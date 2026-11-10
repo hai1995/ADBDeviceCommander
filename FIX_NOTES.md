@@ -4868,3 +4868,62 @@ README / 使用说明 的「六类可折叠」描述改为「平铺 + 设备类�
 确认无问题的点：点停止/取消即刻冻结，失败与 `rec_state died` 路径都会清表；
 `recInFlight` 期间不会起表；`[hidden]` 显式 `display:none`；多设备取最早起录
 时刻，不会因逐台启动累加；只读展示，不触碰任何产物。
+
+---
+
+# 第六十九轮（Logcat 过滤语法完善：排除 / 字段前缀 / 按包）
+
+## 需求
+
+「logcat 的实时监控…过滤出来了很多的杂项…比如我想过滤某个包的日志信息，
+它也没有达到那种智能化的可以预识别」→「做，逐步将其功能完善起来」。
+
+## 实现
+
+一套过滤表达式，**空格 = AND**，`-` 前缀 = 排除，六个字段前缀：
+
+| 写法 | 含义 |
+| --- | --- |
+| `tag:Network` / `-tag:Noise` | Tag 子串包含 / 排除 |
+| `msg:timeout` | 消息正文子串 |
+| `pid:4170` / `tid:901` | **精确相等**（不是子串） |
+| `level:EWF` | 级别集合（多字母） |
+| `pkg:com.demo.app` | 解析该包当前 pid 集合后匹配（含 `:remote` 多进程） |
+| 无前缀 | 整行原文包含（兼容旧行为，能搜进程名等 tag/msg 之外的字段） |
+
+- [core/logcat.py](file:///workspace/core/logcat.py)：新增 `FILTER_FIELDS` /
+  `split_filter_terms` / `match_one_term` / `match_filter` 纯函数。
+- [logcat_service.py](file:///workspace/backend/logcat_service.py)：`_classify_and_filter`
+  委托 `match_filter`；新增 `pkg_pids_of`（`adb shell pidof` 优先，老系统回落 `ps`
+  —— toybox `ps` 首列是 USER，要取末列等于包名的那行里**第一个纯数字字段**）；
+  `LogcatMonitor` 在启动时与空转分支每 5 秒重解析 `pkg:` 的 pid（应用重启后 pid 会变）。
+- [logcat.py 控制器](file:///workspace/backend/controllers/logcat.py)：新增
+  `logcat_packages`（`pm list packages -3`，为空回落全量）与 `logcat_pidof`。
+- [index.html](file:///workspace/frontend/index.html)：过滤框占位符写明语法；
+  新增「按包」下拉（仅列第三方应用）。
+- [app.js](file:///workspace/frontend/js/app.js)：前端实现**同一套语义**
+  （`lcSplitTerms` / `lcMatchTerm` / `linePassesFilter`）——关键字本来就不下发后端，
+  过滤发生在前端，后端那套只用于抓取路径，两边必须逐条对齐；
+  「按包」单选 → 写 `pid:NNN`（可读可编辑），多进程 → 写 `pkg:name`；
+  右键菜单新增「按 Tag 过滤 / 排除此 Tag / 按 PID 过滤 / 排除此 PID / 追加排除此 Tag」。
+
+## 顺带修掉的缺陷
+
+- `level:` 旧实现写成 `pat in 级别`（反了），`level:EWF` 永远不命中；改为
+  「级别 ∈ 表达式字符集」，`level:EW` 自然成立。
+- `pid:` 旧实现是子串包含，`pid:41` 会连 4170 一起过滤掉，用作排除时误伤；
+  改为精确相等。
+- 上一轮只改了后端语法，而前端从不下发关键字 —— 那套规则实际是死代码。
+  这轮把权威实现放到前端，并在两处注释里互相指认，测试各自锁定同语义。
+
+## 测试
+
+- [test_backend_logcat.py](file:///workspace/tests/test_backend_logcat.py)：新增 10 条
+  （排除、排除+包含、多字母级别、pid 精确、pkg 有/无解析、表达式切分、pidof 优先、
+  ps 回落、解析失败返回空集）。
+- [test_backend_controller.py](file:///workspace/tests/test_backend_controller.py)：新增 5 条
+  （第三方包列表、回落全量、无设备、pidof 排序、参数校验）。
+- 新增 [logcat_filter_syntax.test.cjs](file:///workspace/tests/frontend/logcat_filter_syntax.test.cjs)：
+  16 条前端行为断言，覆盖六个字段、排除与包含混合、按包下拉写入、右键菜单四项。
+
+全量：后端 **1416 passed / 1 skipped**；前端 **91 文件 0 失败**；pyflakes 干净。

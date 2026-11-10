@@ -2,9 +2,10 @@
 """backend.controllers.logcat —— logcat 监控与抓取"""
 
 from backend.controller import (
-    load_prefs, os, resolve_save_dir, safe_name,
-    time, unique_path
+    adb_kwargs, load_prefs, os, resolve_save_dir, safe_name,
+    subprocess, time, unique_path
 )
+from backend.logcat_service import pkg_pids_of
 
 class LogcatMixin:
     """logcat 实时监控与抓取。"""
@@ -36,6 +37,51 @@ class LogcatMixin:
     def logcat_clear(self, serial):
         self.bus.push("logcat", {"serial": serial, "status": "clear"})
         return {"ok": True}
+
+    def logcat_packages(self, serial, third_party_only=True):
+        """列出设备上可过滤的包名，供前端「按包过滤」下拉选用。
+
+        默认只列第三方包（`pm list packages -3`）：车机调试时用户的关注点几乎
+        总是自己装的应用，把几百个系统包一起列出来反而淹没目标。找不到第三方
+        包（或老系统不认 -3）时回退全量列表，宁可多列也不给一个空下拉。
+        """
+        if not serial:
+            return {"ok": False, "reason": "no_device", "packages": []}
+        adb = self.state.adb_path
+
+        def _list(extra):
+            try:
+                r = subprocess.run(
+                    [adb, "-s", serial, "shell", "pm", "list", "packages"] + extra,
+                    **adb_kwargs(12))
+            except Exception:
+                return []
+            if r.returncode != 0:
+                return []
+            out = []
+            for line in (r.stdout or "").splitlines():
+                line = line.strip()
+                if line.startswith("package:"):
+                    name = line[len("package:"):].strip()
+                    if name:
+                        out.append(name)
+            return sorted(set(out))
+
+        pkgs = _list(["-3"]) if third_party_only else []
+        if not pkgs:
+            pkgs = _list([])
+        return {"ok": True, "packages": pkgs}
+
+    def logcat_pidof(self, serial, package):
+        """把包名解析成当前 pid 列表（前端 pkg: 过滤的即时解析）。
+
+        与监控 worker 内部用的是同一个函数（backend.logcat_service.pkg_pids_of），
+        保证「下拉选中包时算出来的 pid」和「后端过滤时用的 pid」不会两套口径。
+        """
+        if not serial or not package:
+            return {"ok": False, "pids": []}
+        pids = pkg_pids_of(self.state.adb_path, serial, package)
+        return {"ok": True, "pids": sorted(pids, key=lambda x: (len(x), x))}
 
     def logcat_save(self, serial, text):
         """把当前实时监控视图里的日志文本落盘到保存目录，并返回文件路径。

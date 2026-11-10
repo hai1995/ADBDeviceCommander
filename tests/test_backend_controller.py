@@ -5012,3 +5012,79 @@ def test_device_clock_returns_none_when_unavailable(monkeypatch):
         raise FileNotFoundError("adb")
     monkeypatch.setattr(screen_service.subprocess, "run", boom)
     assert screen_service.device_clock("adb", "A1") is None
+
+
+# ---------------------------------------------------------------------------
+# logcat 按包过滤：包列表 / 包名转 pid
+# ---------------------------------------------------------------------------
+
+def test_logcat_packages_lists_third_party(monkeypatch):
+    """默认只列第三方包（-3），并去掉重复、排序。"""
+    import backend.controllers.logcat as lc_ctrl
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stdout = ("package:com.demo.app\npackage:com.demo.app\n"
+                      "package:com.other\n")
+        return R()
+
+    monkeypatch.setattr(lc_ctrl.subprocess, "run", fake_run)
+    api = WebApi()
+    res = api.logcat_packages("A1")
+    assert res["ok"] is True
+    assert res["packages"] == ["com.demo.app", "com.other"]
+
+
+def test_logcat_packages_falls_back_to_all_when_no_third_party(monkeypatch):
+    """-3 返回空（老系统不认 / 没有第三方包）时回退全量，不给一个空下拉。"""
+    import backend.controllers.logcat as lc_ctrl
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(list(cmd))
+
+        class R:
+            returncode = 0
+            # 带 -3 的第一次调用返回空（模拟老系统 / 无第三方包），触发回落
+            stdout = ("" if "-3" in cmd
+                      else "package:android\npackage:com.android.systemui\n")
+        return R()
+
+    monkeypatch.setattr(lc_ctrl.subprocess, "run", fake_run)
+    api = WebApi()
+    res = api.logcat_packages("A1")
+    assert res["ok"] is True
+    assert "android" in res["packages"]
+    # 第一次带 -3，第二次不带
+    assert "-3" in seen[0] and "-3" not in seen[1]
+
+
+def test_logcat_packages_without_device_returns_empty(monkeypatch):
+    import backend.controllers.logcat as lc_ctrl
+
+    def boom(*a, **k):
+        raise AssertionError("没有设备时不该起 adb 子进程")
+
+    monkeypatch.setattr(lc_ctrl.subprocess, "run", boom)
+    api = WebApi()
+    assert api.logcat_packages("")["packages"] == []
+
+
+def test_logcat_pidof_returns_pids(monkeypatch):
+    import backend.controllers.logcat as lc_ctrl
+
+    # 控制器在 import 时就把 pkg_pids_of 绑进自己的命名空间了，必须打到
+    # lc_ctrl 上；打到 backend.logcat_service 上不会生效（典型 monkeypatch 陷阱）。
+    monkeypatch.setattr(lc_ctrl, "pkg_pids_of",
+                        lambda adb, serial, pkg: {"5518", "5417"})
+    api = WebApi()
+    res = api.logcat_pidof("A1", "com.demo.app")
+    assert res["ok"] is True
+    assert res["pids"] == ["5417", "5518"]     # 按「短数字在前」排序
+
+
+def test_logcat_pidof_requires_both_args():
+    api = WebApi()
+    assert api.logcat_pidof("", "com.demo.app") == {"ok": False, "pids": []}
+    assert api.logcat_pidof("A1", "") == {"ok": False, "pids": []}

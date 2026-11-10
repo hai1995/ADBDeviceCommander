@@ -121,6 +121,86 @@ def classify_line(line: str):
 
 
 # ---------------------------------------------------------------------------
+# 过滤表达式（关键字）解析与匹配 —— 与前端 app.js 的 lcSplitTerms/lcMatchTerm
+# 保持同一套语义。两边各有一份实现是**有意**的：后端用它做落盘侧的兜底过滤，
+# 前端用它做「改关键字即时生效」的本地过滤（不必重启 logcat 子进程）。规则
+# 一旦改动，两处必须同步，且 tests 与 tests/frontend 各有对应用例锁定。
+#
+# 语法：
+#   空格分隔      多个词 = AND（每个词都要命中）
+#   -前缀         排除（如 -tag:Noise 表示「不要含 Noise 这个 tag 的行」）
+#   tag:x         tag 字段包含 x
+#   msg:x         消息正文包含 x
+#   pid:x         pid 精确等于 x（右键菜单填入的就是精确值）
+#   tid:x         tid 精确等于 x
+#   level:x       级别属于 x 中的字母（"level:EWF" = 只看 W/E/F）
+#   pkg:包名      该包名下所有进程的 pid（需调用方预先解析出 pkg_pids）
+#   无前缀        在整行原文里包含（兼容旧行为，也覆盖进程名等其它字段）
+FILTER_FIELDS = ("tag:", "msg:", "pid:", "tid:", "level:", "pkg:")
+
+
+def split_filter_terms(keyword):
+    """把过滤表达式切成 ``[(negate, term), ...]``；空表达式返回 ``[]``。
+
+    单独抽出供前端/后端/测试共用同一份切词结果，避免「空格切分」这种
+    看似简单、实际容易在连续空格、首尾空格、孤立 '-' 上各写各的。
+    """
+    out = []
+    for token in str(keyword or "").split():
+        # 只有一个 '-' 时不当作排除符：用户可能真的想搜连字符
+        negate = len(token) > 1 and token.startswith("-")
+        term = (token[1:] if negate else token).strip()
+        if term:
+            out.append((negate, term))
+    return out
+
+
+def match_one_term(rec, term, pkg_pids=None):
+    """单个过滤词是否命中一行（rec 为 classify_line 的返回值）。
+
+    pkg_pids：``{包名小写: {"pid", ...}}``。pkg: 无法在纯文本里判断，必须由
+    调用方先用 ``adb shell pidof`` 解析成 pid 集合再传进来；没有映射就当作
+    不命中（宁可少匹配，也不要把「过滤条件没生效」伪装成全量放行）。
+    """
+    low = str(term).lower()
+    for prefix in FILTER_FIELDS:
+        if not low.startswith(prefix):
+            continue
+        pat = low[len(prefix):]
+        if not pat:
+            return True                 # 只写了 "tag:"：视为无效词，忽略
+        if prefix == "tag:":
+            return pat in (rec.get("tag") or "").lower()
+        if prefix == "msg:":
+            return pat in (rec.get("msg") or "").lower()
+        # pid/tid 用精确比较：子串会让 "pid:41" 命中 4170，做排除时误伤一片
+        if prefix == "pid:":
+            return (rec.get("pid") or "") == pat
+        if prefix == "tid:":
+            return (rec.get("tid") or "") == pat
+        if prefix == "level:":
+            return (rec.get("level") or "").lower() in pat
+        if prefix == "pkg:":
+            pids = (pkg_pids or {}).get(pat) or ()
+            return bool(pids) and (rec.get("pid") or "") in pids
+    # 无前缀：整行原文匹配。既兼容旧行为，也覆盖 tag/msg 之外的字段
+    # （进程名、被截断消息的前半段等），用户「搜得到才是硬道理」。
+    return low in (rec.get("raw") or "").lower()
+
+
+def match_filter(rec, keyword, pkg_pids=None):
+    """整条表达式是否命中（AND 语义；任一排除词命中即整行不通过）。"""
+    for negate, term in split_filter_terms(keyword):
+        ok = match_one_term(rec, term, pkg_pids)
+        if negate:
+            if ok:
+                return False
+        elif not ok:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # threadtime 行首时间戳：「MM-DD HH:MM:SS.mmm」（18 字符，不含年份）
 # ---------------------------------------------------------------------------
 TS_LEN = 18

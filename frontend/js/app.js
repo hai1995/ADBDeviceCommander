@@ -30,6 +30,7 @@
     lcStart: $("lc-start"), lcStop: $("lc-stop"),
     lcClear: $("lc-clear"), lcSave: $("lc-save"), lcStatus: $("lc-status"),
     lcCounter: $("lc-counter"), lcDev: $("lc-dev"), lcFilter: $("lc-filter"),
+    lcPkg: $("lc-pkg"),
     lcLevels: $("lc-levels"), lcOnlyExc: $("lc-only-exc"),
     lcAuto: $("lc-autoscroll"), lcBuf: $("lc-buf"), lcView: $("lc-view"),
     lcCapZipstop: $("lc-cap-zipstop"),
@@ -1215,6 +1216,8 @@
     onAbout(p);
     // 指令台历史（跨工作区共享、持久化）：从 config.json 恢复。
     _loadCmdHistory(p.settings && p.settings.cmd_history);
+    // 按包过滤的下拉：启动时先把包列表拉回来（设备可能是上次记住的）
+    refreshLcPackages();
     // 主 tab 回到上次停留项：必须排在 renderCommands 之后 —— 切到「性能监控」
     // 要按已勾选的设备渲染目标设备条，切到「设备指令」要求指令卡已经画好。
     // 设备勾选态若还没下发，devices 事件到达时 renderPerfDev 会再补一次。
@@ -1626,7 +1629,7 @@
     // Logcat 自动联动：未监控时跟随左侧第一个勾选设备，监控中不打断
     if (!lcRunning) {
       const next = firstChecked();   // 受控设备第一个（与文件 tab 同源）
-      if (next !== lcSerial) { lcSerial = next; renderLogcat(); }
+      if (next !== lcSerial) { lcSerial = next; renderLogcat(); refreshLcPackages(); }
     }
     syncToolButtons();
     // 抓取开始按钮：不在抓取中且至少有一个受控设备时可点（与监控按钮解耦）
@@ -2576,20 +2579,60 @@
     els.lcStart.disabled = running;
     els.lcStop.classList.toggle("danger", running);
     els.lcStop.classList.toggle("live", running);
+    // 开工/收工都重算 pkg: 的定时解析（停机后不必再起 adb 子进程刷 pid）
+    syncLcPkgTimer();
   }
 
+  /* 过滤表达式（与后端 core/logcat.py 的 split_filter_terms / match_filter
+     同一套语义，改规则必须两处同步）：
+       空格分隔 = AND；- 前缀 = 排除；
+       tag:/msg:/pid:/tid:/level:/pkg: 指定字段；无前缀 = 整行原文包含。 */
+  const LC_FILTER_FIELDS = ["tag:", "msg:", "pid:", "tid:", "level:", "pkg:"];
+  // pkg:包名 -> [pid...]，由后端 adb shell pidof 解析后缓存。pid 会随应用重启
+  // 变化，所以监控中每 PKG_PID_REFRESH_MS 重新解析一次（见 lcRefreshPkgPids）。
+  let lcPkgPids = {};
+  let lcPkgTimer = null;
+  const PKG_PID_REFRESH_MS = 5000;
+
+  function lcSplitTerms(kw) {
+    const out = [];
+    String(kw || "").trim().split(/\s+/).forEach((raw) => {
+      if (!raw) return;
+      const neg = raw.length > 1 && raw.charAt(0) === "-";
+      const term = neg ? raw.slice(1) : raw;
+      if (term) out.push({ neg: neg, term: term });
+    });
+    return out;
+  }
+  function lcMatchTerm(ln, term) {
+    const low = String(term).toLowerCase();
+    for (let i = 0; i < LC_FILTER_FIELDS.length; i++) {
+      const p = LC_FILTER_FIELDS[i];
+      if (low.indexOf(p) !== 0) continue;
+      const pat = low.slice(p.length);
+      if (!pat) return true;
+      if (p === "tag:") return String(ln.tag || "").toLowerCase().indexOf(pat) >= 0;
+      if (p === "msg:") return String(ln.msg || "").toLowerCase().indexOf(pat) >= 0;
+      if (p === "pid:") return String(ln.pid || "") === pat;
+      if (p === "tid:") return String(ln.tid || "") === pat;
+      if (p === "level:") return pat.indexOf(String(ln.level || "").toLowerCase()) >= 0;
+      if (p === "pkg:") {
+        const pids = lcPkgPids[pat] || [];
+        return pids.indexOf(String(ln.pid || "")) >= 0;
+      }
+    }
+    // 无前缀：整行原文（与旧行为一致，覆盖 tag/msg 之外的字段）
+    return String(ln.raw || "").toLowerCase().indexOf(low) >= 0;
+  }
   // 单行是否通过当前过滤条件（与全量重建共用判定）
   function linePassesFilter(ln, f) {
     if (!ln.level) return true;                 // 非 threadtime 行始终保留（纯文本）
     if (!f.levels.includes(ln.level)) return false;
     if (f.onlyExc && !ln.exc) return false;
-    if (f.kw) {
-      // 在整行（raw）里找：tag/msg 之外的字段（如进程名、PID、长消息里被截断前
-      // 的部分）出现的关键字也能命中。此前只拼 msg+tag，导致「账号绑定」这类落在
-      // 消息其它位置的字眼在下方区域完全搜不到。
-      const hay = ((ln.raw || "") + " " + (ln.msg || "") + " " + (ln.tag || ""))
-        .toLowerCase();
-      if (!hay.includes(f.kw)) return false;
+    for (let i = 0; i < f.terms.length; i++) {
+      const t = f.terms[i];
+      const ok = lcMatchTerm(ln, t.term);
+      if (t.neg ? ok : !ok) return false;
     }
     return true;
   }
@@ -2711,11 +2754,55 @@
     els.lcCounter.textContent = text;
   }
   function currentLcFilter() {
-    const kw = (els.lcFilter.value || "").toLowerCase();
+    const kw = (els.lcFilter.value || "");
     const levels = Array.from(els.lcLevels.querySelectorAll("input:checked"))
       .map((c) => c.value);
     const onlyExc = els.lcOnlyExc.checked;
-    return { kw, levels, onlyExc };
+    return { kw: kw, terms: lcSplitTerms(kw), levels, onlyExc };
+  }
+  // 表达式里出现 pkg: 时，先把包名解析成 pid 再重渲染；已解析的直接复用缓存。
+  // 只解析「尚未解析过」的包，避免每次击键都起一遍 adb 子进程。
+  function lcPkgNamesToResolve(terms) {
+    const out = [];
+    terms.forEach((t) => {
+      const low = t.term.toLowerCase();
+      if (low.indexOf("pkg:") !== 0) return;
+      const name = low.slice(4).trim();
+      if (name && lcPkgPids[name] === undefined && out.indexOf(name) < 0) {
+        out.push(name);
+      }
+    });
+    return out;
+  }
+  function lcRefreshPkgPids() {
+    if (!lcSerial) return;
+    const names = lcPkgNamesToResolve(lcSplitTerms(els.lcFilter.value));
+    if (!names.length) return;
+    names.forEach((name) => {
+      callApi(api.logcat_pidof(lcSerial, name)).then((r) => {
+        // 解析失败（设备忙 / 包没在跑）也记成空数组：否则每次重渲染都会
+        // 重新发一遍请求，形成「一直在转圈」的假象。用户能看到「命中 0 行」，
+        // 比毫无反馈更接近事实。
+        lcPkgPids[name] = (r && Array.isArray(r.pids)) ? r.pids : [];
+        if (lcSerial) renderLogcat();
+      }).catch(() => { lcPkgPids[name] = []; });
+    });
+  }
+  // 监控中且表达式含 pkg: 时，按固定间隔重解析 pid（应用重启后 pid 会变）
+  function syncLcPkgTimer() {
+    const hasPkg = lcSplitTerms(els.lcFilter.value).some(
+      (t) => t.term.toLowerCase().indexOf("pkg:") === 0);
+    if (!lcRunning || !hasPkg) {
+      if (lcPkgTimer !== null) { clearInterval(lcPkgTimer); lcPkgTimer = null; }
+      return;
+    }
+    if (lcPkgTimer === null) {
+      lcPkgTimer = setInterval(() => {
+        // 强制重解析：清掉缓存再走一次 lcRefreshPkgPids
+        Object.keys(lcPkgPids).forEach((k) => { delete lcPkgPids[k]; });
+        lcRefreshPkgPids();
+      }, PKG_PID_REFRESH_MS);
+    }
   }
   // 全量重建：仅用于过滤条件变更 / 切换设备 / 清空 / 初始化（增量追加以外的情形）
   function triggerLcFilter() {
@@ -2723,7 +2810,38 @@
     // 不能等 250ms 防抖才生效（用户会觉得"点了没反应"）。
     if (lcFilterTimer !== null) { clearTimeout(lcFilterTimer); lcFilterTimer = null; }
     persistPref("lc_keyword", els.lcFilter.value);
+    // pkg: 条件先解析 pid 再渲染（否则第一次填进去会显示 0 行，随后才跳出来）
+    lcRefreshPkgPids();
+    syncLcPkgTimer();
     if (lcSerial) renderLogcat();
+  }
+  // 「按包」下拉的数据源：设备确定后异步拉一次包列表。失败（老系统没有
+  // pm / 设备刚拔掉）就保持只有「（全部）」，不打断用户。
+  function refreshLcPackages() {
+    if (!els.lcPkg) return;
+    if (!lcSerial) {
+      els.lcPkg.innerHTML = '<option value="">（全部）</option>';
+      return;
+    }
+    const serial = lcSerial;
+    callApi(api.logcat_packages(serial)).then((r) => {
+      if (serial !== lcSerial) return;   // 期间又切了设备，丢弃过期结果
+      const pkgs = (r && Array.isArray(r.packages)) ? r.packages : [];
+      let html = '<option value="">（全部）</option>';
+      pkgs.forEach((p) => {
+        // 包名原样输出到 value；显示上把包名截断得更紧凑些，长包名不撑破布局
+        html += '<option value="' + escAttr(p) + '">' + escHtml(p) + '</option>';
+      });
+      els.lcPkg.innerHTML = html;
+    }).catch(() => {});
+  }
+  function appendLcTerm(term) {
+    // 追加到现有表达式末尾（不覆盖用户已写的条件）；已存在则不重复添加。
+    const cur = (els.lcFilter.value || "").trim();
+    const parts = cur ? cur.split(/\s+/) : [];
+    if (parts.indexOf(term) >= 0) return;
+    els.lcFilter.value = cur ? (cur + " " + term) : term;
+    triggerLcFilter();
   }
   function renderLogcat() {
     // 全量重建前丢弃待渲染队列，否则残留的行会在重建后插入，顺序错乱
@@ -2829,10 +2947,20 @@
             if (ln.tag) {
               items.push({ label: "按 Tag 过滤: " + ln.tag,
                 fn: () => { els.lcFilter.value = "tag:" + ln.tag; triggerLcFilter(); } });
+              items.push({ label: "排除此 Tag: " + ln.tag,
+                fn: () => { els.lcFilter.value = "-tag:" + ln.tag; triggerLcFilter(); } });
             }
             if (ln.pid) {
               items.push({ label: "按 PID 过滤: " + ln.pid,
                 fn: () => { els.lcFilter.value = "pid:" + ln.pid; triggerLcFilter(); } });
+              items.push({ label: "排除此 PID: " + ln.pid,
+                fn: () => { els.lcFilter.value = "-pid:" + ln.pid; triggerLcFilter(); } });
+            }
+            // 「只加条件」而不是「替换条件」的追加方式：用户常已有一条 tag:
+            // 过滤，再想叠一条排除噪音；替换会把前一条冲掉，措手不及。
+            if (ln.tag) {
+              items.push({ label: "追加排除此 Tag",
+                fn: () => { appendLcTerm("-tag:" + ln.tag); } });
             }
           }
         }
@@ -6886,6 +7014,7 @@
     els.lcStart.addEventListener("click", async () => {
       const s = firstSelected(); if (!s) return pushStatus("warn", "请先勾选设备");
       lcSerial = s;
+      refreshLcPackages();
       // 后端可能因「已在监控中 / 设备不可用」返回 ok:false：此时必须回滚按钮态，
       // 否则界面永远停在「采集中」、开始按钮被锁死，用户无从恢复。
       markBtnBusy(els.lcStart, true);
@@ -6927,6 +7056,9 @@
       lcFilterTimer = setTimeout(() => {
         lcFilterTimer = null;
         persistPref("lc_keyword", els.lcFilter.value);
+        // 表达式里可能刚出现/改掉 pkg:（这是唯一需要异步解析的字段）
+        lcRefreshPkgPids();
+        syncLcPkgTimer();
         if (lcSerial) renderLogcat();
       }, LC_DEBOUNCE_MS);
     });
@@ -6938,6 +7070,34 @@
       persistPref("lc_only_exc", !!els.lcOnlyExc.checked);
       if (lcSerial) renderLogcat();
     });
+    // 「按包」下拉：选中即把 pid: 条件写进过滤框（而不是 pkg:）——下拉里的包
+    // 我们在选中这一刻就能解析出 pid，写成显式 pid: 后表达式是可读、可编辑、
+    // 可复制的，用户也能在此基础上再补 -tag: 之类的排除条件。
+    if (els.lcPkg) {
+      els.lcPkg.addEventListener("change", () => {
+        const name = els.lcPkg.value;
+        if (!name) return;
+        if (!lcSerial) return;
+        callApi(api.logcat_pidof(lcSerial, name)).then((r) => {
+          const pids = (r && Array.isArray(r.pids)) ? r.pids : [];
+          if (!pids.length) {
+            // 包没在跑：明确说出来，否则用户以为过滤坏了
+            pushStatus("warn", "⚠ 包 " + name + " 当前没有在运行（pid 为空），"
+                      + "先把它启动起来再过滤");
+            return;
+          }
+          // 多进程包（如含 :remote）会产生多个 pid，用空格 AND 会变成「同时等于
+          // 两个 pid」永远不成立；所以多 pid 时改用 pkg: 交给后端/前端按集合匹配。
+          if (pids.length === 1) {
+            els.lcFilter.value = "pid:" + pids[0];
+          } else {
+            lcPkgPids[name.toLowerCase()] = pids;
+            els.lcFilter.value = "pkg:" + name;
+          }
+          triggerLcFilter();
+        }).catch(() => {});
+      });
+    }
     // 自动滚动 / 缓冲区：不触发重渲染，只记忆选择（下次启动 / 下次抓取生效）
     els.lcAuto.addEventListener("change", () => persistPref("lc_autoscroll", !!els.lcAuto.checked));
     els.lcBuf.addEventListener("change", () => persistPref("lc_buffer", els.lcBuf.value));

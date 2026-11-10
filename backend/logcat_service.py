@@ -34,7 +34,8 @@ from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
                             LOGCAT_CAP_HOLE_WARN_S, LOGCAT_CAP_REPLAY_SKIP_MAX,
                             LOGCAT_CAP_REBOOT_UPTIME_SLACK_S, adb_kwargs,
                             adb_popen_kwargs)
-from core.logcat import classify_line, ts_epoch, ts_prefix as _ts_prefix
+from core.logcat import (classify_line, match_filter, split_filter_terms,
+                         ts_epoch, ts_prefix as _ts_prefix)
 from backend.screen_service import device_present
 
 
@@ -109,6 +110,57 @@ def _device_uptime(adb, serial):
 def _now_mono():
     """抓取流程里的单调时钟（单独抽出来，方便单测把「录制已进行时长」打桩）。"""
     return time.monotonic()
+
+
+# pkg: 过滤的 pid 刷新间隔（秒）。应用被杀掉重开 pid 就变了，但用户要的
+# 语义是「一直只看这个包」，所以按固定间隔静默重解析。5s 足够灵敏，
+# 又不至于为每条日志起 adb 子进程。
+PKG_PID_REFRESH_S = 5.0
+
+
+def pkg_pids_of(adb, serial, package, timeout=6):
+    """把包名解析成当前进程 pid 集合（字符串集合）；解析不到返回 set()。
+
+    两条路径：
+      * `pidof <包名>`：Android 6+ 的 toybox 有；一次就能拿到多进程。
+      * `ps -A` / `ps`：老车机常没有 pidof，逐行找末列的进程名等于包名的行。
+    宁可返回空集也**不要**返回 None：调用方据此判定「pkg: 不命中任何行」，
+    与「没有过滤条件」是两种截然不同的语义，混用会让过滤静默失效。
+    """
+    pkg = (package or "").strip()
+    if not pkg:
+        return set()
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "shell", "pidof", pkg],
+            **adb_kwargs(timeout))
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and out:
+            return set(out.split())
+    except Exception:
+        pass
+    # 回落 ps：老系统 / pidof 被裁剪。ps 的输出格式随版本差异极大（toybox
+    # 是 `USER PID PPID ... NAME`，busybox 可能首列就是 PID），所以不假设
+    # 固定列位——取「最后一个字段 == 包名」的行，再取该行里第一个纯数字字段
+    # 当 PID（跳过用户名/状态列，pid 一定是数字）。
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "shell", "ps"],
+            **adb_kwargs(timeout))
+        if r.returncode != 0:
+            return set()
+        pids = set()
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) < 2 or parts[-1] != pkg:
+                continue
+            for tok in parts:
+                if tok.isdigit():
+                    pids.add(tok)
+                    break
+        return pids
+    except Exception:
+        return set()
 
 
 def _logcat_cmd(adb, serial, buffers, from_now_lines=None):
@@ -279,6 +331,10 @@ class LogcatMonitor:
         # 必须用它：用户把级别全取消勾选、或关键字一个都没命中时，过滤后的行数
         # 天然是 0，拿它当判据就会把正常监控误报成「设备离线」。
         stats = {"seen": 0}
+        # pkg: 过滤需要把包名解析成 pid 集合。pid 会随应用重启变化，所以在
+        # 消费循环的空闲分支里定期重解析（见下方 pkg_refresh_at）。
+        pkg_pids = self._resolve_pkg_pids(serial, keyword)
+        pkg_refresh_at = time.time() + (PKG_PID_REFRESH_S if pkg_pids else 0)
         # 启动爆发期：先用定长窗口接住历史 dump，只留最近的若干行
         t0 = time.time()
         boot_buf = []
@@ -340,6 +396,12 @@ class LogcatMonitor:
                     # 这段时间没有新日志：把攒下的行按时推出去（爆发期则按时
                     # 结束，避免尾部历史行等不到「下一行」而滞留）。
                     now = time.time()
+                    # pkg: 的 pid 会随应用重启变化：空闲时定期重解析一次。
+                    # 放在这里而不是读循环里，是因为它要起一个 adb 子进程，
+                    # 不能卡在每行日志的关键路径上。
+                    if pkg_refresh_at and now >= pkg_refresh_at:
+                        pkg_pids = self._resolve_pkg_pids(serial, keyword)
+                        pkg_refresh_at = now + PKG_PID_REFRESH_S
                     if in_boot:
                         if now - t0 >= BOOT_WINDOW_SEC:
                             _end_boot(now)
@@ -349,7 +411,7 @@ class LogcatMonitor:
                 if raw is _LOGCAT_EOF:
                     break
                 item = self._classify_and_filter(raw, levels, keyword, only_exc,
-                                                 stats)
+                                                 stats, pkg_pids)
                 if item is None:
                     continue
                 if "raw" in item:
@@ -477,8 +539,27 @@ class LogcatMonitor:
             except Exception:
                 pass
 
+    def _resolve_pkg_pids(self, serial, keyword):
+        """把过滤表达式里的 pkg:xxx 解析成 {包名小写: {pid,...}}。
+
+        只解析**非排除**的 pkg 词：`-pkg:x`（排除某包）同样需要 pid 映射才能
+        判断，所以一并解析，避免「排除条件静默变成不排除」。
+        没有 pkg: 词时返回 {}，调用方据此关闭定期刷新。
+        """
+        out = {}
+        for _negate, term in split_filter_terms(keyword):
+            low = term.lower()
+            if not low.startswith("pkg:"):
+                continue
+            name = term[4:].strip().lower()
+            if not name or name in out:
+                continue
+            out[name] = pkg_pids_of(self.adb_path, serial, name)
+        return out
+
     @staticmethod
-    def _classify_and_filter(raw, levels, keyword, only_exc, stats=None):
+    def _classify_and_filter(raw, levels, keyword, only_exc, stats=None,
+                             pkg_pids=None):
         rec = classify_line(raw)
         if rec is None:
             # 非 threadtime 行（标题/分隔/空行）原样保留给前端做纯文本渲染
@@ -489,47 +570,10 @@ class LogcatMonitor:
             return None
         if only_exc and not rec["exc"]:
             return None
-        if keyword:
-            # 关键字语法：多个词空格分隔 = AND；每个词可带前缀指定匹配字段：
-            #   tag:xxx   → 只在 tag 字段中匹配
-            #   msg:xxx   → 只在 msg 字段中匹配
-            #   pid:xxx   → 匹配 pid / tid
-            #   level:x   → 只看 V/D/I/W/E/F 某一级（单字母，可多字母组合 "level:IW"）
-            #   无前缀    → 默认在 tag + msg 中搜索（兼容旧行为）
-            kws = str(keyword).strip().split()
-            for kw in kws:
-                kw = kw.strip()
-                if not kw:
-                    continue
-                lower = kw.lower()
-                matched = False
-                for prefix in ("tag:", "msg:", "pid:", "tid:", "level:"):
-                    if lower.startswith(prefix):
-                        pat = kw[len(prefix):].lower()
-                        if not pat:
-                            matched = True          # 空前缀忽略
-                            break
-                        if prefix == "tag:":
-                            hay = (rec.get("tag") or "").lower()
-                            matched = pat in hay
-                        elif prefix == "msg:":
-                            hay = (rec.get("msg") or "").lower()
-                            matched = pat in hay
-                        elif prefix in ("pid:", "tid:"):
-                            val = rec.get(prefix[:3]) or rec.get("pid") or ""
-                            if not val:             # 字段缺失则不匹配
-                                return None
-                            matched = pat in val.lower()
-                        elif prefix == "level:":
-                            lv = (rec.get("level") or "").lower()
-                            matched = pat in lv     # "level:IW" → tag in "IW"
-                        break
-                else:
-                    # 无前缀：默认 tag + msg 搜索
-                    hay = ((rec.get("msg") or "") + " " + (rec.get("tag") or "")).lower()
-                    matched = lower in hay
-                if not matched:
-                    return None
+        # 过滤表达式（tag:/msg:/pid:/level:/pkg:、- 排除、空格 AND）统一走
+        # core.logcat，避免它与前端各写一套规则后悄然漂移。
+        if keyword and not match_filter(rec, keyword, pkg_pids):
+            return None
         return rec
 
 
