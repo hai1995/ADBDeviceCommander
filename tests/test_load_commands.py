@@ -500,6 +500,52 @@ def test_input_only_string_and_number_variants():
         assert cmds[0]["inputOnly"] is expect, (val, cmds[0]["inputOnly"])
 
 
+# ---------------------------------------------------------------------------
+# 自定义按钮配色：可选 bg / fg（#RGB / #RRGGBB）。非法值必须丢弃而不是让
+# 整条命令加载失败，更不能被塞进前端内联样式。
+# ---------------------------------------------------------------------------
+def test_custom_colors_are_kept_when_valid():
+    raw = [{"id": "a", "name": "醒目", "labels": ["x"], "bg": "#ffcc00",
+            "fg": "#003366", "commands": [{"command": "ls"}]}]
+    cmds, warns = _load_via_file(raw)
+    assert warns == []
+    assert cmds[0]["bg"] == "#ffcc00"
+    assert cmds[0]["fg"] == "#003366"
+
+
+def test_custom_colors_accept_short_form_and_trim():
+    raw = [{"id": "a", "name": "短色值", "labels": ["x"], "bg": " #FC0 ",
+            "commands": [{"command": "ls"}]}]
+    cmds, _ = _load_via_file(raw)
+    assert cmds[0]["bg"] == "#FC0"
+
+
+def test_custom_colors_drop_invalid_values():
+    """写错的颜色只丢该字段，不影响命令本身。"""
+    raw = [{"id": "a", "name": "坏色", "labels": ["x"],
+            "bg": "red", "fg": "#12345",
+            "commands": [{"command": "ls"}]}]
+    cmds, _ = _load_via_file(raw)
+    assert "bg" not in cmds[0]
+    assert "fg" not in cmds[0]
+    assert cmds[0]["commands"][0]["command"] == "ls", "命令本体不该被配色拖累"
+
+
+def test_custom_colors_absent_by_default():
+    raw = [{"id": "a", "name": "普通", "labels": ["x"],
+            "commands": [{"command": "ls"}]}]
+    cmds, _ = _load_via_file(raw)
+    assert "bg" not in cmds[0] and "fg" not in cmds[0]
+
+
+def test_custom_colors_survive_merge_builtins():
+    user = [{"id": "u", "name": "用户", "labels": ["x"], "bg": "#ffcc00",
+             "commands": [{"command": "ls"}]}]
+    merged = merge_builtins(user)
+    by_id = {c["id"]: c for c in merged}
+    assert by_id["u"]["bg"] == "#ffcc00", "合并内置命令时不得丢掉配色"
+
+
 def test_input_only_survives_merge_builtins():
     """merge_builtins 并入内置命令时也必须补齐 inputOnly 键（前端统一读）。"""
     user = [{"id": "u", "name": "用户", "labels": ["x"], "inputOnly": True,

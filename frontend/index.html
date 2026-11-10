@@ -935,6 +935,21 @@
           <span class="fld-hint dim">每行一条命令；行尾加 <code>||delay=800</code> 可设置该条下发后等待的毫秒数（可选）。</span>
         </label>
         <label class="chk"><input type="checkbox" id="cmd-edit-inputonly">仅输入（点击只填入输入框，不直接执行）</label>
+        <div class="fld fld-col"><span>按钮外观（可选）</span>
+          <div class="cmd-color-row">
+            <div class="cmd-color"><span>按钮颜色</span>
+              <input id="cmd-edit-bg" class="color-inp" type="color" value="#161e29"
+                     title="这条命令的按钮底色">
+              <button id="cmd-edit-bg-reset" class="btn tiny" type="button">默认</button>
+            </div>
+            <div class="cmd-color"><span>文字颜色</span>
+              <input id="cmd-edit-fg" class="color-inp" type="color" value="#b9c8d8"
+                     title="这条命令的文字颜色">
+              <button id="cmd-edit-fg-reset" class="btn tiny" type="button">默认</button>
+            </div>
+          </div>
+          <span class="fld-hint dim">只影响这条命令的按钮，便于在命令堆里快速找到；点「默认」恢复主题配色。</span>
+        </div>
       </div>
       <div class="modal-foot">
         <button id="cmd-edit-cancel" class="btn" type="button" data-icon="x">取消</button>

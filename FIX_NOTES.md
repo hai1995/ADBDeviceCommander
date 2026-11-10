@@ -5171,3 +5171,44 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   渲染链路不会把它们过滤掉。
 
 全量：后端 **1418 passed / 1 skipped**；前端 **91 文件 0 失败**。
+
+---
+
+# 第七十七轮（自定义命令按钮配色：bg / fg）
+
+## 需求
+
+命令多了以后在卡片堆里找不到自己的常用命令，希望给单条快捷命令设置
+**按钮颜色**与**文字颜色**，用颜色做视觉索引。
+
+## 数据模型
+
+用户命令新增两个可选字段（[core/commands.py](file:///workspace/core/commands.py#L411-L421)）：
+
+```json
+{ "id": "u_x", "name": "抓日志", "bg": "#ffcc00", "fg": "#003366", ... }
+```
+
+- 只接受 `#RGB` / `#RRGGBB`（`_as_color`）：命令库是手写 / 外部导入的 JSON，
+  颜色最终进内联样式，非十六进制一律丢弃 —— 只丢该字段，不影响命令本体。
+- 没设置就不写字段；加载、导出、合并内置命令都会原样保留（导入后颜色不丢）。
+
+## 前端
+
+- 卡片渲染（[app.js](file:///workspace/frontend/js/app.js#L1958-L1967)）：合法色值
+  写成内联 CSS 变量 `--chip-bg` / `--chip-fg`，加 `.cmd-chip--custom`；
+  只设其中一种也生效。
+- 样式（[app.css](file:///workspace/frontend/css/app.css#L1088-L1101)）：
+  hover 继续用用户选的色（只做轻微提亮），否则「一悬停颜色就没了」。
+- 编辑弹窗新增「按钮外观（可选）」：两个原生取色器 + 各自「默认」按钮。
+  是否设置过记在 `dataset.bg/fg`（取色器永远有值，不能拿它判断「有没有设置」），
+  点「默认」才清空。保存时只写设置过的字段；复制命令时配色一并复制。
+
+## 测试
+
+- 后端 5 条：合法 / 短色值 / 非法丢弃 / 默认无字段 / 合并内置不丢；
+  导出用例补一条 `test_export_commands_keeps_custom_colors`。
+- 前端新增 [cmd_custom_colors.test.cjs](file:///workspace/tests/frontend/cmd_custom_colors.test.cjs)：
+  合法渲染、非法忽略、只设底色、弹窗改色保存只写 bg、点默认清空。
+
+全量：后端 **1424 passed / 1 skipped**；前端 **92 文件 0 失败**；pyflakes 干净。

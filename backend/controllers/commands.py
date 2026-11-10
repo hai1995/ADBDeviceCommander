@@ -87,6 +87,10 @@ class CommandMixin:
                 "commands": d.get("commands") or [],
                 "clickCount": d.get("clickCount") or 0,
                 "inputOnly": bool(d.get("inputOnly")),
+                # 自定义按钮配色：导出要能完整带去别人的机器上，否则备份
+                # 恢复后「颜色没了」；没有配色的命令不写空字段。
+                **({"bg": d["bg"]} if d.get("bg") else {}),
+                **({"fg": d["fg"]} if d.get("fg") else {}),
             })
         return {"ok": True, "commands": user_cmds, "count": len(user_cmds)}
 

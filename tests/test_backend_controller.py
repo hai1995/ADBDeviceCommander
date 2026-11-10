@@ -3864,6 +3864,23 @@ def test_save_commands_tolerates_empty_payload(monkeypatch):
     assert any("已保存" in (p.get("text") or "") for p in status), status
 
 
+def test_export_commands_keeps_custom_colors():
+    """导出要带上自定义配色：换机器导入后颜色不能丢（也不写空字段）。"""
+    api = _make_api()
+    api.state.commands = [
+        {"id": "a", "name": "醒目", "labels": ["x"], "bg": "#ffcc00",
+         "fg": "#003366", "commands": [{"command": "ls"}], "clickCount": 2},
+        {"id": "b", "name": "普通", "labels": ["x"],
+         "commands": [{"command": "ls"}]},
+    ]
+    res = api.export_commands()
+    assert res["ok"] is True
+    by_id = {c["id"]: c for c in res["commands"]}
+    assert by_id["a"]["bg"] == "#ffcc00"
+    assert by_id["a"]["fg"] == "#003366"
+    assert "bg" not in by_id["b"] and "fg" not in by_id["b"]
+
+
 def test_export_commands_save_falls_back_to_tempdir(monkeypatch, tmp_path):
     """程序目录不可写时要**真的**退到系统临时目录。
 

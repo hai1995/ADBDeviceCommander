@@ -761,6 +761,8 @@ git commit -am "第五十二轮：…" && git tag v2026.1105.1200 && git push --
   合并，同名 / 同 `id` 用户命令优先覆盖；带个人路径的项目专属指令仍留在 json 里。
   条目上写 `"inputOnly": true` 即进入 electerm「仅输入」模式：点击只把命令文本
   填进输入框，由用户确认后手动「执行」（防手滑直接跑危险 / 长命令）。
+  条目上还可选写 `"bg": "#ffcc00"` / `"fg": "#003366"`（#RGB / #RRGGBB）给按钮
+  自定义底色与文字色，方便在命令堆里一眼找到常用项；非法色值会被忽略。
 - **加功能**：前端在 `frontend/index.html` + `frontend/js/app.js` 加入口，后端在
   `backend/controller.py` 的 `WebApi` 上暴露动作方法，能力下沉到
   `backend/*_service.py`，耗时操作 `workers.spawn()` 到后台线程、结果走 `bus` 回传；

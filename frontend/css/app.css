@@ -1094,6 +1094,21 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   background: var(--warn-soft); color: #ffd9a0;
   border-color: var(--warn);
 }
+/* 用户自定义配色的命令卡：--chip-bg / --chip-fg 由 mkCmdChip 以内联变量写入。
+   hover 不再切到 accent 主题色 —— 否则用户特意选的颜色一悬停就"消失"了，
+   只用轻微提亮表示可按。 */
+.cmd-chip--custom {
+  background: var(--chip-bg, var(--surface-2));
+  color: var(--chip-fg, var(--text-2));
+  border-color: var(--chip-bg, var(--line));
+}
+.cmd-chip--custom:hover {
+  background: var(--chip-bg, var(--surface-2));
+  color: var(--chip-fg, var(--text-2));
+  border-color: var(--chip-fg, var(--line-strong));
+  filter: brightness(1.08);
+  box-shadow: none;
+}
 /* 内置命令的适用设备角标（通用 / 车机 / 手机）：字号更小、贴右，避免与
    命令名抢视线；三种颜色只用于区分，不表示优先级。 */
 .chip-scope {
@@ -2136,6 +2151,19 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px;
   padding: 0 5px; font-family: var(--font-mono); color: var(--accent);
 }
+/* 命令编辑弹窗里的配色行：两个原生取色器 + 各自「默认」按钮 */
+.cmd-color-row { display: flex; flex-wrap: wrap; gap: 16px; }
+.cmd-color {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: var(--fs-sm); color: var(--muted);
+}
+.cmd-color input[type="color"] {
+  width: 36px; height: 24px; padding: 0;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: none; cursor: pointer;
+}
+.cmd-color input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.cmd-color input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); box-sizing: border-box; }
 
 /* ---------------- 二次确认弹窗（应用内自绘，见 app.js 的 askConfirm） ----------------

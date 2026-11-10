@@ -35,6 +35,9 @@ _NON_COMMAND_FILES = {"config.json"}
 # 去掉命令名开头的 [标签] 前缀，得到用于「同名压制」比对的核心名。
 _LABEL_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
 _WS_RE = re.compile(r"\s+")
+# 自定义按钮配色只接受 #RGB / #RRGGBB：命令库是用户手写 / 别处导出的 JSON，
+# 颜色最终会进内联 style，任何非颜色串都不能被当作值使用。
+_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
 def core_name(name):
@@ -391,15 +394,25 @@ def normalize_commands(raw):
         # 填进指令输入框，由用户确认后手动「执行」，不直接下发。缺省 / 类型
         # 不对都按 False 处理（容错，见 normalize_commands 的健壮性约束）。
         input_only = _as_bool(c.get("inputOnly"))
+        # 自定义按钮配色（可选）：bg=按钮底色、fg=文字色。只认十六进制，
+        # 其他值一律丢弃 —— 写错的颜色不该让整条命令加载失败，也不该被
+        # 原样塞进前端内联样式。
+        bg = _as_color(c.get("bg"))
+        fg = _as_color(c.get("fg"))
 
-        out.append({
+        item = {
             "id": cid, "name": name,
             "labels": labels, "commands": entries,
             # 使用频次（用于前端「常用命令靠前」排序；点击后由后端回写）
             "clickCount": clicks,
             # electerm 仅输入模式：True 时点击只填入输入框，不直接执行
             "inputOnly": input_only,
-        })
+        }
+        if bg:
+            item["bg"] = bg
+        if fg:
+            item["fg"] = fg
+        out.append(item)
     return out, warnings
 
 
@@ -413,6 +426,19 @@ def _as_bool(v) -> bool:
     if isinstance(v, (int, float)):
         return bool(v)
     return False
+
+
+def _as_color(v) -> str:
+    """把命令的 bg / fg 配色归一化为合法的十六进制颜色串（否则返回 ""）。
+
+    只接受 #RGB / #RRGGBB；"red"、rgb(...)、带透明度的 8 位写法都不收 ——
+    这些最终会进前端内联样式，收紧到纯十六进制最省心，也避免手写 json 里
+    的笔误把整条按钮染成不可读的颜色。
+    """
+    if not isinstance(v, str):
+        return ""
+    s = v.strip()
+    return s if _HEX_RE.match(s) else ""
 
 
 def save_click_deltas(deltas):

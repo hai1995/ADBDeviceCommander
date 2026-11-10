@@ -156,6 +156,8 @@
     cmdEditModal: $("cmd-edit-modal"), cmdEditTitle: $("cmd-edit-title"),
     cmdEditName: $("cmd-edit-name"), cmdEditLabels: $("cmd-edit-labels"),
     cmdEditCmds: $("cmd-edit-cmds"), cmdEditInputOnly: $("cmd-edit-inputonly"),
+    cmdEditBg: $("cmd-edit-bg"), cmdEditFg: $("cmd-edit-fg"),
+    cmdEditBgReset: $("cmd-edit-bg-reset"), cmdEditFgReset: $("cmd-edit-fg-reset"),
     cmdEditSave: $("cmd-edit-save"), cmdEditCancel: $("cmd-edit-cancel"),
     cmdEditClose: $("cmd-edit-close"), cmdEditDelete: $("cmd-edit-delete"),
     cmdNew: $("btn-cmd-new"),
@@ -1921,6 +1923,21 @@
   /* 单张指令卡。抽成函数是因为同一条命令可能出现在多个分组里（用户组 /
      内置组共用一套渲染）——同一套卡片逻辑不能抄两遍，否则改角标 / 菜单时
      必然漏掉一边。 */
+  // 自定义配色只认 #RGB / #RRGGBB（与后端 core.commands._as_color 同规则）：
+  // 颜色来自用户 json，前端再校验一次，非法值不写进内联样式。
+  const CMD_HEX_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+  function cmdColor(v) {
+    return (typeof v === "string" && CMD_HEX_RE.test(v.trim())) ? v.trim() : "";
+  }
+  // 取当前主题下某个颜色变量的实际值（给取色器当初始值用）。取不到时退回
+  // 内置默认值 —— jsdom / 老 WebView 里自定义属性可能是空串。
+  function themeColor(name, fallback) {
+    try {
+      const v = getComputedStyle(document.documentElement)
+        .getPropertyValue(name).trim();
+      return cmdColor(v) || fallback;
+    } catch (e) { return fallback; }
+  }
   function mkCmdChip(c, wsId) {
     const chip = document.createElement("button");
     chip.type = "button";
@@ -1937,6 +1954,16 @@
       // electerm「仅输入」模式：点击只填入输入框，不直接执行
       chip.classList.add("cmd-chip--inputonly");
       chip.title = c.name + "（仅输入：点击填入上方输入框，确认后点「执行」）";
+    }
+    // 用户自定义按钮配色：写内联 CSS 变量（hover 规则见 .cmd-chip--custom），
+    // 只设了其中一种也生效（另一种继续用主题色）。
+    const bg = cmdColor(c.bg);
+    const fg = cmdColor(c.fg);
+    if (bg || fg) {
+      chip.classList.add("cmd-chip--custom");
+      if (bg) chip.style.setProperty("--chip-bg", bg);
+      if (fg) chip.style.setProperty("--chip-fg", fg);
+      chip.title += "（自定义配色）";
     }
     const lbl = document.createElement("span");
     lbl.className = "chip-label"; lbl.textContent = c.name;
@@ -2195,13 +2222,19 @@
 
   // 收集需要写回文件的「用户命令」：过滤掉内置默认（builtin），保留点击计数
   function collectUserCommands() {
-    return allCommands.filter((c) => !c.builtin).map((c) => ({
-      id: c.id, name: c.name,
-      labels: (c.labels && c.labels.length) ? c.labels : ["其他"],
-      commands: c.commands || [],
-      clickCount: c.clickCount || 0,
-      inputOnly: !!c.inputOnly,
-    }));
+    return allCommands.filter((c) => !c.builtin).map((c) => {
+      const item = {
+        id: c.id, name: c.name,
+        labels: (c.labels && c.labels.length) ? c.labels : ["其他"],
+        commands: c.commands || [],
+        clickCount: c.clickCount || 0,
+        inputOnly: !!c.inputOnly,
+      };
+      // 自定义配色：没设置就不写该字段（避免 json 里满地空串）
+      if (cmdColor(c.bg)) item.bg = c.bg;
+      if (cmdColor(c.fg)) item.fg = c.fg;
+      return item;
+    });
   }
 
   // 打开编辑弹窗：c 为 null 表示新建；c.id 为空（如「复制」克隆）也按新建处理
@@ -2214,6 +2247,16 @@
     els.cmdEditCmds.value = c ? (c.commands || []).map(
       (e) => e.command + (e.delay ? (" ||delay=" + e.delay) : "")).join("\n") : "";
     els.cmdEditInputOnly.checked = c ? !!c.inputOnly : false;
+    // 配色：dataset 才是「用户是否设置过」的真相。取色器必须永远有值，
+    // 不能把「没设置」误当成「设置成了默认色」。
+    const bg = cmdColor(c && c.bg);
+    const fg = cmdColor(c && c.fg);
+    els.cmdEdit.dataset.bg = bg;
+    els.cmdEdit.dataset.fg = fg;
+    els.cmdEditBg.value = bg || themeColor("--surface-2", "#161e29");
+    els.cmdEditFg.value = fg || themeColor("--text-2", "#b9c8d8");
+    els.cmdEditBgReset.disabled = !bg;
+    els.cmdEditFgReset.disabled = !fg;
     els.cmdEditDelete.hidden = !editing;   // 新建 / 克隆时不显示删除
     els.cmdEditModal.classList.remove("hidden");
     els.cmdEditName.focus();
@@ -2231,15 +2274,26 @@
     const cmds = parseCmdLines(els.cmdEditCmds.value);
     if (!cmds.length) { pushStatus("warn", "⚠ 至少要填写一条命令"); els.cmdEditCmds.focus(); return; }
     const inputOnly = !!els.cmdEditInputOnly.checked;
+    // 自定义配色以 dataset 为准（空串 = 用主题色）
+    const bg = cmdColor(els.cmdEdit.dataset.bg);
+    const fg = cmdColor(els.cmdEdit.dataset.fg);
     const editingId = els.cmdEdit.dataset.id || "";
     const backup = allCommands.map((c) => ({ ...c }));   // 失败回滚用
     if (editingId) {
       const c = allCommands.find((x) => x.id === editingId);
-      if (c) { c.name = name; c.labels = labels.length ? labels : ["其他"]; c.commands = cmds; c.inputOnly = inputOnly; }
+      if (c) {
+        c.name = name; c.labels = labels.length ? labels : ["其他"];
+        c.commands = cmds; c.inputOnly = inputOnly;
+        if (bg) c.bg = bg; else delete c.bg;
+        if (fg) c.fg = fg; else delete c.fg;
+      }
     } else {
       const nid = "u_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      allCommands.push({ id: nid, name, labels: labels.length ? labels : ["其他"],
-        commands: cmds, clickCount: 0, inputOnly });
+      const item = { id: nid, name, labels: labels.length ? labels : ["其他"],
+        commands: cmds, clickCount: 0, inputOnly };
+      if (bg) item.bg = bg;
+      if (fg) item.fg = fg;
+      allCommands.push(item);
     }
     const user = collectUserCommands();
     const res = await callApi(api.save_commands(user));
@@ -2284,6 +2338,9 @@
       labels: (c.labels || []).slice(),
       commands: (c.commands || []).map((e) => ({ ...e })),
       inputOnly: !!c.inputOnly,
+      // 配色一起复制：副本通常是为了「同色系再来一条」，不带上就得重选
+      bg: c.bg,
+      fg: c.fg,
     };
     openCmdEdit(clone);
   }
@@ -7116,6 +7173,23 @@
     });
     els.cmdEditName.addEventListener("keydown", (e) => { if (e.key === "Enter") saveCmdEdit(); });
     els.cmdEditCmds.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCmdEdit(); });
+    // 配色：dataset 记录「是否真的设置过」。取色器总有一个值，不能把
+    // 「没设置」与「设置成了默认色」混为一谈；点「默认」才清掉自定义色。
+    const bindColor = (input, reset, key) => {
+      input.addEventListener("input", () => {
+        els.cmdEdit.dataset[key] = cmdColor(input.value);
+        reset.disabled = !els.cmdEdit.dataset[key];
+      });
+      reset.addEventListener("click", () => {
+        els.cmdEdit.dataset[key] = "";
+        input.value = key === "bg"
+          ? themeColor("--surface-2", "#161e29")
+          : themeColor("--text-2", "#b9c8d8");
+        reset.disabled = true;
+      });
+    };
+    bindColor(els.cmdEditBg, els.cmdEditBgReset, "bg");
+    bindColor(els.cmdEditFg, els.cmdEditFgReset, "fg");
     // 命令导入 / 导出（备份 & 分享）
     // 导入：优先用后端原生文件对话框（默认定位到程序目录，见 import_commands_dialog）；
     // 若运行环境不支持该 API，则降级为浏览器原生 <input type=file>（无默认定位）。
