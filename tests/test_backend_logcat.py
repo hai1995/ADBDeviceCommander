@@ -1613,3 +1613,87 @@ def test_capture_fallback_is_one_shot_for_transient_failure(tmp_path, monkeypatc
 
     cap.stop("E", zip_on_stop=False)
     assert _wait_not_running(cap, "E")
+
+
+# ---------------------------------------------------------------------------
+# 新 classify_line 字段（pid/tid）+ 关键字前缀语法
+# ---------------------------------------------------------------------------
+
+def test_classify_line_return_pid_tid():
+    """classify_line 现在要返回 pid / tid —— 按包/PID 过滤的基础。"""
+    rec = ls.classify_line(
+        "11-10 11:23:59.667  5417  5430 I IDPSRouterServiceBeanDHttp/Main: hi")
+    assert rec is not None
+    assert rec["pid"] == "5417"
+    assert rec["tid"] == "5430"
+    assert rec["level"] == "I"
+    assert rec["tag"] == "IDPSRouterServiceBeanDHttp/Main"
+    assert rec["msg"].strip() == "hi"
+
+
+def test_filter_tag_prefix():
+    """tag:xxx 只在 tag 字段中匹配。"""
+    rec = ls.LogcatMonitor._classify_and_filter(
+        "11-10 11:23:59.667  5417  5430 I MyTag: some message about tag",
+        set("VDIWEF"), "tag:MyTag", False)
+    assert rec is not None
+
+    # 消息里有 "MyTag" 但 tag 字段没有 —— 应该被过滤掉
+    rec = ls.LogcatMonitor._classify_and_filter(
+        "11-10 11:23:59.667  5417  5430 I OtherTag: message mentions MyTag",
+        set("VDIWEF"), "tag:MyTag", False)
+    assert rec is None
+
+
+def test_filter_msg_prefix():
+    """msg:xxx 只在 msg 字段中匹配。"""
+    rec = ls.LogcatMonitor._classify_and_filter(
+        "11-10 11:23:59.667  5417  5430 I Tag1: crash happened",
+        set("VDIWEF"), "msg:crash", False)
+    assert rec is not None
+
+    rec = ls.LogcatMonitor._classify_and_filter(
+        "11-10 11:23:59.667  5417  5430 I crash: normal message",
+        set("VDIWEF"), "msg:crash", False)
+    assert rec is None
+
+
+def test_filter_pid_prefix():
+    """pid:xxx 匹配 pid 字段（子类进程 PID 相同就都能命中）。"""
+    rec = ls.LogcatMonitor._classify_and_filter(
+        "11-10 11:23:59.667  5417  5430 I Tag1: hi",
+        set("VDIWEF"), "pid:5417", False)
+    assert rec is not None
+
+    rec = ls.LogcatMonitor._classify_and_filter(
+        "11-10 11:23:59.667  5417  5430 I Tag1: hi",
+        set("VDIWEF"), "pid:9999", False)
+    assert rec is None
+
+
+def test_filter_multiple_keywords_and():
+    """多个关键字空格分隔 = AND；可以混合前缀 + 默认搜索。"""
+    line = "11-10 11:23:59.667  5417  5430 I AndroidRuntime: FATAL EXCEPTION in main thread"
+    rec = ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "tag:AndroidRuntime main", False)
+    assert rec is not None, "tag 里是 AndroidRuntime，msg 里有 'main' —— 都命中应放行"
+
+    rec = ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "tag:AndroidRuntime nonexistent", False)
+    assert rec is None, "第二个词不存在于 msg/tag —— 应过滤"
+
+
+def test_filter_backward_compat_no_prefix():
+    """无前缀关键字继续搜索 msg + tag —— 兼容旧行为。"""
+    line = "11-10 11:23:59.667  5417  5430 I MyApp: crash happened"
+    rec = ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "crash", False)
+    assert rec is not None   # 在 msg 里
+
+    rec = ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "MyApp", False)
+    assert rec is not None   # 在 tag 里
+
+    rec = ls.LogcatMonitor._classify_and_filter(
+        line, set("VDIWEF"), "zzz", False)
+    assert rec is None       # 都不在

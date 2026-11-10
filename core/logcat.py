@@ -107,9 +107,12 @@ def classify_line(line: str):
     m = LOGCAT_RE.match(text)
     if not m:
         return None
-    level, tag, msg = m.group(1), m.group(2), m.group(3)
+    pid, tid, level, tag, msg = (
+        m.group(1), m.group(2), m.group(3), m.group(4), m.group(5))
     return {
         "raw": text,
+        "pid": pid,
+        "tid": tid,
         "level": level,
         "tag": tag,
         "msg": msg,

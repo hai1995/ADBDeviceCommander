@@ -2718,6 +2718,13 @@
     return { kw, levels, onlyExc };
   }
   // 全量重建：仅用于过滤条件变更 / 切换设备 / 清空 / 初始化（增量追加以外的情形）
+  function triggerLcFilter() {
+    // 清掉防抖定时器 + 立即重渲染 + 落盘：右键菜单直接填入 tag:/pid: 时
+    // 不能等 250ms 防抖才生效（用户会觉得"点了没反应"）。
+    if (lcFilterTimer !== null) { clearTimeout(lcFilterTimer); lcFilterTimer = null; }
+    persistPref("lc_keyword", els.lcFilter.value);
+    if (lcSerial) renderLogcat();
+  }
   function renderLogcat() {
     // 全量重建前丢弃待渲染队列，否则残留的行会在重建后插入，顺序错乱
     clearLcQueue();
@@ -2813,13 +2820,26 @@
         if (line) {
           const t = line.textContent || "";
           items.push({ label: "复制该行", fn: () => copyLcText(t, "日志行") });
+          // 从整行缓存里找这条的 tag / pid（渲染时 ln 对象带这些字段）。
+          // 但 line 只是 DOM，没存 ln 引用——遍历一次当前 buf 找匹配 raw。
+          const raw = t;
+          const allBuf = lcBuffers[lcSerial] || { lines: [] };
+          const ln = allBuf.lines.find((x) => x.raw === raw);
+          if (ln) {
+            if (ln.tag) {
+              items.push({ label: "按 Tag 过滤: " + ln.tag,
+                fn: () => { els.lcFilter.value = "tag:" + ln.tag; triggerLcFilter(); } });
+            }
+            if (ln.pid) {
+              items.push({ label: "按 PID 过滤: " + ln.pid,
+                fn: () => { els.lcFilter.value = "pid:" + ln.pid; triggerLcFilter(); } });
+            }
+          }
         }
       }
       if (!items.length) return;   // 空白处右键：无内容可复制，不弹菜单
       lcMenuShow(ev.clientX, ev.clientY, items);
     });
-    // 点菜单以外 / 视图滚动 / 窗口失焦 / Esc 都收起。pointerdown 用捕获：
-    // 菜单项自己的 click 在 pointerdown 之后，收起逻辑不能抢在它前面误删菜单。
     window.addEventListener("pointerdown", (ev) => {
       if (lcMenuEl && !lcMenuEl.contains(ev.target)) lcMenuHide();
     }, true);

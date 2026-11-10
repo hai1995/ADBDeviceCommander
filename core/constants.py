@@ -65,7 +65,8 @@ LOGCAT_BUFFERS = {
 # 而走原样透传分支 —— 级别 / 仅异常 / 关键字过滤会对它们全部失效，libc 的
 # native crash 也不再被识别为异常。
 LOGCAT_RE = re.compile(
-    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+\d+\s+\d+\s+([VDIWEF])\s+(\S+?)\s*:(.*)$"
+    # group(1)=pid, (2)=tid, (3)=level, (4)=tag, (5)=msg
+    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(\S+?)\s*:(.*)$"
 )
 
 # 异常/崩溃特征：Java 堆栈、AndroidRuntime、Native crash、信号量崩溃、ANR 等。

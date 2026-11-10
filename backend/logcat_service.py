@@ -490,12 +490,46 @@ class LogcatMonitor:
         if only_exc and not rec["exc"]:
             return None
         if keyword:
-            # 关键字与内容都统一小写后再比对：用户随手输入 "FATAL" / "Fatal"
-            # 也要能命中（此前只有全小写才命中，等于过滤「时灵时不灵」）。
-            kw = str(keyword).lower()
-            hay = ((rec["msg"] or "") + " " + (rec["tag"] or "")).lower()
-            if kw not in hay:
-                return None
+            # 关键字语法：多个词空格分隔 = AND；每个词可带前缀指定匹配字段：
+            #   tag:xxx   → 只在 tag 字段中匹配
+            #   msg:xxx   → 只在 msg 字段中匹配
+            #   pid:xxx   → 匹配 pid / tid
+            #   level:x   → 只看 V/D/I/W/E/F 某一级（单字母，可多字母组合 "level:IW"）
+            #   无前缀    → 默认在 tag + msg 中搜索（兼容旧行为）
+            kws = str(keyword).strip().split()
+            for kw in kws:
+                kw = kw.strip()
+                if not kw:
+                    continue
+                lower = kw.lower()
+                matched = False
+                for prefix in ("tag:", "msg:", "pid:", "tid:", "level:"):
+                    if lower.startswith(prefix):
+                        pat = kw[len(prefix):].lower()
+                        if not pat:
+                            matched = True          # 空前缀忽略
+                            break
+                        if prefix == "tag:":
+                            hay = (rec.get("tag") or "").lower()
+                            matched = pat in hay
+                        elif prefix == "msg:":
+                            hay = (rec.get("msg") or "").lower()
+                            matched = pat in hay
+                        elif prefix in ("pid:", "tid:"):
+                            val = rec.get(prefix[:3]) or rec.get("pid") or ""
+                            if not val:             # 字段缺失则不匹配
+                                return None
+                            matched = pat in val.lower()
+                        elif prefix == "level:":
+                            lv = (rec.get("level") or "").lower()
+                            matched = pat in lv     # "level:IW" → tag in "IW"
+                        break
+                else:
+                    # 无前缀：默认 tag + msg 搜索
+                    hay = ((rec.get("msg") or "") + " " + (rec.get("tag") or "")).lower()
+                    matched = lower in hay
+                if not matched:
+                    return None
         return rec
 
 
