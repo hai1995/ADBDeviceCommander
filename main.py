@@ -326,8 +326,15 @@ def _preflight():
 
 
 def main():
+    # 启动分段耗时日志：把「双击 → 窗口出现」这条链路的每一步都打出来，
+    # 以后再觉得慢时能一眼定位卡在 import webview、_preflight 还是 WebApi 构造。
+    _T0 = time.perf_counter()
+    _MARK = lambda tag: print("[boot %5.2fs] %s" % (time.perf_counter() - _T0, tag),
+                              file=sys.stderr, flush=True)
+
     # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
+    _MARK("crash_hooks_done")
 
     parser = argparse.ArgumentParser(description="ADB 设备指令台（Web 版）")
     parser.add_argument("--debug", action="store_true",
@@ -343,15 +350,18 @@ def main():
     # 最后进入 preflight 的 adb 检测。
     _ensure_config_file()
     _apply_user_adb_dir()
+    _MARK("path_ready")
 
     # 预检在创建窗口之前；adb 检查需在 PATH 同步之后，故放这里。
     # 注意：依赖缺失时此处弹窗后即 sys.exit(2)，不会往下走到 import webview。
     # adb 缺失为非阻断项（界面内引导配置），见 core.envcheck / WebApi.boot。
     _preflight()
+    _MARK("preflight_done")
 
     api = WebApi()
+    _MARK("WebApi_built")
     url = _resolve_index_url()
-    return _launch(args, api, url)
+    return _launch(args, api, url, _T0=_T0)
 
 
 def _theme_window(window):
@@ -384,10 +394,15 @@ def _theme_window(window):
         pass                      # 配色是锦上添花，任何异常都不能挡住启动
 
 
-def _launch(args, api, url):
+def _launch(args, api, url, _T0=None):
     """预检通过后真正拉起窗口。webview 在此函数内局部导入，保证即使 pywebview
     缺失，上面的 _preflight 也已先给出友好提示而非裸 ImportError。"""
+    _T0 = _T0 or time.perf_counter()
+    _MARK = lambda tag: print("[boot %5.2fs] %s" % (time.perf_counter() - _T0, tag),
+                              file=sys.stderr, flush=True)
+
     import webview
+    _MARK("webview_imported")
 
     window = webview.create_window(
         "ADB 设备指令台",
@@ -401,6 +416,7 @@ def _launch(args, api, url):
         background_color="#0b0f14",
         maximized=True,   # 启动时即最大化（创建时直接置窗体状态，避免先小窗再放大）
     )
+    _MARK("window_created")
 
     # 采用原生标题栏：启动即最大化（maximized=True），用户可随时用原生标题栏
     # 的「还原」按钮将窗口缩小为可自由调整的大小——不再需要自绘标题栏与

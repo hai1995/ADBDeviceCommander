@@ -9,6 +9,50 @@
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
+  <!-- 启动 splash：WebView2 一旦把 HTML 骨架渲染出来就会看到它 —— 不等 app.css /
+       app.js 加载、不等 boot() 响应。用户双击到窗口出现之间的「空白秒数」从
+       0→消失，变成一个友好的加载动画。
+       不依赖外部资源：所有样式都内联、旋转用 CSS @keyframes，纯 HTML 即可。
+       前端 boot() 完成后给它加 data-faded="1"，配合下方 style 的淡出动画把
+       它移出画面（display:none）。 -->
+  <div id="boot-splash" aria-live="polite">
+    <style>
+      #boot-splash {
+        position: fixed; inset: 0; z-index: 2147483647;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        gap: 18px;
+        background: #0b0f14; color: #c9d1d9;
+        font-family: "Noto Sans SC", -apple-system, "Segoe UI", sans-serif;
+        user-select: none;
+        transition: opacity 0.35s ease, visibility 0s linear 0.35s;
+      }
+      #boot-splash[data-faded="1"] {
+        opacity: 0; visibility: hidden;
+      }
+      #boot-splash .logo {
+        font-size: 18px; letter-spacing: 0.08em;
+        font-weight: 600; color: #e6edf3;
+      }
+      #boot-splash .dot {
+        width: 40px; height: 40px; border-radius: 50%;
+        border: 3px solid rgba(201, 209, 217, 0.15);
+        border-top-color: #58a6ff;
+        animation: bs-spin 0.9s linear infinite;
+      }
+      #boot-splash .hint {
+        font-size: 13px; color: #8b949e;
+      }
+      @keyframes bs-spin {
+        from { transform: rotate(0deg); }
+        to   { transform: rotate(360deg); }
+      }
+    </style>
+    <div class="dot" aria-hidden="true"></div>
+    <div class="logo">ADB 设备指令台</div>
+    <div class="hint">正在启动…</div>
+  </div>
+
   <!-- 多 tab Web 版：设备指令 / 工具 / 性能监控 / Logcat / 文件 / 关于。
        设备栏为全局共享左侧栏（跨 tab 常驻）。
        后端逻辑在 backend/* + core/*，事件经 bus 推到本页 take_events 轮询。 -->

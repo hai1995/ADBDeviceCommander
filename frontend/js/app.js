@@ -1193,6 +1193,11 @@
 
   function onBooted(p) {
     booted = true;
+    // 启动 splash 淡出：boot 成功即可收尾，transition 350ms 后自动隐藏。
+    // 幂等——onBooted 在 boot() 重发路径也会走到（前端重载 / 超时重试），
+    // data-faded 一旦置位后面的 setAttribute 等于空操作。
+    const sp = document.getElementById("boot-splash");
+    if (sp) sp.setAttribute("data-faded", "1");
     setPill("已就绪", "ok");
     (p.warnings || []).forEach((w) => pushStatus("warn", "⚠ " + w));
     els.btnRefresh.disabled = false;

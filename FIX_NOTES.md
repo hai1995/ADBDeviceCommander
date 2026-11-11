@@ -5244,3 +5244,52 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   立即亮起；点恢复调 `update_unskip` 并藏起；写盘失败不亮出口。
 
 全量：后端 **1425 passed / 1 skipped**；前端 **92 文件 0 失败**；pyflakes 干净。
+
+# 第八十轮（双击启动加载 splash + 启动耗时量化日志）
+
+## 问题
+
+用户反馈：双击运行后要等好几秒才启动，这期间没有任何加载提示 / 动画，
+界面空白，体验很差。
+
+## 根因
+
+窗口创建（`webview.create_window`）与 `index.html` 渲染之间的时间差里
+没有任何东西展示。pywebview 在 Windows 上还要先拉起 WebView2 宿主进程
+（冷启数百 ms ~ 1s），再加载 HTML；这段窗口底色虽然已设成 `#0b0f14`
+（与最终界面一致，避免旧灰闪一下），但「纯深色 + 空无一物」的观感
+仍是空白。
+
+真正的重活（命令加载 / 建立 PowerShell 会话 / 设备首刷 / adb server 预热 /
+临时文件清理 / 版本检查）本来就全部塞进 `boot()` 里**异步执行**
+（`workers.spawn`），窗口显示不依赖它们——用户感知到的「等了几秒」
+其实就是 WebView2 冷启 + HTML 渲染 + JS 执行到 `boot()` 返回之间，
+没有任何视觉反馈。因此「重初始化异步化」这一条已经到位，本轮只需
+补**首屏视觉占位**。
+
+## 修复
+
+- [main.py](file:///workspace/main.py#L328-L364) /
+  [_launch](file:///workspace/main.py#L397-L419)：
+  全链路分段耗时日志（`[boot X.XXs] crash_hooks_done / path_ready /
+  preflight_done / WebApi_built / webview_imported / window_created`），
+  以后再觉得慢时能一眼定位卡在哪段；**stderr 输出**（--windowed 打包的
+  exe 没有控制台时看不到），不影响正常用户界面。
+- [index.html](file:///workspace/frontend/index.html#L12-L54)：
+  `<body>` 最顶部插入 `#boot-splash` 遮罩 —— 纯 HTML + 内联 `<style>`
+  + CSS `@keyframes` 旋转点，不依赖 app.css / app.js / 任何外部资源，
+  WebView2 一旦把 HTML 骨架渲染出来就立刻看到。设 `z-index: 2147483647`
+  盖住主界面，背景色 `#0b0f14` 与窗口底色一致，避免过渡闪白。
+- [app.js onBooted](file:///workspace/frontend/js/app.js#L1194-L1201)：
+  boot 成功即 `sp.setAttribute("data-faded", "1")`，配合内联 CSS 的
+  `transition: opacity 0.35s ease, visibility 0s linear 0.35s` 平滑淡出并
+  移出画面。onBooted 在 boot() 重发路径也会走到（页面重载 / 超时重试），
+  `data-faded` 置位后 `setAttribute` 变成空操作，天然幂等。
+
+## 测试
+
+- 新增 [boot_splash.test.cjs](file:///workspace/tests/frontend/boot_splash.test.cjs)
+  6 条：HTML 骨架就绪、默认亮着、不淡出、有 `.dot` 指示器、样式内联、
+  boot 事件触发后淡出、重发 boot 不报错（幂等）。
+
+全量：后端 **1425 passed / 1 skipped**；前端 **93 文件 0 失败**；pyflakes 干净。
