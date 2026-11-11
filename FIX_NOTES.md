@@ -5891,3 +5891,7 @@ VPN 掉线这类短暂断网能在一小时内自愈。但后台循环是无条�
   三次取中位；`python -c "import core.clipboard; 'numpy' in sys.modules"` → `False`）。
 - 竞态用例的有效性做了反向验证：把 `_ws_lock` 换回旧实现、同样放大窗口，8 条线程
   拿到 **8 把**不同的锁；新实现 **1 把**。
+- 远程 12 个改动文件与本地**逐字节一致（12/12）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43010324600`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success（确认惰性导入没有把 numpy 漏出打包产物 ——
+  即便真漏了也只是剪贴板退回纯 Python，不会崩）。
