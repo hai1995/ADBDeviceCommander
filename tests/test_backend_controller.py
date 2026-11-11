@@ -11,6 +11,7 @@ import backend.controller as ctrl
 import backend.device_service as ds
 import backend.screen_service as screen_service
 from backend.controller import WebApi
+from backend.controllers.settings import SettingsMixin
 from backend.screen_service import device_present
 
 # patch_ctrl 见 tests/conftest.py：把名字同时打到所有 controllers 子模块
@@ -207,6 +208,79 @@ def test_boot_refuses_after_shutdown(monkeypatch):
     api = WebApi(session_factory=FakeSession, auto_update=False)
     api.shutdown()
     assert api.boot() == {"ok": False, "reason": "shutting_down"}
+
+
+def _fake_run_ok(cmd, **kw):
+    return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
+
+
+def test_boot_adb_check_is_file_level_not_subprocess(monkeypatch):
+    """boot 的 adb 状态只做文件级查找（shutil.which），界面就绪不等
+    `adb version` 子进程（它在 adb 异常时会卡满 8 秒超时）。
+
+    回归：_boot_extras 曾同步调 _probe_adb()，adb.exe 异常时 boot 响应被
+    拖满 8 秒——用户看着 splash 干等。版本号改用 prefs 缓存，真实版本由
+    后台 _prewarm_adb_server 探测后推 adb_info 事件补到关于页。
+    """
+    import core.prefs as prefs
+    patch_ctrl(monkeypatch, "load_commands", lambda: (list(CMDS), []))
+    monkeypatch.setattr(ds.subprocess, "run", _fake_run_ok)
+    monkeypatch.setattr("shutil.which", lambda p: "/usr/bin/adb")
+    # 预置一份缓存版本：boot 展示它；若同步路径误调 _probe_adb，拿到的会是
+    # 另一个版本（34.0.0），断言立刻能分辨。
+    prefs.save_prefs({"adb_version_cache": "Android Debug Bridge version 1.0.41"})
+    monkeypatch.setattr(
+        SettingsMixin, "_probe_adb",
+        lambda self: {"ok": True, "path": "adb",
+                      "version": "Android Debug Bridge version 34.0.0"})
+
+    api = WebApi(session_factory=FakeSession, auto_update=False)
+    assert api.boot() == {"ok": True}
+    booted = _events_by_kind(api)["booted"][0]
+    assert booted["adb_ok"] is True
+    assert booted["adb"] == "Android Debug Bridge version 1.0.41", \
+        "boot 必须直接用 prefs 缓存版本，不能等 `adb version` 子进程"
+    api.shutdown()
+
+
+def test_prewarm_pushes_real_adb_version_and_caches(monkeypatch):
+    """后台预热把真实版本写进 prefs 缓存并推 adb_info 事件（关于页刷新）。
+
+    缓存的意义：下一次启动的 boot 不用再跑子进程就能展示版本号。
+    """
+    import core.prefs as prefs
+    monkeypatch.setattr(ds.subprocess, "run", _fake_run_ok)
+    monkeypatch.setattr(
+        SettingsMixin, "_probe_adb",
+        lambda self: {"ok": True, "path": "adb",
+                      "version": "Android Debug Bridge version 34.0.0"})
+
+    api = WebApi(session_factory=FakeSession, auto_update=False)
+    api._prewarm_adb_server()
+    by_kind = _events_by_kind(api)
+    assert "adb_info" in by_kind, "探测完必须推 adb_info，前端关于页才知道真实版本"
+    info = by_kind["adb_info"][0]
+    assert info["ok"] is True
+    assert info["version"] == "Android Debug Bridge version 34.0.0"
+    assert prefs.load_prefs().get("adb_version_cache") == \
+        "Android Debug Bridge version 34.0.0", "真实版本要落缓存，下次启动直接展示"
+    api.shutdown()
+
+
+def test_boot_adb_missing_still_guides(monkeypatch):
+    """adb 找不到：adb_ok=False + 引导文案（异步化不改变这条行为）。"""
+    patch_ctrl(monkeypatch, "load_commands", lambda: (list(CMDS), []))
+    monkeypatch.setattr("shutil.which", lambda p: None)
+    monkeypatch.setattr(
+        ds.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"stdout": "", "stderr": "",
+                                         "returncode": 1})())
+    api = WebApi(session_factory=FakeSession, auto_update=False)
+    assert api.boot() == {"ok": True}
+    booted = _events_by_kind(api)["booted"][0]
+    assert booted["adb_ok"] is False
+    assert "未在 PATH 中找到" in booted["adb"]
+    api.shutdown()
 
 
 # ---------------------------------------------------------------------------

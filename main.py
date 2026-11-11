@@ -31,6 +31,14 @@ from core.envcheck import (
 # 注意：webview 不在模块顶层导入。它在预检通过后才于 _launch() 内局部导入——
 # 这样 pywebview 未安装时，能先弹友好中文提示，而不是裸 ImportError。
 
+# pywebview import 时会自动探测可用 GUI 后端（逐个尝试 cef / gtk / qt /
+# winforms / edgechromium，每个都伴随对应第三方库的 import 尝试——在 Windows
+# 上通常要额外加载 pythonnet/clr，整段探测实测可达数百 ms ~ 1s+）。
+# 本项目只跑 Windows + WebView2，后端恒为 edgechromium：显式指定后 pywebview
+# 跳过整段探测直接用它，省掉这次白等。用 setdefault —— 调试时仍可用
+# PYWEBVIEW_GUI=winforms 之类显式覆盖。
+os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
+
 VERSION = "2026.1111.0502"
 
 
@@ -325,12 +333,44 @@ def _preflight():
     sys.exit(2)
 
 
+def _boot_timing_path():
+    """启动分段耗时日志的位置：系统临时目录（程序目录可能只读，写不进去）。"""
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "adbdc_boot_timing.log")
+
+
+def _reset_boot_timing_log():
+    """每次启动重新起一份耗时日志：反馈「这次启动慢」时只看得到本次分段。"""
+    try:
+        with open(_boot_timing_path(), "w", encoding="utf-8") as f:
+            f.write("=== %s 启动 ===\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        pass
+
+
+def _make_boot_mark(t0):
+    """返回启动分段打点函数：同一行既写 stderr（源码跑可见）也追加到日志
+    文件——--windowed 打包的 exe 没有控制台，用户只能从文件里读这份分段。"""
+    def mark(tag):
+        line = "[boot %5.2fs] %s" % (time.perf_counter() - t0, tag)
+        try:
+            print(line, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        try:
+            with open(_boot_timing_path(), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+    return mark
+
+
 def main():
     # 启动分段耗时日志：把「双击 → 窗口出现」这条链路的每一步都打出来，
     # 以后再觉得慢时能一眼定位卡在 import webview、_preflight 还是 WebApi 构造。
     _T0 = time.perf_counter()
-    _MARK = lambda tag: print("[boot %5.2fs] %s" % (time.perf_counter() - _T0, tag),
-                              file=sys.stderr, flush=True)
+    _reset_boot_timing_log()
+    _MARK = _make_boot_mark(_T0)
 
     # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
@@ -398,8 +438,7 @@ def _launch(args, api, url, _T0=None):
     """预检通过后真正拉起窗口。webview 在此函数内局部导入，保证即使 pywebview
     缺失，上面的 _preflight 也已先给出友好提示而非裸 ImportError。"""
     _T0 = _T0 or time.perf_counter()
-    _MARK = lambda tag: print("[boot %5.2fs] %s" % (time.perf_counter() - _T0, tag),
-                              file=sys.stderr, flush=True)
+    _MARK = _make_boot_mark(_T0)
 
     import webview
     _MARK("webview_imported")

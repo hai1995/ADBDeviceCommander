@@ -111,16 +111,51 @@ class SettingsMixin:
             pass
         return {"ok": False, "path": path, "version": ""}
 
+    def _adb_found(self):
+        """adb 可执行文件是否找得到（纯 PATH 文件查找，不跑子进程，毫秒级）。
+
+        boot 阶段用它代替 _probe_adb：`adb version` 子进程在 adb 异常时会卡满
+        8 秒超时，不能把界面就绪押在它身上。真实版本号由 _prewarm_adb_server
+        在后台探测后推 adb_info 事件补上。
+        """
+        import shutil
+        path = getattr(self.state, "adb_path", "") or "adb"
+        try:
+            return bool(shutil.which(path))
+        except Exception:
+            return False
+
     def _prewarm_adb_server(self):
-        """启动后台拉起 adb server（幂等）。失败静默——它不是关键路径。
+        """后台拉起 adb server（幂等）+ 探测真实 adb 版本。失败静默。
 
         server 冷启一次要数百 ms，由「启动后第一次截图」承担这笔钱会很莫名；
         在 boot 的后台线程里提前拉起来，用户点截图时它一定已在。
+
+        boot 阶段的 adb 状态只是文件级查找（_adb_found），真实版本号在这里
+        用 `adb version` 探测（后台线程，即使卡满超时也不挡界面）：探测到就
+        写进 prefs 缓存（下次启动的 boot 直接展示），并推 adb_info 事件让
+        前端关于页把缓存版本 / 路径替换成真实版本。
         """
         try:
             subprocess.run(
                 [getattr(self.state, "adb_path", "") or "adb", "start-server"],
                 **adb_kwargs(10))
+        except Exception:
+            pass
+        try:
+            info = self._probe_adb()
+        except Exception:
+            return
+        if info["ok"] and info["version"]:
+            try:
+                if load_prefs().get("adb_version_cache", "") != info["version"]:
+                    save_prefs_checked({"adb_version_cache": info["version"]})
+            except Exception:
+                pass
+        try:
+            self.bus.push("adb_info", {
+                "ok": info["ok"], "path": info["path"],
+                "version": info["version"]})
         except Exception:
             pass
 

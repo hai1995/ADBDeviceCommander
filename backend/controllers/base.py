@@ -220,11 +220,18 @@ class WebApiBase:
         机制纠正过的字段一并带上下发提示。重发时重新读盘，避免页面重载后
         看到启动瞬间的旧配置。
         """
-        adb_info = self._probe_adb()
-        payload["adb_ok"] = adb_info["ok"]
-        payload["adb"] = (adb_info["version"] or adb_info["path"]
-                          if adb_info["ok"] else "adb 未就绪（未在 PATH 中找到）")
         settings, settings_warnings = load_prefs_checked()
+        # adb 状态用「文件级查找」（_adb_found → shutil.which，毫秒级）而不是
+        # _probe_adb 的 `adb version` 子进程：后者在 adb 异常时会卡满 8 秒
+        # 超时，把 boot 响应拖死（界面长时间停在 splash）。真实版本号由后台
+        # _prewarm_adb_server 探测后推 adb_info 事件补到关于页；这里先回
+        # prefs 里缓存的上次版本（没有缓存就显示路径）。
+        adb_ok = self._adb_found()
+        payload["adb_ok"] = adb_ok
+        cached_ver = settings.get("adb_version_cache", "")
+        payload["adb"] = ((cached_ver or getattr(self.state, "adb_path", "")
+                           or "adb")
+                          if adb_ok else "adb 未就绪（未在 PATH 中找到）")
         payload["settings"] = settings
         payload["settings_warnings"] = settings_warnings
         # 配置文件位置（本机实际落盘路径）与本机实际生效的保存目录。

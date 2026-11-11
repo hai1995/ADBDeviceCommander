@@ -1047,6 +1047,13 @@
       case "diag_state": setDiagRunning(!!p.running); break;
       case "update_state": setUpdateChecking(!!p.running); break;
       case "update": onUpdateResult(p); break;
+      case "adb_info":
+        // boot 阶段为省掉 `adb version` 子进程等待只做了文件级探测（adb_ok +
+        // prefs 缓存版本）；真实版本由后台预热线程探测后推到这里 —— 刷新关于页，
+        // 顺带纠正「文件找得到但跑不起来」的误判。
+        if (p.version) els.aboutAdb.textContent = p.version;
+        else if (p.ok === false) els.aboutAdb.textContent = "adb 未就绪（无法执行 adb version）";
+        break;
       case "logcat": onLogcat(p); break;
       case "logcat_capture": onLogcatCapture(p); break;
       case "file": onFile(p); break;

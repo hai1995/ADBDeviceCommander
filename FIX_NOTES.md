@@ -5485,3 +5485,63 @@ exec-out 报「设备未返回图像（adb 没有给出原因）」；
 ## 验证
 
 后端 **1430 passed / 1 skipped**；前端 **94 文件 0 失败**；pyflakes 干净。
+
+---
+
+# 第八十四轮（启动提速第二轮：跳过 pywebview 后端探测 + boot 不再同步跑 adb version + 耗时日志落盘）
+
+## 触发
+
+第八十轮加了启动 splash 后，用户反馈「能看见加载圈了，但整体还是偏慢」。
+splash 只解决了「没反馈」，没压缩真实耗时——本轮压缩耗时本身。
+
+## 瓶颈定位（两段）
+
+- **A 段（双击 → splash 出现）**：PyInstaller onefile 解压到 %TEMP%
+  （代码层改不了）+ `import webview` 时的 GUI 后端**自动探测**——逐个尝试
+  cef / gtk / qt / winforms / edgechromium，每个都伴随对应第三方库的
+  import 尝试，Windows 上通常还要加载 pythonnet/clr，实测数百 ms ~ 1s+。
+- **B 段（splash → 就绪）**：`boot()` 的 `_boot_extras` 同步调
+  `_probe_adb()` 跑 `adb version` 子进程——正常 100~300ms，但 adb.exe
+  异常时会**卡满 8 秒超时**，是 boot 响应最大的不确定项。
+  另外第八十轮的 `_MARK` 分段日志只写 stderr，--windowed 打包的 exe
+  没有控制台，用户机器上慢在哪一段无从取证。
+
+## 修复
+
+1. [main.py](file:///workspace/main.py#L34-L40)：
+   `os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")`——本项目只跑
+   Windows + WebView2，显式钉住后 pywebview 跳过整段后端探测直接用它。
+   用 setdefault：调试时仍可 `PYWEBVIEW_GUI=winforms` 显式覆盖。
+2. [main.py](file:///workspace/main.py) `_make_boot_mark`：分段耗时同一行
+   **双写** stderr 与日志文件（`%TEMP%/adbdc_boot_timing.log`，每次启动
+   重置只留本次）。windowed 下用户把这份日志发回来即可定位慢在哪段。
+3. [base.py `_boot_extras`](file:///workspace/backend/controllers/base.py)：
+   adb 状态改 `_adb_found()`（`shutil.which` 纯 PATH 文件查找，毫秒级，
+   不跑子进程）；关于页的版本号先用 prefs 缓存 `adb_version_cache`。
+   adb 缺失的引导文案（adb_ok=False → 关于页引导配置）行为不变。
+4. [settings.py `_prewarm_adb_server`](file:///workspace/backend/controllers/settings.py)：
+   后台线程拉起 adb server 后顺带 `_probe_adb()` 探测真实版本——在后台
+   线程里，即使卡满超时也不挡界面。版本变了就更新 prefs 缓存（下次启动
+   的 boot 直接展示），并推 `adb_info` 事件。
+5. [app.js](file:///workspace/frontend/js/app.js)：新增 `adb_info` 事件
+   处理——关于页 adb 行由「缓存版本 / 路径」替换为真实版本；探测失败
+   （文件找得到但跑不起来）时纠正为「未就绪」。
+
+`save_settings`（关于页保存 adb 目录）仍同步 `_probe_adb`：那是用户
+主动点保存、期待即时回测的场景，不在启动路径上，保持原样。
+
+## 测试
+
+| 改动 | 对应测试 |
+|---|---|
+| PYWEBVIEW_GUI 钉住 edgechromium | `tests/test_main_boot.py::test_pywebview_gui_pinned_to_edgechromium` |
+| 分段耗时双写 stderr + 文件 / 每次启动重置 / 不可写不抛 | `tests/test_main_boot.py` 其余 3 条 |
+| boot 只用文件级探测 + prefs 缓存版本（不跑 adb version） | `test_boot_adb_check_is_file_level_not_subprocess` |
+| prewarm 推 adb_info + 真实版本落缓存 | `test_prewarm_pushes_real_adb_version_and_caches` |
+| adb 缺失引导文案不变 | `test_boot_adb_missing_still_guides` |
+| 前端 adb_info 刷新关于页 / 失败纠正 | `tests/frontend/adb_info.test.cjs` 3 条 |
+
+## 验证
+
+后端 **1437 passed / 1 skipped**；前端 **95 文件 0 失败**；pyflakes 干净。
