@@ -39,7 +39,7 @@ from core.envcheck import (
 # PYWEBVIEW_GUI=winforms 之类显式覆盖。
 os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 
-VERSION = "2026.1111.0502"
+VERSION = "2026.1111.0657"
 
 
 def _refresh_system_path():
