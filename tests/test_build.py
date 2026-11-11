@@ -19,15 +19,16 @@ import build  # noqa: E402
 
 def _args(**kw):
     """构造一个 argparse 命名空间（只含 pyinstaller_args 用到的字段）。"""
-    base = dict(mode="onefile", console=False, clean=True,
+    base = dict(mode="onedir", console=False, clean=True,
                 dist_dir=Path("dist"), work_dir=Path("build"), log_level="WARN")
     base.update(kw)
     return type("Args", (), base)()
 
 
-def test_default_is_onefile_windowed_with_icon():
+def test_default_mode_args_are_onedir_windowed_with_icon():
     args = build.pyinstaller_args(_args())
-    assert "--onefile" in args
+    assert "--onedir" in args
+    assert "--onefile" not in args
     assert "--windowed" in args
     assert "--clean" in args
     assert "--noconfirm" in args
@@ -312,6 +313,21 @@ def test_webview_start_never_uses_ssl():
 # ---------------------------------------------------------------------------
 # 命令行开关：文档里写过的写法必须真的可用
 # ---------------------------------------------------------------------------
+def test_default_mode_is_onedir(monkeypatch):
+    """默认必须是目录模式：单文件 exe 每次启动解压整包，用户实报启动二十多秒。
+
+    回归锁定：曾经默认 onefile，双击到界面就绪要 20s+，而 Python 代码只占 0.5s。
+    """
+    seen = []
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "run_pyinstaller",
+                        lambda args, dry: seen.append(args) or (0, ""))
+    assert build.main(["--dry-run", "--no-deps"]) == 0
+    assert seen and "--onedir" in seen[0], seen
+    assert "--onefile" not in seen[0]
+
+
 def test_documented_onedir_flag_is_accepted(monkeypatch):
     """`python build.py --onedir` 必须能跑。
 
@@ -458,6 +474,23 @@ def test_preflight_aborts_with_chinese_hint_when_stage_exe_locked(monkeypatch, c
     assert "被占用" in err and "任务管理器" in err
 
 
+def test_preflight_checks_mode_specific_stage_path(monkeypatch, tmp_path):
+    """占用预检要查**当前模式**的暂存 exe。
+
+    目录模式的产物在 dist_stage/<APP_NAME>/ 下，还按 onefile 的根路径去查，
+    等于永远查不到、白跑一趟 PyInstaller 才在收尾时报占用。
+    """
+    seen = []
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "_file_locked",
+                        lambda p: seen.append(p) or True)
+    rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
+                     "--dist-dir", str(tmp_path / "dist")])
+    assert rc == 5
+    assert seen and seen[0].parent.name == build.APP_NAME, seen
+
+
 def test_tolerable_timestamp_failure_still_publishes(tmp_path, monkeypatch, capsys):
     """主流程：时间戳失败但 exe 完整 → 打警告后继续走发布（不返回失败码）。"""
     exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
@@ -469,7 +502,8 @@ def test_tolerable_timestamp_failure_still_publishes(tmp_path, monkeypatch, caps
     monkeypatch.setattr(build, "_file_locked", lambda p: False)
     monkeypatch.setattr(build, "run_pyinstaller",
                         lambda args, dry: (1, "Execution of 'set_exe_build_timestamp' failed - no more attempts left!\n"))
-    rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
+    rc = build.main(["--onefile", "--no-deps",
+                     "--work-dir", str(tmp_path / "build"),
                      "--dist-dir", str(tmp_path / "dist")])
     assert rc == 0, "时间戳失败但产物完整时应按成功继续，实际 %r" % rc
     out = capsys.readouterr().out
@@ -538,7 +572,8 @@ def test_main_publishes_only_exe(monkeypatch, tmp_path):
     monkeypatch.setattr(build, "clean_junk", lambda root: [])
     monkeypatch.setattr(build, "_file_locked", lambda p: False)
     monkeypatch.setattr(build, "run_pyinstaller", lambda args, dry: (0, ""))
-    rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
+    rc = build.main(["--onefile", "--no-deps",
+                     "--work-dir", str(tmp_path / "build"),
                      "--dist-dir", str(tmp_path / "dist")])
     assert rc == 0
     dist = tmp_path / "dist"
@@ -564,7 +599,8 @@ def test_main_preserves_existing_user_data(monkeypatch, tmp_path):
     monkeypatch.setattr(build, "clean_junk", lambda root: [])
     monkeypatch.setattr(build, "_file_locked", lambda p: False)
     monkeypatch.setattr(build, "run_pyinstaller", lambda args, dry: (0, ""))
-    rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
+    rc = build.main(["--onefile", "--no-deps",
+                     "--work-dir", str(tmp_path / "build"),
                      "--dist-dir", str(dist)])
     assert rc == 0
     # 用户的个人数据原样保留（构建脚本既不删也不改）
@@ -667,3 +703,45 @@ def test_verify_dist_flags_tiny_exe(tmp_path):
     exe.write_bytes(b"MZ")  # 远小于 _MIN_EXE_MB
     problems = build.verify_dist(target, "onefile", exe)
     assert any("体积异常" in p for p in problems)
+
+
+def test_verify_dist_onedir_requires_runtime_dir(tmp_path):
+    """目录模式：只拷了 exe、没带 _internal 的残包必须被拦下。
+
+    exe 只是启动器，缺运行时依赖时双击会报「找不到 DLL / 无法加载 Python 运行时」，
+    这类包发出去同事直接打不开。
+    """
+    target = tmp_path / build.APP_NAME
+    target.mkdir()
+    exe = target / (build.APP_NAME + ".exe")
+    exe.write_bytes(b"MZ" * (1024 * 1024))       # 过体积下限
+    problems = build.verify_dist(target, "onedir", exe)
+    assert any("运行时依赖" in p for p in problems), problems
+
+    (target / "_internal").mkdir()
+    assert build.verify_dist(target, "onedir", exe) == []
+
+
+def test_win_package_onedir_includes_internal_and_skips_personal_data(tmp_path):
+    """目录模式分发件：exe + _internal 必须一起进包，个人数据必须排除。
+
+    只打 exe 的包同事解压后打不开；而整树遍历会把用户跑过一次生成的
+    config.json / commands.json 一并打包（泄漏个人命令库与配置）。
+    """
+    root, dist = _fake_dist(tmp_path)
+    app = tmp_path / "appdir"
+    app.mkdir()
+    exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
+    (app / exe_name).write_bytes(b"MZ")
+    (app / "_internal").mkdir()
+    (app / "_internal" / "python310.dll").write_bytes(b"DLL")
+    (app / "config.json").write_text("{}", encoding="utf-8")
+    (app / "commands.json").write_text("[]", encoding="utf-8")
+
+    zp = build.make_win_package(app, tmp_path / "out", root=root, mode="onedir")
+    names = zipfile.ZipFile(zp).namelist()
+    top = zp.stem + "/"
+    assert top + exe_name in names, "exe 必须进包"
+    assert top + "_internal/python310.dll" in names, "_internal 必须一起进包"
+    assert top + "config.json" not in names, "个人配置不得进分发件"
+    assert top + "commands.json" not in names, "个人命令库不得进分发件"

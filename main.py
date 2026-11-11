@@ -22,6 +22,10 @@ import os
 import sys
 import time
 
+# 进程内最早可测的时刻，刻意放在业务模块 import 之前：backend/core 的 import
+# 发生在 main() 之前，原来的计时从 main() 起算会把这一段漏掉（实测 0.2s+）。
+_MODULE_T0 = time.perf_counter()
+
 from core.constants import PROJECT_ROOT, unique_path
 from backend.controller import WebApi
 from core.envcheck import (
@@ -365,12 +369,45 @@ def _make_boot_mark(t0):
     return mark
 
 
+def _process_age_seconds():
+    """进程创建到现在过了多少秒；取不到返回 None（非 Windows）。
+
+    单文件 exe（PyInstaller onefile）在 Python 代码执行**之前**要先把整包解压到
+    临时目录，这段耗时程序内部任何计时都看不到——只能向系统要进程创建时间。
+    启动日志里把它单列出来，才能判断「启动二十秒」是解压还是 WebView2 初始化。
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        created, exited = wintypes.FILETIME(), wintypes.FILETIME()
+        kernel, user = wintypes.FILETIME(), wintypes.FILETIME()
+        ok = k32.GetProcessTimes(k32.GetCurrentProcess(),
+                                 ctypes.byref(created), ctypes.byref(exited),
+                                 ctypes.byref(kernel), ctypes.byref(user))
+        if not ok:
+            return None
+        # FILETIME：100ns 计数，起点 1601-01-01；11644473600 是 1601→1970 的秒数
+        ft = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return max(0.0, time.time() - (ft / 1e7 - 11644473600))
+    except Exception:
+        return None
+
+
 def main():
     # 启动分段耗时日志：把「双击 → 窗口出现」这条链路的每一步都打出来，
     # 以后再觉得慢时能一眼定位卡在 import webview、_preflight 还是 WebApi 构造。
-    _T0 = time.perf_counter()
+    _T0 = _MODULE_T0
     _reset_boot_timing_log()
     _MARK = _make_boot_mark(_T0)
+    _MARK("main_enter（以上为 import backend/core）")
+    # 双击 → 这里的耗时（onefile 解压 + 解释器启动）单独报一行：它不出现在
+    # 任何一段 Python 计时里，却往往是「启动二十秒」的全部。
+    age = _process_age_seconds()
+    if age is not None:
+        _MARK("process_age %.2fs（进程创建 → Python 代码，含 onefile 解压）" % age)
 
     # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
@@ -456,6 +493,15 @@ def _launch(args, api, url, _T0=None):
         maximized=True,   # 启动时即最大化（创建时直接置窗体状态，避免先小窗再放大）
     )
     _MARK("window_created")
+
+    # 窗口「真正显示」与「页面 DOM 就绪」两个时间点：启动慢时用来区分是
+    # WebView2 运行时初始化慢（window_created → shown 很长），还是页面渲染慢
+    # （shown → loaded）。没有这两点，日志停在 window_created，无法定位。
+    try:
+        window.events.shown += lambda: _MARK("window_shown")
+        window.events.loaded += lambda: _MARK("dom_loaded")
+    except Exception:
+        pass                      # 事件挂不上只是少两行日志，绝不能挡住启动
 
     # 采用原生标题栏：启动即最大化（maximized=True），用户可随时用原生标题栏
     # 的「还原」按钮将窗口缩小为可自由调整的大小——不再需要自绘标题栏与

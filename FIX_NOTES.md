@@ -5545,3 +5545,73 @@ splash 只解决了「没反馈」，没压缩真实耗时——本轮压缩耗�
 ## 验证
 
 后端 **1437 passed / 1 skipped**；前端 **95 文件 0 失败**；pyflakes 干净。
+
+---
+
+# 第八十五轮（启动二十多秒的根因：onefile 每次启动解压整包 → 改默认目录模式）
+
+## 触发
+
+用户按第八十轮的耗时日志跑了打包版，反馈「启动花了二十多秒」，并附上
+`adbdc_boot_timing.log`：
+
+```
+[boot  0.02s] crash_hooks_done
+[boot  0.04s] path_ready
+[boot  0.25s] preflight_done
+[boot  0.26s] WebApi_built
+[boot  0.46s] webview_imported
+[boot  0.47s] window_created
+```
+
+## 定位
+
+Python 代码从 `main()` 到窗口创建**只用了 0.47 秒**，20 秒里 97% 不在这段里。
+日志停在 `window_created`（当时没有之后的打点），可能的两段：
+
+* **A：Python 代码执行之前** —— PyInstaller onefile 每次双击都要把整包解压到
+  `%TEMP%`（本项目含 pywebview + pythonnet + numpy，解开约 60~80MB），再被
+  杀毒软件逐文件扫描。这段耗时发生在解释器启动前，程序内部任何计时都看不到。
+* **B：窗口创建之后** —— WebView2 运行时初始化 + 页面首次渲染。
+
+补了两个打点把 A / B 分开（见下），但更关键的是 A 段的性质：**onefile 是每次
+启动都重新解压**，再怎么优化 Python 代码也绕不开。所以默认改为目录模式
+（onedir，用户确认采纳）。
+
+## 修复
+
+1. [build.py](file:///workspace/build.py)：默认模式 `onefile → onedir`。
+   目录模式下 exe 只是启动器，运行时依赖在 `_internal/`，启动没有解压步骤。
+   仍保留 `--onefile` 供「确需单文件转发」的场景。
+2. [build.py `make_win_package`](file:///workspace/build.py)：目录模式分发件
+   **整目录打包**（exe + `_internal/`）；只打 exe 的包同事解压后直接报
+   「找不到 DLL / 无法加载 Python 运行时」。同时把 `config.json` /
+   `commands.json` / `crash_*.log` 等个人数据显式排除——它们就落在 exe 同
+   目录，整树遍历会一并打包泄漏。
+3. [build.py `verify_dist`](file:///workspace/build.py)：目录模式校验
+   「exe 之外还有运行时依赖」，拦下只拷了 exe 的残包。
+4. [build.py 占用预检](file:///workspace/build.py)：暂存 exe 路径改为按模式
+   推断（目录模式在 `dist_stage/<APP_NAME>/`），否则预检永远查不到、白跑一趟
+   PyInstaller 才在收尾报占用。
+5. [main.py](file:///workspace/main.py)：`_MODULE_T0` 提前到业务模块 import
+   之前（原来从 `main()` 起算，漏算 0.2s+ 的 import）；新增
+   `_process_age_seconds()`（Windows `GetProcessTimes`）把「进程创建 →
+   Python 代码」这段 onefile 解压耗时单列进日志；新增
+   `window_shown` / `dom_loaded` 两个事件打点，把 A / B 两段彻底分开。
+6. [README.md](file:///workspace/README.md) / [使用说明.txt](file:///workspace/使用说明.txt)：
+   分发说明改为「整个文件夹一起拷」，并写明单独拷 exe 无法启动。
+
+## 测试
+
+| 改动 | 对应测试 |
+|---|---|
+| 默认模式是 onedir（参数级 + CLI 级） | `test_default_mode_args_are_onedir_windowed_with_icon`、`test_default_mode_is_onedir` |
+| 目录模式分发件含 `_internal`、排除个人数据 | `test_win_package_onedir_includes_internal_and_skips_personal_data` |
+| 目录模式残包（缺运行时）被拦下 | `test_verify_dist_onedir_requires_runtime_dir` |
+| 占用预检查当前模式的暂存路径 | `test_preflight_checks_mode_specific_stage_path` |
+| 进程创建耗时才非 Windows 返回 None | `test_process_age_is_none_off_windows` |
+| 计时起点在业务 import 之前 | `test_module_t0_precedes_backend_imports` |
+
+## 验证
+
+后端 **1443 passed / 1 skipped**；前端 **95 文件 0 失败**；pyflakes 干净。

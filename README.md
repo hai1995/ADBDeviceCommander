@@ -124,21 +124,28 @@ python main.py --debug    # 附加 WebView2 开发者工具（调前端用）
 ### 打包成 exe（推荐给同事用）
 
 ```bat
-python build.py                # 单文件 exe（默认，分发用）
-python build.py --onedir       # 目录模式：启动更快、缺文件时更好排查
+python build.py                # 目录模式（默认，启动最快，分发用）
+python build.py --onefile      # 单文件 exe：每次启动都要解压整包，启动慢 10s+
 python build.py --console      # 保留控制台窗口（排查「闪一下就没」）
 python build.py --bump         # 打包前先用 tools/bump_version.py 递增版本号
 python build.py --dry-run      # 只打印将要执行的 PyInstaller 命令
 python build.py --no-deps      # 跳过依赖检查与自动安装
 ```
 
-产物为 `dist\ADB设备指令台.exe` 一个文件，放在任意目录即可双击运行。
-`frontend/` 与使用说明都只打进 exe 内部（界面代码与说明使用者无需也不会去改）；
-分发目录因此只有 exe 本体，最干净、最不会误伤同事已有的个人数据。分发的 `dist\` 内容：
+产物为 `dist\ADB设备指令台\` 目录（exe + `_internal\` 运行时依赖），**整个目录
+一起拷给同事**，双击里面的 exe 即可运行。`frontend/` 与使用说明都只打进产物内部。
 
-| 文件 | 说明 |
+> **为什么默认目录模式**：单文件 exe 每次双击都要把整包（pywebview + pythonnet +
+> numpy，解开约 60~80MB）解压到 `%TEMP%` 再逐个被杀毒扫描，实测「启动二十多秒」；
+> 而 Python 代码本身只占 0.5 秒。目录模式没有解压这一步，启动约 1~2 秒。
+> 确需单文件转发时才用 `--onefile`。
+
+分发的 `dist\ADB设备指令台\` 内容：
+
+| 文件 / 目录 | 说明 |
 | --- | --- |
-| `ADB设备指令台.exe` | 主程序（单文件，双击运行，无需 Python） |
+| `ADB设备指令台.exe` | 主程序（双击运行，无需 Python） |
+| `_internal\` | 运行时依赖，缺少则无法启动 |
 
 > 使用说明不再以独立文件随包分发，而是内置于 exe，在程序「关于 → 使用说明」子 tab 里直接阅读。
 

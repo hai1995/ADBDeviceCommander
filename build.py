@@ -11,8 +11,8 @@
 
 用法
 ----
-    python build.py                 # 单文件 exe（默认，分发给同事用）
-    python build.py --onedir        # 目录模式：启动更快、缺文件时更好排查
+    python build.py                 # 目录模式（默认，启动最快，分发给同事用）
+    python build.py --onefile       # 单文件 exe：每次启动都要解压整包，启动慢 10s+
     python build.py --console       # 保留控制台窗口（排查「闪一下就没」）
     python build.py --bump          # 打包前先用 tools/bump_version.py 递增版本号
     python build.py --no-deps       # 跳过依赖检查与自动安装
@@ -25,9 +25,18 @@
 
 产物（`dist/` 整个目录拷给同事即可）：
 
-| 文件              | 说明                                       |
-| ----------------- | ------------------------------------------ |
-| ADB设备指令台.exe | 主程序（双击运行，无需 Python）            |
+目录模式下 `dist/` 是一个完整的应用目录（`ADB设备指令台/`），整个目录必须一起
+拷给同事：exe 只是启动器，真正运行时依赖都 `_internal/` 里。
+
+| 文件                    | 说明                                     |
+| ----------------------- | ---------------------------------------- |
+| ADB设备指令台.exe       | 主程序（双击运行，无需 Python）          |
+| _internal/              | 运行时依赖（Python 标准库 / pywebview 等）|
+
+为什么默认目录模式（onefile 每次启动都慢）：单文件 exe 每次双击都要先把整包
+（本项目含 pywebview + pythonnet + numpy，解开约 60~80MB）解压到 %TEMP%，杀毒
+软件再逐个扫描，用户实报「启动二十多秒」而 Python 代码本身只占 0.5 秒。目录模式
+没有解压这一步，启动约 1~2 秒。
 
 `frontend/`（界面代码）与使用说明都只打进 exe 内部，使用者无需也不会去改；
 使用说明在程序「关于」页的「使用说明」子 tab 内直接阅读。
@@ -91,6 +100,20 @@ REQUIRED_ASSETS = [
 # 调好的命令库 / 设置）。dist 目录因此只剩 exe 本体，最干净、最不会误伤用户数据。
 SIDE_FILES = []
 SIDE_DIRS = []
+
+# 分发件（--package）里绝不允许出现的文件：用户个人数据 + 开发期临时产物。
+# 目录模式要把整个产物目录（exe + _internal）打包，而这些文件恰好就落在 exe
+# 同目录（用户运行过一次就会生成 config.json / commands.json / 崩溃日志），
+# 不排除就会把同事自己的命令库、配置、设备序列号随包发给别人。
+_PACKAGE_EXCLUDE_FILES = (
+    "config.json", "settings.json", "commands.json",
+    "crash_*.log", "adb_devaudio_*.wav",
+)
+
+
+def _package_excluded(name: str) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in _PACKAGE_EXCLUDE_FILES)
+
 
 # 构建期不需要进包的模块（缩小体积）：pytest 只在 tests/ 用，PIL 仅用于重生成图标。
 # cryptography：本项目不启用 pywebview 的 SSL 模式（webview.start 从不传 ssl=True），
@@ -167,9 +190,9 @@ _TIMESTAMP_SIGNATURES = (
     "set_exe_build_timestamp",
     "Execution of 'set_exe_build_timestamp' failed",
 )
-# onefile 产物体积下限（MB）：本程序含 pywebview + 前端资源，正常 15MB+；
-# 暂存 exe 小于此值视为「没真正打出产物」，时间戳失败不予容忍。
-_MIN_EXE_MB = 1.0
+# 产物 exe 体积下限（MB）：目录模式下 exe 只是启动器（约 1MB+），onefile 则
+# 15MB+。低于此值视为「没真正打出产物」，时间戳失败不予容忍。
+_MIN_EXE_MB = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -336,17 +359,19 @@ def win_package_name(root: Path = ROOT) -> str:
 
 
 def make_win_package(target: Path, dist_dir: Path = None,
-                     root: Path = ROOT) -> Path:
-    """把 dist/ 里「双击即用」的那一套打成 zip，返回产物路径。
+                     root: Path = ROOT, mode: str = "onedir") -> Path:
+    """把产物目录里「双击即用」的那一套打成 zip，返回产物路径。
 
     与 make_source_zip 的分工：
       * 源码包给「要看代码 / 想自己跑起来」的人，里面是 .py 与测试；
-      * 这个包给「只想用」的同事，里面只有 exe 本体（使用说明已移入程序内关于页）。
-    commands.json / config.json 是用户使用后产生的个人数据，刻意不进分发包，
-    避免同事重装覆盖自己先前的命令库与设置；运行时缺失会自动重建默认值。
+      * 这个包给「只想用」的同事，里面是可直接运行的应用（使用说明已移入程序内）。
 
-    包内同样套一层与 zip 同名的顶层目录：解压后不会把 exe 和一堆 json
-    散落在下载文件夹里，也就不会出现「exe 与 json 不同目录、json 不生效」。
+    **目录模式必须整目录打包**：exe 只是启动器，运行时依赖（python 标准库 /
+    pywebview / `_internal`）都在同目录。只拷 exe 会双击即报「找不到 DLL / 无法
+    加载 Python 运行时」。所以 onedir 走整树遍历，而 onefile 仍然只拷 exe 本体。
+
+    commands.json / config.json 是用户使用后产生的个人数据，会与 exe 同目录出现；
+    整树遍历时必须显式排除，避免把同事自己的命令库 / 配置打进分发包里泄漏。
     """
     dist_dir = Path(dist_dir or root / "dist")
     dist_dir.mkdir(parents=True, exist_ok=True)
@@ -355,28 +380,44 @@ def make_win_package(target: Path, dist_dir: Path = None,
     exe_name = APP_NAME + (".exe" if os.name == "nt" else "")
     count = 0
     missing = []
+
+    def _add(zf, path: Path, base: Path):
+        nonlocal count
+        zf.write(path, top + "/" + path.relative_to(base).as_posix())
+        count += 1
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         exe = target / exe_name
-        if exe.is_file():
-            zf.write(exe, top + "/" + exe_name)
-            count += 1
+        if mode == "onedir":
+            if target.is_dir():
+                for dirpath, dirnames, filenames in os.walk(target):
+                    dirnames[:] = sorted(
+                        d for d in dirnames if not _package_excluded(d))
+                    for fn in sorted(filenames):
+                        if _package_excluded(fn):
+                            continue
+                        _add(zf, Path(dirpath) / fn, target)
+            if not exe.is_file():
+                # 整树遍历会把「随便什么文件」都打进去，exe 缺失时不能静默出包
+                missing.append(exe_name)
         else:
-            missing.append(exe_name)
-        for rel in SIDE_FILES:
-            p = target / rel
-            if p.is_file():
-                zf.write(p, top + "/" + rel)
+            if exe.is_file():
+                zf.write(exe, top + "/" + exe_name)
                 count += 1
-        for rel in SIDE_DIRS:
-            d = target / rel
-            if not d.is_dir():
-                continue
-            for dirpath, dirnames, filenames in os.walk(d):
-                dirnames.sort()
-                for fn in sorted(filenames):
-                    p = Path(dirpath) / fn
-                    zf.write(p, top + "/" + p.relative_to(target).as_posix())
-                    count += 1
+            else:
+                missing.append(exe_name)
+            for rel in SIDE_FILES:
+                p = target / rel
+                if p.is_file():
+                    _add(zf, p, target)
+            for rel in SIDE_DIRS:
+                d = target / rel
+                if not d.is_dir():
+                    continue
+                for dirpath, dirnames, filenames in os.walk(d):
+                    dirnames.sort()
+                    for fn in sorted(filenames):
+                        _add(zf, Path(dirpath) / fn, target)
     if missing:
         print("[警告] 分发件里缺少 %s（产物目录里没有）" % "、".join(missing),
               file=sys.stderr)
@@ -488,11 +529,10 @@ def copy_side_files(target: Path) -> list:
 
 
 def verify_dist(target, mode, exe):
-    """产物完整性自检：确认 exe 本体确实落盘。
+    """产物完整性自检：确认 exe 本体（及目录模式的运行时依赖）确实落盘。
 
-    手工分发包最易漏 exe 本体，这里在打包收尾自动核对一遍，缺项返回给 main
-    打印告警，避免发出缺文件的残包。dist 目录现在只含 exe（使用说明已移入
-    程序内、config.json / commands.json 由用户首次使用后生成），所以只校验 exe。
+    目录模式下 exe 只是启动器，缺 `_internal/` 会双击即报「找不到 DLL / 无法加载
+    Python 运行时」——这类残包必须拦在发布前，而不是等同事打不开才反查。
     返回空列表即视为通过。
     """
     problems = []
@@ -505,6 +545,12 @@ def verify_dist(target, mode, exe):
             mb = 0.0
         if mb < _MIN_EXE_MB:
             problems.append("主程序体积异常（%.2f MB，疑似未完整生成）：%s" % (mb, exe))
+    if mode == "onedir" and target.is_dir():
+        # PyInstaller 6 起依赖收在 _internal/；更早版本直接平铺在 exe 同目录。
+        # 两种情况都要求「exe 之外还有东西」，否则就是只拷了 exe 的残包。
+        others = [p for p in target.iterdir() if p.name != exe.name]
+        if not others:
+            problems.append("目录模式缺少运行时依赖（_internal / DLL）：%s" % target)
     return problems
 
 def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
@@ -538,15 +584,16 @@ def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="用 PyInstaller 打包 ADB 设备指令台")
-    ap.add_argument("--mode", choices=("onefile", "onedir"), default="onefile",
-                    help="onefile=单文件 exe（默认，便于分发）；onedir=目录模式（启动更快）")
+    ap.add_argument("--mode", choices=("onefile", "onedir"), default="onedir",
+                    help="onedir=目录模式（默认，启动快：无每次解压）；"
+                         "onefile=单文件 exe（便于转发，但每次启动都要解压整包，慢 10s+）")
     # 文档（本文件头部说明与 README）一直写着 `--onedir` / `--onefile`，但实际只存在
     # `--mode`：照文档执行会直接 `error: unrecognized arguments: --onedir` 退出码 2。
     # 这里补成同义开关，两条路都能走。
     ap.add_argument("--onedir", dest="mode", action="store_const", const="onedir",
-                    help="等价于 --mode onedir（目录模式）")
+                    help="等价于 --mode onedir（默认，目录模式：启动最快）")
     ap.add_argument("--onefile", dest="mode", action="store_const", const="onefile",
-                    help="等价于 --mode onefile（单文件，默认）")
+                    help="等价于 --mode onefile（单文件 exe：每次启动解压，启动慢）")
     ap.add_argument("--console", action="store_true",
                     help="保留控制台窗口（排查崩溃时用；默认 --windowed 无控制台）")
     ap.add_argument("--bump", action="store_true",
@@ -627,7 +674,8 @@ def main(argv=None) -> int:
     # 4) 打包前预检：暂存区旧 exe 若被占用（上次的产物还在跑 / 被杀毒锁着），
     # 立刻拦下。不预检的代价：PyInstaller 白跑几分钟，最后在收尾步骤以一句
     # 英文 PermissionError 爆炸，用户不知道该干什么（用户实报的打包崩溃）。
-    staged_exe = (stage_dir(args.work_dir)
+    # 路径必须跟着模式走：目录模式的产物在 dist_stage/<APP_NAME>/ 下，不是根。
+    staged_exe = (exe_dir(stage_dir(args.work_dir), args.mode)
                   / (APP_NAME + (".exe" if os.name == "nt" else "")))
     if not args.dry_run and _file_locked(staged_exe):
         print("[错误] 构建暂存文件被占用：%s\n"
@@ -678,10 +726,15 @@ def main(argv=None) -> int:
     if args.zip:
         make_source_zip(ROOT, args.dist_dir)
     if args.package:
-        make_win_package(target, args.dist_dir)
+        make_win_package(target, args.dist_dir, mode=args.mode)
 
     print("\n打包完成：%s（%.1f MB）" % (exe, exe.stat().st_size / 1024 / 1024))
-    print("把整个 %s 目录一起拷给同事（dist 仅含 exe 本体；使用说明见程序内「关于 → 使用说明」）。" % target)
+    if args.mode == "onedir":
+        print("把整个 %s 目录一起拷给同事（exe 只是启动器，_internal/ 缺一不可）。"
+              % target)
+    else:
+        print("把整个 %s 目录一起拷给同事（dist 仅含 exe 本体；使用说明见程序内「关于 → 使用说明」）。"
+              % target)
     print("提示：同事机器若报「WebView2 Runtime 未安装 / 过旧」，到 "
           "https://developer.microsoft.com/microsoft-edge/webview2/ 装运行库即可。")
     return 0

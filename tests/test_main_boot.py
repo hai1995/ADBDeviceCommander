@@ -45,3 +45,19 @@ def test_boot_mark_never_raises_on_unwritable_log(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_boot_timing_path",
                         lambda: str(tmp_path / "no_such_dir" / "x.log"))
     main._make_boot_mark(0.0)("silent_tag")   # 不抛即通过
+
+
+def test_process_age_is_none_off_windows(monkeypatch):
+    """非 Windows 拿不到进程创建时间：返回 None（日志里就不打这一行）。
+
+    这段耗时专为量化 onefile 解压而加，取不到时只能静默跳过，绝不能抛异常
+    或返回负数影响分段日志。
+    """
+    monkeypatch.setattr(main.sys, "platform", "linux")
+    assert main._process_age_seconds() is None
+
+
+def test_module_t0_precedes_backend_imports():
+    """计时起点在业务模块 import 之前：否则 import backend/core 的耗时被漏算。"""
+    assert isinstance(main._MODULE_T0, float)
+    assert main._MODULE_T0 > 0
