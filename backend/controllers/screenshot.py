@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.screenshot —— 截图"""
 
 from backend.controller import (

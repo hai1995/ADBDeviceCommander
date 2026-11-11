@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.autorefresh —— 自动轮询与孤儿回收"""
 
 from backend.controller import (

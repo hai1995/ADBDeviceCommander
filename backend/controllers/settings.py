@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.settings —— 设置 / adb 状态 / Wi-Fi 无线调试"""
 
 from backend.controller import (

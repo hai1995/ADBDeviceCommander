@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.device_proc —— 设备端后台进程的收尾（录屏 screenrecord / 录音 tinycap 共用）。
 

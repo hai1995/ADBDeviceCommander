@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.logcat —— logcat 监控与抓取"""
 
 from backend.controller import (

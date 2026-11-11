@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.commands —— 指令执行 / 保存 / 导入导出 / 自定义"""
 
 from backend.controller import (

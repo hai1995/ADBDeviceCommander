@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers —— WebApi 的各领域 Mixin 集合。"""
 
 from .base import WebApiBase

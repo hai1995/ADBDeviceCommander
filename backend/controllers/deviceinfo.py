@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.deviceinfo —— 设备信息 / 诊断包"""
 
 from backend.controller import (

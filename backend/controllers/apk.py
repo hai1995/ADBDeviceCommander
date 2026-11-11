@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.apk —— APK 选择 / 安装"""
 
 from backend.controller import (

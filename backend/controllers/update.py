@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.update —— 版本更新检查 / 下载 / 跳过"""
 
 from backend.controller import (

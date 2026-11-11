@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.audio_service —— 音频采集（电脑麦克风 / 设备端）+ ffmpeg 合成。
 

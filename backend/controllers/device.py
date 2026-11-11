@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.device —— 设备刷新、开关、选中"""
 
 class DeviceMixin:

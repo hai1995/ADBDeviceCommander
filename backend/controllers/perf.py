@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.perf —— 性能监控"""
 
 from backend.controller import (

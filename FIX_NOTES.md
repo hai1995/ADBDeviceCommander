@@ -5712,3 +5712,82 @@ Windows 分支不论 `forced_gui` 为何（除 qt）都只有 `guis = [import_wi
 后端 **1451 passed / 1 skipped**；前端 **95 文件 0 失败**；pyflakes 与
 `ruff check .` 均干净。修好后请重新跑一次 CI 打包并**用刚下载的 zip 解压验证**
 （开发机上直接跑产物不复现 MOTW，必须在「下载 → 解压」链路里验证）。
+
+---
+
+# 第八十七轮（审查报告剩余项收口：ruff 存量清零 + CI 权限/镜像 + 版本号单源化）
+
+## 触发
+
+第八十六轮修完崩溃后，代码审查报告里标为「未纳入 / 仍未纳入」的条目继续处理：
+P2 的 4.1~4.6 与 ruff 存量清单。本轮改动同样**直接推 main**，不另开分支。
+
+## 修复
+
+### 1. ruff 存量清零（门禁显著变严）
+
+`ruff.toml` 原先挂着 4 条 `ignore`（bugbear 仅剩的存量），本轮分三批消化：
+
+| 批次 | 规则 | 存量位置 | 处置 |
+|---|---|---|---|
+| 一 | B007 | `backend/perf_service.py:2127` `for i, e in enumerate(entries)` 里 `e` 未使用 | 改名 `_e` |
+| 一 | B009 | `core/win_theme.py:168-169` `getattr(native, "Handle")` | 直接 `native.Handle` |
+| 一 | B023 | `backend/perf_service.py:1012` 循环内闭包捕获 `lo`/`hi` | 默认值绑定 `def is_out_of_range(v, lo=lo, hi=hi)` |
+| 一 | B905 | `backend/file_service.py:124` `zip()` 缺 `strict=` | 补 `strict=True`（前一行已校验长度相等） |
+| 二 | RUF100 | 3 处无效 noqa（指向未启用的 `BLE001`/`E402`） | 删掉行内 noqa、意图改写进中文注释；`tools/package.py` 的 E402 改由 `per-file-ignores` 显式豁免 |
+| 二 | RUF012 | 3 处可变类属性（`file.py` 一处、`record.py` 两处） | 加 `ClassVar[...]` 标注 |
+| 三 | UP009 | 52 处冗余 `# -*- coding: utf-8 -*-` | 机械删除（PEP 3120 起 Python 3 默认 UTF-8） |
+
+`ruff.toml` 的 `ignore` 段**整段删除**，`select` 新增 `RUF100` / `RUF012` / `UP009`。
+存量盘点注释同步更新，并写清哪些规则是「有意留着不启用」及原因。
+
+顺带把 `perf_service.py` 里两个同名 `is_bad` 改名区分：`is_out_of_range`（min/max
+区间越界）与 `is_off_threshold`（单侧阈值）—— 读代码时不用再靠位置猜语义。
+
+### 2. CI 权限与镜像（P2-4.2 / P2-4.3）
+
+- `build.yml` 顶层 `permissions: contents: write` → `contents: read`，写权限**下放到
+  `windows` job**（只有它打 tag 时会创建 Release 并上传附件）。原先顶层给 write，
+  连只读的 `test` job 也拿到了写权限。
+- `windows-latest` → `windows-2022`（`build.yml` + `release.yml` 两处）。`test` job
+  早就特意固定 `ubuntu-24.04` 并写了长注释说明「镜像换代会打断构建」，打包 job 却
+  跟着 `latest` 走，策略不一致。
+
+### 3. 版本号单一真源（P2-4.5 / P2-4.6）
+
+- `core/constants.py` 的 `VERSION` 成为**唯一真源**。`main.py` 里那份硬编码副本
+  **此前从未被任何代码读取过**（`grep VERSION main.py` 只有定义那一行），纯粹是为
+  `bump_version.py` 的双写而存在 —— 现已删除，`main.py` 连 import 都不留。
+- `bump_version.py`：`VERSION_FILES`（双写）→ `VERSION_FILE`（只写真源）+
+  `LEGACY_VERSION_FILES`（只用于**检出残留就报错**）。守卫语义从「两处值不一致才
+  报错」改成「别处又出现硬编码副本就报错」：单源之后不存在「两处不一致」这种
+  正常状态，照旧校验会自相矛盾（写完必然对不上）。
+- `README.md` 两处**用法示例**的硬编码版本号改成 `v<版本号>` 占位符。
+  但 `## 架构（vXXXX Web 版）` 那行**不动** —— `bump_version.py` 靠
+  `README_TITLE_RE` 自动同步它，改了正则就命中不了。
+
+### 4. 明确不做（附理由，避免以后重复评估）
+
+| 项 | 理由 |
+|---|---|
+| P2-4.4 根目录文档归档（505 KB） | `FIX_NOTES.md` / `README.md` **都不进分发包**（`BUNDLED_DATA` 只有 `使用说明.txt` + `frontend/`），体量不影响用户拿到的包；`FIX_NOTES.md` 是每轮追加的活文档（近 8 次提交里 7 次改它），搬到 `docs/` 会切断这条工作流；`README.md` 精简属于需要人工校对的内容工作 |
+| UP031 897（`%` → f-string） | 工程量与 diff 巨大，收益纯风格，应单独批次 |
+| BLE001 375 / S110 163 | 绝大多数是**有意的兜底**（不抛异常卡住桥接、把异常翻译成人话），逐个改要人判断，误改会把静默降级变成真 bug |
+| I001 54（导入排序） | 会重排 `backend/controller.py` 里刻意编排的聚合 import 块（`from backend.controller import (...)` 的成员顺序是手工维护的），纯风格 churn 且 diff 可读性变差 |
+
+## 测试
+
+| 改动 | 对应测试 |
+|---|---|
+| 真实 `main.py` 不再有硬编码副本 | `test_real_main_module_keeps_no_version_copy`（新增） |
+| 别处又写副本 → 当场报错 | `test_read_version_rejects_legacy_copy`（原 `test_read_version_mismatch_raises` 语义变更） |
+| `write_version` 只写真源 + README 标题 | `test_write_version_updates_all_hardcoded_spots`（断言集合改为 `{core/constants.py, README.md}`） |
+| 夹具不再给 `main.py` 造副本 | `_make_project` 去掉 `main_ver` 参数 |
+
+## 验证
+
+后端 **1451 passed / 1 skipped**；前端 **95 文件 0 失败**；`ruff check .`（新增
+RUF100 / RUF012 / UP009）All checks passed；pyflakes 干净；两个 workflow 的 YAML
+解析通过，权限与镜像如预期（`build.yml` 顶层 read + windows job write、
+两个 workflow 的打包 job 均为 `windows-2022`）。`ruff --fix` 后核对行尾：CRLF
+文件数 55 未变、CRLF 行数只减不增，确认 fixer 没把仓库的行尾风格改掉。

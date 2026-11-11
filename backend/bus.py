@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.bus —— 线程安全事件总线。
 
