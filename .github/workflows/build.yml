@@ -94,7 +94,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: 静态检查（pyflakes）
+      - name: 静态检查（pyflakes + ruff）
         # 把「未用导入 / 未定义变量 / 语法陷阱」这类本可无感带进来的问题，在单测
         # 之前先拦一道。后端/核心层全是标准库、无平台依赖，Linux 上装 pyflakes
         # 零风险；任何新改动一旦引入脏代码，这里立刻红，不必等单测或打包才暴露。
@@ -102,9 +102,15 @@ jobs:
         # tests/ 一并纳入：测试里的死代码同样会掩盖真问题（本次就清出 8 处
         # `import backend.controller as c` 残留 —— 它们说明用例曾依赖「patch
         # controller 命名空间」的旧契约，而该契约在物理拆分后已失效）。
+        #
+        # ruff 是补在 pyflakes 之上的「防劣化」门禁：ruff.toml 只启用当前存量
+        # 已为 0 的规则（语法、未用导入、bugbear、注释掉的死代码等），新改动
+        # 引入同类问题就拦住，老代码不受影响。版本写死，避免 ruff 自身升级
+        # 调整规则行为后门禁无端变红 —— 升级由我们自己挑时间做。
         run: |
-          python -m pip install pyflakes
+          python -m pip install pyflakes ruff==0.17.4
           python -m pyflakes backend core tools tests
+          ruff check .
 
       - name: Python 单测
         run: python -m pytest -q

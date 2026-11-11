@@ -1,11 +1,17 @@
 # 运行 / 构建依赖
-pywebview>=6.0            # Web 版宿主（Windows 基于 WebView2），main.py 必需
-pyinstaller>=5.0          # 打包成 exe（仅构建时需要；由 python build.py 调用）
+#
+# 为什么每个都带主版本上界：CI 每次 `pip install -r requirements.txt` 都拉
+# 最新，原来只写 `>=` 等于把「哪天开始用 pywebview 7 / pyinstaller 7」交给
+# 上游决定 —— 主版本一换代，Windows 打包会突然变红，而失败原因藏在依赖变更
+# 里，和本次提交毫无关系。build.yml 特意把 ubuntu-24.04 写死、升级由我们自己
+# 挑时间做，依赖这边应当是同一套策略。要升级时显式改这里，跑一遍完整构建。
+pywebview>=6.0,<7        # Web 版宿主（Windows 基于 WebView2），main.py 必需
+pyinstaller>=5.0,<7      # 打包成 exe（仅构建时需要；由 python build.py 调用）
 
 # 可选（装了会更快：截图写系统剪贴板时的 PNG filter 还原 / BGR 换位向量化，
 # 1080x2400 快 2 倍以上；缺省时 core/clipboard.py 自动回退纯 Python，结果一致）
-numpy>=1.21
+numpy>=1.21,<3
 
 # 可选（仅用于重新生成 assets/app.ico 图标，运行时不依赖）
-pillow>=9.0
+pillow>=9.0,<12
 
