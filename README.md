@@ -770,3 +770,39 @@ git commit -am "第五十二轮：…" && git tag v2026.1105.1200 && git push --
 - **跑测试**：`tests/test_inject.py` 保证拼接逻辑不回归；`tests/frontend/` 为 jsdom
   前端测试（需 `npm install`，之后 `npm test` 一键跑完，单个文件也可
   `node xxx.test.cjs`）。
+
+### 硬约束（新增 / 修改功能前必须读完）
+
+> 最近几轮出现过「重构把功能搞崩，mock 测试因为调用次数 / 返回值签名变了但没同步改
+> 断言」这类回归，为此立此为戒。每条约束违反一次 commit 都必须返工。
+
+1. **改一处 = 全链路同步**：任何函数签名 / 返回值 / 字段名 / 文件位置的改动，必须
+   把所有调用点（后端 + 前端 + 测试 mock）**全部同步**。改完立即 `grep -rn "旧名字"`
+   搜残留，搜不到才算改干净。
+
+2. **重构前先写失败用例**：要改复杂逻辑（状态机 / 多路径 fallback / 线程协作）时，
+   先写一条能在**当前代码上跑出预期结果**的用例，验证它真的会挂，再动重构代码。
+   改完这条用例变绿 = 重构没有丢功能。
+
+3. **跑全量才能提交**：每次 commit 前必须同时满足：
+   ```bash
+   python3 -m pyflakes backend core tools tests
+   python3 -m pytest tests -q -o addopts="" -p no:cacheprovider
+   cd tests/frontend && node run-all.cjs
+   ```
+   三者全绿才能 commit。pyflakes 有警告或任何一条测试红，commit 无效。
+
+4. **不能加临时绕过**：`if DEBUG:`、`try: pass` 吞异常、把错误码静默改成 0 这类「先
+   跑起来再说」的写法一律禁止。真的要绕过时必须：① 日志里写明绕了什么；② 加一条
+   对应测试证明绕过后的行为仍可接受。
+
+5. **修改既有路径 / 分支时，至少补一条覆盖用例**：改 `_pull_capture` 的远程路径列表
+   → 要测 fallback；改 `_exec_out` 的错误文案 → 要测文案里包含 exit code；
+   把单条 try/except 拆成分支 → 每条分支都要有断言覆盖。不允许只改代码不补测试。
+
+6. **前端 HTML 改动要想一下 jsdom**：在 `<body>` 最前加节点、改 input id、改事件
+   触发时序，都会影响 jsdom 测试的 DOM 结构与初始化顺序。改完 HTML 必须跑一遍
+   `tests/frontend/boot_splash.test.cjs` 或 `run-all.cjs` 验证 DOM 相关用例仍过。
+
+以上约束是开发节奏的**硬门禁**，不是建议。任何一条被违反都会导致「改功能
+把功能搞崩」这类低级回归，而这种回归修复成本远高于先花 5 分钟把这些步骤做完。

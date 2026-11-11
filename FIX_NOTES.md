@@ -5416,3 +5416,72 @@ exec-out 报「设备未返回图像（adb 没有给出原因）」；
 
 全量：后端 **1430 passed / 1 skipped**（比之前 +2）；前端 **94 文件 0 失败**
 （cmd_note 已进 run-all）；pyflakes 干净。
+
+# 第八十三轮（全面审查 + 硬约束补入 README）
+
+## 触发
+
+连续几轮出现「重构 / 加功能把已有路径搞崩，mock 测试因为调用次数 / 返回值
+签名变了没同步改断言」这类回归：
+
+| 轮次 | 回归点 | 原因 |
+|---|---|---|
+| 八十二 | 重构 `_pull_capture` 后测试挂 | 把统一 `finally: os.remove(part)` 改成分支内分别清理，漏了成功 return 路径，
+   导致 `.part` 文件永远不删；重构后没跑全量就推了 |
+| 七十？ | `ls -l` 诊断调用 | 临时加了 ls 探测，mock 测试计数变 4 而断言还停在 3，挂掉 |
+| boot-splash | jsdom 依赖 document.body.firstChild | 首次在 `<body>` 顶部插节点，没意识到某些测试假设 body.children[0] 是别的东西 |
+
+这些回归**都不是功能本身 bug，而是改动时漏了同步调用点 / 漏了全量回归**。
+用户明确要求：不可以再出现这样的问题，并把这条写进开发约束。
+
+## 全面审查清单（一次性过）
+
+按「残留探针 → 调用点映射 → 测试覆盖 → 并发安全」逐层扫：
+
+1. **残留探针**：`pyflakes backend core tools tests` 退出码 0；
+   `grep -rn "TODO\|FIXME\|XXX\|后续\|暂不实现"` 扫出来的都是正常注释，没
+   有遗留的临时绕过。
+2. **调用点同步（grep 全链路）**：
+   - `_pull_capture` 改远程路径列表 → 只有 `ScreenCapturer.screenshot` 一处
+     调用，返回签名 (data, why) 不变，无需调用方改。
+   - `_exec_out` 错误文案改（加入 exit code）→ 调用点同上，文案变长但
+     结构不变，`screenshot` 末尾拼接串天然兼容。
+   - `update_info` 加 `skipped` 字段 → 前端只在 `loadUpdateInfo` 读，
+     不影响其他消费方。
+   - `normalize_commands` 加 `_as_text` 分支 → 所有 merge_builtins /
+     save_commands 都是浅拷贝透传，note 自动跟随；export_commands 显式
+     枚举加了 note，对齐 bg/fg。
+   - boot-splash 在 `<body>` 顶部插入 → grep 所有 `body.innerHTML =`，
+     全部是 appendChild，没有整段替换，不会被清掉。
+3. **测试覆盖映射（改动点 ↔ 对应测试）**：
+   | 改动 | 对应测试 | 状态 |
+   |---|---|---|
+   | `_pull_capture` 加 `/data/local/tmp` fallback | `test_pull_capture_falls_back_to_data_local_tmp` | ✅ |
+   | `_pull_capture` 双路径错误聚合 | `test_pull_capture_both_paths_fail_reports_both` | ✅ |
+   | `.part` 清理分支覆盖 | 原有 `test_pull_capture_cleans_remote_and_part_file` | ✅ |
+   | `_exec_out` 错误补 exit code + stdout/stderr | `test_exec_out_reports_adb_error_from_stdout` | ✅ |
+   | update_info.skipped 字段 | `test_update_info_reports_skipped_version` | ✅ |
+   | note normalize / 保留 | 后端 `test_load_commands.py` + 前端 `cmd_note.test.cjs` | ✅ |
+   | boot-splash HTML | `boot_splash.test.cjs` | ✅ |
+   全部绿。
+4. **并发安全**：`ScreenCapturer._seq` 是 `itertools.count()` 全局迭代器，
+   每次调用 `next()` 拿到唯一序号（thread-safe，C 实现）；`safe_name` 纯
+   函数无状态；`_pull_capture` 里 `part` 是函数内局部变量，不同调用互不
+   干扰（serial 唯一文件名）。没有跨调用共享的可变状态，并发截图安全。
+
+## 硬约束补入 README（二次开发段 → 硬约束小节）
+
+六条可执行的门禁规则，每次 commit 前逐条自查：
+
+1. **改一处 = 全链路同步**：改完 grep 旧名字搜残留；
+2. **重构前先写失败用例**：先证明当前代码真会挂，再重构；
+3. **跑全量才能提交**：pyflakes + pytest + run-all.cjs 三者全绿才能 commit；
+4. **不能加临时绕过**：禁止 try: pass / 静默吞异常；
+5. **改既有路径 / 分支时补测试**：每条新分支有断言覆盖；
+6. **HTML 改动要想 jsdom**：改完跑 run-all 验证 DOM 用例。
+
+每条违反一次 commit 必须返工。
+
+## 验证
+
+后端 **1430 passed / 1 skipped**；前端 **94 文件 0 失败**；pyflakes 干净。
