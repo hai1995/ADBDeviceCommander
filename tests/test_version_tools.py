@@ -78,34 +78,52 @@ def test_parse_version_accepts_valid():
 
 
 # ---------------- read / write ----------------
-def _make_project(tmp_path: Path, const_ver: str, main_ver: str) -> Path:
+def _make_project(tmp_path: Path, const_ver: str) -> Path:
     (tmp_path / "core").mkdir()
     (tmp_path / "core" / "constants.py").write_text(
         f'VERSION = "{const_ver}"\nOTHER = 1\n', encoding="utf-8")
-    (tmp_path / "main.py").write_text(
-        f'import sys\nVERSION = "{main_ver}"\n', encoding="utf-8")
+    # main.py 不再定义 VERSION（唯一真源是 core/constants.py）；
+    # 「有人又写了副本」的场景由各用例自己构造。
+    (tmp_path / "main.py").write_text('import sys\n', encoding="utf-8")
     (tmp_path / "README.md").write_text(
         "## 架构（v2026.0101.0000 Web 版）\n\n正文\n", encoding="utf-8")
     return tmp_path
 
 
 def test_read_version_ok(tmp_path):
-    root = _make_project(tmp_path, "2026.0904.1407", "2026.0904.1407")
+    root = _make_project(tmp_path, "2026.0904.1407")
     assert bv.read_version(root) == "2026.0904.1407"
 
 
-def test_read_version_mismatch_raises(tmp_path):
-    root = _make_project(tmp_path, "2026.0904.1407", "2026.0904.1408")
+def test_read_version_rejects_legacy_copy(tmp_path):
+    """main.py 里又出现硬编码 VERSION 副本 → 当场报错。
+
+    单源化之后不存在「两处值不一致」这种正常状态：只要还写着一份副本，
+    就是有人写错了地方，必须立刻拦住，而不是等发版时才发现三处对不上。
+    """
+    root = _make_project(tmp_path, "2026.0904.1407")
+    (root / "main.py").write_text(
+        'import sys\nVERSION = "2026.0904.1408"\n', encoding="utf-8")
     with pytest.raises(bv.VersionError) as e:
         bv.read_version(root)
-    assert "不一致" in str(e.value)
+    assert "副本" in str(e.value)
+
+
+def test_real_main_module_keeps_no_version_copy():
+    """仓库里的 main.py 不保留硬编码 VERSION 副本（唯一真源 core/constants.py）。
+
+    这条是「单源化」本身的回归守卫：以后谁再往 main.py 里塞一份
+    `VERSION = "..."`，这里立刻红，而不是等发版时才发现三处对不上。
+    """
+    src = (bv.ROOT / "main.py").read_text(encoding="utf-8")
+    assert not bv.VERSION_RE.search(src), "main.py 又出现了硬编码 VERSION 副本"
 
 
 def test_write_version_updates_all_hardcoded_spots(tmp_path):
-    root = _make_project(tmp_path, "2026.0904.1407", "2026.0904.1407")
+    root = _make_project(tmp_path, "2026.0904.1407")
     changed = bv.write_version("2026.0904.1500", root)
 
-    assert set(changed) == {"core/constants.py", "main.py", "README.md"}
+    assert set(changed) == {"core/constants.py", "README.md"}
     assert bv.read_version(root) == "2026.0904.1500"
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "## 架构（v2026.0904.1500 Web 版）" in readme
@@ -115,7 +133,7 @@ def test_write_version_updates_all_hardcoded_spots(tmp_path):
 
 
 def test_write_version_rejects_bad_format(tmp_path):
-    root = _make_project(tmp_path, "2026.0904.1407", "2026.0904.1407")
+    root = _make_project(tmp_path, "2026.0904.1407")
     with pytest.raises(bv.VersionError):
         bv.write_version("not-a-version", root)
 

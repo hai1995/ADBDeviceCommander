@@ -1,5 +1,6 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.record —— 录屏 / 投屏 / 麦克风"""
+
+from typing import ClassVar
 
 from backend.controller import (
     DeviceAudioCapture, KEY_POINTER_LOCATION, KEY_SHOW_TOUCHES, MicRecorder,
@@ -39,7 +40,7 @@ class RecordMixin:
 
     # overlay 键 → 界面上的名字（失败提示里点名用，避免把 pointer_location
     # 这种系统键名直接甩给用户）
-    _OVERLAY_LABELS = {
+    _OVERLAY_LABELS: ClassVar[dict[str, str]] = {
         KEY_POINTER_LOCATION: "指针位置",
         KEY_SHOW_TOUCHES: "触摸圆点",
     }
@@ -1157,7 +1158,7 @@ class RecordMixin:
             return dict(pool.map(one, serials))
 
     # 已经压缩过的容器格式：再走 DEFLATE 只烧 CPU，几乎不减小体积。
-    _PRECOMPRESSED_EXT = {
+    _PRECOMPRESSED_EXT: ClassVar[set[str]] = {
         ".mp4", ".m4a", ".m4v", ".mov", ".mkv", ".webm",
         ".mp3", ".aac", ".wav", ".ogg",
         ".jpg", ".jpeg", ".png", ".webp", ".gif",

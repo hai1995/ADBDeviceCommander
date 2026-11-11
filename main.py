@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 main.py —— ADB 设备指令台（Web 版入口 / pywebview 宿主）
 =========================================================
@@ -44,7 +43,9 @@ from core.envcheck import (
 # 见下方 _make_boot_mark 的分段日志。
 os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 
-VERSION = "2026.1111.0748"
+# 版本号只有一个真源：core/constants.py 的 VERSION。本文件既不定义、也不导入
+# 副本 —— 副本漂移过一次就够受的了（bump_version.py 只写 core/constants.py，
+# README 标题另行同步）。需要版本号时从 core.constants 导入。
 
 
 def _refresh_system_path():

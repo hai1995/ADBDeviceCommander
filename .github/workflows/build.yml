@@ -47,9 +47,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# 发布 Release 需要写权限；其余步骤只读
+# 默认只读：test job 只需要读代码。写权限（创建 Release / 上传附件）只在
+# 真正发版的 windows job 上单独授予 —— 顶层给 write 会把写权限摊到不需要
+# 它的 job 上（最小权限原则）。
 permissions:
-  contents: write
+  contents: read
 
 # 同一分支/tag 的新推送会取消上一次未跑完的构建（Windows 机器启动慢，
 # 连推两次不必等两份队列）
@@ -134,7 +136,13 @@ jobs:
     name: 打包（Windows x64）
     needs: test
     if: github.event_name != 'pull_request'
-    runs-on: windows-latest
+    # 固定镜像，不跟 windows-latest：后者随 GitHub 换代，PyInstaller 打包与
+    # WebView2 相关行为可能无声改变，而这种变化与本次提交无关。test job 固定
+    # ubuntu-24.04 是同一个理由。
+    runs-on: windows-2022
+    # 打 tag 时这个 job 会创建 Release 并上传附件，需要写权限。
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 

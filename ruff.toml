@@ -9,9 +9,19 @@
 #
 # 存量盘点（按批消化，清完一批就把规则加进 select、删掉对应 ignore 行）：
 #   UP031 897 / BLE001 375 / S110 163 / UP009 88 / I001 54 / PLW1510 48
-#   RUF059 38 / SIM115 14 / B023 5 / ISC004 3 / RUF012 3 / RUF100 5
+#   RUF059 38 / SIM115 14 / ISC004 3
 # 上面这些目前都不启用，改动集中在 perf_service.py / prefs.py / record.py
 # 等大文件，适合单独开 PR 处理，不混进日常改动。
+#
+# 已消化的批次（规则已进 select，存量归零）：
+#   2026-11-11 第一批：B007 / B009 / B023 / B905 —— bugbear 仅剩的 4 条
+#   2026-11-11 第二批：RUF100（无效 noqa）/ RUF012（可变类属性未标 ClassVar）
+#   2026-11-11 第三批：UP009（冗余 utf-8 声明，52 处纯机械删除）
+#
+# 仍未启用（留给后续批次）：UP031 897（% 格式化改 f-string，工程量大且 diff 巨大）、
+# BLE001 375 / S110 163（blind except / try-except-pass，绝大多数是有意的兜底，
+# 逐个改要人判断，误改会把静默降级变成真 bug）、I001 54（会重排 backend/controller.py
+# 里刻意编排的聚合 import 块，纯风格 churn）。
 #
 # tests/ 排除：测试里大量临时文件句柄（SIM115）与夹具导入顺序是刻意写法，
 # 且 CI 的 pyflakes 门禁已覆盖 tests 的 F 规则。生产代码 ruff 全量覆盖。
@@ -35,13 +45,13 @@ select = [
     "G",      # logging 格式化误用
     "LOG",    # logging 调用反模式
     "PGH",    # 无规则编码 / 泛化的 noqa、type: ignore
+    "RUF100", # 无效的 noqa 指令（指向未启用规则 / 已不需要）
+    "RUF012", # 可变类属性未标注 ClassVar
+    "UP009",  # 冗余的 utf-8 编码声明（Python 3 默认即 UTF-8）
     "TID",    # 相对导入、被禁导入
 ]
 
-# bugbear 里 4 条存量未清，逐条列明位置；修完即可移除对应行。
-ignore = [
-    "B007",   # 循环变量未使用：backend/perf_service.py:2127
-    "B009",   # getattr 常量属性：core/win_theme.py:168,169
-    "B023",   # 循环内闭包捕获 lo/hi：backend/perf_service.py:1012
-    "B905",   # zip() 缺 strict=：backend/file_service.py:124
-]
+# 按文件豁免：tools/package.py 必须在 sys.path.insert 之后 import 同目录的
+# bump_version（否则 import 不到），E402 在这里是有意为之。
+[lint.per-file-ignores]
+"tools/package.py" = ["E402"]

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.base —— 共享状态 / 生命周期 / 事件桥 / 点击计数 / 手册"""
 
 from backend.controller import (
@@ -654,6 +653,6 @@ class WebApiBase:
         try:
             path = resource_path("使用说明.txt")
             text = Path(path).read_text(encoding="utf-8", errors="replace")
-        except Exception as ex:  # noqa: BLE001 — 兜底给前端一个可读错误，不抛异常卡住桥接
+        except Exception as ex:  # 兜底给前端一个可读错误，不抛异常卡住桥接
             return {"ok": False, "reason": "使用说明读取失败：%s" % ex}
         return {"ok": True, "text": text}

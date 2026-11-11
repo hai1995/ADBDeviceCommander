@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 core.win_theme —— 让原生窗口标题栏跟随界面的深色主题（Windows）
 ====================================================================
@@ -165,8 +164,10 @@ def _hwnd_of(native):
     """从 pywebview 的 window.native（WinForms Form）取 HWND；取不到返回 0。"""
     if native is None:
         return 0
-    for getter in (lambda: getattr(native, "Handle"),
-                   lambda: getattr(native, "handle"),
+    # 属性名固定，直接点取即可（ruff B009）：WinForms Form 是 .Handle，
+    # 小写 handle 不存在时抛 AttributeError，由下面的 except 兜住。
+    for getter in (lambda: native.Handle,
+                   lambda: native.handle,
                    lambda: native):
         try:
             v = getter()

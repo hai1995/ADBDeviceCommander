@@ -204,7 +204,7 @@ python build.py --zip-only   # 跳过 PyInstaller，只产出源码 zip
 `make_source_zip()` 内置排除规则（node_modules / `__pycache__` / `.pytest_cache` /
 build / dist / .git / config.json / settings.json / `*.pyc` 等）。
 
-包内所有文件都挂在**与 zip 同名的顶层目录**下（`ADBDeviceCommander_v2026.1029.1649/`）：
+包内所有文件都挂在**与 zip 同名的顶层目录**下（`ADBDeviceCommander_v<版本号>/`）：
 解压不会把 `main.py` / `core` / `frontend` 散落一地；顶层也没有 `index.html`，
 云端导入时不会被误判成「网页包」而解包成一个取不到文件的空壳页面。
 
@@ -268,7 +268,7 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 
 ```bat
 python tools\bump_version.py --apply
-git commit -am "第五十二轮：…" && git tag v2026.1105.1200 && git push --tags
+git commit -am "第五十二轮：…" && git tag v<版本号> && git push --tags
 ```
 
 两个刻意的设计：

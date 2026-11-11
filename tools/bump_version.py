@@ -29,8 +29,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 硬编码 VERSION = "..." 的源码文件（两处必须保持一致）
-VERSION_FILES = ["core/constants.py", "main.py"]
+# 版本号的**唯一真源**：core/constants.py。所有读、写、校验都以此为准。
+VERSION_FILE = "core/constants.py"
+# 历史遗留的硬编码副本位置：只用于「检出残留就报错」，不再写入。main.py 已
+# 改成不定义 VERSION；这份名单留着，是为了「有人又手写了第二份」时当场拦
+# 住，而不是等发版时才发现三处对不上。等确认不会再有人写副本即可删掉。
+LEGACY_VERSION_FILES = ["main.py"]
 VERSION_RE = re.compile(r'^(VERSION\s*=\s*)"(\d{4}\.\d{4}\.\d{4})"', re.M)
 
 # README 里的架构标题：## 架构（vXXXX Web 版）
@@ -46,21 +50,28 @@ class VersionError(RuntimeError):
 
 
 def read_version(root: Path = ROOT) -> str:
-    """读取当前版本号；两处硬编码不一致时直接报错（避免静默发散）。"""
-    found: dict[str, str] = {}
-    for rel in VERSION_FILES:
+    """读取当前版本号（唯一真源 core/constants.py）。
+
+    LEGACY_VERSION_FILES 是副本曾经所在的位置：那里若又出现硬编码 VERSION，
+    直接报错 —— 结构上不该有第二份，写出来就当写错了，当场拦住比发版时才发现
+    三处对不上省事得多。
+    """
+    src = root / VERSION_FILE
+    if not src.exists():
+        raise VersionError(f"缺少版本文件：{src}")
+    m = VERSION_RE.search(src.read_text(encoding="utf-8"))
+    if not m:
+        raise VersionError(f"{VERSION_FILE} 中未找到 VERSION = \"...\" 定义")
+    ver = m.group(2)
+    for rel in LEGACY_VERSION_FILES:
         p = root / rel
         if not p.exists():
-            raise VersionError(f"缺少版本文件：{p}")
-        m = VERSION_RE.search(p.read_text(encoding="utf-8"))
-        if not m:
-            raise VersionError(f"{rel} 中未找到 VERSION = \"...\" 定义")
-        found[rel] = m.group(2)
-    vals = set(found.values())
-    if len(vals) != 1:
-        detail = "、".join(f"{k}={v}" for k, v in sorted(found.items()))
-        raise VersionError(f"各处 VERSION 不一致（{detail}），请先手工统一")
-    return vals.pop()
+            continue
+        if VERSION_RE.search(p.read_text(encoding="utf-8")):
+            raise VersionError(
+                f"{rel} 里又出现了硬编码 VERSION 副本 —— 版本号唯一真源是 "
+                f"{VERSION_FILE}，请改成从 core.constants 导入")
+    return ver
 
 
 def parse_version(v: str) -> datetime:
@@ -102,15 +113,14 @@ def write_version(new: str, root: Path = ROOT) -> list[str]:
     parse_version(new)  # 先校验格式
     changed: list[str] = []
 
-    for rel in VERSION_FILES:
-        p = root / rel
-        text = p.read_text(encoding="utf-8")
-        new_text, n = VERSION_RE.subn(lambda m: f'{m.group(1)}"{new}"', text)
-        if n != 1:
-            raise VersionError(f"{rel} 中 VERSION 替换异常（匹配 {n} 处，应为 1 处）")
-        if new_text != text:
-            p.write_text(new_text, encoding="utf-8")
-            changed.append(rel)
+    p = root / VERSION_FILE
+    text = p.read_text(encoding="utf-8")
+    new_text, n = VERSION_RE.subn(lambda m: f'{m.group(1)}"{new}"', text)
+    if n != 1:
+        raise VersionError(f"{VERSION_FILE} 中 VERSION 替换异常（匹配 {n} 处，应为 1 处）")
+    if new_text != text:
+        p.write_text(new_text, encoding="utf-8")
+        changed.append(VERSION_FILE)
 
     rp = root / README_FILE
     if rp.exists():

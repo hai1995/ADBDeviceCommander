@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.file_service —— 设备文件系统管理（基于 adb shell + pull/push）。
 
@@ -121,7 +120,7 @@ class FileService:
         lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
         if len(lines) != len(links):
             return
-        for item, flag in zip(links, lines):
+        for item, flag in zip(links, lines, strict=True):
             if flag == "D":
                 item["is_dir"] = True
 

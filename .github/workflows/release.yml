@@ -218,7 +218,8 @@ jobs:
   windows:
     name: 打包 + 发版（Windows x64）
     needs: [prepare, test]
-    runs-on: windows-latest
+    # 固定镜像，不跟 windows-latest：与 build.yml 的 windows job 同一理由。
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
         with:

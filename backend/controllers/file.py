@@ -1,5 +1,6 @@
-# -*- coding: utf-8 -*-
 """backend.controllers.file —— 文件浏览 / 增删改 / 上传下载"""
+
+from typing import ClassVar
 
 from backend.controller import (
     os, safe_name, subprocess, sys, threading
@@ -150,7 +151,7 @@ class FileMixin:
     # 上传，每次都刷一次目录的话就是 N 次 `adb shell ls` + N 次列表重建。
     _FILE_REFRESH_DEBOUNCE_S = 0.4
 
-    _FILE_OP_LABELS = {
+    _FILE_OP_LABELS: ClassVar[dict[str, str]] = {
             "_do_file_list": "列出目录", "_do_file_mkdir": "创建目录",
             "_do_file_touch": "创建文件", "_do_file_remove": "删除",
             "_do_file_rename": "重命名", "_do_file_upload_data": "上传",

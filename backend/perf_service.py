@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.perf_service —— 设备性能实时采样（CPU / 内存 / FPS / 电量 / 温度）
 ================================================================================
@@ -1008,10 +1007,12 @@ def evaluate_alerts(samples, thresholds=None):
         if not pts:
             continue
 
-        def is_bad(v):
+        # lo/hi 用默认值绑定：万一这个闭包被延迟到循环外调用，
+        # 也不会误用下一轮的阈值（ruff B023）。
+        def is_out_of_range(v, lo=lo, hi=hi):
             return ((lo is not None and v < lo) or (hi is not None and v > hi))
 
-        bad = [(t, v) for t, v in pts if is_bad(v)]
+        bad = [(t, v) for t, v in pts if is_out_of_range(v)]
         if not bad:
             continue
         worst = min(v for _t, v in bad) if lo is not None else max(
@@ -1022,7 +1023,7 @@ def evaluate_alerts(samples, thresholds=None):
         run_start = None
         prev_t = None
         for t, v in pts:
-            if is_bad(v):
+            if is_out_of_range(v):
                 if run_start is None:
                     run_start = t
                 prev_t = t
@@ -1203,7 +1204,9 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
         elif th_val > hi:
             hi = th_val + span * 0.08
 
-    def is_bad(v):
+    # 与上面 detect_alerts 里的 is_out_of_range 不是一回事：这个按单侧
+    # 阈值（th_dir 决定 min/max）判越界，两个同名函数容易读错，故分开命名。
+    def is_off_threshold(v):
         if th_val is None or v is None:
             return False
         return v < th_val if th_dir == "min" else v > th_val
@@ -1238,11 +1241,11 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
         step = iw / float(max(1, len(pts) - 1))
         i = 0
         while i < len(pts):
-            if not is_bad(pts[i][1]):
+            if not is_off_threshold(pts[i][1]):
                 i += 1
                 continue
             j = i
-            while j + 1 < len(pts) and is_bad(pts[j + 1][1]):
+            while j + 1 < len(pts) and is_off_threshold(pts[j + 1][1]):
                 j += 1
             x1, x2 = x_of(i), x_of(j)
             if x2 - x1 < 2.0:
@@ -2124,7 +2127,7 @@ def _compare_matrix(entries, sums):
     rows = []
     for key, title, unit, _cap in METRICS:
         cells, avgs = [], []
-        for i, e in enumerate(entries):
+        for i, _e in enumerate(entries):
             s = sums[i].get(key)
             if not s:
                 cells.append('<td class="null">--</td>')

@@ -24,7 +24,9 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bump_version import read_version, next_version, write_version, VersionError  # noqa: E402
+# bump_version 与本脚本同目录，必须先 sys.path.insert 才能 import —— 这是有意的
+# 模块级 import 位置（ruff.toml 已对本文件豁免 E402）。
+from bump_version import read_version, next_version, write_version, VersionError
 
 ROOT = Path(__file__).resolve().parent.parent
 NAME = "ADBDeviceCommander"
