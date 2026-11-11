@@ -5980,3 +5980,6 @@ PowerShell 单引号包起来（内部单引号按 PowerShell 规则写成两个
   `tests/test_backend_device_service.py`，比例未被改动）。
 - 新增 docstring 里的反斜杠全部改为 raw string，`python -W error::DeprecationWarning`
   下重新编译无告警（否则将来会变成 SyntaxError）。
+- 远程 9 个改动文件与本地**逐字节一致（9/9）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43039316182`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success。
