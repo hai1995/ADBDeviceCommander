@@ -16,13 +16,47 @@ NO_SERIAL_SUBCOMMANDS = {
     "version", "help", "pair", "keygen", "reconnect",
 }
 
+# 命令行里的「序列号」可能是裸词，也可能是带引号的：PowerShell 用单引号，
+# 用户自己敲命令时也可能用双引号。三种都得认 —— 只认 \S+ 的话，带空格的序列号
+# （mDNS 冲突时 adb 打印的就是这种，见 core/devices.py）会被截成前半截。
+_SERIAL_TOKEN = r"(?:'[^']*'|\"[^\"]*\"|\S+)"
+
+# 序列号里的「安全字符」：字母数字与 . _ : + -
+# 普通序列号（0612333ABC / 192.168.1.5:5555 / emulator-5554）保持原样拼进命令行，
+# 用户在指令台看到的就是熟悉的样子；含空格 / 引号 / 分号等 shell 元字符时才加引号。
+_SAFE_SERIAL_RE = re.compile(r"^[A-Za-z0-9._:+-]+$")
+
+
+def quote_serial(serial: str) -> str:
+    r"""把序列号拼进命令行所需的安全形式（PowerShell 语义）。
+
+    序列号**不是**完全可信的输入：USB 设备的序列号来自设备描述符，是设备端
+    自己报的一串任意字符，`adb devices -l` 会原样打印它。一个伪装的 U 盘可以
+    自称 `x"; Remove-Item -Recurse C:\; "` —— 未加引号地拼进命令行就成了
+    PowerShell 注入（用户在指令台敲任何一条 adb 命令都会中招）。
+
+    顺带修掉一个真 bug：mDNS 冲突时 adb 打印的序列号**本身含空格**
+    （`adb-XXXX (2)._adb-tls-connect._tcp`），不引起来 adb 只收到前半截，
+    命令便下到了错误的设备 / 直接报「device not found」。
+
+    只用于**拼进命令行**的场合；作为子进程参数传递（subprocess 列表形式）
+    的地方不需要它。
+    """
+    s = str(serial or "")
+    if not s or _SAFE_SERIAL_RE.match(s):
+        return s
+    # PowerShell 单引号串：内部单引号写成两个（'' 表示一个 '）
+    return "'" + s.replace("'", "''") + "'"
+
+
 # 匹配 adb 或 adb.exe，且可附带已存在的 -s <serial>
 #   (?<![A-Za-z0-9_\"\'$])  前不能是单词字符，也不能是引号/$（避免误匹配字符串内或变量内的 adb）
 #   adb(?:\.exe)?             adb 或 adb.exe
 #   (?![A-Za-z0-9_])          后不能有单词字符
-#   (?:\s+-s\s+\S+)?          可选的已存在 -s <serial>
+#   (?:\s+-s\s+<serial>)?     可选的已存在 -s <serial>（裸词或带引号都认）
 ADB_RE = re.compile(
-    r"(?<![A-Za-z0-9_\"\'$])adb(?:\.exe)?(?![A-Za-z0-9_])(?:\s+-s\s+\S+)?"
+    r"(?<![A-Za-z0-9_\"\'$])adb(?:\.exe)?(?![A-Za-z0-9_])(?:\s+-s\s+%s)?"
+    % _SERIAL_TOKEN
 )
 SCRCPY_RE = re.compile(r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_])")
 
@@ -50,6 +84,9 @@ def transform(cmd: str, serial: str) -> str:
     - 全局子命令（devices / kill-server ...）-> 不注入 -s。
     - 已带 -s 的（如 adb -s 0612333…）-> 替换为所选设备序列号。
     - 非 adb / 非 scrcpy 命令 -> 原样返回，逻辑零改动。
+
+    序列号按需加引号（见 quote_serial）：普通序列号保持原样，含空格 / 引号等
+    元字符的才包起来。
     """
     if not serial:
         return cmd
@@ -59,13 +96,19 @@ def transform(cmd: str, serial: str) -> str:
         sub = _adb_subcommand(cmd, m)
         if sub in NO_SERIAL_SUBCOMMANDS:
             return m.group(0)
-        return f"{token} -s {serial}"
+        return f"{token} -s {quote_serial(serial)}"
 
     new_cmd = ADB_RE.sub(_replace_adb, cmd)
 
     # scrcpy（投屏也支持按设备下发）
-    if SCRCPY_RE.search(new_cmd) and not re.search(r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_]).*?-s\s+\S+", new_cmd):
-        new_cmd = SCRCPY_RE.sub("scrcpy -s " + serial, new_cmd, count=1)
+    if SCRCPY_RE.search(new_cmd) and not re.search(
+            r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_]).*?-s\s+%s" % _SERIAL_TOKEN,
+            new_cmd):
+        # 用**函数**替换而不是字符串替换：re.sub 的字符串替换里 `\` 会被当转义
+        # 处理，序列号含反斜杠时要么被改写（`\b` 变成退格符）要么直接抛
+        # `re.error: bad escape`（整条命令直接执行失败）。函数替换按字面处理。
+        new_cmd = SCRCPY_RE.sub(
+            lambda _m: "scrcpy -s " + quote_serial(serial), new_cmd, count=1)
 
     return new_cmd
 
@@ -85,7 +128,7 @@ def needs_device(cmd_obj) -> bool:
 # 交互式 adb shell 自动合并
 # ---------------------------------------------------------------------------
 SHELL_INTERACTIVE_RE = re.compile(
-    r"^adb(?:\.exe)?(?:\s+-s\s+\S+)?\s+shell\s*$",
+    r"^adb(?:\.exe)?(?:\s+-s\s+%s)?\s+shell\s*$" % _SERIAL_TOKEN,
     re.IGNORECASE,
 )
 

@@ -859,3 +859,24 @@ def test_resolve_save_dir_explains_why_dir_cannot_be_created(tmp_path):
     assert "不存在" in note and "默认目录" in note
     # 末尾追加了「（<底层异常>）」——不同平台的 errno 文案不同，只看结构
     assert "（" in note and note.rstrip().endswith("）"), note
+
+def test_atomic_write_fsyncs_before_rename(tmp_path, monkeypatch):
+    """落盘必须先 fsync 再改名：断电后不能留下一个空 config.json。
+
+    os.replace 只保证「改名」原子，**不保证**内容已进磁盘；不 fsync 的话，
+    断电可能得到一个 0 字节的配置文件 —— 用户的设置（保存目录、adb 目录、
+    各个开关）就此全丢，而且下次启动看不出任何异常。
+    """
+    import core.prefs as pf
+    target = tmp_path / "config.json"
+    monkeypatch.setattr(pf, "prefs_path", lambda: str(target))
+    calls = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(pf.os, "fsync",
+                        lambda fd: (calls.append(fd), real_fsync(fd))[1])
+
+    assert pf._atomic_write({"a": 1}) is True
+    assert calls, "写盘前没有 fsync：断电可能留下空配置"
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
+    # 临时文件不能留在目录里
+    assert [p.name for p in tmp_path.iterdir()] == ["config.json"]

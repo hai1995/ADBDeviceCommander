@@ -608,3 +608,28 @@ def test_auto_refresh_gives_up_immediately_without_noise(monkeypatch):
     finally:
         slow.release.set()
         holder.join(3.0)
+
+def test_refresh_does_not_release_a_busy_owned_by_someone_else(monkeypatch):
+    """refresh 只能释放**自己**持有的刷新互斥锁。
+
+    回归一个真实竞态：owner 取自 `self._busy_owner`（而不是 _acquire 的返回值）
+    时，若期间有别的线程强制释放并接管了刷新，owner 就会变成**别人的** id，
+    finally 里「owner 匹配才释放」的判断随之成立 —— 本轮把新持有者的互斥锁
+    释放掉，于是两轮 `adb devices` 并发跑。
+    """
+    bus = BackendBus()
+    mgr = ds.DeviceManager(bus)
+    monkeypatch.setattr(ds.subprocess, "run",
+                        _fake_run_factory(lines=_adb_lines([("A1", "device", "Pixel")])))
+
+    def _fake_acquire(wait, verbose):
+        # 模拟：拿到锁之后，另一个线程强制解锁并接管（_busy_owner 变成了别人）
+        with mgr._lock:
+            mgr._busy = True
+            mgr._busy_owner = 99
+        return 7                      # 本轮真正拿到的 owner 是 7
+
+    monkeypatch.setattr(mgr, "_acquire", _fake_acquire)
+    mgr.refresh(adb="adb")
+    # 7 != 99：本轮没有所有权，不能替别人解锁
+    assert mgr._busy is True, "refresh 误释放了别人的刷新互斥锁"

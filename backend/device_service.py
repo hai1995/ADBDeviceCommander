@@ -122,10 +122,13 @@ class DeviceManager:
         **不清空快照**：界面继续展示上一次的设备列表，防止 adb 偶发抖动被
         用户当成「程序自动断连」。
         """
-        if not self._acquire(wait, verbose):
+        # owner 必须用 _acquire **返回**的那个 id，不能回头读 self._busy_owner：
+        # 两者之间若有别的线程强制释放了 _busy 并接管（僵死刷新被解锁、新持有者
+        # 上位），读到的就是**别人的** id，finally 里「owner 匹配才释放」的判断
+        # 于是成立 —— 本轮把新持有者的刷新互斥锁给释放了，两轮 adb devices 并发。
+        owner = self._acquire(wait, verbose)
+        if not owner:
             return False
-        # 持有 _busy 的 owner id；finally 里用来防止僵死线程回来误释放新持有者
-        owner = self._busy_owner
         try:
             # adb 的 I/O 放在锁外：即便 adb 卡满 10s，用户勾选设备也不被阻塞
             raw = self._poll_devices(adb, verbose)

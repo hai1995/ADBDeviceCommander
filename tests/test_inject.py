@@ -206,3 +206,70 @@ def test_shell_names_followed_by_flags_only():
     assert is_subshell_command("powershell -NoExit") is True
     # 但 `cmd /c` 是一次性
     assert is_subshell_command("cmd /c") is False
+
+# ---------------------------------------------------------------------------
+# 序列号拼接：加引号（安全 + 含空格序列号不丢）
+# ---------------------------------------------------------------------------
+def test_plain_serial_stays_unquoted():
+    """普通序列号保持原样：指令台里显示的还是用户熟悉的样子。"""
+    assert transform("adb shell date", "AE86EE") == "adb -s AE86EE shell date"
+    assert transform("adb shell date", "192.168.1.5:5555") == \
+        "adb -s 192.168.1.5:5555 shell date"
+    assert transform("adb shell date", "emulator-5554") == \
+        "adb -s emulator-5554 shell date"
+
+
+def test_serial_with_space_is_quoted():
+    """mDNS 冲突时 adb 打印的序列号本身含空格 —— 必须**整体**交给 adb。
+
+    不引起来的话 adb 只收到 `adb-XXXX`，命令就下到了错误的设备（或者干脆
+    报 device not found），用户完全看不出发生了什么。
+    """
+    serial = "adb-XXXX (2)._adb-tls-connect._tcp"
+    got = transform("adb shell date", serial)
+    assert got == "adb -s '%s' shell date" % serial
+
+
+def test_serial_with_shell_metacharacters_is_quoted():
+    r"""序列号来自设备端描述符，不能让它把命令拼成别的意思。
+
+    序列号自称 `x"; Remove-Item C:\; "` 时，未加引号的拼法就是一条
+    PowerShell 注入命令。
+    """
+    serial = 'x"; Remove-Item C:\\; "'
+    got = transform("adb shell date", serial)
+    assert got.startswith("adb -s '")
+    assert got.endswith("' shell date")
+    # 整段序列号原样落在引号里
+    assert serial in got
+
+
+def test_serial_with_single_quote_is_doubled():
+    """PowerShell 单引号串里，单引号写成两个（'' 表示一个 '）。"""
+    assert transform("adb shell date", "a'b") == "adb -s 'a''b' shell date"
+
+
+def test_scrcpy_serial_with_backslash_is_not_mangled():
+    r"""re.sub 的字符串替换会处理 `\` 转义 —— 序列号含反斜杠时不能被改写。
+
+    旧实现把序列号直接拼进替换串：`a\b` 里的 `\b` 被当成退格符，序列号直接
+    变成乱码；`a\d` 则让 re.sub 抛 `bad escape`，整条命令执行失败。
+    """
+    got = transform("scrcpy", "a\\b")
+    assert got == "scrcpy -s 'a\\b'"
+    # 不含反斜杠的普通序列号仍然不加引号
+    assert transform("scrcpy", "AE86EE") == "scrcpy -s AE86EE"
+
+
+def test_transform_replaces_existing_quoted_serial():
+    """命令里已经写了带引号的 -s 时，整段都要被换掉（不能只换前半截）。"""
+    got = transform("adb -s 'old one' shell date", "AE86EE")
+    assert got == "adb -s AE86EE shell date"
+
+
+def test_merge_detects_interactive_shell_with_quoted_serial():
+    """带引号的序列号也要能被认成「交互式 adb shell」，否则合并与直通都失效。"""
+    cmds = ["adb -s 'x y' shell", "cd /log", "ls"]
+    merged = merge_adb_shell_commands_detailed(cmds)
+    assert len(merged) == 1
+    assert merged[0][0] == "adb -s 'x y' shell 'cd /log; ls'"

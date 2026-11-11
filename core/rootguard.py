@@ -29,8 +29,14 @@ from core.constants import adb_kwargs
 # 前边界排除单词字符与引号 / $：`adb roots`、`myadb root` 不匹配（词边界），
 # 引号内的字样（`git commit -m "adb root 修复"`、`echo "adb root"`）也不算——与
 # adb_inject.ADB_RE 的防护保持一致，避免把「提到 root 的命令」当成「切换 root」。
+#
+# `-s` 后的序列号必须认得**带引号**的形式（adb_inject.quote_serial 会给含空格
+# 的序列号加引号）：只认 \S+ 时，`adb -s 'x y' root` 只能匹配到引号里的前半截，
+# 整条 root 切换就认不出来 —— 保护被静默绕过，用户明明在切 root，程序却当普通
+# 命令放行，录屏被 adbd 重启掐掉时连一句提示都没有。
 _ROOT_SWITCH_RE = re.compile(
-    r"(?<![A-Za-z0-9_\"'$])adb(?:\.exe)?(?:\s+-s\s+\S+)?\s+(root|unroot)\b",
+    r"(?<![A-Za-z0-9_\"'$])adb(?:\.exe)?"
+    r"(?:\s+-s\s+(?:'[^']*'|\"[^\"]*\"|\S+))?\s+(root|unroot)\b",
     re.IGNORECASE,
 )
 

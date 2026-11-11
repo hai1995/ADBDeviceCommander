@@ -5895,3 +5895,88 @@ VPN 掉线这类短暂断网能在一小时内自愈。但后台循环是无条�
 - **真实 CI（run `43010324600`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
   `打包（Windows x64）` → success（确认惰性导入没有把 numpy 漏出打包产物 ——
   即便真漏了也只是剪贴板退回纯 Python，不会崩）。
+
+---
+
+# 第八十九轮（第五轮全局审查：序列号不再裸拼进命令行 + 两处「守护失效」修补）
+
+## 触发
+
+「继续完善」。前三轮之后，代码本身已经很难再找出「明显的错」；本轮换了三个此前没人
+碰过的角度去找问题：**输入面**（谁能把什么字符串送进命令行）、**落盘面**（写盘真的
+安全吗）、**互斥面**（锁真的归自己吗）。本轮仍然**直接推 main**，不另开分支。
+
+## 修复
+
+### 1. 序列号不再裸拼进命令行（本轮最重要的发现）
+
+序列号**不是可信输入**：USB 设备的序列号来自设备描述符，是设备端自己报的一串任意
+字符，`adb devices -l` 会**原样**打印它。此前它被不加引号地拼进 PowerShell 命令行
+（`adb_inject.transform`），引出三个问题：
+
+| # | 问题 | 后果 |
+|---|---|---|
+| 1 | **命令注入** | 一个自称 `x"; Remove-Item -Recurse C:\; "` 的伪装 U 盘，用户在指令台敲任何一条 adb 命令都会执行到它 |
+| 2 | **下错设备**（真 bug） | mDNS 冲突时 adb 打印的序列号**本身含空格**（`adb-XXXX (2)._adb-tls-connect._tcp`，`core/devices.py` 里专门处理过这种形态）。不引起来 adb 只收到前半截 → 命令发给了错误的设备 / 直接报 device not found |
+| 3 | **命令直接崩**（真 bug） | scrcpy 那条用的是 `re.sub` 的**字符串**替换，序列号里的 `\` 被当转义处理：`a\b` 被改写成 `a<退格符>`，`a\d` 让 `re.sub` 抛 `re.error: bad escape` → 整条命令执行失败 |
+
+修法是 `adb_inject.quote_serial()`：普通序列号（`[A-Za-z0-9._:+-]+`）**保持原样**
+（用户在指令台看到的还是熟悉的样子），只有含空格 / 引号 / 分号等元字符的才用
+PowerShell 单引号包起来（内部单引号按 PowerShell 规则写成两个）；scrcpy 改用
+**函数**替换，序列号按字面处理，不再有任何转义解释。
+
+连带把所有解析 `-s <serial>` 的正则都改成认得带引号的序列号（新增 `_SERIAL_TOKEN`）：
+
+| 正则 | 不改会怎样 |
+|---|---|
+| `ADB_RE` | 命令里本来就写了 `adb -s 'x y'` 时，只换掉前半截 → `adb -s 新序列号 y'` |
+| `SHELL_INTERACTIVE_RE` | 带空格的序列号认不出「交互式 adb shell」→ 合并与直通判定全失效 |
+| `core/rootguard._ROOT_SWITCH_RE` | **最要紧**：`adb -s 'x y' root` 完全认不出来 → **root 切换保护被静默绕过**，用户明明在切 root、程序却当普通命令放行，录屏被 adbd 重启掐掉时连一句提示都没有 |
+
+### 2. 配置落盘补 fsync（把「断电也不丢」做实）
+
+`core/prefs._atomic_write()` 的注释写着「进程崩溃 / 断电 / 磁盘写满都不会丢设置」，
+但实现只有「临时文件 + `os.replace`」—— `os.replace` 只保证**改名**这一步是原子的，
+**不保证内容已经写进磁盘**：断电后完全可能留下一个 **0 字节的 config.json**，正是
+那段注释要防的情况（用户的保存目录、adb 目录、全部开关一次性回到默认值，且下次
+启动看不出任何异常）。补 `f.flush()` + `os.fsync()`，代价只有几毫秒（仅在用户改
+设置时发生）。
+
+### 3. 设备刷新互斥的 owner 归属
+
+`DeviceManager.refresh()` 取 owner 用的是 `self._busy_owner`（**回头再读一次**），
+而不是 `_acquire()` 的返回值。两者之间若有别的线程强制释放了 `_busy` 并接管了刷新
+（僵死刷新被解锁的路径），读到的就是**别人的** id，finally 里「owner 匹配才释放」
+的判断随之成立 —— 本轮把新持有者的刷新互斥锁给释放了，于是两轮 `adb devices` 并发
+跑。改为直接用 `_acquire()` 返回的 owner。
+
+## 测试
+
+| 改动 | 对应测试 |
+|---|---|
+| 序列号加引号 / 普通序列号不加引号 | `test_serial_with_space_is_quoted`、`test_serial_with_shell_metacharacters_is_quoted`、`test_serial_with_single_quote_is_doubled`、`test_plain_serial_stays_unquoted` |
+| scrcpy 替换不再被转义改写 | `test_scrcpy_serial_with_backslash_is_not_mangled` |
+| 已带引号的 `-s` 被整段替换 | `test_transform_replaces_existing_quoted_serial` |
+| 带引号序列号仍被认成交互式 shell | `test_merge_detects_interactive_shell_with_quoted_serial` |
+| root 切换保护不因引号而失效 | `test_root_intent_with_quoted_serial` |
+| 落盘前 fsync | `test_atomic_write_fsyncs_before_rename` |
+| refresh 不释放别人的互斥锁 | `test_refresh_does_not_release_a_busy_owned_by_someone_else` |
+
+两条新用例都做了**反向验证**：把代码换回旧实现后，`test_refresh_does_not_release_a_busy_owned_by_someone_else`
+失败（`_busy` 被误释放）、`test_scrcpy_serial_with_backslash_is_not_mangled` 失败
+（序列号被改写成退格符）。
+
+## 已知限制（本轮只记录、不改）
+
+- **Windows 长路径（>260 字符）**：本程序不处理 `\\?\` 前缀。保存目录很深 + 设备名很长
+  时，落盘可能报「系统找不到指定的文件」。要改的话得在**本地文件 I/O** 处统一加前缀，
+  且**不能**加在传给 adb 的参数上（adb 不认 `\\?\`）—— 涉及面较广，单独排一轮。
+
+## 验证
+
+- 后端 **1464 passed / 1 skipped**（新增 10 条）。
+- `ruff check .` All checks passed。
+- 逐文件核对行尾：CRLF / LF 风格与改动前一致（含本来就混行的
+  `tests/test_backend_device_service.py`，比例未被改动）。
+- 新增 docstring 里的反斜杠全部改为 raw string，`python -W error::DeprecationWarning`
+  下重新编译无告警（否则将来会变成 SyntaxError）。

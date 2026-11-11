@@ -497,6 +497,12 @@ def _atomic_write(prefs: dict) -> bool:
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(prefs, f, ensure_ascii=False, indent=2)
+            # 数据先落盘、再改名：os.replace 只保证「改名」这一步是原子的，
+            # **不保证**内容已经写进磁盘 —— 断电后可能留下一个**内容为空**的
+            # config.json，正是这段注释开头要防的「设置全丢」。fsync 把这件事
+            # 做实，代价只有几毫秒（仅在用户改设置时发生）。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, p)
         return True
     except Exception:

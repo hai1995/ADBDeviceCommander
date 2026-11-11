@@ -120,3 +120,13 @@ def test_root_state_false_when_id_reports_shell_user(monkeypatch):
     """`id -u` 明确给出非 0（shell 用户）时是「确认未 root」，不是 None。"""
     _fake_run(monkeypatch, {"id": (0, "2000\n")})
     assert rg.root_state("adb", "A1") is False
+
+def test_root_intent_with_quoted_serial():
+    r"""带引号的序列号同样要能认出 root 切换（否则保护被静默绕过）。
+
+    adb_inject.quote_serial 会给含空格的序列号加引号；只认 \S+ 的正则在这里
+    会只匹配到引号里的前半截，整条 `adb -s 'x y' root` 就认不出来了。
+    """
+    assert rg.root_intent("adb -s 'x y' root") == "root"
+    assert rg.root_intent("adb -s 'x y' unroot") == "unroot"
+    assert rg.root_intent("adb -s A1 root") == "root"
