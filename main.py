@@ -35,12 +35,13 @@ from core.envcheck import (
 # 注意：webview 不在模块顶层导入。它在预检通过后才于 _launch() 内局部导入——
 # 这样 pywebview 未安装时，能先弹友好中文提示，而不是裸 ImportError。
 
-# pywebview import 时会自动探测可用 GUI 后端（逐个尝试 cef / gtk / qt /
-# winforms / edgechromium，每个都伴随对应第三方库的 import 尝试——在 Windows
-# 上通常要额外加载 pythonnet/clr，整段探测实测可达数百 ms ~ 1s+）。
-# 本项目只跑 Windows + WebView2，后端恒为 edgechromium：显式指定后 pywebview
-# 跳过整段探测直接用它，省掉这次白等。用 setdefault —— 调试时仍可用
-# PYWEBVIEW_GUI=winforms 之类显式覆盖。
+# 固定 GUI 后端，用 setdefault —— 调试时仍可 PYWEBVIEW_GUI=qt 之类显式覆盖。
+# 更正第八十四轮记录里的错误结论：pywebview 6.x 的 Windows 分支**无论**
+# PYWEBVIEW_GUI 取何值都只调用 import_winforms（winforms 内部再按 WebView2
+# 可用性选渲染引擎），并不存在「逐个探测 cef/gtk/qt/winforms/edgechromium」
+# 这回事，所以这一行不是启动提速，只是钉住后端、避免将来 pywebview 改默认
+# 行为时窗口表现漂移。真正的启动耗时在 import webview 与 WebView2 初始化，
+# 见下方 _make_boot_mark 的分段日志。
 os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 
 VERSION = "2026.1111.0748"
@@ -396,6 +397,150 @@ def _process_age_seconds():
         return None
 
 
+# ---------------------------------------------------------------------------
+# 打包态 Windows：清除「来自网络」标记（Mark-of-the-Web / Zone.Identifier）
+#
+# 为什么需要：默认分发件是 onedir 的文件夹 zip。用户从浏览器/IM/邮件下载后
+# 解压，Windows 会给每个解出来的文件挂一条 NTFS 备用数据流 Zone.Identifier
+# （ZoneId=3 = Internet）。.NET Framework 的 CAS 加载器**拒绝加载**带此标记
+# 的托管 DLL，于是 pythonnet 在 import clr 时抛：
+#   RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+#   from ...\_internal\pythonnet\runtime\Python.Runtime.dll
+# pywebview 的 winforms 后端只捕获 ImportError，这个 RuntimeError 会一路冒泡
+# 到主线程 —— 也就是用户看到的「Unhandled exception in script 'main'」。
+# onefile 模式解压到 %TEMP% 时文件不继承该标记，所以改成 onedir 之后才暴露。
+#
+# 解法：在 import clr 之前（webview.start 里才会 import，这里来得及）删掉这些
+# 二进制的 :Zone.Identifier。删 ADS 不需要管理员权限，ADS 不存在时
+# DeleteFileW 直接返回 FALSE、无副作用。只扫几个固定目录 + 只看二进制后缀，
+# 避免全包遍历把启动时间又拖回去（用户已经反馈过启动慢）。
+# ---------------------------------------------------------------------------
+_MOTW_BINARY_SUFFIXES = (".dll", ".pyd", ".exe", ".manifest")
+
+
+def _motw_needed():
+    """只有「Windows + PyInstaller 打包态」才需要清理（源码运行 / Linux 空操作）。"""
+    return os.name == "nt" and bool(getattr(sys, "frozen", False))
+
+
+def _motw_cleanup_dirs():
+    """需要清理的目录：onedir 的 _internal（= sys._MEIPASS）+ exe 同目录，
+    外加 pythonnet / clr_loader 放托管 DLL 的子目录。返回去重后的列表。"""
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass and os.path.isdir(meipass):
+        bases.append(meipass)
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if exe_dir and os.path.isdir(exe_dir) and exe_dir not in bases:
+        bases.append(exe_dir)
+    dirs = []
+    for base in bases:
+        candidates = [
+            base,                                                   # DLL 平铺层
+            os.path.join(base, "pythonnet", "runtime"),              # Python.Runtime.dll
+            os.path.join(base, "clr_loader", "ffi", "dlls", "amd64"),  # ClrLoader.dll
+            os.path.join(base, "clr_loader", "ffi", "dlls", "x86"),
+            os.path.join(base, "clr_loader", "ffi", "dlls"),
+        ]
+        for d in candidates:
+            if os.path.isdir(d) and d not in dirs:
+                dirs.append(d)
+    return dirs
+
+
+def _delete_zone_identifier(ads_path):
+    """删除一条 :Zone.Identifier 备用数据流路径，非 Windows / 失败静默返回 False。
+
+    ads_path 形如
+    ``C:\\app\\_internal\\pythonnet\\runtime\\Python.Runtime.dll:Zone.Identifier``。
+    由调用方拼好流名再传进来：这样清理逻辑一眼能看出动的是 ADS 而不是 DLL
+    本体，单测也直接断言传参以 ``:Zone.Identifier`` 结尾即可。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        fn = ctypes.windll.kernel32.DeleteFileW
+        fn.argtypes = [ctypes.c_wchar_p]
+        fn.restype = ctypes.c_int
+        return bool(fn(ads_path))
+    except Exception:
+        return False
+
+
+def _strip_mark_of_the_web():
+    """清掉打包目录下二进制的「来自网络」标记，返回尝试清理的文件数。
+
+    全程不抛异常：清理失败只是让后面的 GUI 初始化仍可能失败，那种情况由
+    _report_gui_init_failure 给出可操作的中文指引，绝不能在这里先崩掉。
+    """
+    if not _motw_needed():
+        return 0
+    count = 0
+    try:
+        for d in _motw_cleanup_dirs():
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            for name in names:
+                if not name.lower().endswith(_MOTW_BINARY_SUFFIXES):
+                    continue        # 跳过 .py/.pyc/.txt，别把整个包扫一遍
+                p = os.path.join(d, name)
+                if not os.path.isfile(p):
+                    continue
+                _delete_zone_identifier(p + ":Zone.Identifier")
+                count += 1
+    except Exception:
+        pass
+    return count
+
+
+def _gui_failure_lines(exc):
+    """GUI 初始化失败的中文提示行：pythonnet/MOTW 场景给可自救的步骤。"""
+    msg = "%s: %s" % (type(exc).__name__, exc)
+    lines = ["窗口启动失败：%s" % msg, ""]
+    if ("Python.Runtime" in msg or "pythonnet" in msg.lower()
+            or "Loader.Initialize" in msg or "CLR" in msg):
+        lines += [
+            "这通常是 Windows 把程序文件夹标记为「来自网络」后，.NET Framework",
+            "拒绝加载其中组件导致的（多发于从浏览器 / IM 下载的 zip 直接解压）。",
+            "",
+            "请按顺序重试：",
+            "  1. 关闭本程序，删除当前解压出来的整个文件夹；",
+            "  2. 右键下载的 zip → 属性 → 勾选「解除锁定 / 取消锁定」→ 确定；",
+            "  3. 重新解压到一个全新目录，再双击运行。",
+            "  也可在该目录用 PowerShell 执行：Get-ChildItem -Recurse | Unblock-File",
+        ]
+    else:
+        lines.append("请把下面的崩溃日志发给维护者以定位问题。")
+    return lines
+
+
+def _report_gui_init_failure(exc):
+    """GUI 初始化失败：留一份完整崩溃日志 + 中文自救弹窗 + 一行启动打点。
+
+    不重新抛异常，避免 crash hook 再弹一个通用「请把日志发给维护者」的重复窗口。
+    """
+    lines = _gui_failure_lines(exc)
+    try:
+        log = _write_crash_log("窗口启动失败（GUI 初始化）", type(exc), exc,
+                               exc.__traceback__)
+    except Exception:
+        log = None
+    if log:
+        lines += ["", "崩溃详情已写入：%s" % log]
+    try:
+        with open(_boot_timing_path(), "a", encoding="utf-8") as f:
+            f.write("[启动失败] %s: %s\n" % (type(exc).__name__, exc))
+    except Exception:
+        pass
+    try:
+        _show_native_error("ADB 设备指令台 · 启动失败", lines)
+    except Exception:
+        pass
+
+
 def main():
     # 启动分段耗时日志：把「双击 → 窗口出现」这条链路的每一步都打出来，
     # 以后再觉得慢时能一眼定位卡在 import webview、_preflight 还是 WebApi 构造。
@@ -412,6 +557,14 @@ def main():
     # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
     _MARK("crash_hooks_done")
+
+    # 必须在任何 import clr 之前（它发生在下面的 webview.start 里）：清掉
+    # onedir 分发件从网络下载后带上的「来自网络」标记，否则 .NET Framework
+    # 拒绝加载 Python.Runtime.dll，窗口起不来。清理只扫少数二进制文件，
+    # 打点里能看到它有没有意外变成新的启动瓶颈。
+    n_motw = _strip_mark_of_the_web()
+    if n_motw:
+        _MARK("motw_cleared %d binaries" % n_motw)
 
     parser = argparse.ArgumentParser(description="ADB 设备指令台（Web 版）")
     parser.add_argument("--debug", action="store_true",
@@ -517,6 +670,13 @@ def _launch(args, api, url, _T0=None):
         webview.start(debug=args.debug, func=_theme_window, args=(window,))
     except KeyboardInterrupt:
         print("[main] 收到中断信号，正在退出…", file=sys.stderr)
+    except Exception as exc:
+        # pythonnet / WebView2 初始化失败（典型：onedir 分发件的 DLL 带
+        # 「来自网络」标记，.NET Framework 拒绝加载）。MOTW 清理由上面兜底，
+        # 这里再兜一层：只读目录 / 企业策略删不掉 ADS 时，给用户一条能自己
+        # 操作的中文指引，而不是只留一句英文 RuntimeError + 通用崩溃弹窗。
+        _report_gui_init_failure(exc)
+        sys.exit(3)
     finally:
         try:
             api.shutdown()

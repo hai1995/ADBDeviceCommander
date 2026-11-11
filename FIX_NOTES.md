@@ -5615,3 +5615,100 @@ Python 代码从 `main()` 到窗口创建**只用了 0.47 秒**，20 秒里 97% 
 ## 验证
 
 后端 **1443 passed / 1 skipped**；前端 **95 文件 0 失败**；pyflakes 干净。
+
+---
+
+# 第八十六轮（onedir 首次分发即崩溃：Windows「来自网络」标记挡住 pythonnet + 启动提速澄清）
+
+## 触发
+
+第八十五轮把默认打包改成 onedir 后，用户拿 CI 打出来的包运行，直接弹
+「Unhandled exception in script 'main'」并附 `crash_20261111_160955.log`：
+
+```
+webview/platforms/winforms.py:14 → import clr
+pythonnet/__init__.py:143 load → clr_loader/netfx.py:47
+RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+  from C:\UniAccessAgentDownloadData\ADBDeviceCommander\_internal\pythonnet\runtime\Python.Runtime.dll
+```
+
+同时反馈「启动速度感觉还是比较慢」。
+
+## 定位
+
+崩溃链逐层核实（pywebview 6.2.1 / pythonnet 3.2.1 / clr-loader 0.3.1 源码对照）：
+
+1. onedir 分发件是**文件夹 zip**。用户从浏览器 / IM / 下载代理拿到后解压，
+   Windows 给每个解出来的文件挂一条 NTFS 备用数据流 `Zone.Identifier`
+   （ZoneId=3 = Internet，即 Mark-of-the-Web）。日志里的
+   `C:\UniAccessAgentDownloadData\...` 正是「下载后解压」的场景。
+2. `webview.start()` → `guilib.initialize()` → `import_winforms()` → `import clr`。
+   pythonnet 在 Windows 上默认用 **.NET Framework（netfx）** 运行时，
+   `ClrLoader.dll` 让 CLR 加载 `_internal\pythonnet\runtime\Python.Runtime.dll`。
+   **.NET Framework 的 CAS 加载器拒绝加载带 MOTW 的托管 DLL**，
+   `pyclr_get_function` 返回 NULL → 上述 RuntimeError。
+3. `winforms.py:13-17` 的 `except Exception` 会把 `PYTHONNET_RUNTIME` 改成
+   `coreclr` 再 `import clr` 重试，但 `pythonnet.load()` 第一次已经把
+   `_RUNTIME` 缓存成 netfx，第二次看到 `_RUNTIME is not None` 直接跳过重新
+   选择 —— 于是两次都栽在同一处（对应日志里 "During handling of the above
+   exception, another exception occurred" 的两段相同栈）。
+4. `import_winforms()` **只捕获 `ImportError`**，`RuntimeError` 一路冒泡到
+   `webview.start()` → 主线程未捕获 → crash hook 落盘 + 弹窗。
+
+**为什么改成 onedir 才崩**：onefile 把文件解压到 `%TEMP%\_MEIxxxx`，
+PyInstaller 自己创建的文件不继承 zip 的 Zone.Identifier，所以 .NET 能正常
+加载；onedir 是把整个文件夹打包分发，标记随每个 DLL 一起落地。提速改动
+本身没错，但它换了一种分发形态，把这个坑带了出来。
+
+**「还是慢」的一半也在这里**：崩溃前那两次失败的 .NET 初始化（netfx
+起 CLR → 加载失败 → coreclr 重试 → 又失败）本身就是秒级等待，用户从双击
+到看见崩溃弹窗当然觉得慢。修好后 pythonnet 一次加载成功，这段等待消失；
+Python 代码到窗口创建实测 0.47s，onedir 的 1~2s 就是正常水平。若仍慢，
+看 `%TEMP%\adbdc_boot_timing.log` 的 `window_created → window_shown →
+dom_loaded` 三段，那是 WebView2 运行时初始化，属另一条链路。
+
+## 更正第八十四轮
+
+第八十四轮写「pywebview import 时逐个探测 cef / gtk / qt / winforms /
+edgechromium，钉住 `PYWEBVIEW_GUI=edgechromium` 可跳过探测省数百 ms~1s」——
+**这个结论是错的**。对照 `webview/guilib.py` 6.2.1 的 `initialize()`：
+Windows 分支不论 `forced_gui` 为何（除 qt）都只有 `guis = [import_winforms]`，
+压根没有多后端探测；`edgechromium` 也不是独立 guilib 后端（winforms 内部再
+按 WebView2 可用性选渲染引擎）。该环境变量在 Windows 上对启动耗时没有影响，
+保留它只为固定后端、便于调试覆盖，注释与测试说明均已改正。以后别再沿着
+「跳过后端探测」这个方向找提速。
+
+## 修复
+
+1. [main.py `_strip_mark_of_the_web`](file:///workspace/main.py)：打包态 Windows
+   下，在 `import clr` 之前删掉 `_internal/`（= `sys._MEIPASS`）与 exe 同目录里
+   二进制文件的 `:Zone.Identifier` ADS（`DeleteFileW`，删 ADS 不需要管理员
+   权限，ADS 不存在时直接返回 FALSE 无副作用）。只扫几个固定目录、只看
+   `.dll/.pyd/.exe/.manifest`，不递归整个包 —— 用户已反馈启动慢，清理本身
+   不能变成新瓶颈；`motw_cleared N binaries` 打点可观测耗时。
+2. [main.py `_report_gui_init_failure`](file:///workspace/main.py)：`webview.start`
+   加异常兜底。万一 ADS 删不掉（只读目录 / 企业策略），给用户一条能自己操作
+   的中文指引（zip 属性勾「解除锁定」→ 重新解压 / PowerShell `Unblock-File`），
+   并留一份完整崩溃日志，而不是只留一句英文 RuntimeError + 通用崩溃弹窗。
+   不重新抛异常，避免 crash hook 再弹一个重复窗口。
+3. [main.py 顶部注释](file:///workspace/main.py) 与
+   [tests/test_main_boot.py](file:///workspace/tests/test_main_boot.py)：改正
+   `PYWEBVIEW_GUI` 的错误说明，避免继续误导后续排查。
+
+## 测试
+
+| 改动 | 对应测试 |
+|---|---|
+| 非打包态 / 非 Windows 不碰 DeleteFileW | `test_strip_motw_is_noop_when_not_frozen` |
+| 只清二进制后缀、不把目录当文件、不递归全包 | `test_strip_motw_only_touches_binary_suffixes` |
+| 目录不可列举 / 删除失败也不崩 | `test_strip_motw_never_raises_on_bad_dir` |
+| 非 Windows 删 ADS 静默返回 False | `test_delete_zone_identifier_is_noop_off_windows` |
+| pythonnet 错误给「解除锁定 / Unblock-File」指引 | `test_gui_failure_lines_gives_unblock_guide` |
+| 其它错误不误导用户去解除锁定 | `test_gui_failure_lines_generic_error` |
+| 失败时写打点 + 留日志 + 弹中文指引 | `test_report_gui_init_failure_logs_and_shows_guide` |
+
+## 验证
+
+后端 **1451 passed / 1 skipped**；前端 **95 文件 0 失败**；pyflakes 与
+`ruff check .` 均干净。修好后请重新跑一次 CI 打包并**用刚下载的 zip 解压验证**
+（开发机上直接跑产物不复现 MOTW，必须在「下载 → 解压」链路里验证）。
