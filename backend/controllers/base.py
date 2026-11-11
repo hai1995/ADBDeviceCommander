@@ -437,8 +437,16 @@ class WebApiBase:
             return self._user_lock
         lk = self._ws_locks.get(wid)
         if lk is None:
-            lk = threading.Lock()
-            self._ws_locks[wid] = lk
+            # 与 _ws_session 同一个道理：用户连点两下「执行」时，两条线程可能
+            # 同时走到这里；不持 guard 就各造一把**互不相识**的 Lock —— 于是
+            # 「同一工作区串行执行」形同虚设：两条命令的 payload 交错写进同一个
+            # powershell 的 stdin，输出与结束标记全对不上（表现为「点了两条命令，
+            # 输出串台、第二条永远等不到结束」）。_ws_guard 是 RLock，重入安全。
+            with self._ws_guard:
+                lk = self._ws_locks.get(wid)
+                if lk is None:
+                    lk = threading.Lock()
+                    self._ws_locks[wid] = lk
         return lk
 
     def _ws_interactive(self, wid):

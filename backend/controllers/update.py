@@ -214,4 +214,10 @@ class UpdateMixin:
                 self.update_check(False)
             except Exception:
                 pass        # 检查更新出任何问题都不能拖垮这条后台线
-            self._update_sleep(updater.CHECK_INTERVAL_S)
+            # 睡到「due() 认为该查了」为止，而不是死睡一个间隔：查失败时
+            # _do_update_check 把时间戳回拨到 1 小时后，死睡 12 小时会让那条
+            # 重试逻辑形同虚设。剩余时间取不到正数（首次启动 / 本次被开关或
+            # busy 挡回）就退回整间隔 —— 否则时间戳一直是 0 时这里会退化成
+            # 每 60 秒空转一次的忙循环。
+            wait_s = updater.next_wait_s(self._update_last_ts)
+            self._update_sleep(wait_s if wait_s > 0 else updater.CHECK_INTERVAL_S)

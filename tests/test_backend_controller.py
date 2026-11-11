@@ -5137,3 +5137,45 @@ def test_logcat_pidof_requires_both_args():
     api = WebApi()
     assert api.logcat_pidof("", "com.demo.app") == {"ok": False, "pids": []}
     assert api.logcat_pidof("A1", "") == {"ok": False, "pids": []}
+
+
+def test_ws_lock_creation_is_serialized(monkeypatch):
+    """同一工作区的执行锁只能有**一把**：并发首建时不许各造一把互不相识的 Lock。
+
+    回归一个真实竞态：`_ws_locks` 的首建没有持 `_ws_guard`，用户连点两下「执行」
+    时两条线程会同时走到「查不到 → 新建」，各自拿到一把锁 —— 于是「同一工作区
+    串行执行命令」形同虚设：两条命令的 payload 交错写进同一个 powershell 的
+    stdin，输出与结束标记全对不上（界面表现：输出串台、第二条永远等不到结束）。
+
+    用「造锁时故意睡一下」把窗口拉到必定踩中：没有 guard 时每个线程都会新建。
+    """
+    import backend.controllers.base as base_mod
+
+    api = _make_api()
+    api._ws_locks.clear()
+    real_lock = threading.Lock
+
+    class _SlowLockModule:
+        @staticmethod
+        def Lock():
+            time.sleep(0.01)          # 判断「不存在」之后、写入字典之前被切走
+            return real_lock()
+
+    monkeypatch.setattr(base_mod, "threading", _SlowLockModule)
+
+    got = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        got.append(api._ws_lock("w-race"))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(got) == 8
+    assert len({id(lk) for lk in got}) == 1, \
+        "同一工作区拿到了 %d 把不同的锁（应只有 1 把）" % len({id(lk) for lk in got})

@@ -35,7 +35,10 @@ core.clipboard —— 把图片写进**系统**剪贴板（零第三方依赖）
   * Pillow 若**恰好**可导入（源码运行时常见）整张图 C 层解码，快一个量级；
   * numpy 若可导入，filter 0/1/2 与 BGR 换位整行/整图向量化（见 _unfilter_np /
     _bgra_bottom_up_np），混合 filter 的图也能快数倍；
-  * 两者都没有时回退逐字节纯 Python（本模块的既有实现，任何平台/环境可用）。
+  * 两者都没有时回退逐字节纯 Python（本模块的既有实现，任何平台/环境可用）；
+  * 这两个加速器**都惰性启用**：本模块被 backend.controller 在启动路径上导入，
+    模块级 `import numpy` 等于让每个会话白付一次启动代价，故只在 decode_png
+    真正跑到时才导入（见 _numpy）。
 Average / Paeth 是行内逐字节递推，没有 C 层原语可向量化，仍走逐字节循环。
 
 设计约定（与 core/* 其它模块一致）：
@@ -59,10 +62,31 @@ except ImportError:                  # 以 core/ 为 sys.path[0] 直接跑时
 
 # 可选加速：numpy 不在运行时依赖里（requirements 标「可选」），导入失败
 # （没装 / 装坏）一律回退下面的纯 Python 实现，功能与结果完全一致。
-try:
-    import numpy as _np
-except Exception:
-    _np = None
+#
+# **必须惰性导入**：本模块被 backend.controller 在**启动路径**上无条件导入，
+# 而 `import numpy` 实测 150~300ms（打包态还要从 _internal 载入一串 DLL、被杀毒
+# 软件逐个扫描），这笔钱全花在「窗口还没出现」的那段里。它加速的只是「把截图
+# 写进系统剪贴板」这一件事（decode_png），多数会话根本走不到。改成首次真正解码
+# 时才导入：启动路径零成本，截图那条后台线程里付一次即可。
+_NP_UNSET = object()        # 哨兵：还没试过导入（与「试过但失败 = None」区分）
+_np = _NP_UNSET
+
+
+def _numpy():
+    """按需导入 numpy；不可用返回 None（失败结果会被缓存，不反复重试）。
+
+    返回 None 表示「这个环境没有可用 numpy」，调用方据此走纯 Python 路径。
+    测试仍可直接改模块级 `_np`（置 None 强制纯 Python / 置 numpy 强制向量化）：
+    只有它还是哨兵时才真去导入，被改过的值一律原样返回。
+    """
+    global _np
+    if _np is _NP_UNSET:
+        try:
+            import numpy as _mod
+        except Exception:       # 没装 / 装坏 / 打包时被裁掉：一律回退
+            _mod = None
+        _np = _mod
+    return _np
 
 CF_DIB = 8                      # BITMAPINFO + 像素（Windows 剪贴板「通用位图」格式）
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -182,9 +206,10 @@ def decode_png(data):
         if topdown is not None:
             # Pillow 已还原为自上而下 RGBA 字节流；包成 ndarray，让 BGR 换位
             # 也走向量化（无 numpy 时保持 bytes，_bgra_bottom_up 自行分派）。
-            if _np is not None:
-                topdown = _np.frombuffer(
-                    topdown, dtype=_np.uint8).reshape(h, stride)
+            np = _numpy()
+            if np is not None:
+                topdown = np.frombuffer(
+                    topdown, dtype=np.uint8).reshape(h, stride)
         else:
             # 无 Pillow：filter 还原按「有无关 numpy」分派向量化 / 纯 Python，
             # 两条路径输出逐字节一致（tests/test_core_clipboard.py 有对拍）。
@@ -212,7 +237,7 @@ def _unfilter(raw, h, stride, bpp):
     numpy 可用时返回 (h, stride) 的 uint8 ndarray，否则 bytearray；
     两者内容逐字节一致（见 _unfilter_np / _unfilter_py 与对拍测试）。
     """
-    if _np is not None:
+    if _numpy() is not None:
         try:
             return _unfilter_np(raw, h, stride, bpp)
         except Exception:
@@ -232,9 +257,10 @@ def _unfilter_np(raw, h, stride, bpp):
                        回落逐字节循环（_filter_row_avg_paeth）。一张图里
                        0/1/2 通常占多数，整体仍比纯 Python 快一个量级。
     """
-    buf = _np.frombuffer(raw, dtype=_np.uint8)
-    out = _np.empty((h, stride), dtype=_np.uint8)
-    prev = _np.zeros(stride, dtype=_np.uint8)
+    np = _numpy()
+    buf = np.frombuffer(raw, dtype=np.uint8)
+    out = np.empty((h, stride), dtype=np.uint8)
+    prev = np.zeros(stride, dtype=np.uint8)
     row_len = stride + 1                                   # 每行 = 1 字节 filter + stride 数据
     for y in range(h):
         base = y * row_len
@@ -243,16 +269,16 @@ def _unfilter_np(raw, h, stride, bpp):
         if filt == 0:
             out[y] = line
         elif filt == 1:
-            m = line.reshape(-1, bpp).astype(_np.uint16)   # (w, bpp)，按列=按通道
-            m = _np.cumsum(m, axis=0, dtype=_np.uint16)
-            _np.bitwise_and(m, 0xFF, out=m)
-            out[y] = m.astype(_np.uint8).reshape(stride)
+            m = line.reshape(-1, bpp).astype(np.uint16)    # (w, bpp)，按列=按通道
+            m = np.cumsum(m, axis=0, dtype=np.uint16)
+            np.bitwise_and(m, 0xFF, out=m)
+            out[y] = m.astype(np.uint8).reshape(stride)
         elif filt == 2:
-            _np.add(line, prev, out=out[y])                # uint8 溢出回绕即 & 0xFF
+            np.add(line, prev, out=out[y])                 # uint8 溢出回绕即 & 0xFF
         elif filt in (3, 4):
-            out[y] = _np.frombuffer(
+            out[y] = np.frombuffer(
                 _filter_row_avg_paeth(line.tobytes(), prev.tobytes(), bpp, filt),
-                dtype=_np.uint8)
+                dtype=np.uint8)
         else:
             raise ValueError("未知 PNG filter %d" % filt)
         prev = out[y]
@@ -332,7 +358,8 @@ def _bgra_bottom_up(topdown, w, h, bpp, stride):
     topdown 为 (h, stride) 的 uint8 ndarray（numpy 路径）或 bytes/bytearray
     （纯 Python 路径）；两条路径输出逐字节一致（有对拍测试）。
     """
-    if _np is not None and isinstance(topdown, _np.ndarray):
+    np = _numpy()
+    if np is not None and isinstance(topdown, np.ndarray):
         try:
             return _bgra_bottom_up_np(topdown, w, h, bpp, stride)
         except Exception:
@@ -346,11 +373,12 @@ def _bgra_bottom_up_np(topdown, w, h, bpp, stride):
     通道换位与行翻转都用扩展切片完成，避免逐像素 Python 循环 ——
     这是解码里唯一还能抠出来的性能，<_unfilter 则无能为力。
     """
+    np = _numpy()
     dstride = w * 4
     if dstride * h > _MAX_DIB_BYTES:
         raise ValueError("位图过大 %dx%d" % (w, h))
     arr = topdown.reshape(h, w, bpp)[::-1]          # 自下而上行序
-    d = _np.empty((h, w, 4), dtype=_np.uint8)
+    d = np.empty((h, w, 4), dtype=np.uint8)
     d[..., 0] = arr[..., 2]                          # B
     d[..., 1] = arr[..., 1]                          # G
     d[..., 2] = arr[..., 0]                          # R

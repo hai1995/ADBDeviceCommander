@@ -8,14 +8,18 @@
      成功后的内存归属、任何路径都要 CloseClipboard）。
 """
 import base64
+import pathlib
 import shutil
 import struct
+import subprocess
 import sys
 import zlib
 
 import pytest
 
 import core.clipboard as cb
+
+_REPO_ROOT = str(pathlib.Path(__file__).resolve().parents[1])
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -869,3 +873,25 @@ def test_decode_png_bounds_inflate_size():
     assert res is not None and len(res[2]) == w * h * 4
     assert peak < 4 * 1024 * 1024, \
         "解压没有按预期长度截断，峰值 %.1f MB" % (peak / 1048576.0)
+
+# ---------------------------------------------------------------------------
+# 4. 导入期不许加载 numpy（启动耗时回归守卫）
+# ---------------------------------------------------------------------------
+def test_import_does_not_pull_numpy():
+    """启动路径上 import core.clipboard **不能**顺带把 numpy 拉起来。
+
+    backend.controller 在窗口出现之前就 import 本模块，而 `import numpy` 实测
+    150~300ms（打包态还要载入一串 DLL、被杀毒软件逐个扫描）——它只用来加速
+    「把截图写进剪贴板」，多数会话根本走不到。改成惰性导入后，这笔钱只在
+    decode_png 真正跑到时才付。
+
+    用子进程复现「冷启动」：本进程里 numpy 早被别的用例导入过了，直接断言
+    sys.modules 恒真，抓不到回归。
+    """
+    code = ("import sys, core.clipboard; "
+            "sys.exit(1 if 'numpy' in sys.modules else 0)")
+    r = subprocess.run([sys.executable, "-c", code], cwd=_REPO_ROOT,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, (
+        "import core.clipboard 把 numpy 拉起来了（启动会白慢 150~300ms）：\n"
+        + (r.stderr or ""))

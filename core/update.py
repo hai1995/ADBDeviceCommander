@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
-import urllib.request
 
 # 更新源：**静态文件优先，API 兜底**。
 #
@@ -126,6 +124,26 @@ def due(last_ts, now=None, interval=CHECK_INTERVAL_S) -> bool:
     return (now - last) >= max(0, int(interval))
 
 
+def next_wait_s(last_ts, now=None, interval=CHECK_INTERVAL_S) -> float:
+    """距离下一次「自动检查到点」还有多少秒（0.0 表示现在就该查）。
+
+    存在的理由：后台循环不能固定睡 CHECK_INTERVAL_S 就了事。检查**失败**时
+    调用方会把时间戳回拨到「1 小时后就到点」（开会切网 / VPN 掉线这类短暂断网
+    应当在一小时内自愈），循环若固定睡 12 小时，那条重试逻辑等于不存在 ——
+    用户得等半天才会被再提示一次。这里用与 due() 完全相同的算式反推剩余时间，
+    两边永远不会脱节。
+    """
+    import time
+    now = time.time() if now is None else now
+    try:
+        last = float(last_ts or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if last <= 0 or last > now:        # 从未查过 / 时间戳在未来：立刻可查
+        return 0.0
+    return max(0.0, max(0, int(interval)) - (now - last))
+
+
 # --------------------------------------------------------------------------- #
 # 解析更新源返回的内容
 # --------------------------------------------------------------------------- #
@@ -207,6 +225,14 @@ def _http_get(url: str, timeout: int):
     4xx/5xx 不当异常抛——状态码本身就是要做分支判断的信息；
     网络层失败（DNS / 连接 / 超时）才抛，由 check() 统一翻译。
     """
+    # urllib.request 在这里才导入，不放模块顶层：本模块被 backend.controller 在
+    # **启动路径**上导入（只为拿 FEEDS / CHECK_INTERVAL_S 这些常量），而
+    # `import urllib.request` 会连带拉起 http.client / email / ssl 一串东西
+    # （实测 20~30ms，打包态还要载入 OpenSSL 的 DLL）。真正的取数只发生在启动
+    # 8 秒后的后台线程里，挪到那时再付，用户完全感知不到。
+    import urllib.error
+    import urllib.request
+
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "application/vnd.github+json, application/json",

@@ -5791,3 +5791,103 @@ RUF100 / RUF012 / UP009）All checks passed；pyflakes 干净；两个 workflow 
 解析通过，权限与镜像如预期（`build.yml` 顶层 read + windows job write、
 两个 workflow 的打包 job 均为 `windows-2022`）。`ruff --fix` 后核对行尾：CRLF
 文件数 55 未变、CRLF 行数只减不增，确认 fixer 没把仓库的行尾风格改掉。
+
+---
+
+# 第八十八轮（第四轮全局审查：启动期重导入惰性化 + 两处并发/节流缺陷 + 工具链漂移）
+
+## 触发
+
+「继续全局审查并修复」。前三轮分别修了崩溃（MOTW）、打包模式、ruff 存量，本轮
+挑的是**前几轮没深挖的面**：启动路径上的模块导入成本、多工作区并发、更新检查的
+节流、以及「上一轮改完代码但注释/工具链还描述旧结构」这类漂移。依旧**直接推 main**，
+不另开分支。
+
+## 修复
+
+### 1. 启动期两个「重导入」改成惰性（「启动慢」剩下的那一段）
+
+先量化再动手。`main.py` 在窗口出现**之前**就 `from backend.controller import WebApi`，
+这条路在本机（Linux，SSD）**240ms**，拆开看：
+
+| 模块 | 首次导入 | 里面的重活 |
+|---|---|---|
+| `core/clipboard` | ~150ms | 顶层 `import numpy`（只用于「把截图写进系统剪贴板」） |
+| `core/update` | ~19ms | 顶层 `import urllib.request`（连带 http.client / email / ssl） |
+| 其余全部 | ~35ms | constants / diag / commands / prefs / shell … |
+
+两处都改成**用到才导入**，同一台机器同一命令降到 **52ms**：
+
+- `core/clipboard`：`_numpy()` + 哨兵常量 `_NP_UNSET`。numpy 只加速 PNG filter 还原
+  与 BGR 换位（`decode_png`），多数会话根本走不到；现在第一次真正解码时才导入，
+  导入失败的结果也缓存（不会反复重试）。哨兵的存在是为了区分「还没试过」与
+  「试过但失败 = None」—— 测试里 `monkeypatch.setattr(cb, "_np", ...)` 那套写法
+  （置 None 强制纯 Python / 置 numpy 强制向量化）因此一字不改仍然有效。
+- `core/update`：`urllib.error` / `urllib.request` 挪进 `_http_get()`。真正的取数只
+  发生在「启动 8 秒后的后台线程」和用户手点「检查更新」时，挪到那时再付这笔钱。
+
+打包态的收益比本机更大：numpy 在 onedir 产物里要从 `_internal` 载入一串 DLL，还会被
+杀毒软件逐个扫描 —— 这正是用户反复提的「启动慢」里仍然存在的一段。
+
+### 2. 工作区执行锁的「首建」竞态（`_ws_lock`）
+
+`_ws_lock()` 里 `_ws_locks` 的首建**没有持 `_ws_guard`**：
+
+```python
+lk = self._ws_locks.get(wid)
+if lk is None:
+    lk = threading.Lock()      # ← 判断与写入之间可能被切走
+    self._ws_locks[wid] = lk
+```
+
+用户连点两下「执行」时两条线程会同时走到这里，各造一把**互不相识**的锁 —— 于是
+「同一工作区串行执行命令」形同虚设：两条命令的 payload 交错写进同一个 powershell 的
+stdin，输出与结束标记全对不上（界面表现：输出串台、第二条永远等不到结束）。
+`_ws_session()` 早就为同一个坑加了「持锁建 + 双检」并写了注释，`_ws_lock()` 漏了。
+现按同样方式修正（`_ws_guard` 是 RLock，重入安全）。
+
+### 3. 更新检查的「1 小时重试」被固定 12 小时睡眠架空
+
+`_do_update_check()` 在检查**失败**时把时间戳回拨到「1 小时后就到点」，让开会切网 /
+VPN 掉线这类短暂断网能在一小时内自愈。但后台循环是无条件
+`self._update_sleep(updater.CHECK_INTERVAL_S)` —— 睡满 12 小时，那条重试逻辑等于
+不存在，用户得等半天才会被再提示一次。
+
+新增 `core.update.next_wait_s()`：用与 `due()` **完全相同**的算式反推「还有多少秒到点」
+（两边因此永远不会脱节），循环按它睡；取不到正数（首次启动 / 本次被开关或 busy 挡回）
+就退回整间隔，避免时间戳一直是 0 时退化成每 60 秒空转一次的忙循环。
+
+### 4. 工具链与文档的漂移（第八十七轮单源化后的残留）
+
+上一轮把版本号收成唯一真源，但还有四处仍在描述「两份副本」的旧结构：
+
+| 位置 | 旧 | 新 |
+|---|---|---|
+| `build.py` `VERSION_FILES` | `("core/constants.py", "main.py")` | 只留真源，并说明为什么删掉 main.py |
+| `build.py` `--bump` 失败提示 | 「请检查两个文件的 VERSION 是否一致」 | 指向真实原因（格式不合规 / main.py 残留副本） |
+| `build.yml` 头部注释 | 「main.py 保留同值副本」 | 「唯一真源，检出残留副本直接报错」 |
+| `README.md` CI 表格 | `windows-latest` / `pytest` 1355 项 / 前端 87 个文件 | `windows-2022` / 不写死项数 / 95 个文件 |
+
+`windows-2022` 那格是第八十七轮改了 workflow 却漏改文档；项数写死本身就是未来的
+一处假信息，这次连带去掉。
+
+## 测试
+
+| 改动 | 对应测试 |
+|---|---|
+| `next_wait_s` 与 `due()` 同向（含「查失败后返回 3600 而非 43200」） | `test_next_wait_s_agrees_with_due`（新增） |
+| 同一工作区的锁只能有一把（并发首建） | `test_ws_lock_creation_is_serialized`（新增，用慢锁放大窗口） |
+| `import core.clipboard` 不得拉起 numpy | `test_import_does_not_pull_numpy`（新增，子进程复现冷启动） |
+
+`test_import_does_not_pull_numpy` 特意在**子进程**里跑：测试进程里 numpy 早被别的
+用例导入过，就地断言 `sys.modules` 恒真，抓不到这次回归。
+
+## 验证
+
+- 后端 **1454 passed / 1 skipped**（新增 3 条）。
+- 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
+- `ruff check .` All checks passed。
+- 启动导入实测：`import backend.controller` **240ms → 52ms**（同一台机器、同一命令、
+  三次取中位；`python -c "import core.clipboard; 'numpy' in sys.modules"` → `False`）。
+- 竞态用例的有效性做了反向验证：把 `_ws_lock` 换回旧实现、同样放大窗口，8 条线程
+  拿到 **8 把**不同的锁；新实现 **1 把**。

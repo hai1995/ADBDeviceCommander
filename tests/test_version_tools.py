@@ -140,7 +140,7 @@ def test_write_version_rejects_bad_format(tmp_path):
 
 # ---------------- 打包结构（扁平、无顶层目录） ----------------
 def test_project_version_files_are_in_sync():
-    """工程真实文件的两处 VERSION 必须一致（防止手改发散）。"""
+    """工程真实的版本号必须是单一真源，且没有残留副本（防止手改发散）。"""
     assert bv.read_version(ROOT)  # 不一致会抛 VersionError
 
 

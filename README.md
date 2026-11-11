@@ -257,8 +257,8 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 
 | job | 运行环境 | 触发 | 做什么 |
 | --- | --- | --- | --- |
-| `test` | ubuntu-24.04 | 每次 push / PR | `pytest` 全量（1355 项）+ 前端 87 个 jsdom 测试文件 |
-| `windows` | windows-latest | push 到 main / 打 tag / 手动 | 装依赖 → 校验 tag 与源码 `VERSION` 一致 → `build.py --package --zip` → 生成 `sha256sums.txt` → 上传 artifact → tag 时发 Release |
+| `test` | ubuntu-24.04 | 每次 push / PR | `pytest` 全量 + 前端 95 个 jsdom 测试文件 |
+| `windows` | windows-2022 | push 到 main / 打 tag / 手动 | 装依赖 → 校验 tag 与源码 `VERSION` 一致 → `build.py --package --zip` → 生成 `sha256sums.txt` → 上传 artifact → tag 时发 Release |
 
 打 tag 之后的两三分钟，Releases 页面就有 `ADBDeviceCommander_v<版本>_win64.zip`
 （给同事的）、源码包（给要看代码的）和 `sha256sums.txt`。同事的下载地址因此固定成

@@ -102,6 +102,29 @@ def test_due_survives_garbage_last_value():
     assert update.due([], now=1_000_000.0) is True
 
 
+def test_next_wait_s_agrees_with_due():
+    """next_wait_s 与 due() 必须永远同向（后台循环靠它决定睡多久）。
+
+    这条守住的是一个真实回归：循环曾固定睡 CHECK_INTERVAL_S，「查失败后 1 小时
+    重试」的时间戳回拨因此完全失效——断网一次就静默半天。
+    """
+    now = 1_000_000.0
+    iv = update.CHECK_INTERVAL_S
+    # 从未查过 / 时间戳在未来：现在就该查
+    assert update.next_wait_s(0, now=now) == 0.0
+    assert update.next_wait_s(None, now=now) == 0.0
+    assert update.next_wait_s(now + 4321, now=now) == 0.0
+    # 刚查完：整整一个间隔
+    assert update.next_wait_s(now, now=now) == float(iv)
+    # 查失败后时间戳被回拨到「1 小时后到点」：返回 3600，而不是 12 小时
+    assert update.next_wait_s(now - iv + 3600, now=now) == 3600.0
+    # 已到点：0（due() 此时必为 True）
+    assert update.next_wait_s(now - iv, now=now) == 0.0
+    assert update.due(now - iv, now=now) is True
+    # 坏值按「从未查过」处理，与 due() 一致
+    assert update.next_wait_s("bad", now=now) == 0.0
+
+
 # --------------------------------------------------------------------------- #
 # 资产挑选
 # --------------------------------------------------------------------------- #

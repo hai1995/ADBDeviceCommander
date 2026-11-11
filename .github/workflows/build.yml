@@ -15,8 +15,8 @@
 #   pull_request      → 只跑测试（省一台 Windows 机器）
 #   手动 workflow_dispatch → 同 main
 #
-# 发版只需两步（版本号以 core/constants.py 为准，main.py 保留同值副本，
-# tools/bump_version.py 会把两处一起写回）：
+# 发版只需两步（版本号唯一真源是 core/constants.py；main.py **不再**保留副本，
+# tools/bump_version.py 只写这一处 + README 标题，检出残留副本会直接报错）：
 #   python tools/bump_version.py --apply     # 递增版本号并写回源码
 #   git commit -am "第五十二轮：..." && git tag v<新版本> && git push --tags
 #

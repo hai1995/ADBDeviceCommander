@@ -169,8 +169,11 @@ SOURCE_ZIP_EXCLUDE_FILES = (
     ".git-push-log.txt",
 )
 
-# 版本号源码位置（与 tools/bump_version.py 保持一致）
-VERSION_FILES = ("core/constants.py", "main.py")
+# 版本号源码位置：**唯一真源** core/constants.py（与 tools/bump_version.py 一致）。
+# 曾把 main.py 也列进来 —— 那是「双写时代」的遗留：两份 VERSION 靠工具同步，
+# 一旦漏写就出现「程序自报版本 ≠ 包名版本」。现在 main.py 里不允许再有副本
+# （bump_version.py 检出即报错），这里再留着它只会让下一个人以为「要改两处」。
+VERSION_FILES = ("core/constants.py",)
 VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d{4}\.\d{4}\.\d{4})"', re.M)
 
 # ---------------------------------------------------------------------------
@@ -662,12 +665,13 @@ def main(argv=None) -> int:
                                    str(ROOT / "tools" / "bump_version.py"),
                                    "--apply"])
         except subprocess.CalledProcessError as e:
-            # 典型触发：core/constants.py 与 main.py 的 VERSION 不一致（版本号工具
-            # 会以退出码 2 报「版本号不一致」）。旧实现直接把 CalledProcessError 抛出去，
-            # 用户看到的是一段英文 traceback 而不是中文原因。
-            print("[错误] 版本号递增失败（退出码 %s）。请先检查 core/constants.py 与 "
-                  "main.py 的 VERSION 是否一致，或省掉 --bump 用现有版本号打包。"
-                  % e.returncode, file=sys.stderr)
+            # 典型触发：main.py 里又出现了硬编码 VERSION 副本（bump_version.py
+            # 检出即退出 2），或 core/constants.py 的版本号格式不合规。旧实现直接把
+            # CalledProcessError 抛出去，用户看到的是一段英文 traceback 而不是原因。
+            print("[错误] 版本号递增失败（退出码 %s）。请检查 core/constants.py 里的 "
+                  "VERSION 格式是否为 YYYY.MMDD.HHMM、main.py 里有没有残留的 "
+                  "VERSION 副本（那是唯一真源之外的重复），或省掉 --bump "
+                  "用现有版本号打包。" % e.returncode, file=sys.stderr)
             return 4
 
     # 4) 打包前预检：暂存区旧 exe 若被占用（上次的产物还在跑 / 被杀毒锁着），
