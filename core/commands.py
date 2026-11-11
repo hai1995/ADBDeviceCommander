@@ -399,6 +399,10 @@ def normalize_commands(raw):
         # 原样塞进前端内联样式。
         bg = _as_color(c.get("bg"))
         fg = _as_color(c.get("fg"))
+        # 备注（可选）：纯文字，支持换行（多行备注原样保留）。
+        # 类型不对（dict / list / 数字）一律按空串处理 —— 用户手写 json 里
+        # "note": 123 这类笔误不该让整条命令加载失败。
+        note = _as_text(c.get("note"))
 
         item = {
             "id": cid, "name": name,
@@ -412,6 +416,8 @@ def normalize_commands(raw):
             item["bg"] = bg
         if fg:
             item["fg"] = fg
+        if note:
+            item["note"] = note
         out.append(item)
     return out, warnings
 
@@ -439,6 +445,25 @@ def _as_color(v) -> str:
         return ""
     s = v.strip()
     return s if _HEX_RE.match(s) else ""
+
+
+def _as_text(v) -> str:
+    """把可选的备注 / 描述类字段归一化为字符串（否则返回 ""）。
+
+    备注支持多行：前端 textarea 里的 \\n 原样保留、落盘 JSON 后下次启动
+    仍能完整回填。类型不对（dict / list / None / bool）一律空串 ——
+    用户手写 json 的笔误不该让整条命令加载失败。数字、布尔则转字符串，
+    毕竟用户不太可能真的想把 "note": 123 当备注展示。
+    """
+    if v is None:
+        return ""
+    if isinstance(v, bool):     # bool 要先于 int 判断：Python bool 是 int 子类
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(v)
+    return ""
 
 
 def save_click_deltas(deltas):

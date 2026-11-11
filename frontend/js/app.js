@@ -157,6 +157,7 @@
     cmdEditModal: $("cmd-edit-modal"), cmdEditTitle: $("cmd-edit-title"),
     cmdEditName: $("cmd-edit-name"), cmdEditLabels: $("cmd-edit-labels"),
     cmdEditCmds: $("cmd-edit-cmds"), cmdEditInputOnly: $("cmd-edit-inputonly"),
+    cmdEditNote: $("cmd-edit-note"),
     cmdEditBg: $("cmd-edit-bg"), cmdEditFg: $("cmd-edit-fg"),
     cmdEditBgReset: $("cmd-edit-bg-reset"), cmdEditFgReset: $("cmd-edit-fg-reset"),
     cmdEditSave: $("cmd-edit-save"), cmdEditCancel: $("cmd-edit-cancel"),
@@ -1971,6 +1972,11 @@
       if (fg) chip.style.setProperty("--chip-fg", fg);
       chip.title += "（自定义配色）";
     }
+    // 备注（可选）：鼠标 hover 按钮时换起 tip，换一行显示更清楚。
+    // 有备注才加，没有就保持原来的简洁 title（避免空串造成视觉杂音）。
+    if (typeof c.note === "string" && c.note.trim()) {
+      chip.title += "\n\n" + c.note.trim();
+    }
     const lbl = document.createElement("span");
     lbl.className = "chip-label"; lbl.textContent = c.name;
     chip.appendChild(lbl);
@@ -2236,9 +2242,10 @@
         clickCount: c.clickCount || 0,
         inputOnly: !!c.inputOnly,
       };
-      // 自定义配色：没设置就不写该字段（避免 json 里满地空串）
+      // 自定义配色 / 备注：没设置就不写该字段（避免 json 里满地空串）
       if (cmdColor(c.bg)) item.bg = c.bg;
       if (cmdColor(c.fg)) item.fg = c.fg;
+      if (typeof c.note === "string" && c.note.trim()) item.note = c.note.trim();
       return item;
     });
   }
@@ -2253,6 +2260,9 @@
     els.cmdEditCmds.value = c ? (c.commands || []).map(
       (e) => e.command + (e.delay ? (" ||delay=" + e.delay) : "")).join("\n") : "";
     els.cmdEditInputOnly.checked = c ? !!c.inputOnly : false;
+    // 备注：textarea 原样回填（支持多行换行）。
+    // 复制 / 新建时如果来源命令有备注，一并克隆过去（克隆语义）。
+    els.cmdEditNote.value = (c && typeof c.note === "string") ? c.note : "";
     // 配色：dataset 才是「用户是否设置过」的真相。取色器必须永远有值，
     // 不能把「没设置」误当成「设置成了默认色」。
     const bg = cmdColor(c && c.bg);
@@ -2280,6 +2290,7 @@
     const cmds = parseCmdLines(els.cmdEditCmds.value);
     if (!cmds.length) { pushStatus("warn", "⚠ 至少要填写一条命令"); els.cmdEditCmds.focus(); return; }
     const inputOnly = !!els.cmdEditInputOnly.checked;
+    const note = (els.cmdEditNote.value || "").trim();  // 备注：支持多行，原样保留 \n
     // 自定义配色以 dataset 为准（空串 = 用主题色）
     const bg = cmdColor(els.cmdEdit.dataset.bg);
     const fg = cmdColor(els.cmdEdit.dataset.fg);
@@ -2290,6 +2301,7 @@
       if (c) {
         c.name = name; c.labels = labels.length ? labels : ["其他"];
         c.commands = cmds; c.inputOnly = inputOnly;
+        if (note) c.note = note; else delete c.note;
         if (bg) c.bg = bg; else delete c.bg;
         if (fg) c.fg = fg; else delete c.fg;
       }
@@ -2297,6 +2309,7 @@
       const nid = "u_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const item = { id: nid, name, labels: labels.length ? labels : ["其他"],
         commands: cmds, clickCount: 0, inputOnly };
+      if (note) item.note = note;
       if (bg) item.bg = bg;
       if (fg) item.fg = fg;
       allCommands.push(item);

@@ -87,6 +87,11 @@ class CommandMixin:
                 "commands": d.get("commands") or [],
                 "clickCount": d.get("clickCount") or 0,
                 "inputOnly": bool(d.get("inputOnly")),
+                # 备注（可选）：支持换行，导出/导入后恢复原样。
+                # 只接受非空字符串 —— 用户手写 json 里 "note": 123 这类
+                # 类型错误不能让导出产物坏掉；空串也不写（保持文件干净）。
+                **({"note": d["note"]} if isinstance(d.get("note"), str)
+                                        and d["note"].strip() else {}),
                 # 自定义按钮配色：导出要能完整带去别人的机器上，否则备份
                 # 恢复后「颜色没了」；没有配色的命令不写空字段。
                 **({"bg": d["bg"]} if d.get("bg") else {}),

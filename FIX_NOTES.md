@@ -5293,3 +5293,60 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   boot 事件触发后淡出、重发 boot 不报错（幂等）。
 
 全量：后端 **1425 passed / 1 skipped**；前端 **93 文件 0 失败**；pyflakes 干净。
+
+# 第八十一轮（快捷命令新增「备注」字段：编辑 + hover 提示）
+
+## 需求
+
+用户希望快捷命令按钮新增「备注」功能：
+- 新增 / 修改 / 复制命令时可以编辑备注；
+- 平时鼠标移入按钮时，title 里也能看到备注。
+
+## 改动
+
+### 后端
+
+- [commands.py](file:///workspace/core/commands.py#L402-L421)：
+  `normalize_commands` 新增 `note = _as_text(c.get("note"))`，
+  保留非空字符串（支持多行 `\n` 原样保留），空串/None/类型
+  不对一律不进 item dict（与 bg/fg 的设计一致）。
+  新增辅助函数 [_as_text](file:///workspace/core/commands.py#L450-L466)：
+  bool 显式挡掉（bool 是 int 子类，不能只按 int 判断），数字转字符串
+  保留（用户手写 json `"note": 123` 容错），dict/list/None 一律空串。
+- [export_commands](file:///workspace/backend/controllers/commands.py#L83-L99)：
+  显式枚举字段里加一行 `note` 条件带出（与 bg/fg 同一风格：有才带，
+  不污染空字段），保证备份 → 恢复后备注仍在。
+- 其它链路（`load_commands` / `save_commands` / `merge_builtins` /
+  `save_click_deltas`）都是浅拷贝原样透传，note 自动跟随。
+
+### 前端
+
+- [index.html](file:///workspace/frontend/index.html#L984-L987)：
+  在编辑弹窗里「仅输入」复选框之后、「按钮外观」颜色块之前，插入
+  `<textarea id="cmd-edit-note" rows="2">`（支持多行）。
+- [app.js els](file:///workspace/frontend/js/app.js#L160)：
+  注册 `cmdEditNote`。
+- [mkCmdChip title 拼备注](file:///workspace/frontend/js/app.js#L1975-L1979)：
+  在 title 末尾（内置 / 仅输入 / 配色的说明之后）换两行拼上 `c.note.trim()`。
+  有备注才加，没有保持原来简洁 title，避免空串造成视觉杂音。
+- [collectUserCommands](file:///workspace/frontend/js/app.js#L2248)：
+  非空 note 才写进落盘 item（与 bg/fg 同风格，不制造空字段）。
+- [openCmdEdit](file:///workspace/frontend/js/app.js#L2263-L2265)：
+  原样回填 textarea。复制命令时备注一并克隆（克隆语义）。
+- [saveCmdEdit](file:///workspace/frontend/js/app.js#L2293-L2316)：
+  编辑路径：有 note 赋值，没 note 则 `delete c.note`；
+  新建路径：非空才写进 item（与 bg/fg 对齐）。
+
+## 测试
+
+- 后端新增 3 条（tests/test_load_commands.py）：
+  - `test_note_is_preserved_when_nonempty`（单行 / 多行）；
+  - `test_note_dropped_when_empty_or_invalid`（空串 / None / bool / dict / list 丢，
+    数字 123 转成字符串 "123" 保留——有意容错）；
+  - `test_note_survives_merge_builtins_and_export`（merge_builtins 浅拷贝 +
+    CommandMixin.export_commands 显式枚举带出）。
+- 前端新增 [cmd_note.test.cjs](file:///workspace/tests/frontend/cmd_note.test.cjs)
+  7 条：有 note 的 chip.title 含命令名+备注、无 note 不凭空多出空行、
+  编辑弹窗里有 cmd-edit-note textarea。
+
+全量：后端 **1428 passed / 1 skipped**；前端 **93 文件 0 失败**；pyflakes 干净。

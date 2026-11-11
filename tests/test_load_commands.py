@@ -558,6 +558,59 @@ def test_input_only_survives_merge_builtins():
             assert b["inputOnly"] is False, "内置命令一律直接执行"
 
 
+def test_note_is_preserved_when_nonempty():
+    """normalize_commands 保留非空 note，支持多行（\\n 原样保留）。"""
+    raw = [{"id": "u1", "name": "命令", "labels": ["x"],
+            "note": "一行备注",
+            "commands": [{"command": "ls"}]}]
+    cmds, _w = normalize_commands(raw)
+    assert cmds[0].get("note") == "一行备注"
+
+    multi = [{"id": "u2", "name": "命令", "labels": ["x"],
+              "note": "第一行\n第二行",
+              "commands": [{"command": "ls"}]}]
+    cmds, _w = normalize_commands(multi)
+    assert cmds[0].get("note") == "第一行\n第二行"
+
+
+def test_note_dropped_when_empty_or_invalid():
+    """空串 / None / 类型不对（dict/list/bool）一律不写 note 字段。
+
+    数字（123）会被转成字符串 "123" 保留 —— 这是有意的容错，
+    毕竟用户手写 json 把 `"note": "123"` 写成 `"note": 123` 时，
+    转成字符串比丢弃更合理。bool 被显式挡掉（bool 是 int 子类，
+    不能只按 int 判断）。
+    """
+    for bad in ["", None, True, False, {"a": 1}, ["nope"]]:
+        raw = [{"id": "u", "name": "n", "labels": ["x"], "note": bad,
+                "commands": [{"command": "ls"}]}]
+        cmds, _w = normalize_commands(raw)
+        assert "note" not in cmds[0], \
+            "note=%s 应被丢弃，不得污染命令字段" % (bad,)
+    # 数字转字符串是有意容错
+    cmds, _w = normalize_commands(
+        [{"id": "u", "name": "n", "labels": ["x"], "note": 123,
+          "commands": [{"command": "ls"}]}])
+    assert cmds[0].get("note") == "123"
+
+
+def test_note_survives_merge_builtins_and_export():
+    """用户命令的备注经 merge_builtins 后完整保留。"""
+    from backend.controllers.commands import CommandMixin
+    # merge_builtins 是浅拷贝，note 自动跟 dict 走
+    user = [{"id": "u", "name": "用户", "labels": ["x"], "note": "这是备注",
+             "commands": [{"command": "ls"}]}]
+    merged = merge_builtins(user)
+    by_id = {c["id"]: c for c in merged}
+    assert by_id["u"].get("note") == "这是备注", "merge_builtins 不得丢备注"
+    # export_commands 显式枚举字段，带 note
+    mixin = CommandMixin()
+    mixin.state = type("S", (), {"commands": merged, "shutting_down": False})()
+    data = mixin.export_commands()
+    notes = {c["id"]: c.get("note") for c in data["commands"]}
+    assert notes["u"] == "这是备注", "导出后备注应仍在"
+
+
 # ---------------------------------------------------------------------------
 # 运行目录多文件扫描 / 合并去重 / 无文件时生成 commands.json
 # ---------------------------------------------------------------------------
