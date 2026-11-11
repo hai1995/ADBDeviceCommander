@@ -187,12 +187,15 @@ jobs:
       - name: 安装测试依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pyflakes
+          python -m pip install pytest pyflakes ruff==0.17.4
 
-      - name: 静态检查（pyflakes）
-        # 与 build.yml 同一道门禁（backend core tools tests）：发版前先拦住
-        # 未用导入 / 未定义变量，避免把脏代码打进正式包。
-        run: python -m pyflakes backend core tools tests
+      - name: 静态检查（pyflakes + ruff）
+        # 与 build.yml 同一道门禁：发版前先拦住未用导入 / 未定义变量，避免把
+        # 脏代码打进正式包。ruff.toml 只启用存量已为 0 的规则做防劣化，
+        # 版本同样写死，理由见 build.yml 对应步骤。
+        run: |
+          python -m pyflakes backend core tools tests
+          ruff check .
 
       - name: Python 单测
         run: python -m pytest -q
@@ -267,12 +270,18 @@ jobs:
 
           # 该 tag 已经有 Release 时不能再 create（gh 会报 already exists），
           # 而「重跑一次修更新说明 / 补附件」是很实际的需求（上一版的说明写错、
-          # 或构建产物要重打）。此时改为更新标题与说明，附件随后 upload --clobber。
+          # 或构建产物要重打）。此时改为更新标题与说明，并把附件强制覆盖上传。
+          #
+          # 这一行不能漏：只 edit 说明、不重传 @assets 的话，latest.json 已经
+          # 换成新版本号和新说明，用户点下载拿到的却还是上一次的旧 zip ——
+          # 版本号与产物对不上，而且全程不报错，比直接失败更难排查。
+          # build.yml 的发布步骤里有同一行，两个工作流要保持一致。
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             Write-Host "Release $tag 已存在：更新说明与附件"
             gh release edit $tag --title "ADB 设备指令台 $tag" `
               --notes-file dist-notes/release-notes.md
+            gh release upload $tag @assets --clobber
           } else {
             gh release create $tag @assets --title "ADB 设备指令台 $tag" `
               --notes-file dist-notes/release-notes.md
