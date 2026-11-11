@@ -5244,3 +5244,44 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   立即亮起；点恢复调 `update_unskip` 并藏起；写盘失败不亮出口。
 
 全量：后端 **1425 passed / 1 skipped**；前端 **92 文件 0 失败**；pyflakes 干净。
+
+# 第七十九轮（device_service 轮询 / screen·recording 审查 + 注释校准）
+
+## 审查范围
+
+按要求重点通读：
+- `backend/device_service.py`（`DeviceManager.refresh / _acquire / _poll_devices`、
+  防误报断连的重试 / 自愈 / 宽限逻辑、`_busy` 互斥与强制释放）；
+- `backend/controllers/autorefresh.py`（`_auto_loop`、`_reap_dead_recordings`、
+  `_reap_gone_tools` 与录屏 `reboot_wait` 的协作）；
+- `backend/controllers/record.py`（`screen_record_start/stop/cancel`、
+  `_session_teardown / _session_discard / _teardown_devices`、overlay 恢复、
+  logcat 覆盖度校验、分段合并、打包）；
+- `backend/screen_service.py`（`VideoRecorder.start / _watch_exit /
+  _roll_segment_locked / stop_ex / discard_ex / _pull_one`、死亡/上限区分、
+  重启等待续录）；
+- `core/devices.py`（`plan_devices` 宽限状态机、粘性勾选）；
+- 前端 `app.js` 录屏按钮态（`recInFlight`、`setRecRunning`、`rec_state` 同步）
+  与设备卡片 `reconnecting` 渲染。
+
+## 结论
+
+上述链路防御性已极强（互斥锁、finally 清会话、写盘失败不装假成功、
+设备掉线区分「重连等待」与「真断」、残片保留不混进成品包等），
+未发现功能性缺陷。
+
+## 修复
+
+[device_service.py](file:///workspace/backend/device_service.py#L42-L57)：
+两处注释的重试次数与常量 `DEVICE_RETRY_MAX=1` 不符——
+- `BUSY_WAIT_S` 注释原写「重试 4 次」，实为「重试 1 次（共 2 次尝试）」；
+- `BUSY_FORCE_RELEASE_S` 注释原写「2 次重试 × (10s + 0.6s)」，
+  实为「1 次重试，共 2 次尝试（2×10s + 0.6s ≈ 21s）」。
+
+这两个常量的取值（12s / 60s）正是基于真实重试时长推导的，注释写错会误导
+后续维护者误判等待窗口与强制释放阈值，故校准为与代码一致的表述。
+
+## 测试
+
+相关后端用例全绿：**123 passed**（device_service / screen /
+record_logcat_coverage / core_devices）。注释改动不涉及逻辑，未新增用例。
