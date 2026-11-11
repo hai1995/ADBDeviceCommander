@@ -1288,6 +1288,69 @@ def test_pull_capture_cleans_remote_and_part_file(monkeypatch, tmp_path):
     assert calls[2][3:5] == ["shell", "rm"], "设备端临时文件要删掉"
     assert calls[2][-1].startswith("/sdcard/"), calls
 
+
+def test_pull_capture_falls_back_to_data_local_tmp(tmp_path, monkeypatch):
+    """/sdcard/ 不可写（kiosk / SELinux）时，自动尝试 /data/local/tmp/ 兜底。
+
+    这是车机场景用户真实遇到的：exec-out 空、probe_shell ok，但 screencap
+    写 /sdcard/ 退出码非 0（SELinux 拒绝）。/data/local/tmp/ 是 adb shell 用户
+    肯定可写的位置，必须作为 fallback 存在。
+    """
+    png = _tiny_png()
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "screencap" in cmd:
+            # /sdcard/ 失败（rc=1，Permission denied）；/data/local/tmp/ 成功
+            remote = cmd[-1]
+            if remote.startswith("/sdcard/"):
+                return ss.subprocess.CompletedProcess(
+                    cmd, 1, "", "screencap: open failed: Permission denied")
+            return ss.subprocess.CompletedProcess(cmd, 0, "", "")
+        if "pull" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(png)
+        return ss.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    local = str(tmp_path / "shot.png")
+    data, why = ss.ScreenCapturer._pull_capture("adb", "A1", local)
+
+    assert why == "", "成功时 why 为空"
+    assert data == png
+    # 调用序列：/sdcard screencap → /data/local/tmp screencap → pull → rm
+    assert calls[0][-1].startswith("/sdcard/"), \
+        "优先尝试 /sdcard/（顺序对）"
+    assert calls[1][-1].startswith("/data/local/tmp/"), \
+        "/sdcard/ 失败后自动 fallback"
+    # .part 必须清掉
+    assert not (tmp_path / "shot.png.part").exists()
+
+
+def test_pull_capture_both_paths_fail_reports_both(tmp_path, monkeypatch):
+    """两条路径都挂时，错误信息里要带上**两条路径**的退出码和 stderr ——
+    用户能一眼看出到底是路径权限问题，还是 screencap 命令本身不存在。"""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "screencap" in cmd:
+            return ss.subprocess.CompletedProcess(
+                cmd, 127, "", "/system/bin/screencap: not found")
+        return ss.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    local = str(tmp_path / "shot.png")
+    data, why = ss.ScreenCapturer._pull_capture("adb", "A1", local)
+
+    assert data == b""
+    assert "/sdcard/" in why and "/data/local/tmp/" in why, \
+        "两条路径的原因都要带出来"
+    assert "退出码 127" in why, "退出码不能丢（127 通常是命令不存在）"
+    assert "not found" in why, "stderr 原文要带"
+
+
 def test_early_exit_reports_device_side_error_from_stdout(monkeypatch, tmp_path):
     """screenrecord 提前退出时，原因在 stdout（设备端输出），不能只读 stderr。
 

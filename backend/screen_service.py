@@ -271,7 +271,6 @@ class ScreenCapturer:
             pull_why = err
         return None, ("两条取图通道都没成功：exec-out 报「%s」；"
                       "设备端落盘再 pull 报「%s」" % (why, pull_why))
-
     @staticmethod
     def _exec_out(adb, serial, timeout=30):
         """exec-out 直取 PNG 字节；返回 (data, 原因)，data 为空即失败。"""
@@ -288,10 +287,19 @@ class ScreenCapturer:
             # adb 的报错几乎都落在 **stdout**（`error: device 'xxx' not found`
             # 就是典型），只解 stderr 会得到空串，界面于是显示「截图失败：空
             # 数据」—— 用户完全看不出是设备没连上。两路都收，优先给带内容的
-            # 那一句。
+            # 那一句；同时补上 returncode，避免用户只看到「没有给出原因」这种
+            # 无信息的文案（经验教训：exec-out 失败信息被截断时先补全完整
+            # 命令 + returncode + stderr 前 N 行再归因）。
             both = ((err or b"") + b"\n" + (data or b"")).strip()
             text = both.decode("utf-8", "ignore").strip()[:200]
-            return b"", text or "设备未返回图像（adb 没有给出原因）"
+            rc = proc.returncode if proc is not None else "?"
+            if text:
+                return b"", "exec-out 退出码 %s：%s" % (rc, text)
+            # 连 stderr/stdout 都空 —— 设备没有任何原因就把 exec-out 掐了。
+            # 这大多是车机 ROM / kiosk mode 禁了 screencap（系统策略层面直接
+            # 拒绝，不给任何提示），把 returncode 带出去至少能让后续 pull 路径
+            # 或 shell probe 给出更有用的线索。
+            return b"", "设备未返回图像（exec-out 退出码 %s，没有任何 stderr/stdout）" % rc
         except Exception as e:
             # 超时（设备无响应 / 被别的 adb 客户端抢锁）时 communicate() 只是抛错、
             # **不会**终止子进程：卡住的 adb exec-out 会变成孤儿进程一直挂着，
@@ -351,52 +359,98 @@ class ScreenCapturer:
         存在的意义是绕开 exec-out 的文本通道：个别 Windows adb 与车机会在
         那条管道上做换行转换（0x0A → 0x0D 0x0A），把 PNG 内部字节改坏；
         `adb pull` 走 sync 协议，二进制原样传输。
+
+        **关键修复：** 设备端临时路径给两条候选：
+          1) `/sdcard/adbdc_shot_*.png` —— 正常用户可写；
+          2) `/data/local/tmp/adbdc_shot_*.png` —— adb shell 用户**肯定可写**，
+             是 Android 上通用的 adb 临时目录，车机 kiosk 模式 / 定制 ROM
+             上 `/sdcard/` 只读或没挂载时这条路兜底。
+
+        第一条先试，失败（`screencap` 退出码非 0 或 pull 拿不到文件）再试
+        第二条；两条都挂了才把各自的原因**一起**吐出来 —— 用户能一眼看出
+        到底是「命令不存在」「权限被 SELinux 拦」还是「设备端根本没有
+        screencap」，而不是只看到最后一条的错误。
         """
-        # 远端文件名带本进程序号：同一台设备连点截图也不会互相覆盖
-        remote = "/sdcard/adbdc_shot_%s_%d.png" % (
-            safe_name(serial), next(ScreenCapturer._seq))
-        try:
-            r = subprocess.run(
-                [adb, "-s", serial, "shell", "screencap", "-p", remote],
-                stdin=subprocess.DEVNULL, **adb_kwargs(30))
-        except subprocess.TimeoutExpired:
-            return b"", "设备端 screencap 超时（30 秒）"
-        except Exception as e:
-            return b"", "设备端 screencap 未能执行：%s" % e
-        text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-        if r.returncode != 0:
-            return b"", ("设备端 screencap 失败：%s"
-                         % (text[:200] or "退出码 %d" % r.returncode))
-        part = local_hint + ".part"
-        try:
-            r2 = subprocess.run(
-                [adb, "-s", serial, "pull", remote, part],
-                stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
-            text2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
-            if r2.returncode != 0 or not os.path.exists(part):
-                return b"", ("adb pull 没有取回截图：%s"
-                             % (text2[-200:] or "退出码 %d" % r2.returncode))
-            with open(part, "rb") as f:
-                return f.read(), ""
-        except subprocess.TimeoutExpired:
-            return b"", "adb pull 超时（%d 秒）" % timeout
-        except Exception as e:
-            return b"", "adb pull 失败：%s" % e
-        finally:
-            # .part 只是中间产物：校验由调用方做，这里负责不留垃圾
+        remote_seq = next(ScreenCapturer._seq)
+        remote_base = "adbdc_shot_%s_%d.png" % (
+            safe_name(serial), remote_seq)
+        # 两条候选路径，按优先级排序；第二条 /data/local/tmp 是 adb shell
+        # 用户写权限的铁保证，几乎所有车机 / 定制 ROM 都能写。
+        remote_candidates = [
+            "/sdcard/" + remote_base,           # 正常设备首选
+            "/data/local/tmp/" + remote_base,   # kiosk / 无 sdcard 时兜底
+        ]
+        errs = []  # 收集每条路径的失败原因，成功时整体返回空串
+        for remote in remote_candidates:
             try:
-                if os.path.exists(part):
+                r = subprocess.run(
+                    [adb, "-s", serial, "shell", "screencap", "-p", remote],
+                    stdin=subprocess.DEVNULL, **adb_kwargs(30))
+            except subprocess.TimeoutExpired:
+                errs.append("%s 超时（30s）" % remote)
+                continue
+            except Exception as e:
+                errs.append("%s 异常：%s" % (remote, e))
+                continue
+            text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+            if r.returncode != 0:
+                # screencap 命令可能根本不存在（某些极简车机 ROM 把它裁掉了），
+                # 这种情况下两条路径都会挂，所以把 exit code + stderr 原样
+                # 带出去让用户判断是「路径问题」还是「命令不存在」。
+                errs.append("%s：screencap 退出码 %d：%s"
+                            % (remote, r.returncode, text[:200] or "无 stderr"))
+                continue
+            # screencap 退出码 0 但文件实际为空（SELinux 策略强制 exit 0 但禁写）
+            # 的情况留给 pull 自己判断 —— pull 有 returncode + os.path.exists
+            # 双重检查，足够识别；不再额外发 ls 命令（节省一次往返、也避免
+            # 某些 mock 测试因调用次数变化挂掉）。
+
+            part = local_hint + ".part"
+            try:
+                r2 = subprocess.run(
+                    [adb, "-s", serial, "pull", remote, part],
+                    stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
+                text2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
+                if r2.returncode != 0 or not os.path.exists(part):
+                    errs.append("%s：adb pull 没取回（exit %d：%s）"
+                                % (remote, r2.returncode, text2[-200:] or "无 stderr"))
+                    try:
+                        if os.path.exists(part): os.remove(part)
+                    except Exception:
+                        pass
+                    continue
+                with open(part, "rb") as f:
+                    data = f.read()
+                # 本地 .part 中间文件必须清掉 —— 成功 return 前就删掉，
+                # 不能等调用方 / 下一次循环处理（调用方拿不到 .part 路径，
+                # 循环下一轮可能因为 screencap 失败直接 continue，永远碰不到）。
+                try:
                     os.remove(part)
-            except Exception:
-                pass
-            # 设备端临时文件无论成败都清掉；清不掉（例如传输中途掉线）不该
-            # 覆盖本次的真正结果，所以异常一律吞掉。
-            try:
-                subprocess.run(
-                    [adb, "-s", serial, "shell", "rm", "-f", remote],
-                    stdin=subprocess.DEVNULL, **adb_kwargs(10))
-            except Exception:
-                pass
+                except Exception:
+                    pass
+                # 成功了：清理远程文件（try/except 吞掉，别覆盖本次结果）
+                try:
+                    subprocess.run(
+                        [adb, "-s", serial, "shell", "rm", "-f", remote],
+                        stdin=subprocess.DEVNULL, **adb_kwargs(10))
+                except Exception:
+                    pass
+                return data, ""
+            except subprocess.TimeoutExpired:
+                errs.append("%s：adb pull 超时（%ds）" % (remote, timeout))
+                try:
+                    if os.path.exists(part): os.remove(part)
+                except Exception:
+                    pass
+                continue
+            except Exception as e:
+                errs.append("%s：adb pull 异常：%s" % (remote, e))
+                try:
+                    if os.path.exists(part): os.remove(part)
+                except Exception:
+                    pass
+                continue
+        return b"", "；".join(errs) or "设备端 screencap 失败（所有候选路径都不通）"
 
     @staticmethod
     def _validate(data):

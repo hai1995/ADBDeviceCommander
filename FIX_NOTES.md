@@ -5350,3 +5350,69 @@ worker 的 `queue.Empty` 分支里 —— 那是「这段时间没有新日志�
   编辑弹窗里有 cmd-edit-note textarea。
 
 全量：后端 **1428 passed / 1 skipped**；前端 **93 文件 0 失败**；pyflakes 干净。
+
+# 第八十二轮（截图失败：设备端落盘路径加 /data/local/tmp/ 兜底 + 错误信息补全）
+
+## 用户反馈
+
+车机（序列号 `a5144205`）上点「截图」失败：
+```
+⚠ 截图失败 a5144205: 两条取图通道都没成功：
+exec-out 报「设备未返回图像（adb 没有给出原因）」；
+设备端落盘再 pull 报「设备端 screencap 失……」
+```
+
+两条都挂，但 `probe_shell` 通过了（否则就直接走「shell 被密码/权限拦截」那条
+提示、不会继续到 pull）——说明 adb 通道本身通，只是 `screencap` 这条命令
+在 exec-out 与 `/sdcard/` 落盘两条路径上都失败。
+
+## 根因
+
+`_pull_capture` 只试一条远程路径：`/sdcard/adbdc_shot_*.png`。
+
+车机常见情况：
+- Android 10+ 的 `/sdcard/` 是 FUSE 守护进程（sdcard-fuser）挂载的，kiosk
+  / launcher-only 模式下这个守护可能没起，路径只读或甚至不存在；
+- SELinux 策略把 `screencap` 二进制的写权限限制在 `/data/local/tmp/` 这类
+  adb shell 用户空间，`/sdcard/` 写操作直接 `Permission denied`，但 exit
+  code 可能是 0（策略层拒绝，命令本身没抛错）。
+
+`/data/local/tmp/` 是 **adb shell 用户肯定可写** 的路径（Android 上通用
+临时目录），这条路径此前完全没被尝试过。
+
+## 修复
+
+### [screen_service.py: _pull_capture](file:///workspace/backend/screen_service.py#L355-L453)
+
+- 远程路径从单条 `/sdcard/...` 改成两条候选（`remote_candidates` 列表）：
+  先试 `/sdcard/`，失败后 **自动 fallback 到 `/data/local/tmp/`**。
+- 所有失败分支（screencap rc 非 0 / 超时 / pull 没拿回 / pull 超时 / pull
+  异常）都追加到 `errs = []` 里，而不是覆盖上一个错误 —— 两条都挂时最终
+  拼出 `"/sdcard/... 报 xxx；/data/local/tmp/... 报 xxx"`，用户能一眼区分
+  是「路径都不可写」还是「screencap 命令本身不存在」。
+- 重构为 for 循环 + 每次循环自己管理 `part` 文件清理：成功 return 前删
+  `.part`，超时 / 异常 / pull 失败的 continue 分支里也各自删一次（不再
+  依赖统一 finally），避免「上一轮遗留的 .part 被下一轮 pull 命中、
+  误以为成功」的竞态。
+
+### [screen_service.py: _exec_out](file:///workspace/backend/screen_service.py#L277-L296)
+
+把原来的 "设备未返回图像（adb 没有给出原因）" 改成 **带 exit code +
+完整 stderr/stdout** 的形式：
+- adb 报错几乎都落在 stdout（`error: device 'xxx' not found`），两路
+  都收；
+- 之前只给 "adb 没有给出原因" 这种无信息文案，用户看到只会是「截图不行」，
+  加了 exit code 后至少能知道是 adb 通道被掐、还是设备直接拒绝。
+
+## 测试
+
+新增两条（tests/test_backend_screen.py）：
+- `test_pull_capture_falls_back_to_data_local_tmp`：
+  `/sdcard/` screencap rc=1 → 自动 fallback 到 `/data/local/tmp/` 成功；
+  调用顺序对（先 sdcard、再 data/local/tmp），.part 被清掉。
+- `test_pull_capture_both_paths_fail_reports_both`：
+  两条路径的 screencap 都是 rc=127（命令不存在）；返回错误里必须同时
+  包含 `/sdcard/`、`/data/local/tmp/`、`退出码 127`、`not found`。
+
+全量：后端 **1430 passed / 1 skipped**（比之前 +2）；前端 **94 文件 0 失败**
+（cmd_note 已进 run-all）；pyflakes 干净。
