@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 core.builtin_commands —— 程序内置的「通用」快捷命令（与用户 quick_commands.json 解耦）。
 

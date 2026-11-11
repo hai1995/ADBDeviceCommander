@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.screen_service —— 截图 + 录屏（视频，不含音频合成）。
 

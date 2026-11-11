@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 core.shell —— 持久 PowerShell 会话（ShellSession）。
 与 旧 Tk 版（已移除） 中的 ShellSession 同源；不依赖任何 UI。

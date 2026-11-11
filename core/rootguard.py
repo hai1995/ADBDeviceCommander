@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """core.rootguard —— `adb root` / `adb unroot` 的执行保护（判定 + 状态查询）。
 
 为什么需要专门保护这一条命令

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """ADB 设备指令台 —— PyInstaller 打包脚本（替代原 `build_windows.bat`）。
 
 为什么用 Python 而不是 bat：

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.logcat_service —— Logcat 实时监控 + 抓取服务（与 UI 无关）。
 

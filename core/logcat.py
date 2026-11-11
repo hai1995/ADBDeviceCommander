@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 core.logcat —— logcat 行分类 / 异常识别 / 时间戳解析（纯逻辑，与 UI 无关）。
 供 Logcat 监控实时渲染与抓取共用。

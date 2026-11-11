@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 backend.video_join —— 把自动分段录出的多段 mp4 合并回一个完整 mp4。
 
