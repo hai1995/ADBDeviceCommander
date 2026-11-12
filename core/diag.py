@@ -39,6 +39,7 @@ import tempfile
 import zipfile
 
 from core.constants import VERSION, adb_kwargs, safe_name, unique_path
+from core.longpath import long_path
 from core import devinfo
 
 # 默认 / 上限 logcat 行数。上限不是「随便定一个」：单条 threadtime 约 150 字节，
@@ -498,9 +499,10 @@ class _Ctx:
 
 def _write(path, text):
     """写一份诊断文件（UTF-8 + 宽松换行），返回字节数。"""
-    with open(path, "w", encoding="utf-8", errors="replace", newline="\n") as f:
+    lp = long_path(path)
+    with open(lp, "w", encoding="utf-8", errors="replace", newline="\n") as f:
         f.write(text if text is not None else "")
-    return os.path.getsize(path)
+    return os.path.getsize(lp)
 
 
 def _logcat_text(ctx, lines):
@@ -548,7 +550,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
     ts = dt.strftime("%Y%m%d_%H%M%S")
     serial_s = str(serial or "")
     try:
-        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(long_path(out_dir), exist_ok=True)
     except Exception as e:
         return None, None, "无法创建保存目录 %s：%s" % (out_dir, e)
 
@@ -710,23 +712,24 @@ def collect(adb, serial, out_dir, with_logcat=True,
         # 落在同一秒：ZipFile(..., "w") 会直接把同名文件截断 —— 用户手上那份
         # （可能已经发出去）悄悄变成第二份的内容。宁可多一个 _2。
         zip_path = unique_path(os.path.join(out_dir, name))
+        lzip = long_path(zip_path)
         try:
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            with zipfile.ZipFile(lzip, "w", zipfile.ZIP_DEFLATED) as z:
                 for fn in (F_DEVICE, F_PROPS, F_LOGCAT, F_PROCESS, F_APPS,
                            F_ANR, F_NET, F_MEMINFO, F_CPU, F_META):
                     p = os.path.join(work, fn)
                     if os.path.exists(p):
-                        z.write(p, fn)
+                        z.write(long_path(p), fn)
         except Exception as e:
             try:
-                if os.path.exists(zip_path):
-                    os.remove(zip_path)
+                if os.path.exists(lzip):
+                    os.remove(lzip)
             except Exception:
                 pass
             return None, manifest, "打包失败：%s" % e
         return zip_path, manifest, None
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(long_path(work), ignore_errors=True)
 
 
 def summary_line(zip_path, manifest):

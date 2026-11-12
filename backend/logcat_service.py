@@ -35,6 +35,7 @@ from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
                             adb_popen_kwargs)
 from core.logcat import (classify_line, match_filter, split_filter_terms,
                          ts_epoch, ts_prefix as _ts_prefix)
+from core.longpath import long_path
 from backend.screen_service import device_present
 
 
@@ -906,7 +907,8 @@ class LogcatCapture:
                         # 需要的往往正是断点前那几十行。每行 flush 的代价只是一次
                         # write 系统调用（本机写盘速率远高于 adb 输出速率，不会
                         # 反压到设备端 logcat 缓冲）。
-                        f = open(path, "w", encoding="utf-8", errors="replace",
+                        f = open(long_path(path), "w", encoding="utf-8",
+                                 errors="replace",
                                  buffering=1)
                     except Exception as e:
                         err_reported = True
@@ -1332,15 +1334,16 @@ class LogcatCapture:
         或手工清理即可），且 zip 失败时绝不删源。
         """
         zpath = path + ".zip"
+        lzpath = long_path(zpath)
         try:
-            if os.path.exists(zpath):
-                os.remove(zpath)
-            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-                z.write(path, os.path.basename(path))
+            if os.path.exists(lzpath):
+                os.remove(lzpath)
+            with zipfile.ZipFile(lzpath, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(long_path(path), os.path.basename(path))
         except Exception:
             try:
-                if os.path.exists(zpath):
-                    os.remove(zpath)
+                if os.path.exists(lzpath):
+                    os.remove(lzpath)
             except Exception:
                 pass
             return None

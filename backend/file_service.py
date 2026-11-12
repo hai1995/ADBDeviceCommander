@@ -12,6 +12,7 @@ import tempfile
 import uuid
 
 from core.constants import adb_kwargs, parse_ls_output, posix_join, safe_name
+from core.longpath import explain_long_path, is_too_long, long_path
 from core import tmpfiles
 
 
@@ -148,10 +149,17 @@ class FileService:
         return r.returncode == 0, _err_text(r)
 
     def download(self, serial, remote, local_dir):
+        base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
+        target = os.path.join(local_dir, base)
+        # adb pull 由 adb.exe 落盘，它**不认** \\?\ 前缀（见 core/longpath）：
+        # 目标路径超过 260 字符时 adb 只会甩一句含糊的英文错误，文件还不会
+        # 落地。提前判一次，给用户一句能照做的中文提示。
+        if is_too_long(target):
+            return None, explain_long_path(target)
         # 目录建不出来（无权限 / 非法盘符）要回一句人话，否则 worker 线程里
         # 静默抛异常，前端只会看到「没有任何反应」。
         try:
-            os.makedirs(local_dir, exist_ok=True)
+            os.makedirs(long_path(local_dir), exist_ok=True)
         except Exception as e:
             return None, "无法创建保存目录 %s：%s" % (local_dir, e)
         r = subprocess.run(
@@ -159,7 +167,6 @@ class FileService:
             **adb_kwargs(120))
         if r.returncode != 0:
             return None, _err_text(r, "pull 失败（adb 没有给出原因）")
-        base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
         # 落盘名是 **adb 自己**按设备端原名生成的，不是我们净化后的名字：
         # `adb pull` 只认远端文件名，我们无法告诉它「落地时换个名」。所以先按
         # 原名找、找得到再尽力改成净化名（设备端文件名可能含 Windows 非法字符，
@@ -168,12 +175,12 @@ class FileService:
         # None，界面显示成「下载失败 <路径>: None」，用户以为文件丢了。
         raw_local = os.path.join(local_dir, base)
         safe_local = os.path.join(local_dir, safe_name(base))
-        if os.path.exists(safe_local):
+        if os.path.exists(long_path(safe_local)):
             return safe_local, None
-        if os.path.exists(raw_local):
+        if os.path.exists(long_path(raw_local)):
             if raw_local != safe_local:
                 try:
-                    os.replace(raw_local, safe_local)
+                    os.replace(long_path(raw_local), long_path(safe_local))
                     return safe_local, None
                 except OSError:
                     pass          # 改不了名（占用 / 权限）就把真实路径回给用户
@@ -231,7 +238,7 @@ class FileService:
                               errors="replace") as f:
                         txt = f.read()
                     try:
-                        os.remove(tmp)
+                        os.remove(long_path(tmp))
                     except Exception:
                         pass
                     return {"text": txt, "local": None}, None

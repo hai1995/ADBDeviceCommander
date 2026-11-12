@@ -49,6 +49,7 @@ import time
 from collections import deque
 
 from core.constants import adb_kwargs, resource_path, unique_path
+from core.longpath import long_path
 
 # 环形缓冲上限：1Hz 约 5.5 小时。够长（够挂机跑一夜），又不会把内存吃穿
 # （单样本 ~200B，20000 条约 4MB）。
@@ -1903,7 +1904,7 @@ def write_csv(samples, path):
     两列都留，分析时想看长期水位还是瞬时抖动都有据可查。
     """
     rows = 0
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+    with open(long_path(path), "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(CSV_HEADER)
         for s in samples:
@@ -1920,7 +1921,7 @@ def write_csv(samples, path):
 
 def write_report(samples, info, out_dir, thresholds=None):
     """把 HTML + CSV 写到 out_dir，返回 {"html","csv","rows"}。"""
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(long_path(out_dir), exist_ok=True)
     serial = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(info.get("serial") or "device"))
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     # 同一秒内连跑两次不能让后一份报告覆盖前一份（html 与 csv 同源，一起避让）
@@ -1928,7 +1929,7 @@ def write_report(samples, info, out_dir, thresholds=None):
                        suffixes=(".html", ".csv"))
     html_path = base + ".html"
     csv_path = os.path.join(out_dir, base + ".csv")
-    with open(html_path, "w", encoding="utf-8") as f:
+    with open(long_path(html_path), "w", encoding="utf-8") as f:
         f.write(build_report_html(samples, info, thresholds))
     rows = write_csv(samples, csv_path)
     return {"html": html_path, "csv": csv_path, "rows": rows}
@@ -2324,10 +2325,10 @@ def write_compare_report(entries, out_dir, thresholds=None):
     html = build_compare_html(entries, thresholds)
     if not html:
         return {}
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(long_path(out_dir), exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = unique_path(os.path.join(
         out_dir, "perf_compare_%d_dev_%s.html" % (len(entries), stamp)))
-    with open(path, "w", encoding="utf-8") as f:
+    with open(long_path(path), "w", encoding="utf-8") as f:
         f.write(html)
     return {"html": path, "devices": len(entries)}

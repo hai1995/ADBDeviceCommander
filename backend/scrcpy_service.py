@@ -24,6 +24,8 @@ import tempfile
 import threading
 import time
 
+from core.longpath import long_path
+
 from core.constants import no_window_flags, safe_name
 
 # 可执行文件名（Windows 带 .exe，其它平台不带）
@@ -204,8 +206,8 @@ class ScrcpyLauncher:
         if not path:
             return
         try:
-            if os.path.exists(path):
-                os.remove(path)
+            if os.path.exists(long_path(path)):
+                os.remove(long_path(path))
         except Exception:
             pass
 
@@ -251,7 +253,7 @@ class ScrcpyLauncher:
         log_path = os.path.join(tempfile.gettempdir(),
                                 "adc_scrcpy_%s.log" % safe_name(serial))
         try:
-            f = open(log_path, "wb")
+            f = open(long_path(log_path), "wb")
         except Exception:
             f = None
         try:
@@ -268,7 +270,7 @@ class ScrcpyLauncher:
                 # 刚建的日志文件是空的，Popen 都没起来就没人会用：顺手删掉，
                 # 免得每失败一次就在 TEMP 里留一个 0 字节文件。
                 try:
-                    os.remove(log_path)
+                    os.remove(long_path(log_path))
                 except Exception:
                     pass
             return False, "启动失败：%s" % e
@@ -282,7 +284,7 @@ class ScrcpyLauncher:
         if rc is not None:
             msg = _tail(log_path)
             try:
-                os.remove(log_path)
+                os.remove(long_path(log_path))
             except Exception:
                 pass
             return False, ("scrcpy 立即退出（退出码 %s）%s"
@@ -309,7 +311,7 @@ class ScrcpyLauncher:
         # 日志文件可能还被刚刚 terminate 的进程短暂占用，留给系统临时目录清理
         for path in logs:
             try:
-                if os.path.exists(path):
-                    os.remove(path)
+                if os.path.exists(long_path(path)):
+                    os.remove(long_path(path))
             except Exception:
                 pass

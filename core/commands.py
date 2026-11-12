@@ -13,6 +13,7 @@ import uuid
 
 from core.constants import program_dir
 from core.builtin_commands import BUILTIN_COMMANDS
+from core.longpath import long_path
 
 DEMO_COMMANDS = [
     {"id": "demo", "name": "[通用] 示例-查看时间", "labels": ["通用"],
@@ -98,7 +99,7 @@ def _iter_candidate_files(directory):
 
 
 def _read_json(path):
-    with open(path, encoding="utf-8-sig") as f:
+    with open(long_path(path), encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -483,7 +484,7 @@ def save_click_deltas(deltas):
         return
     p = primary_command_path()
     try:
-        with open(p, encoding="utf-8-sig") as f:
+        with open(long_path(p), encoding="utf-8-sig") as f:
             raw = json.load(f)
     except Exception:
         return
@@ -532,15 +533,16 @@ def _write_json_atomic(path, data):
     文件里可能是「半份 A + 半份 B」的坏 JSON，下次启动整份命令库丢失。
     """
     tmp = "%s.%s.tmp" % (path, uuid.uuid4().hex[:8])
+    ltmp, lpath = long_path(tmp), long_path(path)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        os.replace(ltmp, lpath)
         return True
     except Exception:
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            if os.path.exists(ltmp):
+                os.remove(ltmp)
         except Exception:
             pass
         return False

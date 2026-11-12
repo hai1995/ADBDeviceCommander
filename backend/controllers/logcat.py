@@ -5,6 +5,7 @@ from backend.controller import (
     subprocess, time, unique_path
 )
 from backend.logcat_service import pkg_pids_of
+from core.longpath import long_path
 
 class LogcatMixin:
     """logcat 实时监控与抓取。"""
@@ -89,7 +90,7 @@ class LogcatMixin:
         # 避免 save_dir 为 None 时 os.makedirs(None) 抛 TypeError 直接失败。
         save_dir = save_dir or self._default_save_dir()
         try:
-            os.makedirs(save_dir, exist_ok=True)
+            os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
             # 同上：返回前端也不看。保存目录不可写（只读盘 / 盘符不存在 /
             # 路径被同名文件占位）时，用户点「开始抓取」后什么都不发生。

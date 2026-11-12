@@ -26,6 +26,7 @@ import time
 _MODULE_T0 = time.perf_counter()
 
 from core.constants import PROJECT_ROOT, unique_path
+from core.longpath import long_path
 from backend.controller import WebApi
 from core.envcheck import (
     run_all, WEBVIEW2_DOWNLOAD_URL, WEBVIEW2_CLIENT_GUID, WEBVIEW2_PV_SUBKEYS,
@@ -254,7 +255,7 @@ def _write_crash_log(title, exc_type, exc, tb):
     candidates.append(tempfile.gettempdir())
     for d in candidates:
         try:
-            os.makedirs(d, exist_ok=True)
+            os.makedirs(long_path(d), exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
             # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
@@ -348,7 +349,7 @@ def _boot_timing_path():
 def _reset_boot_timing_log():
     """每次启动重新起一份耗时日志：反馈「这次启动慢」时只看得到本次分段。"""
     try:
-        with open(_boot_timing_path(), "w", encoding="utf-8") as f:
+        with open(long_path(_boot_timing_path()), "w", encoding="utf-8") as f:
             f.write("=== %s 启动 ===\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
     except Exception:
         pass
@@ -364,7 +365,7 @@ def _make_boot_mark(t0):
         except Exception:
             pass
         try:
-            with open(_boot_timing_path(), "a", encoding="utf-8") as f:
+            with open(long_path(_boot_timing_path()), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
             pass
@@ -532,7 +533,7 @@ def _report_gui_init_failure(exc):
     if log:
         lines += ["", "崩溃详情已写入：%s" % log]
     try:
-        with open(_boot_timing_path(), "a", encoding="utf-8") as f:
+        with open(long_path(_boot_timing_path()), "a", encoding="utf-8") as f:
             f.write("[启动失败] %s: %s\n" % (type(exc).__name__, exc))
     except Exception:
         pass

@@ -33,6 +33,7 @@ import subprocess
 from backend.audio_service import (
     _have_ffmpeg, _mp4_playable, _silent_remove, _video_duration)
 from core.constants import adb_kwargs
+from core.longpath import long_path
 
 # 单次合并的超时（秒）。`-c copy` 是纯 IO：57 分钟素材（20 段）在机械盘上
 # 也就几十秒。给到 1800 是为了留足「磁盘被别的程序抢占」的余量，而不是
@@ -49,10 +50,11 @@ def _has_moov(path, scan=4 * 1024 * 1024):
     这里另写一份而不是跨模块调用，是为了让本模块能独立测试、独立复用。
     """
     try:
-        size = os.path.getsize(path)
+        lpath = long_path(path)
+        size = os.path.getsize(lpath)
         if size < 64:
             return False
-        with open(path, "rb") as f:
+        with open(lpath, "rb") as f:
             if b"moov" in f.read(min(size, scan)):
                 return True
             f.seek(max(0, size - scan))
@@ -141,7 +143,7 @@ def join_segments(paths, out_path, timeout=None):
     _silent_remove(temp)
     try:
         try:
-            with open(list_path, "w", encoding="utf-8") as f:
+            with open(long_path(list_path), "w", encoding="utf-8") as f:
                 for p in used:
                     f.write("file '%s'\n" % _concat_quote(p))
         except Exception as e:
@@ -183,7 +185,7 @@ def join_segments(paths, out_path, timeout=None):
                         "reason": "合并产物时长 %.1f 秒，各段合计 %.1f 秒，"
                                   "拼接结果不可信" % (got, want)}
         try:
-            os.replace(temp, out_path)
+            os.replace(long_path(temp), long_path(out_path))
         except Exception as e:
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,

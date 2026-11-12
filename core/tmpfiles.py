@@ -22,6 +22,8 @@ import os
 import tempfile
 import time
 
+from core.longpath import long_path
+
 # 本程序在系统临时目录里留下的文件前缀（新增此类文件时记得加到这里）。
 #   adb_view_     「查看」大文件时 pull 下来的副本（本模块的主要目标）
 #   adb_up_       上传时前端字节落地的中转文件（正常路径由调用方 finally 删除，
@@ -92,7 +94,7 @@ def sweep(prefixes=DEFAULT_PREFIXES, keep_newest=8, min_age_s=600.0,
             stats["kept"] += 1
             continue
         try:
-            os.remove(path)
+            os.remove(long_path(path))
             stats["removed"] += 1
             stats["freed"] += max(0, int(size or 0))
         except OSError:

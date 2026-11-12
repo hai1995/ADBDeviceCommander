@@ -16,6 +16,7 @@ import threading
 import time
 
 from backend.device_proc import kill_device_process
+from core.longpath import long_path
 from core.constants import (
     _WAVEHDR, adb_kwargs, adb_popen_kwargs, safe_name, unique_path)
 
@@ -328,8 +329,8 @@ def _media_duration(path):
 
 def _silent_remove(path):
     try:
-        if path and os.path.exists(path):
-            os.remove(path)
+        if path and os.path.exists(long_path(path)):
+            os.remove(long_path(path))
     except Exception:
         pass
 
@@ -451,8 +452,8 @@ class DeviceAudioCapture:
             # 把已经落盘的残片删掉。它不会被合成，留在 TEMP 里既白占空间，
             # 又让人看到 adb_devaudio_*.wav 误以为这次录音是好的。
             try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
+                if os.path.exists(long_path(tmp)):
+                    os.remove(long_path(tmp))
             except Exception:
                 pass
         try:
@@ -582,7 +583,7 @@ class MicRecorder:
         if self._running:
             return False, "已在录音"
         try:
-            os.makedirs(save_dir, exist_ok=True)
+            os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
             return False, "无法创建目录：%s" % e
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -689,7 +690,7 @@ class MicRecorder:
             data = data[:-(len(data) % block_align)]
         import struct
         size = len(data)
-        with open(self._path, "wb") as f:
+        with open(long_path(self._path), "wb") as f:
             f.write(b"RIFF")
             f.write(struct.pack("<I", 36 + size))
             f.write(b"WAVEfmt ")

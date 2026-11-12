@@ -7,6 +7,7 @@ from backend.controller import (
     root_intent, save_user_commands, tempfile, time,
     transform, unique_path, uuid
 )
+from core.longpath import long_path
 
 class CommandMixin:
     """快捷指令：执行、保存、导入导出、自定义、停止。"""
@@ -119,9 +120,9 @@ class CommandMixin:
         last_err = ""
         for out_dir in (primary, tempfile.gettempdir()):
             try:
-                os.makedirs(out_dir, exist_ok=True)
+                os.makedirs(long_path(out_dir), exist_ok=True)
                 path = unique_path(os.path.join(out_dir, name))
-                with open(path, "w", encoding="utf-8") as f:
+                with open(long_path(path), "w", encoding="utf-8") as f:
                     f.write(text)
             except OSError as e:
                 last_err = str(e)

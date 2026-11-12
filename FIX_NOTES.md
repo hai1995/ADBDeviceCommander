@@ -5983,3 +5983,84 @@ PowerShell 单引号包起来（内部单引号按 PowerShell 规则写成两个
 - 远程 9 个改动文件与本地**逐字节一致（9/9）**；`/branches` 仍只有 `main`。
 - **真实 CI（run `43039316182`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
   `打包（Windows x64）` → success。
+
+---
+
+# 第九十轮（第六轮：把「Windows 长路径 >260 字符」这条已知限制修掉）
+
+## 触发
+
+上一轮结尾记了一条**已知限制**：Windows 的 MAX_PATH 是 260 字符，本程序没处理
+`\\?\` 前缀 —— 同事把保存目录设成多层归档目录（`D:\工作\2026\客户A\车机项目\
+第二期\录屏\`）再拼上设备名与时间戳，截图 / 录屏 / logcat 抓取会**静默丢失**，
+症状是「系统找不到指定的文件」，用户会去查权限、查文件存不存在，根本想不到是
+长度问题。本轮把它修掉。
+
+## 修复
+
+### 1. 新模块 `core/longpath.py`：Windows 设备路径
+
+```python
+long_path(path)        # 平台感知：非 Windows 原样返回；Windows 上按需加 \\?\ 前缀
+win_long_path(path)    # 纯逻辑（不看平台），单测在 Linux 上也能验证
+is_too_long(path)      # 是否长到 adb / 资源管理器也会栽跟头（按 260 判）
+explain_long_path(path)# 过长时的中文说明（可直接拼进错误提示）
+```
+
+三条设计约束（写进模块头部，也各有一条门禁守着）：
+
+1. **`long_path()` 只许用在「本进程自己做」的文件 I/O 上**（open / os.makedirs /
+   os.replace / shutil…）；
+2. **绝不能**用在交给外部程序的参数上 —— 尤其 `adb pull` / `adb push` 的本地
+   路径！adb.exe 不认 `\\?\`，带上去必然失败；
+3. 也**绝不能**用在展示给用户的字符串里（界面会显示成 `\\?\D:\...`）。
+
+只对**够长**的路径加前缀（阈值 240，给「先落临时名再改名」的写法留余量），短路径
+原样返回 —— 绝大多数路径的行为完全不变，异常信息里也不会冒出看不懂的前缀。
+
+`_absolute()` 用 `ntpath` 处理绝对路径，于是这个纯逻辑函数在 Linux CI 上给出的
+答案与 Windows 一致（可直接单测）；真正在 Windows 上运行时改用 `os.path.abspath`
+（走 Win32 的 GetFullPathName，盘符相对路径 `C:foo` 才会按「该盘符的当前目录」
+解析）。
+
+### 2. 全库铺开：16 个模块、60 余处落盘点
+
+按「谁真正写文件」逐个改过（配置 / 命令库 / 诊断包 / 截图 / 录屏分段 / logcat
+抓取 / 性能报告 / 麦克风 / zip 打包 / 临时文件 / 崩溃日志 …）。**返回给用户、
+展示在界面上的路径一律保持原样** —— 用户看到的仍然是「D:\工作\...」。
+
+### 3. adb 拉不回来的那一段：预检 + 中文提示
+
+adb.exe 自己写文件，它不认 `\\?\` 前缀 → 目标路径超过 260 字符时，它只会甩一句
+含糊的英文错误，文件还不落地。改不了 adb，就**提前判一次**：
+
+- `backend/file_service.py download()`：pull 之前先算目标路径长度，超了直接回
+  「目标路径 N 个字符，超过 Windows 单条路径 260 字符的上限；请把『保存目录』改短
+  一些…」；
+- `backend/screen_service.py _pull_one()`：同样在拉回录像前判一次 —— 否则整场
+  录像就此白录，用户只看到「取回录屏文件失败」。
+
+### 4. 两条全库门禁（AST 扫描，不需要 Windows）
+
+| 门禁 | 拦什么 |
+|---|---|
+| `test_all_local_file_io_goes_through_long_path` | core/ backend/ main.py 里凡是做 open(写) / os.makedirs / os.remove / os.replace / zipfile 的**函数**，都必须引用 `long_path()` —— 否则那条路径超过 260 字符时就会静默丢文件 |
+| `test_no_long_path_in_subprocess_arguments` | `subprocess` 的参数里**不得**出现 `long_path(...)` —— 那是把 `\\?\` 交给 adb，必然失败 |
+
+两条门禁都做了**反向验证**：故意去掉一处 `long_path`、故意往 adb 参数里塞一处
+`long_path`，两条用例分别失败。
+
+## 测试
+
+新增 `tests/test_core_longpath.py`（9 条）：
+
+- 加不加前缀（短路径不加 / 超阈值加 / UNC 走 `\\?\UNC\` / 已带前缀幂等 / 空值安全 /
+  非 Windows 原样返回）；
+- `is_too_long` 按 260 判、`explain_long_path` 含「260」与「保存目录」；
+- 上面那两条全库门禁。
+
+## 验证
+
+- 后端 **1473 passed / 1 skipped**（新增 9 条）；`ruff check .` All checks passed。
+- 新增 docstring 里的反斜杠全部用 raw string，`python -W error::DeprecationWarning`
+  下重新编译无告警。

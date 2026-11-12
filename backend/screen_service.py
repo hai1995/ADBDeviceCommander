@@ -20,6 +20,7 @@ import time
 
 from backend.device_proc import kill_device_process
 from core import imgbytes
+from core.longpath import explain_long_path, is_too_long, long_path
 from core.constants import (
     REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
     REC_REBOOT_WAIT_S, REC_SEGMENT_S,
@@ -231,7 +232,7 @@ class ScreenCapturer:
         """
         if save_file:
             try:
-                os.makedirs(save_dir, exist_ok=True)
+                os.makedirs(long_path(save_dir), exist_ok=True)
             except Exception as e:
                 return None, "无法创建保存目录 %s: %s" % (save_dir, e)
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -410,21 +411,22 @@ class ScreenCapturer:
                     [adb, "-s", serial, "pull", remote, part],
                     stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
                 text2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
-                if r2.returncode != 0 or not os.path.exists(part):
+                if r2.returncode != 0 or not os.path.exists(long_path(part)):
                     errs.append("%s：adb pull 没取回（exit %d：%s）"
                                 % (remote, r2.returncode, text2[-200:] or "无 stderr"))
                     try:
-                        if os.path.exists(part): os.remove(part)
+                        if os.path.exists(long_path(part)):
+                            os.remove(long_path(part))
                     except Exception:
                         pass
                     continue
-                with open(part, "rb") as f:
+                with open(long_path(part), "rb") as f:
                     data = f.read()
                 # 本地 .part 中间文件必须清掉 —— 成功 return 前就删掉，
                 # 不能等调用方 / 下一次循环处理（调用方拿不到 .part 路径，
                 # 循环下一轮可能因为 screencap 失败直接 continue，永远碰不到）。
                 try:
-                    os.remove(part)
+                    os.remove(long_path(part))
                 except Exception:
                     pass
                 # 成功了：清理远程文件（try/except 吞掉，别覆盖本次结果）
@@ -438,14 +440,16 @@ class ScreenCapturer:
             except subprocess.TimeoutExpired:
                 errs.append("%s：adb pull 超时（%ds）" % (remote, timeout))
                 try:
-                    if os.path.exists(part): os.remove(part)
+                    if os.path.exists(long_path(part)):
+                        os.remove(long_path(part))
                 except Exception:
                     pass
                 continue
             except Exception as e:
                 errs.append("%s：adb pull 异常：%s" % (remote, e))
                 try:
-                    if os.path.exists(part): os.remove(part)
+                    if os.path.exists(long_path(part)):
+                        os.remove(long_path(part))
                 except Exception:
                     pass
                 continue
@@ -481,7 +485,7 @@ class ScreenCapturer:
             ext = ".jpg" if kind == "jpg" else "." + kind
             out = os.path.splitext(out)[0] + ext
         # exec-out 输出为原始 PNG 二进制，禁止做任何换行翻译，原样写入
-        with open(out, "wb") as f:
+        with open(long_path(out), "wb") as f:
             f.write(data)
         return out
 
@@ -615,7 +619,7 @@ class VideoRecorder:
             if serial in self._sessions:
                 return False, "该设备已在录制"
         try:
-            os.makedirs(save_dir, exist_ok=True)
+            os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
             return False, "无法创建保存目录 %s: %s" % (save_dir, e)
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -1408,7 +1412,7 @@ class VideoRecorder:
             size = os.path.getsize(path)
             if size < 64:
                 return False
-            with open(path, "rb") as f:
+            with open(long_path(path), "rb") as f:
                 head = f.read(min(size, 4 * 1024 * 1024))
                 if b"moov" in head:
                     return True
@@ -1477,9 +1481,15 @@ class VideoRecorder:
         # 直接抛 OSError：异常一路冒到 controller，跳过本会话的其余收尾，也让
         # stop_all 的循环中断、后面的设备统统不再收尾。转成一条明确的失败返回。
         try:
-            os.makedirs(sess["dir"], exist_ok=True)
+            os.makedirs(long_path(sess["dir"]), exist_ok=True)
         except Exception as e:
             return False, local, "无法创建保存目录 %s：%s" % (sess["dir"], e)
+        # adb pull 由 adb.exe 落盘，它**不认** \\?\ 前缀（见 core/longpath）：
+        # 目标路径超过 Windows 的 260 字符上限时，adb 只会甩一句含糊的
+        # 「adb: error: failed to copy」。这里提前判一次并给一句能照做的中文
+        # 提示 —— 否则整场录像就此白录，用户只看到「取回录屏文件失败」。
+        if is_too_long(local):
+            return False, local, explain_long_path(local)
         # 收尾/落盘有延迟：device 端 screenrecord 收到 SIGTERM 后需要一点时间写回
         # moov 头并关闭文件。这里先确认远端文件已就绪，再 pull，带退避重试。
         # 注意：adb 的报错信息有时落在 stdout（而非 stderr），两路都要采集，避免
@@ -1521,7 +1531,7 @@ class VideoRecorder:
                         [self.adb, "-s", serial, "pull", remote, local],
                         **adb_kwargs(120))
                     err = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
-                    if r.returncode == 0 and os.path.exists(local):
+                    if r.returncode == 0 and os.path.exists(long_path(local)):
                         # 校验 MP4 已收尾（含 moov 头）：否则没有时长、播放不了
                         if not VideoRecorder._mp4_has_moov(local):
                             try:

@@ -5,6 +5,7 @@ from typing import ClassVar
 from backend.controller import (
     os, safe_name, subprocess, sys, threading
 )
+from core.longpath import long_path
 
 
 def _build_browse_info(title):
@@ -166,10 +167,10 @@ class FileMixin:
         # 目录明明在，真正的问题是没权限。
         mkdir_err = ""
         try:
-            os.makedirs(d, exist_ok=True)
+            os.makedirs(long_path(d), exist_ok=True)
         except OSError as e:
             mkdir_err = str(e)
-        if not os.path.isdir(d):
+        if not os.path.isdir(long_path(d)):
             why = mkdir_err or "路径不存在"
             self._push_status("err", "⚠ 无法创建 / 打开目录 %s：%s" % (d, why))
             return {"ok": False, "text": why}
@@ -406,7 +407,7 @@ class FileMixin:
             "adb_up_%s_%s" % (uuid.uuid4().hex[:8],
                               safe_name(os.path.basename(name or ""))))
         try:
-            with open(tmp, "wb") as f:
+            with open(long_path(tmp), "wb") as f:
                 f.write(base64.b64decode(b64 or ""))
         except Exception as e:
             self._push_status("err", "⚠ 解码上传文件失败：%s" % e)

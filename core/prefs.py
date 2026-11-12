@@ -72,6 +72,7 @@ import sys
 import threading
 
 from core.constants import PROJECT_ROOT, resource_path
+from core.longpath import long_path
 
 # save_prefs 的「读-合并-写」整体互斥锁（见 save_prefs 的说明）。
 # 模块级：所有调用方共用同一把，跨线程串行化写入。
@@ -433,17 +434,21 @@ def ensure_prefs_file() -> str:
     写进去重启即丢，详见 prefs_path() 的说明。
     """
     p = prefs_path()
-    if os.path.exists(p):
+    # 长路径（>260 字符）：本进程自己做 I/O，可以放心用 \\?\ 前缀；
+    # 但**返回给调用方的仍是原始路径**（界面要显示它，见 core/longpath 的说明）。
+    lp = long_path(p)
+    if os.path.exists(lp):
         return p
     tmp = p + ".tmp"
+    ltmp = long_path(tmp)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(ltmp, "w", encoding="utf-8") as f:
             f.write(default_prefs_json())
-        os.replace(tmp, p)
+        os.replace(ltmp, lp)
     except Exception:
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            if os.path.exists(ltmp):
+                os.remove(ltmp)
         except Exception:
             pass
     return p
@@ -494,8 +499,9 @@ def _atomic_write(prefs: dict) -> bool:
     import uuid
     p = prefs_path()
     tmp = "%s.%s.tmp" % (p, uuid.uuid4().hex[:8])
+    lp, ltmp = long_path(p), long_path(tmp)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(prefs, f, ensure_ascii=False, indent=2)
             # 数据先落盘、再改名：os.replace 只保证「改名」这一步是原子的，
             # **不保证**内容已经写进磁盘 —— 断电后可能留下一个**内容为空**的
@@ -503,12 +509,12 @@ def _atomic_write(prefs: dict) -> bool:
             # 做实，代价只有几毫秒（仅在用户改设置时发生）。
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, p)
+        os.replace(ltmp, lp)
         return True
     except Exception:
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            if os.path.exists(ltmp):
+                os.remove(ltmp)
         except Exception:
             pass
         return False
@@ -538,7 +544,7 @@ def _migrate_rec_defaults(clean, warnings):
 def _read_json_file(path):
     """读一个 JSON 文件并返回 dict；文件缺失 / 损坏 / 非对象一律返回 None。"""
     try:
-        with open(path, encoding="utf-8-sig") as f:
+        with open(long_path(path), encoding="utf-8-sig") as f:
             import json
             data = json.load(f)
         return data if isinstance(data, dict) else None
@@ -556,10 +562,11 @@ def _migrate_legacy_file():
     返回迁移后的 dict（迁移失败返回 None）。
     """
     p_new = prefs_path()
-    if os.path.exists(p_new):
+    lp_new = long_path(p_new)
+    if os.path.exists(lp_new):
         return None            # 已有新文件：什么都不做
     p_old = legacy_prefs_path()
-    if not os.path.exists(p_old):
+    if not os.path.exists(long_path(p_old)):
         return None
     data = _read_json_file(p_old)
     if not data:
@@ -568,13 +575,14 @@ def _migrate_legacy_file():
     try:
         import json
         tmp = p_new + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        ltmp = long_path(tmp)
+        with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, p_new)
+        os.replace(ltmp, lp_new)
     except Exception:
         try:
-            if os.path.exists(p_new + ".tmp"):
-                os.remove(p_new + ".tmp")
+            if os.path.exists(ltmp):
+                os.remove(ltmp)
         except Exception:
             pass
         return None
@@ -588,18 +596,19 @@ def load_prefs_checked():
     旧版 settings.json 存在而 config.json 不存在时，自动迁移并给出提示。
     """
     p = prefs_path()
-    if not os.path.exists(p):
+    lp = long_path(p)
+    if not os.path.exists(lp):
         migrated = _migrate_legacy_file()
         if migrated is not None:
             return migrated, ["已从旧版 settings.json 迁移到 config.json"
                               "（旧文件保留为备份，可自行删除）"]
     data = _read_json_file(p)
     if data is None:
-        if not os.path.exists(p):
+        if not os.path.exists(lp):
             return {}, []
         # 文件在但读不出来（损坏 / 顶层不是对象）
         try:
-            with open(p, encoding="utf-8-sig") as f:
+            with open(lp, encoding="utf-8-sig") as f:
                 import json
                 json.load(f)
         except FileNotFoundError:
@@ -654,16 +663,17 @@ def resolve_save_dir(prefs=None, default=None, ensure_dir=False):
         return default, None
     cfg = raw.strip()
     mkdir_err = ""
-    if not os.path.isdir(cfg) and ensure_dir:
+    lcfg = long_path(cfg)
+    if not os.path.isdir(lcfg) and ensure_dir:
         try:
-            os.makedirs(cfg, exist_ok=True)
+            os.makedirs(lcfg, exist_ok=True)
         except OSError as e:
             # 用户在本机界面新填的路径建不出来（父级被同名文件占着 / 没权限 /
             # 盘符不存在）。旧实现吞掉异常后只说「不存在」，而用户去查时那
             # 个路径看起来一切正常（父目录明明在）—— 提示里必须带上原因。
             mkdir_err = str(e)
-    if os.path.isdir(cfg):
-        if os.access(cfg, os.W_OK):
+    if os.path.isdir(lcfg):
+        if os.access(lcfg, os.W_OK):
             return cfg, None
         return default, ("配置里的保存目录不可写，已改用默认目录：%s" % default)
     return default, ("配置里的保存目录在本机不存在，已改用默认目录：%s%s"

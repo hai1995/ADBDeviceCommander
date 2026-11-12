@@ -13,6 +13,7 @@ from backend.screen_service import device_clock
 from backend.video_join import join_segments
 from core.constants import LOGCAT_COVERAGE_WARN_S
 from core.logcat import read_time_bounds
+from core.longpath import long_path
 
 
 def _fmt_span(sec):
@@ -675,9 +676,9 @@ class RecordMixin:
                 continue
             seen.add(key)
             try:
-                if os.path.isdir(p) or not os.path.exists(p):
+                if os.path.isdir(long_path(p)) or not os.path.exists(long_path(p)):
                     continue
-                os.remove(p)
+                os.remove(long_path(p))
                 removed += 1
             except Exception:
                 kept.append(p)
@@ -800,8 +801,8 @@ class RecordMixin:
         # TEMP 留下孤儿文件，长期累积会悄悄占满系统盘。
         for lp in local_devaudio.values():
             try:
-                if lp and os.path.exists(lp):
-                    os.remove(lp)
+                if lp and os.path.exists(long_path(lp)):
+                    os.remove(long_path(lp))
             except Exception:
                 pass
         # 同步 logcat 抓取收尾：**录屏结束，日志必须同时结束**。
@@ -1027,7 +1028,7 @@ class RecordMixin:
                         pass
             want = stem + ".mp4"
             try:
-                os.replace(merged, want)
+                os.replace(long_path(merged), long_path(want))
                 final = want
             except Exception as e:
                 # 改不成名（目标被播放器占着等）不是失败：成片已经在 out 上，
@@ -1182,10 +1183,11 @@ class RecordMixin:
         「打包完成后清理刚打包的源文件（仅删打包所覆盖的文件）」保持一致。
         """
         written = []
+        lzip = long_path(zip_path)
         try:
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
-            with zipfile.ZipFile(zip_path, "w") as z:
+            if os.path.exists(lzip):
+                os.remove(lzip)
+            with zipfile.ZipFile(lzip, "w") as z:
                 for p in paths:
                     if (p and p != zip_path and os.path.exists(p)
                             and os.path.isfile(p)):
@@ -1193,22 +1195,22 @@ class RecordMixin:
                         # 再走 DEFLATE 只是把整个文件白算一遍：3 分钟的 1080p
                         # 录屏能白白多花一两秒 CPU，体积却几乎不变。体积真正
                         # 能压下来的是 logcat 的 txt，那类仍用 DEFLATE。
-                        z.write(p, os.path.basename(p),
+                        z.write(long_path(p), os.path.basename(p),
                                 compress_type=RecordMixin._zip_method_for(p))
                         written.append(p)
-            if not os.path.exists(zip_path):
+            if not os.path.exists(lzip):
                 return None
         except Exception:
             # 打包中途失败：清掉可能残留的半成品 zip，源文件一律保留
             try:
-                if os.path.exists(zip_path):
-                    os.remove(zip_path)
+                if os.path.exists(lzip):
+                    os.remove(lzip)
             except Exception:
                 pass
             return None
         for p in written:
             try:
-                os.remove(p)
+                os.remove(long_path(p))
             except Exception:
                 pass
         return zip_path
