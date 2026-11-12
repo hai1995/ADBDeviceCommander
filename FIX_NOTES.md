@@ -6384,3 +6384,24 @@ PowerShell 还原出一个参数 → grep 'a;b' /proc/x → adb 原样交给设�
 - 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
 - 复核 `core/rootguard` 的 root 切换保护：合并逻辑把 `adb root` 单独拆出来，
   保护仍能识别（`root_intent` 仍返回 `'root'`），本次改动不影响它。
+- 远程 6 个改动文件与本地**逐字节一致（6/6）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43159520183`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success。
+
+## 附记：本地验证必须与 CI 等价
+
+第一次推送被 CI 的**静态检查**拦下（run `43158894229` 失败，Windows 打包 job 被
+连带 skipped）：新测试文件里留了一个没用到的 `import re`。
+
+之所以本地没发现：`ruff.toml` 把 `tests/` **排除**在外（tests 的 F 类规则由 CI 的
+`pyflakes` 门禁覆盖，见该文件里的注释），而我本地只跑了 `ruff check .` —— 它按配置
+根本不扫 tests/。
+
+所以本项目本地验证的**完整**清单是四样，缺一不可：
+
+```
+python -m pyflakes backend core tools tests   # 覆盖 tests/ 的 F 类规则
+python -m ruff check .                         # 其余规则（ruff.toml 的 select）
+python -m pytest -q                            # 后端全量
+node tests/frontend/run-all.cjs                # 前端 jsdom
+```
