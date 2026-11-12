@@ -6134,3 +6134,13 @@ adb.exe 自己写文件，它不认 `\\?\` 前缀 → 目标路径超过 260 字
 `booted.settings` 又是整份 prefs，链路完整）；文件列表的「过期响应覆盖新目录」由
 后端 `_file_req` 序号守卫拦着；设备信息快照的前端串号防护；内置命令库逐条核对
 （`date` 格式、keycode、旋转、飞行模式接口等）无错。
+
+## 验证
+
+- 后端 **1475 passed / 1 skipped**（新增 2 条门禁用例）；`ruff check .` All checks passed。
+- 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
+- `set_theme` 补播报后，纯 mixin 单测（`SettingsMixin()` 单独实例化）没有播报通道
+  → 测试里补了一个记录用的替身（与 tests/test_backend_file.py 的既有做法一致）。
+- 远程 8 个改动文件与本地**逐字节一致（8/8）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43138844395`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success。
