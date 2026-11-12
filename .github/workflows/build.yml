@@ -172,7 +172,14 @@ jobs:
       - name: 构建（exe + 分发 zip + 源码 zip）
         # --package 产出发给同事的 ADBDeviceCommander_v<版本>_win64.zip
         # --zip     同时产出源码分发包（给要看代码的人）
-        run: python build.py --package --zip
+        #
+        # 默认就是单文件模式（--onefile）：分发件里只有**一个** exe，
+        # 同事双击即用，不需要拷整个目录、不需要解压出一堆 DLL。
+        # 这同时从结构上根除了「从网上下载解压后，DLL 带 Zone.Identifier →
+        # .NET 拒绝加载 → 启动即崩」的老问题（单文件把整包解压到 %TEMP%
+        # 下当场新建的目录，那些文件不带该标记）。
+        # 显式写上 --onefile 是为了让这行命令自解释（默认值变了也不误读）。
+        run: python build.py --onefile --package --zip
 
       - name: 生成 SHA256 校验和
         shell: pwsh

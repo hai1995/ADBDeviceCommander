@@ -103,6 +103,13 @@ const hitCount = (doc) => {
   return m ? Number(m[1]) : null;
 };
 
+// 切到指定的主 tab（与用户点页签同一条路径：switchMainTab → prepareTab）。
+// 分步加载后，「按包过滤」下拉这类 Logcat 页专属数据要切到该页才加载。
+function switchTab(doc, key) {
+  const btn = doc.querySelector('.tab-btn[data-tab="' + key + '"]');
+  if (btn) btn.click();
+}
+
 (async () => {
   console.log("\n[1] tag: / -tag: 包含与排除");
   {
@@ -185,6 +192,9 @@ const hitCount = (doc) => {
       logcat_packages: () => Promise.resolve({ ok: true, packages: ["com.demo.app", "com.other"] }),
       logcat_pidof: () => Promise.resolve({ ok: true, pids: ["5417"] }),
     });
+    // 分步加载：包下拉是 Logcat 页专属数据，切到该页才拉设备包名列表。
+    // boot 时设备已确定但没进过 Logcat 页，不会白打这次设备调用。
+    switchTab(doc, "logcat");
     const sel = doc.getElementById("lc-pkg");
     const filled = await waitFor(() => sel.options.length >= 3, 4000, "包列表填充");
     ok(filled, "设备确定后包下拉被填充（全部 + 2 个包）", sel.options.length + " 项");

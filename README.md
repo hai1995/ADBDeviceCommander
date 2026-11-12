@@ -124,28 +124,41 @@ python main.py --debug    # 附加 WebView2 开发者工具（调前端用）
 ### 打包成 exe（推荐给同事用）
 
 ```bat
-python build.py                # 目录模式（默认，启动最快，分发用）
-python build.py --onefile      # 单文件 exe：每次启动都要解压整包，启动慢 10s+
+python build.py                # 单文件 exe（默认）：分发件就是**一个 exe**
+python build.py --onedir       # 目录模式（仅供本机排查：启动快，但分发要整目录）
 python build.py --console      # 保留控制台窗口（排查「闪一下就没」）
 python build.py --bump         # 打包前先用 tools/bump_version.py 递增版本号
 python build.py --dry-run      # 只打印将要执行的 PyInstaller 命令
 python build.py --no-deps      # 跳过依赖检查与自动安装
+python build.py --with-numpy   # 把 numpy 也打进包（默认不打，见下）
 ```
 
-产物为 `dist\ADB设备指令台\` 目录（exe + `_internal\` 运行时依赖），**整个目录
-一起拷给同事**，双击里面的 exe 即可运行。`frontend/` 与使用说明都只打进产物内部。
+产物为 `dist\ADB设备指令台.exe`，**拷一个文件**给同事即可，双击运行、无需 Python，
+不依赖同目录任何文件夹。`frontend/`（界面代码）与使用说明都只打进 exe 内部。
 
-> **为什么默认目录模式**：单文件 exe 每次双击都要把整包（pywebview + pythonnet +
-> numpy，解开约 60~80MB）解压到 `%TEMP%` 再逐个被杀毒扫描，实测「启动二十多秒」；
-> 而 Python 代码本身只占 0.5 秒。目录模式没有解压这一步，启动约 1~2 秒。
-> 确需单文件转发时才用 `--onefile`。
+> **为什么默认改回单文件 exe**：上一版发的是「目录模式」（exe + `_internal\`）。
+> 同事从网上下载文件夹再解压，Windows 会给每个解出来的文件挂 Zone.Identifier
+> （ZoneId=3 = Internet）；.NET 的程序集加载器**拒绝加载**带此标记的托管 DLL，
+> 于是 WebView2 的 `Microsoft.Web.WebView2.Core.dll` 一加载就崩（HRESULT
+> `0x80131515`）。单文件 exe 每次把归档解压到 `%TEMP%` 下**新建**的目录，那些
+> 文件是当场创建的、不带此标记 —— **从结构上根除**「下载即崩」这一整类问题。
 
-分发的 `dist\ADB设备指令台\` 内容：
+> **单文件模式的启动速度怎么兼顾**：解压整包确实要时间，用三件事压下来 ——
+> ① 默认**不把 numpy 打进包**（它在 requirements 里本就是可选加速项，缺它时
+> `core/clipboard.py` 自动回退纯 Python、结果逐字节一致），实测单文件 exe 从
+> 68.7MB 降到 54.2MB（-21%），解压文件数少一大截、杀毒逐文件扫描同步变快；
+> ② **前端分步加载**：窗口先出加载页，再按「上次停留的 tab → 用户切到哪个 tab
+> 就加载哪个」逐块加载，指令库 / Logcat 包列表（一次设备调用）等重活不再挤在
+> 启动关键路径（见 `frontend/js/app.js` 的 `prepareTab`）；③ `frontend/` 等资源
+> 仍打进包内（走 `resource_path` 的 `_MEIPASS` 回退），不依赖 exe 旁边任何文件。
+> `config.json` / `commands.json` 仍按 `sys.executable` 落在 exe 同目录，升级不
+> 覆盖用户设置。确需 numpy 加速或本机快速迭代时，分别用 `--with-numpy` / `--onedir`。
 
-| 文件 / 目录 | 说明 |
+分发目录 `dist\` 里只含：
+
+| 文件 | 说明 |
 | --- | --- |
-| `ADB设备指令台.exe` | 主程序（双击运行，无需 Python） |
-| `_internal\` | 运行时依赖，缺少则无法启动 |
+| `ADB设备指令台.exe` | 主程序（单文件，双击运行，无需 Python） |
 
 > 使用说明不再以独立文件随包分发，而是内置于 exe，在程序「关于 → 使用说明」子 tab 里直接阅读。
 

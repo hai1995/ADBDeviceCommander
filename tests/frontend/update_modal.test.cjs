@@ -105,10 +105,17 @@ function mkEnv(opts) {
   return { window, doc: window.document, calls, pending };
 }
 
+// 切到指定的主 tab（与用户点页签同一条路径：switchMainTab → prepareTab）。
+// 关于页的更新状态（#about-update-state / -auto / -skipped）属于「关于」页的
+// 数据：分步加载后启动时**不**回填，切到「关于」页时才拉 update_info。
+function switchTab(doc, key) {
+  const btn = doc.querySelector('.tab-btn[data-tab="' + key + '"]');
+  if (btn) btn.click();
+}
+
 const watchdog = setTimeout(() => {
   console.log("    (看门狗触发：疑似断言抛错导致未收尾)");
-  process.exit(fail ? 1 : 0);
-}, 90000);
+  process.exit(fail ? 1 : 0);}, 90000);
 
 (async () => {
   console.log("[A] 结构：关于页一行 + 弹窗控件都在");
@@ -277,15 +284,18 @@ const watchdog = setTimeout(() => {
   {
     const { doc } = mkEnv({ info: { last: { status: "update", current: "2026.1029.1931",
                                             version: "2026.1103.1200" } } });
+    // 分步加载：关于页的数据在「切到关于页」时才回填（见 switchTab 的说明）
+    switchTab(doc, "about");
     const back = await waitFor(
       () => /有新版本/.test(doc.getElementById("about-update-state").textContent),
       4000, "回填上次结果");
-    ok(back, "启动时把上次检查结果回填到关于页");
+    ok(back, "切到关于页后把上次检查结果回填到关于页");
     ok(doc.getElementById("update-modal").classList.contains("hidden"),
       "回填不弹窗（弹窗只由事件触发，避免一开程序就弹旧结果）");
   }
   {
     const { doc } = mkEnv({ info: { enabled: false } });
+    switchTab(doc, "about");
     await waitFor(() => doc.getElementById("about-update-auto").checked === false,
                   4000, "回填开关");
     ok(doc.getElementById("about-update-auto").checked === false,
@@ -294,11 +304,12 @@ const watchdog = setTimeout(() => {
 
   console.log("\n[I] 跳过版本的恢复出口：跳过可见、点了调 update_unskip、随后藏起");
   {
-    // 启动回填：update_info 带着 skipped → 出口直接亮出来（重启后仍能反悔）
+    // 切到关于页时回填：update_info 带着 skipped → 出口直接亮出来（重启后仍能反悔）
     const { doc } = mkEnv({ info: { skipped: "2026.1103.1200" } });
+    switchTab(doc, "about");
     const b = doc.getElementById("about-update-skipped");
     const shown = await waitFor(() => !b.hidden, 4000, "回填 skipped");
-    ok(shown, "config.json 里记过跳过版本 → 启动后恢复出口亮起");
+    ok(shown, "config.json 里记过跳过版本 → 切到关于页后恢复出口亮起");
     ok(/2026\.1103\.1200/.test(b.textContent), "出口带上被跳过的版本号");
   }
   {

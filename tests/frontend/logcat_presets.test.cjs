@@ -81,7 +81,16 @@ async function boot(settings) {
   // 「（无）」选项会让断言抢在配置恢复之前跑起来。
   await waitFor(() => doc.getElementById("pill").textContent === "已就绪",
                 6000, "booted");
+  // 分步加载：预设下拉（#lc-preset）属于 Logcat 页的数据，启动时**不**加载，
+  // 切到 Logcat 页时才恢复。所以本文件的每个用例都要先切过去。
+  switchTab(doc, "logcat");
   return { window, doc };
+}
+
+// 切到指定的主 tab（与用户点页签同一条路径：switchMainTab → prepareTab）
+function switchTab(doc, key) {
+  const btn = doc.querySelector('.tab-btn[data-tab="' + key + '"]');
+  if (btn) btn.click();
 }
 
 function typeFilter(window, doc, kw) {

@@ -20,12 +20,14 @@ import build  # noqa: E402
 def _args(**kw):
     """构造一个 argparse 命名空间（只含 pyinstaller_args 用到的字段）。"""
     base = dict(mode="onedir", console=False, clean=True,
-                dist_dir=Path("dist"), work_dir=Path("build"), log_level="WARN")
+                dist_dir=Path("dist"), work_dir=Path("build"), log_level="WARN",
+                with_numpy=False)
     base.update(kw)
     return type("Args", (), base)()
 
 
-def test_default_mode_args_are_onedir_windowed_with_icon():
+def test_onedir_args_are_onedir_windowed_with_icon():
+    """_args() 的 onedir 组合：目录模式 + 无控制台 + 图标。"""
     args = build.pyinstaller_args(_args())
     assert "--onedir" in args
     assert "--onefile" not in args
@@ -67,6 +69,37 @@ def test_excludes_and_paths():
     # .spec 落在 work_dir，不污染工程根
     assert Path(args[args.index("--specpath") + 1]).name == "tmp"
     assert args[-1] == str(ROOT / build.ENTRY)
+
+
+def test_numpy_is_excluded_by_default():
+    """默认**不打** numpy：单文件模式每次启动都要解压整包，numpy 的
+    ~40MB / 1184 个文件直接变成解压耗时与杀毒扫描次数。
+
+    numpy 在 requirements.txt 里本就标着「可选」，缺它时 core/clipboard.py
+    自动回退纯 Python，结果逐字节一致（tests/test_core_clipboard.py 有对拍）。
+    实测（Linux + PyInstaller 6）：带 numpy 68.7MB，不带 54.2MB（-21%）。
+    """
+    args = build.pyinstaller_args(_args())
+    for mod in build.OPTIONAL_EXCLUDE_MODULES:
+        assert mod in args, "%s 应默认排除" % mod
+
+
+def test_with_numpy_flag_keeps_numpy_in_bundle():
+    """--with-numpy：想要截图写剪贴板时的向量化加速就显式带上它。"""
+    args = build.pyinstaller_args(_args(with_numpy=True))
+    for mod in build.OPTIONAL_EXCLUDE_MODULES:
+        assert mod not in args, "%s 在 --with-numpy 下不该被排除" % mod
+
+
+def test_cli_with_numpy_flag_is_accepted(monkeypatch):
+    """命令行开关真的能传到 pyinstaller_args（文档里写了就得能用）。"""
+    seen = []
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "run_pyinstaller",
+                        lambda args, dry: seen.append(args) or (0, ""))
+    assert build.main(["--dry-run", "--no-deps", "--with-numpy"]) == 0
+    assert seen and "numpy" not in seen[0], seen
 
 
 def test_publish_from_stage_copies_exe(tmp_path):
@@ -313,10 +346,16 @@ def test_webview_start_never_uses_ssl():
 # ---------------------------------------------------------------------------
 # 命令行开关：文档里写过的写法必须真的可用
 # ---------------------------------------------------------------------------
-def test_default_mode_is_onedir(monkeypatch):
-    """默认必须是目录模式：单文件 exe 每次启动解压整包，用户实报启动二十多秒。
+def test_default_mode_is_onefile(monkeypatch):
+    """默认必须是**单文件**模式：分发件就是一个 exe，同事双击即用。
 
-    回归锁定：曾经默认 onefile，双击到界面就绪要 20s+，而 Python 代码只占 0.5s。
+    回归锁定（两次方向相反的教训）：
+    * 曾经默认 onedir（目录 + _internal/）—— 分发件要拷整个文件夹，且从网上
+      下载解压后每个 DLL 都带 Zone.Identifier，.NET 的 CAS 加载器**拒绝加载**
+      托管 DLL（WebView2 的 Microsoft.Web.WebView2.Core.dll），程序直接崩。
+    * 曾经默认 onefile 但整包含 numpy（68.7MB）—— 每次启动解压整包，用户实报
+      「启动二十多秒」。
+    现在默认 onefile + 不打 numpy：崩溃从结构上消失，exe 体积也降了 21%。
     """
     seen = []
     monkeypatch.setattr(build, "check_sources", lambda: [])
@@ -324,8 +363,8 @@ def test_default_mode_is_onedir(monkeypatch):
     monkeypatch.setattr(build, "run_pyinstaller",
                         lambda args, dry: seen.append(args) or (0, ""))
     assert build.main(["--dry-run", "--no-deps"]) == 0
-    assert seen and "--onedir" in seen[0], seen
-    assert "--onefile" not in seen[0]
+    assert seen and "--onefile" in seen[0], seen
+    assert "--onedir" not in seen[0]
 
 
 def test_documented_onedir_flag_is_accepted(monkeypatch):
@@ -488,6 +527,15 @@ def test_preflight_checks_mode_specific_stage_path(monkeypatch, tmp_path):
     rc = build.main(["--no-deps", "--work-dir", str(tmp_path / "build"),
                      "--dist-dir", str(tmp_path / "dist")])
     assert rc == 5
+    # 默认是单文件模式：产物直接落在 dist_stage/ 下（不再有 <APP_NAME>/ 一层）
+    assert seen and seen[0].parent.name == "dist_stage", seen
+
+    # 目录模式则要查 dist_stage/<APP_NAME>/ 下的那个
+    seen.clear()
+    rc = build.main(["--onedir", "--no-deps",
+                     "--work-dir", str(tmp_path / "build"),
+                     "--dist-dir", str(tmp_path / "dist")])
+    assert rc == 5
     assert seen and seen[0].parent.name == build.APP_NAME, seen
 
 
@@ -644,6 +692,27 @@ def test_win_package_contains_only_exe(tmp_path):
     assert top + "使用说明.txt" not in names, "使用说明已移入程序内，不再随包分发"
     assert top + "config.json" not in names, "个人配置不进分发件"
     assert top + "assets/app.ico" not in names, "assets 不再随版本分发"
+
+
+def test_win_package_onefile_holds_exactly_one_exe(tmp_path):
+    """单文件模式（默认）：分发件里**只有那一个 exe**，同事解压即双击即用。
+
+    这是「单 exe 分发」这条要求的验收点：包里若混进了 _internal/ 或别的
+    文件，同事就还得拷整个目录 —— 那正是上一版崩溃（从网上下载解压后
+    DLL 带 Zone.Identifier → .NET 拒绝加载）的分发形态。
+    """
+    root, dist = _fake_dist(tmp_path)
+    # 造一个「目录模式残留」：exe 旁边还有 _internal/ 与个人数据
+    (dist / "_internal").mkdir()
+    (dist / "_internal" / "python311.dll").write_bytes(b"DLL")
+    (dist / "config.json").write_text("{}", encoding="utf-8")
+    (dist / "commands.json").write_text("[]", encoding="utf-8")
+
+    names = zipfile.ZipFile(build.make_win_package(dist, tmp_path / "out",
+                                                    root=root)).namelist()
+    top = names[0].split("/")[0]
+    exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
+    assert names == [top + "/" + exe_name], names
 
 
 def test_win_package_is_wrapped_in_single_top_dir(tmp_path):

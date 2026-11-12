@@ -237,7 +237,9 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: 构建（exe + 分发 zip + 源码 zip）
-        run: python build.py --package --zip
+        # 单文件模式（--onefile）：分发件里只有**一个** exe，同事双击即用。
+        # 显式写出这个开关，让发版命令自解释（默认值改了也不误读）。
+        run: python build.py --onefile --package --zip
 
       - name: 生成 SHA256 校验和
         shell: pwsh

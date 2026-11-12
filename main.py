@@ -447,20 +447,41 @@ def _process_age_seconds():
 # ---------------------------------------------------------------------------
 # 打包态 Windows：清除「来自网络」标记（Mark-of-the-Web / Zone.Identifier）
 #
-# 为什么需要：默认分发件是 onedir 的文件夹 zip。用户从浏览器/IM/邮件下载后
-# 解压，Windows 会给每个解出来的文件挂一条 NTFS 备用数据流 Zone.Identifier
-# （ZoneId=3 = Internet）。.NET Framework 的 CAS 加载器**拒绝加载**带此标记
-# 的托管 DLL，于是 pythonnet 在 import clr 时抛：
-#   RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
-#   from ...\_internal\pythonnet\runtime\Python.Runtime.dll
-# pywebview 的 winforms 后端只捕获 ImportError，这个 RuntimeError 会一路冒泡
-# 到主线程 —— 也就是用户看到的「Unhandled exception in script 'main'」。
-# onefile 模式解压到 %TEMP% 时文件不继承该标记，所以改成 onedir 之后才暴露。
+# 为什么需要（**目录模式**下）：分发件是打包后的文件夹，用户从浏览器/IM/邮件
+# 下载后解压，Windows 会给每个解出来的文件挂一条 NTFS 备用数据流
+# Zone.Identifier（ZoneId=3 = Internet）。.NET Framework 的程序集加载器
+# **拒绝加载**带此标记的托管 DLL：pythonnet 在 import clr /
+# clr.AddReference 时抛 .NET 的 FileLoadException（HRESULT 0x80131515，
+# 「未能加载文件或程序集 Microsoft.Web.WebView2.Core.dll」），内层是
+# NotSupportedException「尝试从一个网络位置加载程序集」—— 也就是 .NET 的
+# CAS 加载器判定「这个程序集来自网络」直接拒绝。
+#
+# 实测踩过的坑（本轮崩溃的真正原因）：**清理目录清单是手写的**，只列了
+# pythonnet/runtime 与 clr_loader/ffi/dlls 两处，漏掉了 webview/lib。
+# 于是 pythonnet 修好了、WebView2 的托管程序集紧接着炸 —— 报错路径
+# "webview\lib\Microsoft.Web.WebView2.Core.dll" 正是漏网的那一个。
+# 结论：**不能再靠手写清单**，改成「递归扫整个运行时目录树」。
+#
+# 为什么递归扫不会拖慢启动：实测（4500 个文件的合成树）整树 scandir 遍历
+# 只要 ~4.5ms；真正耗时的是 DeleteFileW 的文件系统调用，而它只对**二进制**
+# 后缀的文件发生（.dll/.pyd/.exe/.manifest），Python 源码/缓存一律跳过。
+# 递归一次换掉「每加一个依赖就补一行清单」的长期失修，这笔买卖很划算。
 #
 # 解法：在 import clr 之前（webview.start 里才会 import，这里来得及）删掉这些
 # 二进制的 :Zone.Identifier。删 ADS 不需要管理员权限，ADS 不存在时
-# DeleteFileW 直接返回 FALSE、无副作用。只扫几个固定目录 + 只看二进制后缀，
-# 避免全包遍历把启动时间又拖回去（用户已经反馈过启动慢）。
+# DeleteFileW 直接返回 FALSE、无副作用。
+#
+# **单文件模式（onefile）下这段清理基本是空转，但它必须留着**：
+#   * 单文件模式把整包解压到 %TEMP% 下**每次新建**的目录，那些文件是当场
+#     创建的，本就不带 Zone.Identifier —— .NET 不会再拒绝加载。也就是说
+#     **崩溃在单文件模式下从结构上就消失了**（这正是改用单文件分发的
+#     主要收益之一：同事只需要下载并双击一个 exe，不会再因为「解压目录
+#     里的 DLL 带下载标记」而启动失败）。
+#   * 但「用户可能把 exe 放在从网络下载的位置」这件事仍然存在：exe 自身
+#     会带 Zone.Identifier，某些企业策略下这仍可能拦下 DLL 加载。留着
+#     递归清理当兜底，代价只有几毫秒。
+#   * 关键：**绝不能**因此去扫 exe 同目录（那可能是用户的「下载」文件夹，
+#     里面还有别的下载物）。判定见 _motw_cleanup_dirs 的说明。
 # ---------------------------------------------------------------------------
 _MOTW_BINARY_SUFFIXES = (".dll", ".pyd", ".exe", ".manifest")
 
@@ -471,31 +492,97 @@ def _motw_needed():
 
 
 def _motw_cleanup_dirs():
-    """需要清理的目录：onedir 的 _internal（= sys._MEIPASS）+ exe 同目录，
-    外加 pythonnet / clr_loader 放托管 DLL 的子目录。返回去重后的列表。"""
-    bases = []
+    """需要递归清理的根目录。
+
+    **只清「运行时目录树」（sys._MEIPASS）**，以及在「目录模式」下额外清
+    exe 同目录。两种打包布局的差别很要紧：
+
+    * 目录模式（onedir）：_MEIPASS = exe 旁的 _internal/，exe 同目录就是
+      **程序自己的目录**（里面只有本程序的文件）。老版本 PyInstaller 还会
+      把部分 DLL 平铺在 exe 旁边，一并清掉。
+    * 单文件模式（onefile）：_MEIPASS = %TEMP% 下**每次新建**的临时目录
+      （解出来的文件是当场创建的，本来就不带 Zone.Identifier）；而 exe
+      同目录是**用户自己放 exe 的地方** —— 很可能就是「下载」文件夹，
+      里面还有用户别的下载物。递归扫它会顺手删掉那些文件的「来自网络」
+      标记（等于替用户解除了别的程序的下载来源标记），既越界又慢。
+      故 onefile 下**只清 _MEIPASS**。
+
+    判据用「_MEIPASS 是否位于 exe 同目录之下」：onedir 是（_internal 在
+    exe 旁），onefile 不是（临时目录在别处）。这个判据不依赖 PyInstaller
+    的内部命名约定。
+
+    长路径安全：程序装在深层目录时，os.path.isdir 对超长路径返回 False →
+    目录找不到 → MOTW 清理**静默跳过** → 那个崩溃又回来了，还查不出原因。
+    """
+    roots = []
     meipass = getattr(sys, "_MEIPASS", "")
-    # 长路径安全：这一步是「崩溃修复」本身 —— 程序装在深层目录时，
-    # os.path.isdir 对超长路径返回 False → 目录找不到 → MOTW 清理**静默跳过**
-    # → 那个「系统找不到指定的文件」的崩溃又回来了，还查不出原因。
     if meipass and path_isdir(meipass):
-        bases.append(meipass)
+        roots.append(meipass)
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-    if exe_dir and path_isdir(exe_dir) and exe_dir not in bases:
-        bases.append(exe_dir)
-    dirs = []
-    for base in bases:
-        candidates = [
-            base,                                                   # DLL 平铺层
-            os.path.join(base, "pythonnet", "runtime"),              # Python.Runtime.dll
-            os.path.join(base, "clr_loader", "ffi", "dlls", "amd64"),  # ClrLoader.dll
-            os.path.join(base, "clr_loader", "ffi", "dlls", "x86"),
-            os.path.join(base, "clr_loader", "ffi", "dlls"),
-        ]
-        for d in candidates:
-            if path_isdir(d) and d not in dirs:
-                dirs.append(d)
-    return dirs
+    if exe_dir and path_isdir(exe_dir) and exe_dir not in roots:
+        # 判据：_MEIPASS 位于 exe 同目录**之下** → 这是目录模式（onedir）。
+        # 那种布局下 exe 同目录就是程序自己的目录（只有本程序的文件），
+        # 老版本 PyInstaller 还会把部分 DLL 平铺在 exe 旁边，一并清掉。
+        #
+        # 单文件模式（onefile）不满足这个判据：_MEIPASS 在 %TEMP% 下每次
+        # 新建，exe 同目录是**用户自己放 exe 的地方**（很可能是「下载」
+        # 文件夹，里面还有别的下载物）。递归扫它会顺手删掉那些文件的
+        # 「来自网络」标记 —— 越界且慢。这种情况下只清 _MEIPASS。
+        #
+        # 这个判据只依赖「目录包含关系」，不依赖 PyInstaller 的内部命名约定。
+        if any(_is_under(exe_dir, r) for r in roots):
+            roots.append(exe_dir)
+    return roots
+
+
+def _is_under(parent, child):
+    """child 是否在 parent 之内（含相等）。用于避免重复扫描同一棵树。"""
+    try:
+        parent = os.path.normcase(os.path.abspath(parent))
+        child = os.path.normcase(os.path.abspath(child))
+    except (OSError, ValueError):
+        return False
+    if parent == child:
+        return True
+    return child.startswith(parent + os.sep)
+
+
+def _iter_motw_files(root):
+    """递归遍历 root，产出其中所有「二进制」文件的路径。
+
+    只认二进制后缀（.dll/.pyd/.exe/.manifest）：Python 源码与 .pyc 带上
+    Zone.Identifier 也不会让 .NET 拒绝加载它们，为它们多花 DeleteFileW 的
+    系统调用纯属浪费。
+
+    用显式栈而不是递归函数：目录层级不可控（用户可能把程序放在归档目录里），
+    递归版遇到极深目录会撞 Python 的递归上限。
+    """
+    stack = [root]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        # 目录可能被符号链接绕回自己：用 realpath 去重，防无限循环。
+        try:
+            key = os.path.realpath(current)
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            entries = list(os.scandir(long_path(current)))
+        except (OSError, ValueError):
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                    continue
+                if not entry.name.lower().endswith(_MOTW_BINARY_SUFFIXES):
+                    continue
+            except OSError:
+                continue
+            yield entry.path
 
 
 def _delete_zone_identifier(ads_path):
@@ -519,7 +606,7 @@ def _delete_zone_identifier(ads_path):
 
 
 def _strip_mark_of_the_web():
-    """清掉打包目录下二进制的「来自网络」标记，返回尝试清理的文件数。
+    """清掉运行时目录树下所有二进制的「来自网络」标记，返回清理的文件数。
 
     全程不抛异常：清理失败只是让后面的 GUI 初始化仍可能失败，那种情况由
     _report_gui_init_failure 给出可操作的中文指引，绝不能在这里先崩掉。
@@ -528,20 +615,9 @@ def _strip_mark_of_the_web():
         return 0
     count = 0
     try:
-        for d in _motw_cleanup_dirs():
-            try:
-                # 长路径安全：os.listdir 对超长路径直接抛 OSError（不像 exists
-                # 那样返回 False），这里会被 except 吞掉 → 整个目录被跳过。
-                names = os.listdir(long_path(d))
-            except OSError:
-                continue
-            for name in names:
-                if not name.lower().endswith(_MOTW_BINARY_SUFFIXES):
-                    continue        # 跳过 .py/.pyc/.txt，别把整个包扫一遍
-                p = os.path.join(d, name)
-                if not path_isfile(p):
-                    continue
-                _delete_zone_identifier(p + ":Zone.Identifier")
+        for root in _motw_cleanup_dirs():
+            for path in _iter_motw_files(root):
+                _delete_zone_identifier(path + ":Zone.Identifier")
                 count += 1
     except Exception:
         pass

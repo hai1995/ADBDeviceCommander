@@ -10,8 +10,8 @@
 
 用法
 ----
-    python build.py                 # 目录模式（默认，启动最快，分发给同事用）
-    python build.py --onefile       # 单文件 exe：每次启动都要解压整包，启动慢 10s+
+    python build.py                 # 单文件 exe（默认）：分发件就是**一个 exe**
+    python build.py --onedir        # 目录模式（仅供本机排查：启动快，但分发要整目录）
     python build.py --console       # 保留控制台窗口（排查「闪一下就没」）
     python build.py --bump          # 打包前先用 tools/bump_version.py 递增版本号
     python build.py --no-deps       # 跳过依赖检查与自动安装
@@ -21,21 +21,52 @@
     python build.py --zip-only      # 跳过 PyInstaller，只产出源码分发 zip
     python build.py --package       # exe 打完后，额外产出「双击即用」的 Windows 分发 zip
                                     # （ADBDeviceCommander_v<版本>_win64.zip，CI 发的就是它）
+    python build.py --with-numpy    # 把 numpy 也打进 exe（默认不打，见下）
 
 产物（`dist/` 整个目录拷给同事即可）：
 
-目录模式下 `dist/` 是一个完整的应用目录（`ADB设备指令台/`），整个目录必须一起
-拷给同事：exe 只是启动器，真正运行时依赖都 `_internal/` 里。
+单文件模式下 `dist/` 里只有**一个** `ADB设备指令台.exe`，双击即用：
 
 | 文件                    | 说明                                     |
 | ----------------------- | ---------------------------------------- |
 | ADB设备指令台.exe       | 主程序（双击运行，无需 Python）          |
-| _internal/              | 运行时依赖（Python 标准库 / pywebview 等）|
 
-为什么默认目录模式（onefile 每次启动都慢）：单文件 exe 每次双击都要先把整包
-（本项目含 pywebview + pythonnet + numpy，解开约 60~80MB）解压到 %TEMP%，杀毒
-软件再逐个扫描，用户实报「启动二十多秒」而 Python 代码本身只占 0.5 秒。目录模式
-没有解压这一步，启动约 1~2 秒。
+为什么默认单文件（而不是「目录 + _internal/」）
+----------------------------------------------
+上一版发的是**目录模式**：exe 只是启动器，真正的运行时（Python 标准库 /
+pywebview / pythonnet / WebView2 托管 DLL）全在旁边的 `_internal/` 里。
+同事把整个文件夹拷过去、**从网上下载再解压**后，Windows 会给解压出来的每个
+文件挂一条 NTFS 备用数据流 Zone.Identifier（ZoneId=3 = Internet）。.NET
+Framework 的程序集加载器**拒绝加载**带此标记的托管 DLL，于是 WebView2 的
+`Microsoft.Web.WebView2.Core.dll` 一加载就炸：
+
+    System.IO.FileLoadException: 未能加载文件或程序集
+      "file:///...\\webview\\lib\\Microsoft.Web.WebView2.Core.dll" ... 不支持操作。
+      (异常来自 HRESULT: 0x80131515)
+    ---> System.NotSupportedException: 尝试从一个网络位置加载程序集 ...
+
+单文件模式**从结构上根除**这个问题：exe 每次启动把内置归档解压到
+%TEMP% 下新建的目录，那些文件是**当场创建**的，没有也不可能有
+Zone.Identifier —— .NET 不会再拒绝加载。代价是每次启动都要解压整包
+（见下节「启动速度」）。
+
+启动速度：单文件模式怎么把解压耗时压下来
+------------------------------------------
+单文件模式每次启动都要把整包解压到 %TEMP%，这一步完全在 Python 代码
+之前发生（程序内部任何计时都看不到），是「双击到窗口出现」的主要成本。
+三件事一起做，把它压到可接受：
+
+1. **默认不把 numpy 打进包**（`--with-numpy` 可显式打开）。numpy 在
+   requirements.txt 里本就是**可选**加速项（PNG filter 还原 / BGR 换位
+   向量化），缺它时 core/clipboard.py 自动回退纯 Python，**结果逐字节
+   一致**（tests/test_core_clipboard.py 有对拍用例）。而 numpy 的 Windows
+   轮子装完约 40MB、1184 个文件 —— 实测单文件 exe 从 68.7MB 降到 54.2MB
+   （-21%），解压的文件数也少一大截，杀毒软件的逐文件扫描同步变快。
+2. **前端分步加载**：窗口先出加载页，再按「上次停留的 tab → 用户切到
+   哪个 tab 就加载哪个」逐块加载（见 frontend/js/app.js 的 prepareTab）。
+   指令库、Logcat 包列表（一次设备调用）等重活不再挤在启动关键路径上。
+3. **exe 同目录优先的资源查找**：frontend/ 等资源仍打进包内（走
+   resource_path 的 _MEIPASS 回退），不依赖 exe 旁边的任何文件。
 
 `frontend/`（界面代码）与使用说明都只打进 exe 内部，使用者无需也不会去改；
 使用说明在程序「关于」页的「使用说明」子 tab 内直接阅读。
@@ -124,6 +155,21 @@ def _package_excluded(name: str) -> bool:
 # ⚠️ 若将来项目真的要 import cryptography（或给 webview.start 传 ssl=True），
 #    必须先从这里移除——tests/test_build.py 的源码安全测试会拦住这种改动。
 EXCLUDE_MODULES = ["pytest", "PIL", "cryptography"]
+
+# 可选加速依赖，默认**不进包**（用 --with-numpy 才带上）。
+#
+# numpy 在 requirements.txt 里本就标着「可选」：core/clipboard.py 只在真正
+# 写剪贴板时惰性 import 它，导入失败就自动回退纯 Python 实现，**结果逐字节
+# 一致**（tests/test_core_clipboard.py 有 numpy 路径 vs 纯 Python 的对拍用例）。
+#
+# 而它的代价在单文件模式下被放大：Windows 轮子装完约 40MB、1184 个文件。
+# 单文件 exe 每次启动都要把整包解压到 %TEMP%，文件数直接决定解压耗时，
+# 还要被杀毒软件逐个扫描。实测（Linux + PyInstaller 6，同一份源码）：
+#   带 numpy：68.7 MB    不带 numpy：54.2 MB（-21%）
+# 这 21% 直接换成「双击到窗口出现」的时间，故默认排除。
+#
+# 想要 numpy 加速（截图写剪贴板时 PNG filter 还原快 2 倍以上）就加 --with-numpy。
+OPTIONAL_EXCLUDE_MODULES = ["numpy"]
 
 # 构建前清掉的缓存目录：删了会自动再生，但会让源码分发包凭空胖几 MB。
 # 注意不含 node_modules——那是前端测试依赖，删了要重装，分发性排除
@@ -242,6 +288,12 @@ def pyinstaller_args(args) -> list:
         out += ["--add-data", "%s%s%s" % (ROOT / src, os.pathsep, dst)]
     for mod in EXCLUDE_MODULES:
         out += ["--exclude-module", mod]
+    # numpy 默认不进包（见 OPTIONAL_EXCLUDE_MODULES 的说明）：
+    # 单文件模式每次启动都要解压整包，numpy 的 ~40MB / 1184 个文件直接
+    # 变成解压耗时与杀毒扫描次数。--with-numpy 才带上它。
+    if not getattr(args, "with_numpy", False):
+        for mod in OPTIONAL_EXCLUDE_MODULES:
+            out += ["--exclude-module", mod]
     # 先打进 build/ 下的暂存目录，再由本脚本拷进 dist/：
     # 直接把 dist/ 当 --distpath 时，PyInstaller 会先 os.remove 旧 exe —— 一旦那一步
     # 失败（文件被占用，或被「安全删除」类钩子拦截）整个构建就白跑了。
@@ -361,16 +413,17 @@ def win_package_name(root: Path = ROOT) -> str:
 
 
 def make_win_package(target: Path, dist_dir: Path = None,
-                     root: Path = ROOT, mode: str = "onedir") -> Path:
+                     root: Path = ROOT, mode: str = "onefile") -> Path:
     """把产物目录里「双击即用」的那一套打成 zip，返回产物路径。
 
     与 make_source_zip 的分工：
       * 源码包给「要看代码 / 想自己跑起来」的人，里面是 .py 与测试；
       * 这个包给「只想用」的同事，里面是可直接运行的应用（使用说明已移入程序内）。
 
-    **目录模式必须整目录打包**：exe 只是启动器，运行时依赖（python 标准库 /
-    pywebview / `_internal`）都在同目录。只拷 exe 会双击即报「找不到 DLL / 无法
-    加载 Python 运行时」。所以 onedir 走整树遍历，而 onefile 仍然只拷 exe 本体。
+    **单文件模式（默认）只拷 exe 本体**：分发件里就一个 exe，解压出来双击
+    即用，不需要再带一堆 DLL。**目录模式必须整目录打包**：exe 只是启动器，
+    运行时依赖（python 标准库 / pywebview / `_internal`）都在同目录，只拷 exe
+    会双击即报「找不到 DLL / 无法加载 Python 运行时」。
 
     commands.json / config.json 是用户使用后产生的个人数据，会与 exe 同目录出现；
     整树遍历时必须显式排除，避免把同事自己的命令库 / 配置打进分发包里泄漏。
@@ -586,16 +639,23 @@ def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="用 PyInstaller 打包 ADB 设备指令台")
-    ap.add_argument("--mode", choices=("onefile", "onedir"), default="onedir",
-                    help="onedir=目录模式（默认，启动快：无每次解压）；"
-                         "onefile=单文件 exe（便于转发，但每次启动都要解压整包，慢 10s+）")
+    ap.add_argument("--mode", choices=("onefile", "onedir"), default="onefile",
+                    help="onefile=单文件 exe（默认）：分发件就是一个 exe，"
+                         "从结构上根除「解压出来的 DLL 带 Zone.Identifier → "
+                         ".NET 拒绝加载」的崩溃；onedir=目录模式（仅供本机"
+                         "排查：启动快，但分发要整目录，且会带上那个崩溃）")
     # 文档（本文件头部说明与 README）一直写着 `--onedir` / `--onefile`，但实际只存在
     # `--mode`：照文档执行会直接 `error: unrecognized arguments: --onedir` 退出码 2。
     # 这里补成同义开关，两条路都能走。
     ap.add_argument("--onedir", dest="mode", action="store_const", const="onedir",
-                    help="等价于 --mode onedir（默认，目录模式：启动最快）")
+                    help="等价于 --mode onedir（目录模式：仅供本机排查）")
     ap.add_argument("--onefile", dest="mode", action="store_const", const="onefile",
-                    help="等价于 --mode onefile（单文件 exe：每次启动解压，启动慢）")
+                    help="等价于 --mode onefile（单文件 exe：默认）")
+    ap.add_argument("--with-numpy", dest="with_numpy", action="store_true",
+                    help="把 numpy 也打进 exe（默认不打：单文件模式每次启动"
+                         "都要解压整包，numpy 的 ~40MB/1184 个文件直接变成"
+                         "解压耗时；缺它时剪贴板 PNG 还原自动回退纯 Python，"
+                         "结果一致）")
     ap.add_argument("--console", action="store_true",
                     help="保留控制台窗口（排查崩溃时用；默认 --windowed 无控制台）")
     ap.add_argument("--bump", action="store_true",

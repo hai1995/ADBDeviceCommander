@@ -6632,3 +6632,121 @@ AssertionError: assert '## 架构（v2026.1111.0748 Web 版）' in ...
   → success；`打包（Windows x64）` → success。
 - 版本号一致性复核（远端）：`core/constants.py` 的 `VERSION` 与 `README.md` 的
   架构标题都是 `2026.1112.0254` —— 与用户发版那次提交一致，没有被回退。
+
+---
+
+# 第九十七轮（拆分打包运行不了 → 改回单 exe + 兼顾启动速度）
+
+## 触发
+
+「目前的这种拆分打包出来的程序运行不了」，附 `crash_20261112_134224.log`。要求
+三件事：**全面审查**、**改回单 exe**、**尽量兼顾运行速度**，并点名一种做法 ——
+「快速启动加载页 → 加载上次停留页（首次进默认页）→ 用户切到哪个 tab 再加载哪个
+→ 切过一遍就全加载完了」。
+
+这其实是对**第八十五轮结论的一次反转**：那一轮因为「onefile 每次启动解压整包、
+用户实报启动二十多秒」把默认改成了 onedir。代价当时没算到 —— onedir 的文件夹
+从网上下载解压后**根本起不来**。速度优化把「能不能运行」弄丢了，本轮把它找回来：
+能运行优先于快，再用别的办法把单文件的解压代价压下来。
+
+## 崩溃根因：`_internal\webview\lib\` 下的托管 DLL 带「来自网络」标记
+
+日志里唯一指向真因的那段是（HRESULT `0x80131515`）：
+
+```
+System.IO.FileLoadException: 未能加载文件或程序集
+  "file:///...\_internal\webview\lib\Microsoft.Web.WebView2.Core.dll" ... 不支持操作。
+---> System.NotSupportedException: 尝试从一个网络位置加载程序集 ...
+```
+
+- .NET Framework 的 CAS 加载器**拒绝** `Assembly.LoadFrom` 一个带
+  `Zone.Identifier`（ZoneId=3 = Internet）的托管 DLL。
+- onedir 分发件是「一个文件夹」，同事从浏览器 / IM / 网盘下载再解压，Windows 给
+  **每个**解出来的文件挂上这条 NTFS 备用数据流。
+- 调用链：`webview/platforms/edgechromium.py` → `clr.AddReference(
+  interop_dll_path("Microsoft.Web.WebView2.Core.dll"))` → `Python.Runtime` →
+  `Assembly.LoadFrom`。pywebview 的 `hook-webview.py` 把 `webview/lib` 当 **datas**
+  收进 `_internal/webview/lib/`（仅 Windows），正好是崩的那个路径。
+
+**为什么之前的「MOTW 清理」没挡住**：`main.py` 的 `_strip_mark_of_the_web()`
+用的是**手写目录清单**，只列了 `pythonnet/runtime` 与 `clr_loader/ffi/dlls` 两处，
+而且只 `os.listdir` 扫**顶层**。`webview/lib` 是多出来的一层子目录，从来没被访问
+过。于是 pythonnet 那边修好了，WebView2 的托管程序集紧接着炸 —— 报错路径正是
+漏网的那一个。结论：**不能再靠手写清单**。
+
+## 修复一：改回单 exe（从结构上根除这类崩溃）
+
+`build.py` 默认 `--mode` 从 `onedir` 改回 `onefile`（`--onedir` 保留供本机快速
+迭代）；`.github/workflows/build.yml` / `release.yml` 都按默认（单文件）构建；
+`make_win_package()` 默认也改 onefile，`_win64.zip` 里**只有一个 exe**。
+
+单文件 exe 每次启动把内置归档解压到 `%TEMP%` 下**新建**的目录，那些文件是当场
+创建的、不继承 Zone.Identifier —— .NET 不会再拒绝加载。这不是「再补一条清理
+规则」，而是让「下载即崩」这一整类问题**不可能发生**。实测确认 onefile 下
+`sys.executable` 仍指向原始 exe（所以 `config.json` / `commands.json` 照旧落在
+exe 同目录），`sys._MEIPASS` 是那个临时解压目录（`resource_path()` 的回退照旧
+能找到 `frontend/`）—— 分发方式换了，用户数据的落点没变。
+
+## 修复二：MOTW 清理改成递归扫整棵运行时树（顺带修一个正确性坑）
+
+单文件下这段清理基本是空转，但 `onedir` 仍留作排查用，代码必须正确。改成：
+
+- `_iter_motw_files()` 用**显式栈**递归遍历（不是递归函数），`realpath` 去重防
+  符号链接环，只对 `.dll/.pyd/.exe/.manifest` 删 `:Zone.Identifier`；
+- 实测 4509 文件的合成整树 `scandir` 约 4.5ms —— 递归一次，换掉「每加一个
+  依赖就补一行清单」的长期失修；
+- **一个必须处理的副作用**：onefile 下 `sys.executable` 指向用户放 exe 的目录
+  （很可能就是「下载」文件夹），递归扫它会**误删用户其它下载文件的「来自网络」
+  标记**。判定改成：`_MEIPASS` 在 exe 目录**之下**（onedir 的 `_internal` 平级）
+  时才连带扫 exe 同目录；onefile 的 `_MEIPASS` 在 `%TEMP%`，**不扫**。
+
+`tests/test_main_boot.py` 加 5 条：覆盖嵌套 `webview/lib`（正是崩溃路径）、
+跳源码与符号链接环、onedir 扫两处、onefile 不碰 exe 目录、缺树不抛。
+
+## 修复三：把单文件的解压代价压下来（启动速度）
+
+### ① 默认不打 numpy（`--with-numpy` 可显式打开）
+
+`requirements.txt` 里 numpy 本就是**可选**加速项（PNG filter 还原 / BGR 换位
+向量化），缺它时 `core/clipboard.py` 自动回退纯 Python、**结果逐字节一致**
+（对拍用例在 `tests/test_core_clipboard.py`）。它的 Windows 轮子装完约 40MB /
+1184 个文件，其中 19.5MB 是只有 `numpy.linalg` 才用得上的 OpenBLAS，而 numpy
+的 `__init__` 会 eager 导入 linalg —— 想只删 BLAS 是不行的。实测单文件 exe：
+**含 numpy 68.7MB → 排除 54.2MB（-21%）**，解压文件数与杀毒逐文件扫描同步变
+少。`build.py` 把 numpy 加进 `EXCLUDE_MODULES`，另开 `--with-numpy` 显式装回。
+
+### ② 前端分步加载（就是用户点名的做法）
+
+`frontend/js/app.js` 新增 `TAB_PREPARE` 注册表 + `prepareTab(key)`：每个 tab 的
+「首次进入才做」的活登记成一个回调，`tabPrepared` 记账、**只跑一次**。流程：
+
+1. 窗口先出加载页（`#boot-splash`，原本就有）；
+2. `onBooted` 应用配置 → `restoreMainTab(上次停留)` → `prepare(当前页)`；
+   首次启动没有记录就是默认「设备指令」页；
+3. 用户**切到哪个 tab 才 `prepare` 哪个**（`switchMainTab` 里调）；
+4. 六个 tab 都切过一遍 → 全都加载完。
+
+从启动路径挪进 tab 回调的活：`refreshLcPackages`（`pm list packages -3`，
+1~3 秒的设备调用）与 `_loadLcPresets` → `logcat`；`loadUpdateInfo` → `about`。
+指令库数据本身随 `booted` 载荷到，属全局状态、`renderCommands` 仍在 boot 做，
+**不算** tab 的活。另有一处容易漏：`renderDevices`（设备列表首刷）原本会无条件
+`refreshLcPackages()`，改成只有 `tabPrepared.has("logcat")` 才联动 —— 否则
+「用户没开 Logcat」照样在启动时白打一次设备。
+
+> 约束：96 个 jsdom 测试把 `app.js` 当成**单个 blob** `window.eval`，所以不能做
+> 代码拆分 / HTML 拆分，分步加载只能写在**同一个文件**里、靠 per-tab 回调实现。
+> 三个原本断言「启动后不切 tab 也能看到这些数」的用例（`logcat_presets` /
+> `update_modal` / `logcat_filter_syntax`）按新语义改为「切到该 tab 后数据就位」；
+> 新增 `tab_staged_load.test.cjs` 专门锁住「启动不打设备、切过去才打、只打一次」。
+
+## 验证
+
+- Python 全量 **1514 passed / 1 skipped**（上轮 1505，净增 9 条）；
+  `ruff check .` All checks passed、`pyflakes` 无输出。
+- 前端 `node tests/frontend/run-all.cjs`：**96 个文件 0 失败**（新增分步加载用例）。
+- 载荷实测（Linux 侧 PyInstaller 6，Windows 侧构成同理）：onefile 含 numpy
+  68.7MB / 排除后 54.2MB；确认 `webview/lib` 的托管 DLL 只在 Windows 被 hook
+  收进包内，正是递归 MOTW 清理必须覆盖的那一层。
+- 逐文件核对行尾：`build.py` 保持 CRLF，其余改动文件 LF，与改动前一致。
+- 文档同步：`README.md` 打包章节、`使用说明.txt` 一句话与更新提示、本轮记录；
+  `build.py` 头部把「为什么默认单文件 / 三件提速」写全。

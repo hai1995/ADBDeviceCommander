@@ -195,6 +195,10 @@
   let api = null;
   let devices = [];
   let booted = false;
+  // 启动时随 booted 载荷下发的那份用户配置（config.json 的内容）。
+  // 存一份是因为「分步加载」把部分恢复动作推迟到了切 tab 时才做
+  // （见 TAB_PREPARE），那时 booted 载荷早已不在作用域里。
+  let bootSettings = null;
   let lcSerial = null;              // 当前 logcat 监控设备
   let lcRunning = false;            // 是否正在监控（监控中不自动切设备）
   // 丢弃开关：点了停止（或设备被移除强停）后，总线上还在途的 append 事件
@@ -1214,6 +1218,9 @@
     if (p.state_labels) stateLabels = p.state_labels;
     if (p.lc_buffers) buildLcBufferOptions(p.lc_buffers);
     if (p.settings) applyBootSettings(p.settings);
+    // 留一份配置给「分步加载」用：切到 Logcat 页时要把 lc_presets 恢复进
+    // 预设下拉，那时 booted 载荷的 p 已经不在作用域里了。
+    bootSettings = p.settings || null;
     // settings.json 里被防错机制纠正过的配置（手写错类型 / 非法级别）：
     // 逐条提示，让用户知道「这项没按你写的生效，已恢复默认」，
     // 而不是哪天莫名发现开关复位、却不知道去哪查。
@@ -1234,17 +1241,21 @@
     onAbout(p);
     // 指令台历史（跨工作区共享、持久化）：从 config.json 恢复。
     _loadCmdHistory(p.settings && p.settings.cmd_history);
-    // 按包过滤的下拉：启动时先把包列表拉回来（设备可能是上次记住的）
-    refreshLcPackages();
-    // 过滤预设（自定义的常用表达式，落盘在 config.json 的 lc_presets）
-    _loadLcPresets(p.settings && p.settings.lc_presets);
     // 主 tab 回到上次停留项：必须排在 renderCommands 之后 —— 切到「性能监控」
     // 要按已勾选的设备渲染目标设备条，切到「设备指令」要求指令卡已经画好。
     // 设备勾选态若还没下发，devices 事件到达时 renderPerfDev 会再补一次。
     restoreMainTab(p.settings && p.settings.main_active_tab);
-    // 版本更新状态（开关 + 上次检查结果）。单独一次调用而不是塞进 booted 载荷：
-    // 它是「可选的附加信息」，取不到也不该影响启动主流程。
-    loadUpdateInfo();
+    // ---- 以下两件改由「切到对应 tab 时才做」（见 prepareTab / TAB_PREPARE）----
+    //
+    // ① 按包过滤的下拉要打设备（pm list packages -3），1~3 秒。此前它在 boot
+    //    里无条件执行：用户压根没开 Logcat，也得先等设备回话。
+    //    现在只有真的切到 Logcat 页才拉。
+    // ② 版本更新状态（update_info）同理：关于页没打开就不必回填。
+    //
+    // 但注意 restoreMainTab 内部也会 prepare 当前页 —— 若上次停留的正是
+    // Logcat / 关于，上述两件事会在那一刻立刻发生（用户点开就看到内容，
+    // 与之前无异）；停在别的页时则完全省掉。切到这两页时由 switchMainTab
+    // 里的 prepareTab 接手。
   }
 
   // 后端下发的缓冲区选项（label -> 实际缓冲区名列表）重建下拉；
@@ -1661,7 +1672,12 @@
       if (next !== lcSerial) {
         lcSerial = next;
         renderLogcat();
-        refreshLcPackages();
+        // 换了设备，「按包过滤」下拉的包列表也得跟着换（那是**另一台**设备的包）。
+        // 但拉包列表要打设备（pm list packages -3，1~3 秒），与 Logcat 页是否
+        // 被打开无关 —— 分步加载后，只有用户真的进过 Logcat 页才值得付这个钱。
+        // 没进过就跳过：等切到 Logcat 页时 prepareTab 会拉一次（那时 lcSerial
+        // 已是最新，拿到的就是当前设备的包）。
+        if (tabPrepared.has("logcat")) refreshLcPackages();
         // 表达式里可能有 pkg:，换了设备就必须按新设备重新解析 pid：
         // 只重绘的话缓存里没有这台设备的映射，会一直显示「命中 0 行」，
         // 而界面看上去一切正常（这两台设备的缓存还互相不通用）。
@@ -7156,6 +7172,65 @@
       .map((b) => b.dataset.tab).filter(Boolean);
   }
 
+  /* ---------------- 主 tab 分步加载（按需准备） ----------------
+     为什么要分步：单文件 exe 每次启动都要先把整包解压到 %TEMP%，解压完还得
+     让 Python 跑起来、后端 boot、前端渲染。启动关键路径上每多一件重活，
+     用户就多等一份。原先 boot 一口气把所有 tab 的活都干了：
+       · renderCommands —— 渲染全部命令卡到**每一个**工作区（命令多时很慢）；
+       · refreshLcPackages —— 打设备（pm list packages -3），1~3 秒；
+       · _loadLcPresets / loadUpdateInfo —— 各自的下拉与状态回填。
+     这些活里，只有「当前这一页」是用户马上要看的，其余可以等到用户切过去
+     再做。于是改成：每个 tab 登记一个 prepare 回调，切到它时才跑一次。
+
+     三个约束（都是为了不破坏既有行为）：
+       1. prepare **只跑一次**（tabPrepared 记账）：切走再切回来不重跑，
+          否则「按包过滤」下拉会在每次切页时都打一次设备。
+       2. 启动时先恢复上次停留的页，再 prepare 它 —— 用户点开就看到上次那页，
+          不多等别的 tab 的活。
+       3. 已在 boot 阶段做过的全局初始化（命令库数据本身、配置回填）**不算**
+          tab 的活，不重复做。 */
+  const tabPrepared = new Set();
+
+  // 各 tab 的「首次进入才做」的活。缺省即无需准备。
+  // 注意：cmd 页的 renderCommands 在 boot 阶段就渲染了（命令库数据随 booted
+  // 载荷一起到，属于全局状态），故此处不再重复 —— 见 onBooted 的注释。
+  const TAB_PREPARE = {
+    // Logcat：拉设备上的包名列表（pm list packages -3，1~3 秒的设备调用）
+    // + 恢复过滤预设下拉（自定义的常用表达式，落盘在 config.json 的 lc_presets）。
+    // 之前在 boot 里无条件执行：用户压根没开 Logcat，也得先等设备回话。
+    // 现在只有真的切到 Logcat 页才做。
+    logcat: function () {
+      _loadLcPresets(bootSettings && bootSettings.lc_presets);
+      refreshLcPackages();
+    },
+    // 关于：拉版本更新状态（update_info 是本地读取，但仍是桥接往返）。
+    about: function () { loadUpdateInfo(); },
+  };
+
+  /* 准备某个 tab（只首次生效）。未登记的 tab 什么都不做。 */
+  function prepareTab(key) {
+    if (!key || tabPrepared.has(key)) return;
+    const fn = TAB_PREPARE[key];
+    if (!fn) return;
+    // 先记账再执行：回调里若又调回 prepareTab，不该重复跑。
+    tabPrepared.add(key);
+    try {
+      fn();
+    } catch (e) {
+      // 准备失败不该让切页崩掉：这个 tab 只是少加载了点东西，
+      // 用户仍能切走、也能再手动触发它自己的功能。
+      pushStatus("err", "⚠ 加载「" + tabLabel(key) + "」页数据失败："
+                + ((e && e.message) || e));
+    }
+  }
+
+  // tab 的中文名（仅用于出错提示）
+  function tabLabel(key) {
+    if (!els.tabs) return key;
+    const btn = els.tabs.querySelector('.tab-btn[data-tab="' + key + '"]');
+    return (btn && btn.textContent) || key;
+  }
+
   function switchMainTab(key, opts) {
     const keys = mainTabKeys();
     if (!keys.length) return;
@@ -7175,6 +7250,8 @@
     if (changed && (!opts || opts.persist !== false)) {
       persistPref("main_active_tab", key);
     }
+    // 分步加载：切到哪一页，才准备哪一页（首次才真正干活）。
+    prepareTab(key);
   }
 
   /* 启动时按 main_active_tab 回到上次那个主 tab（没记过 / 失效 → 设备指令）。
@@ -7183,7 +7260,12 @@
   function restoreMainTab(key) {
     if (typeof key !== "string" || !key) return;
     if (mainTabKeys().indexOf(key) === -1) return;   // 失效就保持 HTML 默认（设备指令）
-    if (key === mainActiveTab) return;
+    if (key === mainActiveTab) {
+      // 已经是当前页（首次启动的默认页「设备指令」就是这种情况）：
+      // 仍要 prepare —— 它可能在 TAB_PREPARE 里登记了活。
+      prepareTab(key);
+      return;
+    }
     switchMainTab(key, { persist: false });
   }
 
