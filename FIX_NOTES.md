@@ -6064,3 +6064,7 @@ adb.exe 自己写文件，它不认 `\\?\` 前缀 → 目标路径超过 260 字
 - 后端 **1473 passed / 1 skipped**（新增 9 条）；`ruff check .` All checks passed。
 - 新增 docstring 里的反斜杠全部用 raw string，`python -W error::DeprecationWarning`
   下重新编译无告警。
+- 远程 19 个改动文件与本地**逐字节一致（19/19）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43124246086`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success（长路径是 Windows 专属逻辑，Windows 打包 job
+  全绿说明 PyInstaller 打包没被新模块影响）。
