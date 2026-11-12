@@ -6627,4 +6627,8 @@ AssertionError: assert '## 架构（v2026.1111.0748 Web 版）' in ...
   `pyflakes backend core tools tests` 无输出。
 - 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
 - 逐文件核对行尾：CRLF / LF 风格与改动前一致。
-- 远程与本地逐字节一致（推送后复核）。
+- 远程与本地逐字节一致（推送后复核）；`/branches` 仍只有 `main`。
+- **真实 CI（run `43172519930`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success。
+- 版本号一致性复核（远端）：`core/constants.py` 的 `VERSION` 与 `README.md` 的
+  架构标题都是 `2026.1112.0254` —— 与用户发版那次提交一致，没有被回退。
