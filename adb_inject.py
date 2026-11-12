@@ -195,12 +195,35 @@ def merge_adb_shell_commands_detailed(commands):
     return out
 
 
+def _ps_quote(text: str) -> str:
+    """把一段文本包成 PowerShell 里的**单个字面量参数**。
+
+    PowerShell 的单引号串里，单引号本身要写成两个（''）—— 这是它唯一的转义
+    规则，没有别的花样（反斜杠在单引号串里是字面量，不当转义用）。
+
+    不能用双引号：双引号串里 ``$`` 会做变量展开、`` ` `` 是转义符，
+    设备端命令里出现 ``$PATH`` / ``$1`` 这类写法时会被本地 PowerShell 先吃一遍。
+    """
+    return "'" + text.replace("'", "''") + "'"
+
+
 def _build_shell(shell_cmd: str, inner: list) -> str:
     """把 shell 入口命令 + 内部命令拼接成非交互式 adb shell 命令。"""
     if not inner:
         return shell_cmd
-    # 用单引号包裹，避免 PowerShell 解析内部 ';'
-    return shell_cmd + " '" + "; ".join(inner) + "'"
+    # 整条内部命令序列必须作为**一个**参数交给 adb（否则 adb 会把 `;` 当成
+    # 自己的参数分隔符，而不是交给设备端 shell 去切分）。
+    #
+    # 包裹时必须转义内部命令自带的单引号：PowerShell 解析参数时，串里的
+    # 单引号会**提前闭合**外层引号，把一条命令切成几个参数。
+    #   原始： adb shell 'grep 'a;b' /proc/x'
+    #   PowerShell 切分后 → ['adb','shell','grep a',';','b /proc/x']
+    #   也就是说 `;` 提前变成了 PowerShell 的语句分隔符：后半截 `b /proc/x`
+    #   会被**当成本机命令**执行，而不是设备端命令的一部分。
+    # 转义后 → adb shell 'grep ''a;b'' /proc/x'
+    #   PowerShell 还原出一个参数 `grep 'a;b' /proc/x`，adb 原样交给设备端。
+    body = "; ".join(inner)
+    return shell_cmd + " " + _ps_quote(body)
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ import csv
 import datetime
 import itertools
 import json
+import math
 import os
 import re
 import subprocess
@@ -811,14 +812,22 @@ def _values(samples, key):
 def summarize(values):
     """-> {"min","avg","max","p95","n"}；空数据返回 None。
 
-    P95 用「最近秩」法（不进位到两端），比线性插值简单且样本少时也不会
-    被插出一个数据里根本不存在的极值。
+    P95 用**最近秩法（nearest-rank）**：取排序后第 ``ceil(0.95 * n)`` 个值，
+    1 起算。样本少时它给出一个**真实采到过的**值，不会像线性插值那样插出
+    一个数据里根本不存在的数。
+
+    为什么必须是这个公式（而不是 ``round(0.95 * (n - 1))``）：
+    前端 ``app.js`` 的 ``perfPct()`` 用的是同一个公式，两边算出来的 P95
+    必须逐位相同 —— 同一个指标在「区间统计」卡和导出的 HTML 报告里显示
+    两个数，用户没法判断哪个是真的。旧公式与它有 **85/200** 的样本量会
+    给出不同结果（且旧公式因为 Python 的银行家舍入 ``round(28.5)==28``，
+    还会系统性地偏低）。现由 tests/test_perf_stats_parity.py 锁住。
     """
     if not values:
         return None
     vals = sorted(values)
     n = len(vals)
-    idx = min(n - 1, max(0, int(round(0.95 * (n - 1)))))
+    idx = min(n - 1, max(0, math.ceil(0.95 * n) - 1))
     return {"min": round(vals[0], 1), "max": round(vals[-1], 1),
             "avg": round(sum(vals) / n, 1), "p95": round(vals[idx], 1), "n": n}
 

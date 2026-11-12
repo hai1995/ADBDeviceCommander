@@ -4953,7 +4953,12 @@
   }
 
   /* 分位数用 nearest-rank（第 ceil(p·n) 个）：小样本下比线性插值更贴近
-     「第 95 个百分点上的实测值」，报告里也能照着复现。 */
+     「第 95 个百分点上的实测值」，报告里也能照着复现。
+
+     后端 backend/perf_service.py 的 summarize() 用的是**同一个公式** ——
+     同一个指标在「区间统计」卡与导出的 HTML 报告里必须显示同一个数，
+     否则用户没法判断哪个是真的。改这里就必须同步改那边；
+     tests/test_perf_stats_parity.py 会把两边逐位比对，改漏了立刻报错。 */
   function perfPct(sorted, p) {
     if (!sorted.length) return null;
     const i = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
