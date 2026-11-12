@@ -6220,3 +6220,63 @@ WinMM 是**普通 Python 方法**（没有 argtypes 属性），真实环境里 
 - 远程 8 个改动文件与本地**逐字节一致（8/8）**；`/branches` 仍只有 `main`。
 - **真实 CI（run `43146189077`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
   `打包（Windows x64）` → success。
+
+---
+
+# 第九十三轮（第九轮：把「同一份规则写了两遍」变成可执行的差分门禁 + 修标题栏与系统主题脱节）
+
+## 触发
+
+「继续逐步进行修复」。这轮不再去找「新 bug」，而是转去找**同一份规则写了两遍**的地方 ——
+这类地方一旦两边漂移，用户看到的是「过滤不生效 / 界面对不上」，而**两边各自的单测
+照样全绿**，纯靠人 review 根本看不出来。
+
+全库扫下来，「双实现」只有两处：logcat 过滤规则、主题深浅的解析。
+
+## 修复
+
+### 1. logcat 过滤：前后端差分门禁（`tests/test_logcat_filter_parity.py`）
+
+过滤规则在项目里有两份实现，且是**有意**各写一份的：
+
+* 前端 `frontend/js/app.js` 的 `lcSplitTerms` / `lcMatchTerm` / `linePassesFilter`
+  —— 改关键字即时生效，不必重启 logcat 子进程；
+* 后端 `core/logcat.py` 的 `split_filter_terms` / `match_filter`，以及
+  `backend/logcat_service.py` 的 `_classify_and_filter`（落盘抓取的级别过滤）。
+
+`core/logcat.py` 的注释写着「规则一旦改动，两处必须同步」—— 但**「必须同步」一直
+只是一句口头约定**：两边各有单测锁定自己那份，**没有交叉锁定**。有人改了前端忘了改
+后端（反之亦然），两边测试都绿，用户看到的却是「界面上过滤不生效」。
+
+新增的差分测试把这条约定变成可执行的：
+
+* 从 `app.js` 里**原样提取**那三个函数（不是抄一份 —— 抄的会跟着前端一起漂移，
+  等于没测），拼进一个临时 node 脚本跑；
+* 前端样本取自 `classify_line(raw)` 的解析结果 —— 前端拿到的行**就是后端推过来的
+  那一行**（含 level / tag / msg / pid / tid / exc），两边喂的必须是同一份数据；
+* 逐条比对：样本 123 × 表达式 88 × 级别组 3 × 仅异常两种 = **64896 个组合**。
+
+当前结果：**0 处不一致**（两边今天确实还是一致的）。门禁做了**反向验证**：把前端
+`pid:` 的精确匹配改成子串匹配（后端不动）→ 测试立刻抓到 **146 处**不一致。
+
+顺带把切词结果（`split_filter_terms` vs `lcSplitTerms`）也单独锁了一条。
+
+### 2. 系统主题变化时，原生标题栏没跟着换（真 bug）
+
+「随系统」模式下，用户在 Windows 里切换浅/深色后：
+
+* **界面**跟着变了（前端 `prefers-color-scheme` 的 change 监听 → `applyThemeAttr`）；
+* **原生标题栏**却留在旧颜色 —— 它的深浅是后端读注册表（`AppsUseLightTheme`）
+  解析出来的，前端从没通知过它。
+
+两块拼在一起，割裂得很明显。现在系统主题变化时前端会补一次 `set_theme("system")`，
+后端重新读注册表并重新上色。
+
+回归用例加在 `tests/frontend/theme.test.cjs`：断言「系统主题变化后，`set_theme('system')`
+的**调用次数增加**」—— 只看「有没有调过」会一直为真（启动时 `applyBootSettings`
+已经调过一次），抓不到这次的回归。反向验证过：去掉联动 → 用例失败（20 通过 / 1 失败）。
+
+## 验证
+
+- 后端 **1479 passed / 1 skipped**（新增 2 条差分用例）；`ruff check .` All checks passed。
+- 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。

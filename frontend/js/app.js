@@ -1494,7 +1494,16 @@
     // 只挂一次：系统主题变化时，仅当当前模式为 system 才重新解析应用。
     if (!window.matchMedia || _themeMql) return;
     _themeMql = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = () => { if (_themeMode === "system") applyThemeAttr(); };
+    const handler = () => {
+      if (_themeMode !== "system") return;
+      applyThemeAttr();
+      // 原生标题栏也要跟着换：它的深浅是后端读注册表（AppsUseLightTheme）
+      // 解析出来的，不通知后端的话，用户在系统里切换浅/深色后**界面变了、
+      // 标题栏还留在旧颜色** —— 两块拼在一起，割裂得很明显。
+      if (api && api.set_theme) {
+        try { api.set_theme("system"); } catch (e) {}
+      }
+    };
     if (_themeMql.addEventListener) _themeMql.addEventListener("change", handler);
     else if (_themeMql.addListener) _themeMql.addListener(handler); // 旧版 Safari
   }

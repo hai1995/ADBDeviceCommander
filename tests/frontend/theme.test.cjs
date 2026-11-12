@@ -177,7 +177,7 @@ const activeMode = (window) => {
   console.log("\n[4] 随系统：跟随系统主题变化实时改色");
   {
     const mql = mkMatchMedia(false); // 系统=浅色
-    const { window } = mkEnv({ theme: "system" }, { matchMedia: (q) => mql });
+    const { window, calls } = mkEnv({ theme: "system" }, { matchMedia: (q) => mql });
     ok(await waitFor(() => themeOf(window) === "light", 3000, "system→浅色"),
        "系统浅色时 system 模式解析为浅色");
     // 系统切到深色：触发 change，界面应实时变深
@@ -186,10 +186,18 @@ const activeMode = (window) => {
     ok(await waitFor(() => themeOf(window) === "dark", 2000, "系统切换→深色"),
        "系统切到深色后界面实时变深（不刷新页面）");
     // 系统切回浅色
+    const sysCallsBefore = themeCalls(calls).filter((c) => c.args[0] === "system").length;
     mql.__set(false);
     mql.__fire();
     ok(await waitFor(() => themeOf(window) === "light", 2000, "系统切换→浅色"),
        "系统切回浅色后界面实时变浅");
+    // 原生标题栏也必须跟着换：它的深浅是后端读注册表（AppsUseLightTheme）解析的，
+    // 前端不通知后端的话，用户在系统里切浅/深色后**界面变了、标题栏还是旧颜色**。
+    // 必须比**增量**：启动时 applyBootSettings 已经调过一次 set_theme('system')，
+    // 只看「有没有调过」会一直为真，抓不到这次的回归。
+    const sysCallsAfter = themeCalls(calls).filter((c) => c.args[0] === "system").length;
+    ok(sysCallsAfter > sysCallsBefore,
+       "系统主题变化时联动后端 set_theme('system')（原生标题栏同步）");
   }
 
   console.log("\n结果：" + pass + " 通过 / " + fail + " 失败");
