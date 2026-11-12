@@ -6280,3 +6280,6 @@ WinMM 是**普通 Python 方法**（没有 argtypes 属性），真实环境里 
 
 - 后端 **1479 passed / 1 skipped**（新增 2 条差分用例）；`ruff check .` All checks passed。
 - 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
+- 远程 4 个改动文件与本地**逐字节一致（4/4）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43152238449`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success。
