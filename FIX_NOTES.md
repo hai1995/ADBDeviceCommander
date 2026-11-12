@@ -6217,3 +6217,6 @@ WinMM 是**普通 Python 方法**（没有 argtypes 属性），真实环境里 
 
 - 后端 **1477 passed / 1 skipped**（新增 2 条门禁用例）；`ruff check .` All checks passed。
 - 逐文件核对行尾：CRLF / LF 风格与改动前一致。
+- 远程 8 个改动文件与本地**逐字节一致（8/8）**；`/branches` 仍只有 `main`。
+- **真实 CI（run `43146189077`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
+  `打包（Windows x64）` → success。
