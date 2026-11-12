@@ -6405,3 +6405,121 @@ python -m ruff check .                         # 其余规则（ruff.toml 的 se
 python -m pytest -q                            # 后端全量
 node tests/frontend/run-all.cjs                # 前端 jsdom
 ```
+
+---
+
+# 第九十五轮（第十一轮：补上「长路径」的读侧 —— 第九十轮只修了一半）
+
+## 触发
+
+「继续往前推进修复」。这轮从「上次那轮**做对了吗**」的角度切入：第九十轮给
+Windows 长路径（>260 字符）铺开了 `core/longpath`，把**写**这一侧全部改造了。
+本轮回头审它 —— 结果发现**读**这一侧原封不动，于是出现了「半修」状态。
+
+## 根因：第九十轮的门禁粒度太粗
+
+第九十轮的门禁是「**函数**里出现过 `long_path` 就算过」：
+
+```python
+uses = any(isinstance(n, ast.Name) and n.id == "long_path" for n in ast.walk(fn))
+```
+
+只要函数里有**一处**走了 `long_path`，同函数里其余**没走**的调用就一并放过。
+于是「写」这一侧修好了，「读」这一侧却原样留着。
+
+而 Windows 上 `os.path.exists()` / `os.path.getsize()` / `os.path.isfile()` 与
+`open()` 一样受 MAX_PATH 限制，**超过 260 字符时不报错，只是返回 False / 0**
+（`open` 读则直接抛 OSError）。于是出现了一个很怪的中间态：
+
+> 文件**写得进去**（写侧有前缀），却**查不到**（查侧没前缀）。
+
+## 真实后果：四类「东西莫名没了」
+
+| # | 位置 | 症状 | 用户的真实原因 |
+|---|---|---|---|
+| 1 | `core/constants.unique_path()` | 认为位置是空的 → **覆盖用户上一份产物**（它存在的唯一目的就是别覆盖） | 路径超长 |
+| 2 | `backend/controllers/record._zip_paths()` | 认为文件不存在 → **打包出的 zip 少了文件**，界面照样弹「✓ 已打包」 | 路径超长 |
+| 3 | `backend/video_join.join_segments()` | 认为分段不存在 → **合并直接失败**，报的是「都缺 moov 头」（真实原因一字未提） | 路径超长 |
+| 4 | `backend/audio_service._wav_ok()` | 认为 wav 不存在 → **刚录好的音频被判无效并删除**，用户只看到「未录到声音」 | 路径超长 |
+
+还有一处更要紧：`main.py` 的 **MOTW 清理**（第一轮修的启动崩溃）——
+`_motw_cleanup_dirs()` 里 `os.path.isdir(meipass)` 对超长路径返回 False →
+程序装在深层目录时**崩溃修复被静默跳过** → 那个「系统找不到指定的文件」的崩溃
+又回来了，还查不出原因。
+
+这些症状全都表现为「东西莫名没了 / 打包少了内容」，与「路径太长」毫无关联。
+
+## 修复
+
+### 1. `core/longpath.py` 新增一组「元数据查询」包装
+
+```python
+path_exists(path)   # 存在性（长路径安全）
+path_isfile(path)   # 是否普通文件
+path_getsize(path)  # 字节数（取不到返回 0）
+path_isdir(path)    # 是否目录
+path_remove(path)   # 删除（返回是否删掉了；调用点多半静默吞异常）
+```
+
+把「加前缀」这件事集中起来 —— 免得每个调用点各写一遍 `long_path(...)`，也免得漏。
+
+### 2. 全库铺开：16 个模块、80 余处
+
+覆盖**保存目录**里的一切产物（截图 / 录屏分段 / logcat 抓取与打包 / 性能报告 /
+诊断包 / 麦克风录音 / 设备音频 / 命令库 / 配置），以及 `main.py` 的 MOTW 清理与
+索引查找。
+
+关键判据：**凡是路径可能来自用户「保存目录」的，一律走长路径安全版本**。
+
+### 3. 两条新门禁（粒度改成「每一次调用」）
+
+| 门禁 | 拦什么 |
+|---|---|
+| `test_metadata_queries_go_through_long_path` | `os.path.exists / getsize / isfile / isdir` 的**每一次**调用都必须走长路径安全版本 |
+| `test_reading_local_files_goes_through_long_path` | `open(..., "rb" / "r")` 读本地文件也必须走（第九十轮的门禁只查了**写**模式，读模式被漏掉） |
+
+门禁会跟踪「已经变成长路径的变量」（`x = long_path(...)`、`x, y = long_path(a),
+long_path(b)` 等赋值形态），因此 `os.path.exists(ltmp)` 这种「ltmp 本身就是长路径」
+的写法不会被误报。
+
+### 4. 行为级回归测试（`tests/test_longpath_metadata.py`）
+
+门禁是静态的，只能证明「写法对不对」；这组用例证明「**行为**对不对」：用一个
+**虚拟文件系统**把 CI 变成「小 Windows」——
+
+  * `core.longpath.long_path` 换成 Windows 模拟版（Windows 风格的路径按
+    `win_long_path` 加前缀；纯 POSIX 路径原样返回，否则连 Linux 上的普通文件
+    都访问不到）；
+  * `os.path.exists / isfile / getsize` 与 `open` 换成模拟 Win32 的版本：
+    **无前缀且超过 260 字符 → 一律「不存在」**（这正是 Windows 的真实行为）。
+
+于是 `unique_path` / `_zip_paths` / `_wav_ok` 三条链路的真实行为能在 CI 上复现。
+
+## 反向验证
+
+三条行为用例都做了反向验证（把代码改回旧实现后必须失败）：
+
+| 注入的回归 | 结果 |
+|---|---|
+| `unique_path` 退回 `os.path.exists` | 用例失败（会覆盖上一份产物） |
+| `_zip_paths` 退回 `os.path.exists` / `isfile` | 用例失败（压缩包缺内容） |
+| `_wav_ok` 退回 `os.path.exists` | 用例失败（录音被当成空录音丢弃） |
+
+两条新门禁也做了反向验证：
+
+| 注入的回归 | 结果 |
+|---|---|
+| `_wav_ok` 的 `path_exists` 退回 `os.path.exists` | 元数据门禁立刻抓到 |
+| `_wav_ok` 的 `open(long_path(path))` 退回 `open(path)` | 读模式门禁立刻抓到 |
+
+> 调试这条测试时踩到一个坑：`from core.longpath import long_path` 是**按值导入**
+> 的 —— 只改 `core.longpath` 模块里的那个名字，已经导入各模块的那一份不会跟着变。
+> fixture 因此把所有已导入模块里指向原始 `long_path` 的地方一并替换，模拟才是完整的。
+
+## 验证
+
+- 后端 **1501 passed / 1 skipped**（新增 7 条）；`ruff check .` All checks passed；
+  `pyflakes backend core tools tests` 无输出。
+- 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
+- 逐文件核对行尾：CRLF / LF 风格与改动前一致（含本来就混行的
+  `backend/logcat_service.py`，比例未被改动）。

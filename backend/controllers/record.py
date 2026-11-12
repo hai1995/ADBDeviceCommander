@@ -13,7 +13,7 @@ from backend.screen_service import device_clock
 from backend.video_join import join_segments
 from core.constants import LOGCAT_COVERAGE_WARN_S
 from core.logcat import read_time_bounds
-from core.longpath import long_path
+from core.longpath import long_path, path_exists, path_isfile
 
 
 def _fmt_span(sec):
@@ -713,7 +713,10 @@ class RecordMixin:
             pretaken=sess.get("video_segs") or {})
         local_videos = {}
         for s, (vs, _a) in teardown.items():
-            keep = [p for p in (vs or []) if p and os.path.exists(p)]
+            # 长路径安全：这些是**用户保存目录**里的录屏分段，路径可以超长。
+            # Windows 上 os.path.exists 对超长路径返回 False → 分段会被当成
+            # 「没落盘」丢弃，用户的录屏就此消失，界面上还不给任何提示。
+            keep = [p for p in (vs or []) if p and path_exists(p)]
             if keep:
                 local_videos[s] = keep
         # 自动分段是**实现手段**，不是用户要的东西：先把多段合并成一个完整 mp4，
@@ -784,11 +787,11 @@ class RecordMixin:
                         self._push_toast(
                             "warn", "⚠ 合成音视频失败%s，原始视频已保存（无音轨）: %s"
                             % (why, vlocal))
-                        if os.path.exists(vlocal):
+                        if path_exists(vlocal):
                             rec_files.append(vlocal)
                 else:
                     self._push_status("ok", "✓ 录屏已保存: %s" % vlocal)
-                    if os.path.exists(vlocal):
+                    if path_exists(vlocal):
                         rec_files.append(vlocal)
         if mic_lost:
             # 空录音（麦克风被占用 / 全程静音 / 无录音权限）现在会返回 None 并删除坏文件，
@@ -829,7 +832,7 @@ class RecordMixin:
                     "⚠ %s 的 logcat 日志仍在收尾，未放入本次压缩包，"
                     "原文件已保留：%s" % (s, p))
                 continue
-            if os.path.exists(p):
+            if path_exists(p):
                 rec_files.append(p)
         # 覆盖度校验必须放在打包之前：打包会删源 txt，之后就没法再读时间戳了。
         # 结论只进内存（sess["logcat_notes"]），由调用方在「✓ 录屏已完成」之后
@@ -879,7 +882,9 @@ class RecordMixin:
             s, p = job
             out = []
             try:
-                if not os.path.isfile(p):
+                # 长路径安全：logcat txt 落在用户的保存目录里。超长路径下
+                # os.path.isfile 返回 False → 会被误报成「配套 logcat 文件不存在」。
+                if not path_isfile(p):
                     # 文件不在了（保存目录被删 / 同名文件被移走）：说明本次日志
                     # 根本没落盘，别让用户以为包里那份是完整的。
                     return [("warn", "⚠ %s 的配套 logcat 文件不存在（%s），"
@@ -1022,8 +1027,10 @@ class RecordMixin:
             # 打包时体积也白翻一倍。
             for p in used:
                 if p and p != merged:
+                    # 长路径安全：中间段删除失败会被静默吞掉 → 目录里留着
+                    # 「3 个分段 + 1 个成片」，用户第一反应是「哪几个是最终版」。
                     try:
-                        os.remove(p)
+                        os.remove(long_path(p))
                     except Exception:
                         pass
             want = stem + ".mp4"
@@ -1189,8 +1196,12 @@ class RecordMixin:
                 os.remove(lzip)
             with zipfile.ZipFile(lzip, "w") as z:
                 for p in paths:
-                    if (p and p != zip_path and os.path.exists(p)
-                            and os.path.isfile(p)):
+                    # 长路径安全：Windows 上 os.path.exists / isfile 对超过
+                    # 260 字符的路径返回 False —— 文件会被**静默跳过**，打包
+                    # 出来的 zip 少了内容，而界面照样弹「✓ 已打包」。用户拿到
+                    # 的压缩包缺了录屏，却没有任何提示。
+                    if (p and p != zip_path and path_exists(p)
+                            and path_isfile(p)):
                         # 视频/音频/图片本来就已经压缩过（H.264/AAC/PNG），
                         # 再走 DEFLATE 只是把整个文件白算一遍：3 分钟的 1080p
                         # 录屏能白白多花一两秒 CPU，体积却几乎不变。体积真正

@@ -24,7 +24,7 @@ import tempfile
 import threading
 import time
 
-from core.longpath import long_path
+from core.longpath import long_path, path_isdir, path_isfile
 
 from core.constants import no_window_flags, safe_name
 
@@ -71,13 +71,13 @@ def _as_exe(path):
     if not p:
         return None
     # 目录 → 在里面找可执行文件
-    if os.path.isdir(p):
+    if path_isdir(p):
         for name in SCRCPY_EXE_NAMES:
             cand = os.path.join(p, name)
-            if os.path.isfile(cand):
+            if path_isfile(cand):
                 return cand
         return None
-    if os.path.isfile(p):
+    if path_isfile(p):
         return p
     return None
 
@@ -106,7 +106,7 @@ def find_scrcpy(pref_path=""):
 
     # 3) 常见安装目录
     for d in _extra_dirs():
-        if not os.path.isdir(d):
+        if not path_isdir(d):
             continue
         if d.rstrip("\\/").lower().endswith("packages"):
             # winget 布局是 Packages/<包名>/<版本>/scrcpy.exe，往下扫两层
@@ -116,7 +116,7 @@ def find_scrcpy(pref_path=""):
                 continue
             for pkg in pkgs[:40]:
                 pkg_dir = os.path.join(d, pkg)
-                if not os.path.isdir(pkg_dir):
+                if not path_isdir(pkg_dir):
                     continue
                 exe = _as_exe(pkg_dir)          # 有的包直接铺在包目录下
                 if exe:
@@ -159,7 +159,7 @@ def probe(pref_path=""):
 def _tail(path, limit=400):
     """读日志文件末尾（秒退时用它给出 scrcpy 自己的报错）。"""
     try:
-        with open(path, "rb") as f:
+        with open(long_path(path), "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             f.seek(max(0, size - limit))

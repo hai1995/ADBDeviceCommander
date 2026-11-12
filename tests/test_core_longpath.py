@@ -154,7 +154,168 @@ def test_all_local_file_io_goes_through_long_path():
 
 
 # ---------------------------------------------------------------------------
-# 3. 门禁二：交给 adb 的参数不能带 \\?\ 前缀
+# 3. 门禁二：本地文件的**元数据查询**也必须走长路径安全版本
+# ---------------------------------------------------------------------------
+# 为什么要单独一条
+# ----------------
+# 第九十轮的门禁是「**函数**里出现过 long_path 就算过」—— 粒度太粗：只要函数
+# 里有一处走了 long_path，同函数里其余**没走**的调用就一并放过。
+#
+# 于是「写」这一侧修好了，「读」这一侧却原样留着：
+#
+#   * `os.path.exists()` / `os.path.getsize()` / `os.path.isfile()` 在 Windows 上
+#     同样受 MAX_PATH 限制 —— 超过 260 字符时它们**不报错，只是返回 False / 0**；
+#   * `open(path, "rb")` 读超长路径直接抛 OSError。
+#
+# 结果是「半修」状态：文件**写得进去**（写侧有前缀），却**查不到**（查侧没前缀）：
+#
+#   * `unique_path()` 认为位置是空的 → **覆盖用户上一份产物**；
+#   * `_zip_paths()` 认为文件不存在 → **打包出的 zip 少了文件**，界面照样弹
+#     「✓ 已打包」；
+#   * `join_segments()` 认为分段不存在 → **合并直接失败**，报的是「都缺 moov 头」；
+#   * `_wav_ok()` 认为 wav 不存在 → **刚录好的音频被判无效并丢弃**。
+#
+# 这些症状全都表现为「东西莫名没了 / 打包少了内容」，与「路径太长」毫无关联。
+#
+# 所以这条门禁的粒度必须是**每一次调用**，而不是「函数里有没有出现过」。
+_HELPER_NAMES = frozenset((
+    "long_path", "path_exists", "path_isfile", "path_getsize",
+    "path_isdir", "path_remove",
+))
+_META_CHECKS = frozenset(("exists", "getsize", "isdir", "isfile"))
+
+
+def _long_path_vars(fn):
+    """函数里「已经变成长路径」的变量名。
+
+    追踪 `x = long_path(...)` / `x, y = long_path(a), long_path(b)` 这类赋值
+    —— 之后 `os.path.exists(x)` 里的 x 已经是长路径，不需要再包一次。
+    """
+    names = set()
+    for _ in range(6):                      # 迭代到不再有新增（支持链式赋值）
+        added = False
+        for node in ast.walk(fn):
+            targets, value = [], None
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.target is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if isinstance(value, ast.Tuple):
+                # x, y = long_path(a), long_path(b)
+                for tgt in targets:
+                    if not isinstance(tgt, ast.Tuple):
+                        continue
+                    for name_tgt, el in zip(tgt.elts, value.elts):
+                        if not isinstance(name_tgt, ast.Name):
+                            continue
+                        el_ok = (isinstance(el, ast.Call)
+                                 and isinstance(el.func, ast.Name)
+                                 and el.func.id in _HELPER_NAMES)
+                        if el_ok and name_tgt.id not in names:
+                            names.add(name_tgt.id)
+                            added = True
+                continue
+            is_helper = (isinstance(value, ast.Call)
+                          and isinstance(value.func, ast.Name)
+                          and value.func.id in _HELPER_NAMES)
+            is_alias = (isinstance(value, ast.Name) and value.id in names)
+            if not (is_helper or is_alias):
+                continue
+            for tgt in targets:
+                if isinstance(tgt, ast.Name) and tgt.id not in names:
+                    names.add(tgt.id)
+                    added = True
+        if not added:
+            break
+    return names
+
+
+def _is_long_path_arg(node, names):
+    """这个实参是否已经是长路径（或长路径安全的包装）。"""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id in _HELPER_NAMES
+    if isinstance(node, ast.Name):
+        return node.id in names
+    return False
+
+
+def test_metadata_queries_go_through_long_path():
+    """本地文件的元数据查询（exists / getsize / isfile / isdir）必须长路径安全。
+
+    这条是第九十轮那条门禁的补漏：原来只要求「函数里出现过 long_path」，
+    粒度太粗，同函数里没走前缀的调用全被放过 —— 于是出现了「写得进去、
+    查不到」的半修状态（详见上面的说明）。
+    """
+    bad = []
+    for path in _scan_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in [n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            names = _long_path_vars(fn)
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                f = node.func
+                # os.path.exists(...) / os.path.getsize(...) / …
+                if not (isinstance(f, ast.Attribute)
+                        and f.attr in _META_CHECKS
+                        and isinstance(f.value, ast.Attribute)
+                        and isinstance(f.value.value, ast.Name)
+                        and f.value.value.id == "os"
+                        and f.value.attr == "path"):
+                    continue
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant):
+                    continue                 # 常量路径不可能超长
+                if _is_long_path_arg(arg, names):
+                    continue
+                bad.append("%s:%d %s() → os.path.%s(%s)" % (
+                    path.relative_to(ROOT), node.lineno, fn.name,
+                    f.attr, ast.unparse(arg)[:50]))
+    assert not bad, ("这些元数据查询没走长路径安全版本（超过 260 字符时会"
+                     "静默返回 False / 0）：\n  " + "\n  ".join(bad))
+
+
+def test_reading_local_files_goes_through_long_path():
+    """读本地文件（open(..., "rb" / "r")）也必须走长路径。
+
+    第九十轮的门禁只查了**写**模式（"w" / "wb" / "a"），读模式被漏掉了：
+    `open(path, "rb")` 在超长路径上直接抛 OSError / FileNotFoundError。
+    """
+    bad = []
+    for path in _scan_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in [n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            names = _long_path_vars(fn)
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                f = node.func
+                if not (isinstance(f, ast.Name) and f.id == "open"):
+                    continue
+                mode = "r"
+                cand = list(node.args[1:2]) + [k.value for k in node.keywords
+                                               if k.arg == "mode"]
+                for a in cand:
+                    if isinstance(a, ast.Constant):
+                        mode = a.value or "r"
+                if not any(c in mode for c in "rb+"):
+                    continue
+                arg = node.args[0]
+                if _is_long_path_arg(arg, names):
+                    continue
+                bad.append("%s:%d %s() → open(%s, %r)" % (
+                    path.relative_to(ROOT), node.lineno, fn.name,
+                    ast.unparse(arg)[:40], mode))
+    assert not bad, ("这些读取没走长路径（超过 260 字符时直接抛 OSError）：\n  "
+                     + "\n  ".join(bad))
+
+
+# ---------------------------------------------------------------------------
+# 4. 门禁三：交给 adb 的参数不能带 \\?\ 前缀
 # ---------------------------------------------------------------------------
 def test_no_long_path_in_subprocess_arguments():
     r"""subprocess 的参数里不得出现 long_path(...)。

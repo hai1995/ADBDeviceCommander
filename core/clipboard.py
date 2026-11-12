@@ -55,6 +55,8 @@ import sys
 import time
 import zlib
 
+from core.longpath import long_path, path_isfile
+
 try:
     from core import imgbytes
 except ImportError:                  # 以 core/ 为 sys.path[0] 直接跑时
@@ -121,9 +123,11 @@ def copy_image(path):
     失败原因写成人话（直接供状态栏展示），且本函数在任何情况下都不抛异常。
     """
     try:
-        if not path or not os.path.isfile(path):
+        # 长路径安全：截图落在用户的保存目录里，路径可以超长。超长路径下
+        # os.path.isfile 返回 False → 明明截图就在那儿，却被报成「图片不存在」。
+        if not path or not path_isfile(path):
             return False, "图片不存在: %s" % (path or "<空>")
-        with open(path, "rb") as f:
+        with open(long_path(path), "rb") as f:
             raw = f.read()
         if not raw:
             return False, "图片为空: %s" % path
@@ -669,7 +673,7 @@ def copy_linux(raw, png, pix, path):
         cmd = (["xclip", "-selection", "clipboard", "-t", "image/png"]
                if tool == "xclip" else ["wl-copy", "-t", "image/png"])
         try:
-            with open(path, "rb") as f:
+            with open(long_path(path), "rb") as f:
                 r = subprocess.run(cmd, stdin=f, timeout=20,
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)

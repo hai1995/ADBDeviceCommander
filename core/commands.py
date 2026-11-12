@@ -13,7 +13,7 @@ import uuid
 
 from core.constants import program_dir
 from core.builtin_commands import BUILTIN_COMMANDS
-from core.longpath import long_path
+from core.longpath import long_path, path_exists, path_isfile
 
 DEMO_COMMANDS = [
     {"id": "demo", "name": "[通用] 示例-查看时间", "labels": ["通用"],
@@ -83,7 +83,7 @@ def _iter_candidate_files(directory):
         if name.startswith((".", "~$")) or low.endswith(".tmp"):
             continue
         p = os.path.join(directory, name)
-        if os.path.isfile(p):
+        if path_isfile(p):
             out.append(p)
 
     # 优先级：commands.json > quick_commands.json > 其它（按文件名）。先出现的
@@ -268,9 +268,9 @@ def primary_command_path(directory=None):
     directory = directory or command_scan_dir()
     p_primary = os.path.join(directory, PRIMARY_COMMAND_FILE)
     p_legacy = os.path.join(directory, LEGACY_COMMAND_FILE)
-    if os.path.exists(p_primary):
+    if path_exists(p_primary):
         return p_primary
-    if os.path.exists(p_legacy):
+    if path_exists(p_legacy):
         return p_legacy
     return p_primary
 
@@ -541,7 +541,7 @@ def _write_json_atomic(path, data):
         return True
     except Exception:
         try:
-            if os.path.exists(ltmp):
+            if path_exists(ltmp):
                 os.remove(ltmp)
         except Exception:
             pass

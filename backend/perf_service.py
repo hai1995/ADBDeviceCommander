@@ -1358,7 +1358,7 @@ def _echarts_js():
     _ECHARTS_CACHE["tried"] = True
     try:
         path = resource_path(os.path.join("frontend", "vendor", "echarts.min.js"))
-        with open(path, "r", encoding="utf-8") as f:
+        with open(long_path(path), "r", encoding="utf-8") as f:
             _ECHARTS_CACHE["js"] = f.read()
     except (OSError, UnicodeDecodeError):
         _ECHARTS_CACHE["js"] = ""

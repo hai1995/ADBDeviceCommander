@@ -3,6 +3,7 @@
 from backend.controller import (
     ScreenCapturer, clipboard, get_pref, os
 )
+from core.longpath import long_path, path_isfile
 
 class ScreenshotMixin:
     """截图（单设备/批量/剪贴板）。"""
@@ -244,10 +245,12 @@ class ScreenshotMixin:
         """
         import base64
         p = (path or "").strip()
-        if not p or not os.path.isfile(p):
+        # 长路径安全：截图落在用户的保存目录里，路径可以超长。Windows 上
+        # os.path.isfile 对超长路径返回 False → 预览图读不出来（界面空白）。
+        if not p or not path_isfile(p):
             return {"ok": False, "reason": "missing"}
         try:
-            with open(p, "rb") as f:
+            with open(long_path(p), "rb") as f:
                 data = f.read()
         except Exception as e:
             return {"ok": False, "reason": str(e)}

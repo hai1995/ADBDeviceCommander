@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, quote
 from backend.device_proc import kill_device_process
 from core import imgbytes
 from core.constants import no_window_flags
+from core.longpath import path_isdir, path_isfile
 
 # ---- 播放器：按「延迟表现」排序，越靠前越优先 ----
 PLAYER_ORDER = ("ffplay", "mpv", "mplayer", "vlc")
@@ -127,7 +128,7 @@ def _player_extra_dirs():
                  "/Applications/VLC.app/Contents/MacOS"]
     else:
         dirs += ["/usr/local/bin", "/usr/bin", "/snap/bin"]
-    return [d for d in dirs if os.path.isdir(d)]
+    return [d for d in dirs if path_isdir(d)]
 
 
 def _as_exe(path, names):
@@ -137,13 +138,13 @@ def _as_exe(path, names):
     p = str(path).strip().strip('"')
     if not p:
         return None
-    if os.path.isdir(p):
+    if path_isdir(p):
         for name in names:
             cand = os.path.join(p, name)
-            if os.path.isfile(cand):
+            if path_isfile(cand):
                 return cand
         return None
-    if os.path.isfile(p):
+    if path_isfile(p):
         return p
     return None
 

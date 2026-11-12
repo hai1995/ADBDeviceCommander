@@ -39,7 +39,7 @@ import tempfile
 import zipfile
 
 from core.constants import VERSION, adb_kwargs, safe_name, unique_path
-from core.longpath import long_path
+from core.longpath import long_path, path_exists
 from core import devinfo
 
 # 默认 / 上限 logcat 行数。上限不是「随便定一个」：单条 threadtime 约 150 字节，
@@ -718,7 +718,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
                 for fn in (F_DEVICE, F_PROPS, F_LOGCAT, F_PROCESS, F_APPS,
                            F_ANR, F_NET, F_MEMINFO, F_CPU, F_META):
                     p = os.path.join(work, fn)
-                    if os.path.exists(p):
+                    if path_exists(p):
                         z.write(long_path(p), fn)
         except Exception as e:
             try:

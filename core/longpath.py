@@ -125,6 +125,79 @@ def is_too_long(path: str) -> bool:
     return len(full) >= 260
 
 
+# ---------------------------------------------------------------------------
+# 元数据查询（exists / getsize / isfile）
+# ---------------------------------------------------------------------------
+# 为什么需要单独一组
+# ------------------
+# 第九十轮给「写」这一侧铺开了 long_path()（open 写 / os.makedirs / os.replace /
+# zipfile），但**读**这一侧当时没有一起改：
+#
+#   * `os.path.exists()` / `os.path.getsize()` / `os.path.isfile()` 在 Windows 上
+#     同样受 MAX_PATH 限制 —— 超过 260 字符时它们**不报错，只是返回 False / 0**；
+#   * `open(path, "rb")` 读一个超长路径会直接抛 OSError。
+#
+# 于是出现了很难查的「半修」状态：文件**写得进去**（写侧有前缀），但
+# **查不到**（查侧没前缀）：
+#
+#   * `unique_path()` 认为路径是空的 → **覆盖用户上一份产物**（它存在的唯一
+#     目的就是别覆盖）；
+#   * `_zip_paths()` 认为文件不存在 → **打包出来的 zip 少了文件**，用户却看到
+#     「✓ 已打包」；
+#   * `join_segments()` 认为分段不存在 → **合并直接失败**，报的是「都缺 moov 头」；
+#   * `_wav_ok()` 认为 wav 不存在 → **刚录好的音频被判为无效并丢弃**。
+#
+# 这些症状全都表现为「东西莫名没了 / 打包少了内容」，与「路径太长」毫无关联，
+# 用户根本想不到该去查长度。
+#
+# 所以元数据查询必须和写侧一样加前缀。下面这几个包装把这件事集中起来，
+# 免得每个调用点各写一遍「long_path(x)」。
+def path_exists(path: str) -> bool:
+    """路径是否存在（长路径安全）。"""
+    try:
+        return os.path.exists(long_path(path))
+    except (OSError, ValueError):
+        return False
+
+
+def path_isfile(path: str) -> bool:
+    """是否是普通文件（长路径安全）。"""
+    try:
+        return os.path.isfile(long_path(path))
+    except (OSError, ValueError):
+        return False
+
+
+def path_getsize(path: str) -> int:
+    """文件字节数（长路径安全）；取不到返回 0。"""
+    try:
+        return os.path.getsize(long_path(path))
+    except (OSError, ValueError):
+        return 0
+
+
+def path_isdir(path: str) -> bool:
+    """是否是目录（长路径安全）。"""
+    try:
+        return os.path.isdir(long_path(path))
+    except (OSError, ValueError):
+        return False
+
+
+def path_remove(path: str) -> bool:
+    """删除文件（长路径安全）。返回是否删掉了。
+
+    `os.remove` 在超长路径上抛 OSError；调用点多半包着 try/except 静默吞掉，
+    于是「文件其实还在」这件事没人知道 —— 而「打包后清掉源文件」这类逻辑
+    恰恰依赖删除**确实发生**。这里把异常变成返回值，由调用方决定要不要报。
+    """
+    try:
+        os.remove(long_path(path))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def explain_long_path(path: str) -> str:
     """路径过长时的中文说明（可直接拼进错误提示）。"""
     return ("目标路径 %d 个字符，超过 Windows 单条路径 260 字符的上限；"

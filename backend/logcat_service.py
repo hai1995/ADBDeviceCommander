@@ -35,7 +35,7 @@ from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
                             adb_popen_kwargs)
 from core.logcat import (classify_line, match_filter, split_filter_terms,
                          ts_epoch, ts_prefix as _ts_prefix)
-from core.longpath import long_path
+from core.longpath import long_path, path_exists, path_getsize, path_isfile
 from backend.screen_service import device_present
 
 
@@ -1258,14 +1258,19 @@ class LogcatCapture:
                 # 先确认是**普通文件**：open(path, "w") 失败时（保存目录被删、
                 # 路径被同名目录占位），path 可能仍 exists —— 对目录打包会产出
                 # 一个只有空目录条目的 zip，看起来「打包成功」却什么都没有。
+                # 长路径安全：Windows 上 os.path.isfile / getsize 对超过 260
+                # 字符的路径不报错、只返回 False / 0 —— 于是这里会报「抓取文件
+                # 不存在或不是普通文件（保存目录被删 / 被同名目录占位？）」，
+                # 而文件其实好好地在那儿。真实的失败原因（路径太长）一个字
+                # 都没提，用户只会反复重建目录。
                 try:
-                    is_file = os.path.isfile(path)
-                    size_now = os.path.getsize(path) if is_file else 0
+                    is_file = path_isfile(path)
+                    size_now = path_getsize(path) if is_file else 0
                 except OSError:
                     is_file, size_now = False, 0
                 if not is_file:
                     zip_err = ("抓取文件不存在或不是普通文件（保存目录被删 / "
-                               "被同名目录占位？）")
+                               "被同名目录占位 / 路径超过 260 字符？）")
                 elif size_now <= 0:
                     zip_err = "抓取文件为空，没有可打包的内容"
                 else:
@@ -1279,10 +1284,10 @@ class LogcatCapture:
                                "path": zpath, "src": path,
                                "text": "已打包：%s" % zpath})
             # size 语义：打了包就报 zip 的大小（源 txt 已清理），否则报 txt 大小
-            if zpath and os.path.exists(zpath):
-                size_out = os.path.getsize(zpath)
-            elif os.path.isfile(path):
-                size_out = os.path.getsize(path)
+            if zpath and path_exists(zpath):
+                size_out = path_getsize(zpath)
+            elif path_isfile(path):
+                size_out = path_getsize(path)
             else:
                 size_out = 0
             if not stopped_by_user and not logish and not err_reported and not gap_written:
@@ -1347,8 +1352,10 @@ class LogcatCapture:
             except Exception:
                 pass
             return None
+        # 长路径安全：源 txt 的清理也必须走前缀，否则超过 260 字符时删除
+        # 静默失败 —— 用户目录里会同时留着 txt 和 zip（体积白占一倍）。
         try:
-            os.remove(path)
+            os.remove(long_path(path))
         except Exception:
             pass
         return zpath

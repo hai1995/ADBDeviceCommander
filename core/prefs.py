@@ -72,7 +72,7 @@ import sys
 import threading
 
 from core.constants import PROJECT_ROOT, resource_path
-from core.longpath import long_path
+from core.longpath import long_path, path_isdir, path_isfile
 
 # save_prefs 的「读-合并-写」整体互斥锁（见 save_prefs 的说明）。
 # 模块级：所有调用方共用同一把，跨线程串行化写入。
@@ -752,9 +752,9 @@ def apply_adb_dir(adb_dir, env=None) -> bool:
     if not d:
         return False
     # 兼容直接填 adb.exe / adb 的完整路径
-    if os.path.isfile(d) and os.path.basename(d).lower() in ("adb.exe", "adb"):
+    if path_isfile(d) and os.path.basename(d).lower() in ("adb.exe", "adb"):
         d = os.path.dirname(d)
-    if not os.path.isdir(d):
+    if not path_isdir(d):
         return False
     cur = env.get("PATH", "")
     marker = d + os.pathsep

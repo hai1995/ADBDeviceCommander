@@ -7,6 +7,7 @@ from backend.controller import (
 )
 from core import win_theme
 from core.devices import parse_devices
+from core.longpath import path_exists
 
 class SettingsMixin:
     """设置、adb 状态、Wi-Fi 无线调试。"""
@@ -85,7 +86,7 @@ class SettingsMixin:
         return {
             "ok": True,
             "path": p,
-            "exists": os.path.exists(p),
+            "exists": path_exists(p),
             "save_dir": settings.get("save_dir", ""),
             "save_dir_effective": eff,
             "note": note,

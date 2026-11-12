@@ -12,7 +12,8 @@ import tempfile
 import uuid
 
 from core.constants import adb_kwargs, parse_ls_output, posix_join, safe_name
-from core.longpath import explain_long_path, is_too_long, long_path
+from core.longpath import (
+    explain_long_path, is_too_long, long_path, path_getsize, path_isfile)
 from core import tmpfiles
 
 
@@ -231,10 +232,10 @@ class FileService:
             # 目录拉下来，exists 命中后 getsize 直接抛 IsADirectoryError，用户看到
             # 一句 "[Errno 21] Is a directory" 的 Python 内部错误；isfile 不命中时
             # 落到下面的 cat stderr（"Is a directory"），是人能看懂的原因。
-            if pr.returncode == 0 and os.path.isfile(tmp):
-                sz = os.path.getsize(tmp)
+            if pr.returncode == 0 and path_isfile(tmp):
+                sz = path_getsize(tmp)
                 if sz <= max_inline_bytes:
-                    with open(tmp, "r", encoding="utf-8",
+                    with open(long_path(tmp), "r", encoding="utf-8",
                               errors="replace") as f:
                         txt = f.read()
                     try:

@@ -20,7 +20,8 @@ import time
 
 from backend.device_proc import kill_device_process
 from core import imgbytes
-from core.longpath import explain_long_path, is_too_long, long_path
+from core.longpath import (
+    explain_long_path, is_too_long, long_path, path_exists, path_getsize)
 from core.constants import (
     REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
     REC_REBOOT_WAIT_S, REC_SEGMENT_S,
@@ -1257,15 +1258,18 @@ class VideoRecorder:
             if not seg["done"].wait(timeout=90):
                 notes.append("第 %s 段的拉取未在 90 秒内完成" % seg.get("n"))
             p = seg.get("local")
-            if seg.get("ok") and p and os.path.exists(p):
+            # 长路径安全：分段落在用户的保存目录里，路径可以超长。超长路径下
+            # os.path.exists 返回 False → 分段被当成「没拉到」，整场录像直接
+            # 不见了（notes 里也不会提）。
+            if seg.get("ok") and p and path_exists(p):
                 paths.append(p)
                 continue
             if seg.get("err"):
                 notes.append("第 %s 段：%s" % (seg.get("n"), seg.get("err")))
-            if p and os.path.exists(p):
+            if p and path_exists(p):
                 notes.append("（第 %s 段残片：%s）" % (seg.get("n"), p))
         # 当前段（段号最大）排在最后，与目录里的 _pN 顺序一致。
-        if local and os.path.exists(local):
+        if local and path_exists(local):
             if ok:
                 paths.append(local)
             else:
@@ -1409,7 +1413,7 @@ class VideoRecorder:
         """MP4 是否含 moov 头（索引在文件尾部，screenrecord 优雅收尾时写回）。
         缺 moov 即未正常收尾，会没有时长、播放不了。仅扫描头/尾各 4MB（moov 在尾部）。"""
         try:
-            size = os.path.getsize(path)
+            size = path_getsize(path)
             if size < 64:
                 return False
             with open(long_path(path), "rb") as f:

@@ -5,9 +5,9 @@ core.logcat —— logcat 行分类 / 异常识别 / 时间戳解析（纯逻辑
 逻辑与 旧 Tk 版（已移除） 中的 _logcat_classify 同源（见 tests/test_logcat_capture.py）。
 """
 import datetime
-import os
 
 from core.constants import LOGCAT_EXC_RE, LOGCAT_RE
+from core.longpath import long_path, path_getsize
 
 # 直接判为异常的 tag（AndroidRuntime 打 Java 崩溃、libc 打 native crash）。
 # 用 frozenset：这行判定在日志洪流下每秒要跑上万次，集合查找比元组线性扫描省事。
@@ -291,13 +291,16 @@ def read_time_bounds(path, head_bytes=128 * 1024, tail_bytes=128 * 1024):
     if not path:
         return None, None
     try:
-        size = os.path.getsize(path)
+        # 长路径安全：录屏收尾时校验「配套日志跟到什么时候」用的就是这里。
+        # 超过 260 字符时 getsize 抛 OSError → 返回 (None, None) → 界面报
+        # 「配套日志没覆盖到录屏区间」，而日志其实好好的，只是路径太长。
+        size = path_getsize(path)
     except OSError:
         return None, None
     if size <= 0:
         return None, None
     try:
-        with open(path, "rb") as f:
+        with open(long_path(path), "rb") as f:
             head = f.read(min(head_bytes, size))
     except OSError:
         return None, None
@@ -313,7 +316,7 @@ def read_time_bounds(path, head_bytes=128 * 1024, tail_bytes=128 * 1024):
         parts = head.split(b"\n")
     else:
         try:
-            with open(path, "rb") as f:
+            with open(long_path(path), "rb") as f:
                 f.seek(max(0, size - tail_bytes))
                 tail = f.read()
         except OSError:

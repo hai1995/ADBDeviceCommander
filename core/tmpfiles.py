@@ -22,7 +22,7 @@ import os
 import tempfile
 import time
 
-from core.longpath import long_path
+from core.longpath import long_path, path_isfile
 
 # 本程序在系统临时目录里留下的文件前缀（新增此类文件时记得加到这里）。
 #   adb_view_     「查看」大文件时 pull 下来的副本（本模块的主要目标）
@@ -55,7 +55,7 @@ def _candidates(directory, prefixes):
         path = os.path.join(directory, name)
         try:
             # isfile 而非 exists / 不跟随符号链接：目录与其他特殊文件一律不碰
-            if os.path.islink(path) or not os.path.isfile(path):
+            if os.path.islink(path) or not path_isfile(path):
                 continue
             st = os.stat(path)
             out.append((path, st.st_mtime, st.st_size))

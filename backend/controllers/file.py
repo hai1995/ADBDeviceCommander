@@ -5,7 +5,7 @@ from typing import ClassVar
 from backend.controller import (
     os, safe_name, subprocess, sys, threading
 )
-from core.longpath import long_path
+from core.longpath import long_path, path_isdir, path_isfile
 
 
 def _build_browse_info(title):
@@ -161,7 +161,7 @@ def _pick_folder(initial=None):
         win = None
     if win is None or not hasattr(win, "create_file_dialog"):
         return None, "unsupported"
-    directory = initial if (initial and os.path.isdir(initial)) else ""
+    directory = initial if (initial and path_isdir(initial)) else ""
     try:
         res = win.create_file_dialog(webview.FOLDER_DIALOG, directory=directory)
     except TypeError:
@@ -498,7 +498,9 @@ class FileMixin:
         避免把明显非法的输入透传给系统打开机制。
         """
         try:
-            if not path or not os.path.isfile(path):
+            # 长路径安全：这里只做「存在性校验」，真正的打开交给系统
+            # （os.startfile 不认 \\?\ 前缀，所以路径原样传）。
+            if not path or not path_isfile(path):
                 why = "文件不存在或已被清理"
                 self._push_status("err", "⚠ 无法打开文件：%s" % why)
                 return {"ok": False, "reason": why}

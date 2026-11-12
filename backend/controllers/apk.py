@@ -4,6 +4,7 @@ from backend.controller import (
     adb_kwargs, apkinfo, load_prefs, os,
     subprocess
 )
+from core.longpath import path_getsize, path_isfile
 
 class ApkMixin:
     """APK 选择/安装。"""
@@ -17,7 +18,10 @@ class ApkMixin:
         if not path:
             return {"ok": False, "reason": "cancelled"}
         try:
-            size = os.path.getsize(path)
+            # 长路径安全：安装包可能放在很深的目录里（用户自己选的文件）。
+            # getsize 对超长路径抛 OSError → 界面报「读取安装包失败」，
+            # 真实原因（路径太长）一个字都没提。
+            size = path_getsize(path)
         except OSError as e:
             return {"ok": False, "reason": "读取安装包失败：%s" % e}
         self._apk_path = path
@@ -34,7 +38,7 @@ class ApkMixin:
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
         path = self._apk_path
-        if not path or not os.path.isfile(path):
+        if not path or not path_isfile(path):
             return {"ok": False, "reason": "请先选择 APK 安装包"}
         prefs = load_prefs()
         if replace is None:

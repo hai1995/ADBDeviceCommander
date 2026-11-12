@@ -19,6 +19,7 @@ from backend.device_proc import kill_device_process
 from core.longpath import long_path
 from core.constants import (
     _WAVEHDR, adb_kwargs, adb_popen_kwargs, safe_name, unique_path)
+from core.longpath import path_exists, path_getsize
 
 
 # MMSYSERR / WAVERR 里最常见的几个：报错时直接翻成人话，用户才知道该动哪里。
@@ -74,8 +75,11 @@ def _wav_duration(path):
     写出的那种。tinycap 写出的头有时字段顺序不同，宁可判为不可用也不要喂给 ffmpeg。
     """
     try:
-        total = os.path.getsize(path)
-        with open(path, "rb") as f:
+        # 长路径安全：读侧也必须加前缀，否则超过 260 字符时 getsize 直接抛
+        # OSError、open 抛 FileNotFoundError，函数返回 None → 上层把**刚录好
+        # 的音频**判成无效并丢弃。
+        total = path_getsize(path)
+        with open(long_path(path), "rb") as f:
             head = f.read(12)
             if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
                 return None
@@ -120,11 +124,14 @@ def _wav_ok(path):
     这里额外要求 data 段有真实字节数。
     """
     try:
-        if not os.path.exists(path):
+        # 长路径安全：Windows 上 os.path.exists 对超长路径返回 False（不报错），
+        # 于是「文件不存在」被误判 → _wav_ok 返回 False → 调用方把**录好的
+        # 音频当成空录音删掉**（见 MicRecorder.stop 与 DeviceAudioCapture.stop）。
+        if not path_exists(path):
             return False
-        if os.path.getsize(path) < 44:
+        if path_getsize(path) < 44:
             return False
-        with open(path, "rb") as f:
+        with open(long_path(path), "rb") as f:
             head = f.read(12)
         if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
             return False
@@ -142,9 +149,11 @@ def _mp4_playable(path):
     避免把坏文件当成功结果交给用户。
     """
     try:
-        if not os.path.exists(path):
+        # 长路径安全：同 _wav_ok —— 超长路径下 exists 返回 False，会把正常的
+        # mp4 判成「不可播放」，合成结果被白白丢掉。
+        if not path_exists(path):
             return False
-        size = os.path.getsize(path)
+        size = path_getsize(path)
         # 正常 1 帧视频都远大于 4KB；低于此值基本可判定为空壳
         if size < 4096:
             return False
@@ -158,7 +167,7 @@ def _mp4_playable(path):
         except Exception:
             pass
         # 没有 ffprobe 时退化为「体积 + moov 头」兜底判断
-        with open(path, "rb") as f:
+        with open(long_path(path), "rb") as f:
             return b"moov" in f.read(min(size, 4 * 1024 * 1024))
     except Exception:
         return False
@@ -174,10 +183,10 @@ def _mp4_duration(path):
     不能只读文件头），拿到 mvhd 的 timescale/duration 后换算。
     """
     try:
-        total = os.path.getsize(path)
+        total = path_getsize(path)
         if total < 16:
             return None
-        with open(path, "rb") as f:
+        with open(long_path(path), "rb") as f:
             moov = None
             pos = 0
             while pos + 8 <= total:
@@ -274,7 +283,8 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
     """
     if not _have_ffmpeg():
         return None
-    if not (video_path and os.path.exists(video_path)):
+    # 长路径安全：视频落在用户的保存目录里，路径可以超长。
+    if not (video_path and path_exists(video_path)):
         return None
     audios = [a for a in (audio_paths or []) if a and _wav_ok(a)]
     if not audios:
@@ -301,7 +311,7 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
             out_path]
     try:
         r = subprocess.run(cmd, **adb_kwargs(300))
-        if r.returncode == 0 and os.path.exists(out_path):
+        if r.returncode == 0 and path_exists(out_path):
             # 复核：ffmpeg 成功也可能产出空壳（音频为空/过短时）
             if _mp4_playable(out_path):
                 return out_path
@@ -665,7 +675,7 @@ class MicRecorder:
         self._write_wav()
         # 空录音（麦克风被占用 / 全程静音 / 权限不足）会写出只有 44 字节头的 wav，
         # 这种文件任何播放器都打不开。删掉并回 None，让调用方明确提示「未录到声音」。
-        if self._path and os.path.exists(self._path) and not _wav_ok(self._path):
+        if self._path and path_exists(self._path) and not _wav_ok(self._path):
             _silent_remove(self._path)
             self._path = None
             return None

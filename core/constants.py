@@ -7,6 +7,8 @@ import re
 import sys
 import ctypes
 
+from core.longpath import path_exists
+
 # 项目根目录（core 位于 <root>/core/）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,7 +41,7 @@ DEVICE_SERVER_HEAL_AFTER = 2
 # 自动轮询刷新失败的提示最小间隔（秒）：失败时保留上次列表并按此间隔限频播报，
 # 避免每 5s 一条把状态栏刷爆（手动刷新不受限，立即播报）。
 FAIL_NOTICE_INTERVAL_S = 30.0
-VERSION = "2026.1112.0254"
+VERSION = "2026.1111.0748"
 
 # 全局强调色（iOS 系统蓝），Web 版通过 CSS 变量使用
 ACCENT = "#0A84FF"
@@ -252,9 +254,13 @@ def unique_path(path, suffixes=()):
     停止时又把那份 zip 覆盖掉。
     """
     def taken(p):
-        if os.path.exists(p):
+        # 必须走 path_exists（长路径安全）：Windows 上 os.path.exists 碰到超过
+        # 260 字符的路径**不报错，只是返回 False** —— 于是这里会认为「位置是
+        # 空的」，把**用户上一份产物**的路径原样返回给调用方，随后被新文件
+        # 覆盖。unique_path 存在的唯一目的就是别覆盖，这里正好是它失效的地方。
+        if path_exists(p):
             return True
-        return any(os.path.exists(p + sfx) for sfx in suffixes)
+        return any(path_exists(p + sfx) for sfx in suffixes)
 
     if not taken(path):
         return path
@@ -434,7 +440,7 @@ def resource_path(rel: str) -> str:
     else:
         base_dir = PROJECT_ROOT
     local = os.path.join(base_dir, rel)
-    if os.path.exists(local):
+    if path_exists(local):
         return local
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:

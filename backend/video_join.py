@@ -33,7 +33,7 @@ import subprocess
 from backend.audio_service import (
     _have_ffmpeg, _mp4_playable, _silent_remove, _video_duration)
 from core.constants import adb_kwargs
-from core.longpath import long_path
+from core.longpath import long_path, path_exists, path_getsize
 
 # 单次合并的超时（秒）。`-c copy` 是纯 IO：57 分钟素材（20 段）在机械盘上
 # 也就几十秒。给到 1800 是为了留足「磁盘被别的程序抢占」的余量，而不是
@@ -119,8 +119,12 @@ def join_segments(paths, out_path, timeout=None):
 
     调用方约定：`used` 里除 `path` 之外的段可以删；`skipped` 一律保留。
     """
+    # 存在性与大小都要走长路径安全的版本：Windows 上 os.path.exists 碰到超过
+    # 260 字符的路径**返回 False**（不报错），分段会被误判成「不存在」——
+    # 于是这里直接判定「没有可合并的完整分段（都缺 moov 头）」，而真实原因
+    # 是路径太长，用户完全无从推断。
     segs = [p for p in (paths or [])
-            if p and os.path.exists(p) and os.path.getsize(p) > 0]
+            if p and path_exists(p) and path_getsize(p) > 0]
     used, skipped = [], []
     for p in segs:
         (used if _has_moov(p) else skipped).append(p)
@@ -159,7 +163,7 @@ def join_segments(paths, out_path, timeout=None):
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped, "reason": "ffmpeg 合并失败：%s" % e}
-        if r.returncode != 0 or not os.path.exists(temp):
+        if r.returncode != 0 or not path_exists(temp):
             why = _err_text(r)
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used, "skipped": skipped,

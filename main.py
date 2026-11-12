@@ -26,7 +26,7 @@ import time
 _MODULE_T0 = time.perf_counter()
 
 from core.constants import PROJECT_ROOT, unique_path
-from core.longpath import long_path
+from core.longpath import long_path, path_isdir, path_isfile
 from backend.controller import WebApi
 from core.envcheck import (
     run_all, WEBVIEW2_DOWNLOAD_URL, WEBVIEW2_CLIENT_GUID, WEBVIEW2_PV_SUBKEYS,
@@ -85,7 +85,10 @@ def _resolve_index_url():
     """
     from pathlib import Path
     index = os.path.join(PROJECT_ROOT, "frontend", "index.html")
-    if not os.path.exists(index):
+    # 长路径安全：项目根目录可以很深（用户把源码 clone 在归档目录里）。
+    # os.path.exists 对超长路径返回 False → 这里会误报「未找到 index.html，
+    # 窗口可能显示空白」，而文件其实好好地在那儿。
+    if not path_isfile(index):
         print("[main] 警告：未找到 %s，窗口可能显示空白（前端尚未就绪）。"
               % index, file=sys.stderr)
     return Path(index).resolve().as_uri()
@@ -472,10 +475,13 @@ def _motw_cleanup_dirs():
     外加 pythonnet / clr_loader 放托管 DLL 的子目录。返回去重后的列表。"""
     bases = []
     meipass = getattr(sys, "_MEIPASS", "")
-    if meipass and os.path.isdir(meipass):
+    # 长路径安全：这一步是「崩溃修复」本身 —— 程序装在深层目录时，
+    # os.path.isdir 对超长路径返回 False → 目录找不到 → MOTW 清理**静默跳过**
+    # → 那个「系统找不到指定的文件」的崩溃又回来了，还查不出原因。
+    if meipass and path_isdir(meipass):
         bases.append(meipass)
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-    if exe_dir and os.path.isdir(exe_dir) and exe_dir not in bases:
+    if exe_dir and path_isdir(exe_dir) and exe_dir not in bases:
         bases.append(exe_dir)
     dirs = []
     for base in bases:
@@ -487,7 +493,7 @@ def _motw_cleanup_dirs():
             os.path.join(base, "clr_loader", "ffi", "dlls"),
         ]
         for d in candidates:
-            if os.path.isdir(d) and d not in dirs:
+            if path_isdir(d) and d not in dirs:
                 dirs.append(d)
     return dirs
 
@@ -524,14 +530,16 @@ def _strip_mark_of_the_web():
     try:
         for d in _motw_cleanup_dirs():
             try:
-                names = os.listdir(d)
+                # 长路径安全：os.listdir 对超长路径直接抛 OSError（不像 exists
+                # 那样返回 False），这里会被 except 吞掉 → 整个目录被跳过。
+                names = os.listdir(long_path(d))
             except OSError:
                 continue
             for name in names:
                 if not name.lower().endswith(_MOTW_BINARY_SUFFIXES):
                     continue        # 跳过 .py/.pyc/.txt，别把整个包扫一遍
                 p = os.path.join(d, name)
-                if not os.path.isfile(p):
+                if not path_isfile(p):
                     continue
                 _delete_zone_identifier(p + ":Zone.Identifier")
                 count += 1
