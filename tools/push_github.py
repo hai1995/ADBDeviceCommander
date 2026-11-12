@@ -220,6 +220,53 @@ def _ensure_identity():
     return ""
 
 
+def check_not_stale():
+    """推送前确认本地不是「落后的克隆」。
+
+    为什么必须查
+    ------------
+    `git push` 在远端有新提交时会**拒绝**（non-fast-forward），这是安全的。
+    但有两种情况它拦不住：
+
+    1. 别人改了**别的文件**（比如发版时把 `core/constants.py` 的 VERSION 从
+       A 改成 B），本地克隆还是旧版本 —— 此时直接提交推送，会把**别人那份改动
+       悄悄回退**（"git push" 不会拦，因为本地确实有这个文件的改动要提交）；
+    2. 更隐蔽：本地把整个文件**旧的内容**推上去，覆盖掉远端的新内容。
+
+    第 2 种真的发生过：一次推送把用户刚发的版（VERSION 从 2026.1111.0748 改成
+    2026.1112.0254）无声地退回旧版本号，CI 立刻红（README 标题与版本号对不上）
+    才被发现 —— 但如果那次 CI 没跑，用户拿到手的就是一个「版本号倒退了」的包。
+
+    这里的检查：先 `git fetch`，再看远端有没有本地没有的提交；有就**中止推送**
+    并说明该做什么。宁可让人多按一次「拉取」，也不要静默回退别人的改动。
+
+    返回 (是否可继续, 说明文字)。
+    """
+    if not _has_git_repo():
+        return True, ""
+    rc, out = _git("fetch", "--quiet", "origin")
+    if rc != 0:
+        # 拉不下来（没网 / 凭证过期）不拦 —— 推送本身也会失败，让它去报错。
+        return True, ""
+    rc2, local_sha = _git("rev-parse", "HEAD")
+    rc3, remote_sha = _git("rev-parse", "origin/" + BRANCH)
+    if rc2 != 0 or rc3 != 0:
+        return True, ""
+    local_sha, remote_sha = local_sha.strip(), remote_sha.strip()
+    if local_sha == remote_sha:
+        return True, ""
+    # 远端有没有本地没有的提交？
+    rc4, behind = _git("rev-list", "--count", "HEAD..origin/" + BRANCH)
+    if rc4 == 0 and behind.strip() not in ("", "0"):
+        rc5, log = _git("log", "--oneline", "-5", "HEAD..origin/" + BRANCH)
+        return False, ("远端有 %s 个本地没有的提交（多半是别人发了版或改了东西）。"
+                       "先执行 `git pull --rebase origin %s` 把它们取回来再推 —— "
+                       "直接推会把远端那些改动**静默回退**（本地这份是旧的）。"
+                       "远端多出来的提交：\n%s"
+                       % (behind.strip(), BRANCH, (log or "").strip()))
+    return True, ""
+
+
 def _auto_message(items):
     """按改动文件自动生成一句能看懂的提交说明。"""
     n = len(items)
@@ -332,6 +379,17 @@ def main(argv=None):
     ident = _ensure_identity()
     if ident:
         steps.append(ident)
+
+    # ---- 推送前的「本地是否过期」检查 ----
+    # 放在提交**之前**：此时工作区还没被提交动过，检查失败就直接中止，
+    # 不留下一个「已经提交、但没推」的半截状态。
+    ok_stale, why = check_not_stale()
+    if not ok_stale:
+        _out("✗ 本地是落后的克隆，已中止推送。")
+        _out("  %s" % why)
+        return 1
+    if why:
+        steps.append(why)
 
     # ---- 提交 ----
     _branch, items = repo_state()

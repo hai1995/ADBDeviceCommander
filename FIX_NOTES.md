@@ -6523,3 +6523,108 @@ long_path(b)` 等赋值形态），因此 `os.path.exists(ltmp)` 这种「ltmp �
 - 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
 - 逐文件核对行尾：CRLF / LF 风格与改动前一致（含本来就混行的
   `backend/logcat_service.py`，比例未被改动）。
+
+---
+
+# 第九十六轮（第十二轮：长路径读侧补齐 + 一次「推送静默回退用户发版」的现场）
+
+## 触发
+
+「继续往前推进修复」。这轮从「上次那轮**做对了吗**」切入：第九十轮给 Windows
+长路径（>260 字符）铺开了 `core/longpath`，把**写**这一侧全改了。回头审它 ——
+发现**读**这一侧原封不动，于是是「半修」状态。
+
+## 修复一：长路径的「读侧」
+
+### 根因：第九十轮的门禁粒度太粗
+
+```python
+uses = any(isinstance(n, ast.Name) and n.id == "long_path" for n in ast.walk(fn))
+```
+
+只要函数里有**一处**走了 `long_path`，同函数里其余**没走**的调用就一并放过。
+
+而 Windows 上 `os.path.exists()` / `getsize()` / `isfile()` 与 `open()` 一样受
+MAX_PATH 限制，**超过 260 字符时不报错，只是返回 False / 0**（读则抛 OSError）。
+于是出现了「文件**写得进去**（写侧有前缀），却**查不到**（查侧没前缀）」。
+
+### 真实后果：四类「东西莫名没了」
+
+| # | 位置 | 症状 | 用户的真实原因 |
+|---|---|---|---|
+| 1 | `core/constants.unique_path()` | 认为位置是空的 → **覆盖用户上一份产物**（它存在的唯一目的就是别覆盖） | 路径超长 |
+| 2 | `record._zip_paths()` | 认为文件不存在 → **压缩包少了文件**，界面照样弹「✓ 已打包」 | 路径超长 |
+| 3 | `video_join.join_segments()` | 认为分段不存在 → **合并直接失败**，报的是「都缺 moov 头」（真因一字未提） | 路径超长 |
+| 4 | `audio_service._wav_ok()` | 认为 wav 不存在 → **刚录好的音频被判无效并删除**，用户只看到「未录到声音」 | 路径超长 |
+
+更要紧的是 `main.py` 的 **MOTW 清理**（第一轮修的启动崩溃）：
+`os.path.isdir(meipass)` 对超长路径返回 False → 程序装在深层目录时**崩溃修复被
+静默跳过** → 那个「系统找不到指定的文件」的崩溃又回来了，还查不出原因。
+
+### 改法
+
+- `core/longpath.py` 新增 `path_exists / path_isfile / path_getsize / path_isdir /
+  path_remove` 五个包装，把「加前缀」集中起来；
+- **16 个模块、80 余处**铺开；
+- 两条新门禁（粒度改成「**每一次调用**」而非「函数里出现过」）：
+  `test_metadata_queries_go_through_long_path`、
+  `test_reading_local_files_goes_through_long_path`（第九十轮只查了**写**模式）；
+- 行为级回归测试 `tests/test_longpath_metadata.py`：用**虚拟文件系统**把 CI 变成
+  「小 Windows」（`os.path.exists` 等换成模拟 Win32 的版本 —— **无前缀且超长一律
+  「不存在」**），三条链路的真实行为能在 CI 上复现。
+
+## 修复二：一次「推送静默回退用户发版」的现场（本轮真正的教训）
+
+### 发生了什么
+
+本轮第一次推送后，**CI 直接红了**：
+
+```
+FAILED tests/test_version_tools.py::test_project_readme_title_carries_current_version
+AssertionError: assert '## 架构（v2026.1111.0748 Web 版）' in ...
+```
+
+查下来是：用户在上一轮之间**自己发了版**（`release: v2026.1112.0254`），那次提交
+把 `core/constants.py` 的 `VERSION` 与 `README.md` 的架构标题一起改成了
+`2026.1112.0254`。而**本地克隆是那次发版之前的旧版本** —— 本轮推送时把
+`core/constants.py` 连同我的改动一起推上去，**顺手把用户的版本号改回了
+`2026.1111.0748`**。
+
+后果：远端 README 标题是 `2026.1112.0254`、而 `core/constants.py` 是
+`2026.1111.0748` —— 程序自报版本与包名版本对不上，且**版本号倒退了**。
+
+### 为什么 `git push` 没拦住
+
+`git push` 在远端有新提交时会拒绝（non-fast-forward）。但本次的情况是：
+本地**确实有** `core/constants.py` 的改动要提交（我的长路径改造），而那份改动是
+基于**旧版本**做的 —— git 只看提交图，看不出「这个文件的内容比远端旧」。
+于是推送成功，远端那两处改动被**静默覆盖**。
+
+### 修法
+
+1. **先把版本号改回来**：`core/constants.py` 恢复为 `2026.1112.0254`，
+   `README.md` 的标题同步（本地那份也是旧的）。
+2. **`tools/push_github.py` 加一道推送前的检查**（`check_not_stale()`）：
+   推送前先 `git fetch`，再看**远端有没有本地没有的提交**；有就**中止推送**，
+   并明确告诉用户「先 `git pull --rebase`，直接推会把远端那些改动静默回退」。
+   检查放在**提交之前**，避免留下「已提交、没推」的半截状态。
+   新增 4 条用例（挡住 / 列出多出来的提交 / 不误伤正常流程 / fetch 失败不拦）。
+
+   用真实 git 仓库验证过：本地落后 1 个提交时，检查确实拦下并列出了那个提交。
+
+3. 这条检查的价值不止于「版本号」：任何「别人改了、我基于旧版本改同一个文件」
+   的场景都会被它挡住 —— 那正是最容易造成静默回退的一类。
+
+> 另有一条工作纪律（本轮之后固定下来）：
+> **每次推送前先 `git fetch` 看远端 HEAD 与本地是否一致**；不一致就先把远端的
+> 提交取回来（`git pull --rebase`）再改再推。上一轮 CI 因为「pyflakes 漏了
+> tests/」红过一次，这一轮又因为「本地克隆过期」红过一次 —— 两次都是本地环境
+> 与 CI/远端不一致导致的，代价是一次往返。
+
+## 验证
+
+- 后端 **1505 passed / 1 skipped**（新增 11 条）；`ruff check .` All checks passed；
+  `pyflakes backend core tools tests` 无输出。
+- 前端 `node tests/frontend/run-all.cjs`：**95 个文件 0 失败**。
+- 逐文件核对行尾：CRLF / LF 风格与改动前一致。
+- 远程与本地逐字节一致（推送后复核）。

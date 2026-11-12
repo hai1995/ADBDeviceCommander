@@ -366,3 +366,101 @@ def test_gitignore_covers_credential_and_runtime_config():
 
 def posix_msg(pat):
     return ".gitignore 缺少 %s：这条不写，一次 git add -A 就会把它带进仓库" % pat
+
+
+# --------------------------------------------------------------------------- #
+# 推送前的「本地是否过期」检查
+# --------------------------------------------------------------------------- #
+# 背景：真的发生过一次 —— 一次推送把用户刚发的版（VERSION 从 2026.1111.0748
+# 改成 2026.1112.0254）无声地退回旧版本号。`git push` 不会拦（本地确实有那个
+# 文件的改动要提交），CI 红了才被发现，但用户如果没看 CI 就拿到了「版本号倒退」
+# 的包。这条检查的作用是：**在推送之前**就发现本地落后并中止。
+
+
+def _stub_git_stale(monkeypatch, behind_count, status_lines=" M core/a.py\n",
+                    fetch_rc=0):
+    """模拟「远端有本地没有的提交」。"""
+    calls = []
+
+    def fake_run(args, timeout=180, check=False):
+        calls.append(list(args))
+        joined = " ".join(args)
+        if "fetch" in args:
+            return fetch_rc, ""
+        if "rev-parse" in args and "--abbrev-ref" in args:
+            return 0, "main\n"
+        if "rev-parse" in args and "origin/main" in args:
+            return 0, "remote999\n"
+        if "rev-parse" in args and "--short" in args:
+            return 0, "abc1234\n"
+        if "rev-list" in args:
+            return 0, "%d\n" % behind_count
+        if "log" in args:
+            return 0, "remote999 release: v2026.1112.0254\n"
+        if "status" in joined:
+            return 0, status_lines
+        if "remote" in args and "get-url" in args:
+            return 0, pg.DEFAULT_REMOTE + "\n"
+        if "config" in args and "user.email" in args:
+            return 0, "someone@example.com\n"
+        if "commit" in args:
+            return 0, "[main abc1234] ok\n"
+        if "push" in args:
+            return 0, ""
+        return 0, ""
+
+    monkeypatch.setattr(pg, "_run", fake_run)
+    monkeypatch.setattr(pg, "_has_git_repo", lambda: True)
+    return calls
+
+
+def test_stale_clone_is_blocked_before_pushing(monkeypatch, tmp_path, capsys):
+    """远端有本地没有的提交 → 拒绝推送，并且**不**提交、不推送。"""
+    monkeypatch.setattr(pg, "CRED_FILE", _cred(tmp_path, json.dumps({"token": TOKEN})))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls = _stub_git_stale(monkeypatch, behind_count=2)
+
+    assert pg.main(["-m", "改点东西"]) == 1
+
+    kinds = _subcommands(calls)
+    assert "push" not in kinds, "本地落后时不该推送"
+    assert "commit" not in kinds, "本地落后时不该先提交（免得留下半截状态）"
+    out = capsys.readouterr().out
+    assert "落后的克隆" in out
+    assert "git pull --rebase" in out, "必须告诉用户下一步怎么做"
+
+
+def test_stale_check_lists_the_missing_commits(monkeypatch, tmp_path, capsys):
+    """提示里要列出远端多出来的提交（让人知道是谁改了什么）。"""
+    monkeypatch.setattr(pg, "CRED_FILE", _cred(tmp_path, json.dumps({"token": TOKEN})))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    _stub_git_stale(monkeypatch, behind_count=1)
+
+    pg.main([])
+    out = capsys.readouterr().out
+    assert "release: v2026.1112.0254" in out
+
+
+def test_up_to_date_clone_pushes_normally(monkeypatch, tmp_path):
+    """本地不落后 → 照常提交并推送（这条检查不能误伤正常流程）。"""
+    monkeypatch.setattr(pg, "CRED_FILE", _cred(tmp_path, json.dumps({"token": TOKEN})))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls = _stub_git_stale(monkeypatch, behind_count=0)
+
+    assert pg.main(["-m", "改点东西"]) == 0
+    kinds = _subcommands(calls)
+    assert "commit" in kinds and "push" in kinds
+
+
+def test_fetch_failure_does_not_block(monkeypatch, tmp_path):
+    """拉不下来（没网 / 凭证过期）不拦 —— 推送本身会失败，让它去报错。"""
+    monkeypatch.setattr(pg, "CRED_FILE", _cred(tmp_path, json.dumps({"token": TOKEN})))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls = _stub_git_stale(monkeypatch, behind_count=5, fetch_rc=1)
+
+    assert pg.main([]) == 0
+    assert "push" in _subcommands(calls)
