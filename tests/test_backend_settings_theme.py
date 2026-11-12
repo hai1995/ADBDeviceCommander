@@ -9,6 +9,18 @@ import core.win_theme as win_theme
 from backend.controllers.settings import SettingsMixin
 
 
+def _mixin():
+    """造一个可独立测试的 SettingsMixin。
+
+    set_theme 失败时会播报状态（原生标题栏配色失败不该一声不吭），而播报通道
+    在真实的 WebApi 上才有 —— 纯 mixin 单测里补一个记录用的替身。
+    """
+    m = SettingsMixin()
+    m.notes = []
+    m._push_status = lambda kind, text, **kw: m.notes.append((kind, text))
+    return m
+
+
 def test_set_theme_valid_modes_call_apply_for_mode(monkeypatch):
     cap = {}
 
@@ -17,7 +29,7 @@ def test_set_theme_valid_modes_call_apply_for_mode(monkeypatch):
         return {"ok": True, "reason": ""}
 
     monkeypatch.setattr(win_theme, "apply_for_mode", fake)
-    m = SettingsMixin()
+    m = _mixin()
     for mode in ("dark", "light", "system"):
         r = m.set_theme(mode)
         assert r["ok"] is True
@@ -27,7 +39,7 @@ def test_set_theme_valid_modes_call_apply_for_mode(monkeypatch):
 
 
 def test_set_theme_invalid_mode_rejected():
-    m = SettingsMixin()
+    m = _mixin()
     r = m.set_theme("neon")
     assert r["ok"] is False
     assert r["reason"] == "invalid_mode"
@@ -40,7 +52,7 @@ def test_set_theme_unsupported_is_treated_as_ok(monkeypatch):
         return {"ok": False, "reason": "unsupported"}
 
     monkeypatch.setattr(win_theme, "apply_for_mode", fake)
-    m = SettingsMixin()
+    m = _mixin()
     r = m.set_theme("light")
     assert r["ok"] is True
     assert r["title_bar"]["reason"] == "unsupported"
@@ -52,7 +64,7 @@ def test_set_theme_apply_exception_is_caught(monkeypatch):
         raise RuntimeError("dwmapi exploded")
 
     monkeypatch.setattr(win_theme, "apply_for_mode", fake)
-    m = SettingsMixin()
+    m = _mixin()
     r = m.set_theme("dark")
     assert r["ok"] is False
     assert r["reason"] == "apply_failed"

@@ -56,10 +56,13 @@ class SettingsMixin:
         结果便于排查，但「非 Windows 不支持」是预期内，不当作失败。
         """
         if mode not in ("dark", "light", "system"):
+            self._push_status("err", "⚠ 主题切换失败：未知的取值 %s" % mode)
             return {"ok": False, "reason": "invalid_mode", "mode": mode}
         try:
             res = win_theme.apply_for_mode(mode, pid=os.getpid())
         except Exception as e:  # 标题栏配色是锦上添花，任何异常都不能影响切换
+            self._push_status(
+                "err", "⚠ 原生标题栏配色未能应用（界面主题已切换）：%s" % e)
             return {"ok": False, "reason": "apply_failed", "mode": mode,
                     "error": str(e)}
         # 非 Windows 上 win_theme 恒返回 unsupported —— 那是预期内，不算失败。

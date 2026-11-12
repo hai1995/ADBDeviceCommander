@@ -5837,7 +5837,12 @@
     // 那个是回传给别人的文本，弹编辑器反而打断操作）。
     // 多设备时优先打开对比报告：它才是这一轮真正要看的那份。
     const openPath = res.compare || res.html;
-    if (openPath && api.open_local_file) callApi(api.open_local_file(openPath));
+    if (openPath && api.open_local_file) {
+      const r = await callApi(api.open_local_file(openPath));
+      if (r && r.ok === false) {
+        pushStatus("err", "⚠ 未能打开报告文件：" + (r.reason || "未知原因"));
+      }
+    }
   }
   /* ---------------- 文件 ---------------- */
   function renderFileDev() {
@@ -6823,7 +6828,13 @@
       await callApi(api.stop_run(id));
       pushStatus("info", "已停止「" + ws.name + "」里正在执行的命令");
     }
-    if (api && api.ws_close) await callApi(api.ws_close(id));
+    if (api && api.ws_close) {
+      // 检查返回：默认工作区不可关 / 关窗中会失败，不检查就是「点了没反应」。
+      const r = await callApi(api.ws_close(id));
+      if (r && r.ok === false && r.reason !== "shutting_down") {
+        pushStatus("warn", "⚠ 关闭工作区失败：" + (r.reason || "未知原因"));
+      }
+    }
     if (ws.splitterRec) {
       const i = _splitters.indexOf(ws.splitterRec);
       if (i >= 0) _splitters.splice(i, 1);
@@ -7915,14 +7926,19 @@
     // ---- 关于页子 tab（概览 / 使用说明）----
     bindAboutSubtabs();
     if (els.updateDownload) {
-      els.updateDownload.addEventListener("click", () => {
+      els.updateDownload.addEventListener("click", async () => {
         const url = updateShown && updateShown.url;
         if (!url) {
           pushStatus("warn", "⚠ 这个版本没有提供下载地址，请到仓库的 Releases 页面手动取包");
           return;
         }
-        callApi(api.update_open(url));
+        // 检查返回：后端已播报一条，这里再兜一次 —— 万一是桥接层失败（res 为空），
+        // 用户至少知道「没打开」，而不是对着关掉的弹窗发呆。
+        const res = await callApi(api.update_open(url));
         hideUpdateModal();
+        if (res && res.ok === false) {
+          pushStatus("err", "⚠ 未能打开下载页：" + (res.reason || "未知原因"));
+        }
       });
     }
     if (els.updateSkip) {
@@ -8129,9 +8145,12 @@
       trapConfirmTab(e);
     });
     // 大文件「查看」：直接调系统默认程序打开已拉取到本地的临时文件
-    els.modalOpenLocal.addEventListener("click", () => {
+    els.modalOpenLocal.addEventListener("click", async () => {
       if (!modalLocalPath) return;
-      callApi(api.open_local_file(modalLocalPath));
+      const r = await callApi(api.open_local_file(modalLocalPath));
+      if (r && r.ok === false) {
+        pushStatus("err", "⚠ 未能打开文件：" + (r.reason || "未知原因"));
+      }
     });
     // 可拖动分隔条：设备栏（最小 200px，右侧内容至少留 480px）。
     // 指令台分隔条由 bindWorkspace 按工作区各绑一份（含默认工作区），这里不再

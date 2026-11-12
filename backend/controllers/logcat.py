@@ -30,6 +30,7 @@ class LogcatMixin:
 
     def logcat_stop(self, serial):
         if not serial:
+            self._push_status("warn", "⚠ 当前没有正在监控的设备")
             return {"ok": False, "reason": "no_device"}
         self.logcat_monitor.stop(serial)
         return {"ok": True}

@@ -220,6 +220,7 @@ class FileMixin:
 
     def file_list(self, serial, path):
         if not serial:
+            self._push_status("warn", "⚠ 请先在左侧勾选一台设备，再浏览它的文件")
             return {"ok": False, "reason": "no_device"}
         # 每次列目录用**唯一** worker key + 记录「该设备最新一次请求」：
         #  · 唯一 key：旧实现固定用 "file_<serial>"，上一次 `ls -la` 还没结束时
@@ -354,6 +355,7 @@ class FileMixin:
     def file_remove(self, serial, paths):
         paths = paths if isinstance(paths, list) else [paths]
         if not paths:
+            self._push_status("warn", "⚠ 没有选中要删除的项目")
             return {"ok": False, "reason": "empty"}
         return self._file_op(serial, self._do_file_remove, list(paths))
 
@@ -458,7 +460,9 @@ class FileMixin:
         """
         try:
             if not path or not os.path.isfile(path):
-                return {"ok": False, "reason": "文件不存在或已被清理"}
+                why = "文件不存在或已被清理"
+                self._push_status("err", "⚠ 无法打开文件：%s" % why)
+                return {"ok": False, "reason": why}
             if os.name == "nt":
                 os.startfile(path)                    # Windows：文件关联程序
             elif sys.platform == "darwin":
@@ -467,7 +471,9 @@ class FileMixin:
                 subprocess.Popen(["xdg-open", path])
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "reason": str(e)}
+            why = str(e)
+            self._push_status("err", "⚠ 打开文件失败：%s" % why)
+            return {"ok": False, "reason": why}
 
     def _do_file_view(self, serial, path):
         res, err = self.file_svc.view(serial, path)

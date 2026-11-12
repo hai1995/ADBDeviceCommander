@@ -141,15 +141,19 @@ class UpdateMixin:
         except Exception:
             extra = ()
         if not _host_allowed(target, extra):
-            return {"ok": False,
-                    "reason": ("拒绝打开这个地址：%s（只允许 GitHub 域名，"
-                               "或 config.json 里 update_feed 所配置的域名）"
-                               % target[:100])}
+            why = ("拒绝打开这个地址：%s（只允许 GitHub 域名，"
+                   "或 config.json 里 update_feed 所配置的域名）" % target[:100])
+            # 必须播报：前端历史上不检查这里的返回，于是「点了去下载、浏览器没
+            # 打开、界面毫无反应」——用户既看不到原因，也以为程序卡了。
+            self._push_status("err", "⚠ " + why)
+            return {"ok": False, "reason": why}
         try:
             import webbrowser
             opened = webbrowser.open(target)
         except Exception as e:
-            return {"ok": False, "reason": "打开浏览器失败：%s" % e}
+            why = "打开浏览器失败：%s" % e
+            self._push_status("err", "⚠ " + why)
+            return {"ok": False, "reason": why}
         if not opened:
             # webbrowser.open 在「没有默认浏览器 / 被组策略或安全软件拦下 /
             # 远程桌面会话里没有浏览器关联」时是**返回 False**，不抛异常。
