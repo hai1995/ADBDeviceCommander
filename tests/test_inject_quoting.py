@@ -46,8 +46,6 @@ PowerShell 的参数模式与 POSIX shell 不同（POSIX 的单引号里没有�
 模型与真实 PowerShell 的差异只可能让本门禁**更严**（宁可误报不可漏报），
 且它明确覆盖了真实缺陷 —— 见 test_merge_quote_is_not_early_closed。
 """
-import re
-
 import pytest
 
 from adb_inject import merge_adb_shell_commands_detailed
