@@ -47,3 +47,6 @@ tests/frontend/node_modules/
 # 会话上传的临时文件（截图 / 附件）：环境会自动把它们 commit 进仓库，
 # 属于杂物，明确忽略。
 .uploads/
+# coverage.py 的数据文件（本地跑覆盖率用，不该进版本库）
+.coverage
+.coverage.*

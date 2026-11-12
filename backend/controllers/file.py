@@ -78,23 +78,62 @@ def _win_select_folder(title):
         bi, _display = _build_browse_info(title)
         shell32 = ctypes.windll.shell32
         ole32 = ctypes.windll.ole32
+        user32 = ctypes.windll.user32
+        # ---- Win32 原型必须显式声明 --------------------------------------
+        # 不声明 argtypes 时 PIDL 这种指针参数按 C int（32 位）传，64 位下直接
+        # 被截断 —— SHBrowseForFolder 拿不到有效的 PIDL，这段兜底路径必然失败
+        # （用户看到的是「选择目录」按钮点了没反应）。
         ole32.CoInitialize.argtypes = [ctypes.c_void_p]
         ole32.CoInitialize.restype = wintypes.HRESULT
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree.restype = None
+        ole32.CoUninitialize.argtypes = []
+        ole32.CoUninitialize.restype = None
+        shell32.SHBrowseForFolder.argtypes = [ctypes.c_void_p]
+        shell32.SHBrowseForFolder.restype = ctypes.c_void_p
+        shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p,
+                                                 ctypes.c_wchar_p]
+        shell32.SHGetPathFromIDListW.restype = ctypes.c_int
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
         try:
-            bi.hwndOwner = ctypes.windll.user32.GetForegroundWindow()
+            bi.hwndOwner = user32.GetForegroundWindow()
         except Exception:
             bi.hwndOwner = None
 
         ole32.CoInitialize(None)
+        pidl = None
         try:
-            pidl = shell32.SHBrowseForFolder(ctypes.byref(bi))
+            pidl = shell32.SHBrowseForFolder(
+                ctypes.cast(ctypes.byref(bi), ctypes.c_void_p))
             if not pidl:
                 return None
-            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH + 1)
-            if not shell32.SHGetPathFromIDListW(pidl, buf):
-                return None
+            # 缓冲区给足：MAX_PATH(260) 在多层归档目录下不够用，
+            # SHGetPathFromIDListW 缓冲区不足时直接失败 —— 用户看到的是
+            # 「明明选中了目录，却说没选」。先按 4096 试，失败再按它要的
+            # 尺寸（它会把所需长度写回来）重试一次。
+            buf = ctypes.create_unicode_buffer(4096)
+            if not shell32.SHGetPathFromIDListW(
+                    pidl, ctypes.cast(buf, ctypes.c_wchar_p)):
+                try:
+                    need = int(shell32.SHGetPathFromIDListW(pidl, None) or 0)
+                except Exception:
+                    need = 0
+                if need <= 0:
+                    return None
+                buf = ctypes.create_unicode_buffer(need + 1)
+                if not shell32.SHGetPathFromIDListW(
+                        pidl, ctypes.cast(buf, ctypes.c_wchar_p)):
+                    return None
             return buf.value or None
         finally:
+            # SHBrowseForFolder 返回的 PIDL 由调用方用 CoTaskMemFree 释放：
+            # 不释放就是每点一次「选择目录」漏一次 COM 内存。
+            try:
+                if pidl:
+                    ole32.CoTaskMemFree(pidl)
+            except Exception:
+                pass
             ole32.CoUninitialize()
     except Exception:
         return None

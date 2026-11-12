@@ -177,6 +177,45 @@ def _ensure_config_file():
         pass
 
 
+def _win32():
+    """取得本文件用到的 Win32 对象，并**显式声明它们的原型**。
+
+    为什么必须声明：ctypes 在没有 argtypes 时按「默认转换」传参 —— byref 对象
+    被当成一个整数（它指向的地址）传下去，而 C int 只有 32 位，64 位下指针就此
+    被截断。GetProcessTimes 会往被截断的野指针里写 FILETIME（内存破坏），
+    进程创建时间也拿不到 —— 启动日志里「process_age 那一行」于是永远是空的，
+    而那正是判断「启动二十秒是 onefile 解压还是 WebView2 初始化」的关键数据。
+
+    非 Windows 返回 (None, None, None)，调用方按「不支持」处理。
+    """
+    if os.name != "nt":
+        return None, None, None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        shell32 = ctypes.windll.shell32
+        k32 = ctypes.windll.kernel32
+    except Exception:
+        return None, None, None
+    user32.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                   ctypes.c_wchar_p, ctypes.c_uint]
+    user32.MessageBoxW.restype = ctypes.c_int
+    shell32.ShellExecuteW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                     ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                     ctypes.c_wchar_p, ctypes.c_int]
+    shell32.ShellExecuteW.restype = ctypes.c_void_p
+    k32.GetCurrentProcess.argtypes = []
+    k32.GetCurrentProcess.restype = ctypes.c_void_p
+    k32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME)]
+    k32.GetProcessTimes.restype = ctypes.c_int
+    return user32, shell32, k32
+
+
 def _show_native_error(title, lines, url=None):
     """用不依赖 WebView2/Tk 的原生方式展示错误并退出前调用。
 
@@ -193,7 +232,6 @@ def _show_native_error(title, lines, url=None):
     shown = False
     if is_win:
         try:
-            import ctypes
             MB_ICONERROR = 0x10
             MB_SYSTEMMODAL = 0x1000
             MB_OKCANCEL = 0x01
@@ -202,12 +240,14 @@ def _show_native_error(title, lines, url=None):
                 flags = MB_OKCANCEL | MB_ICONERROR | MB_SYSTEMMODAL
             else:
                 flags = MB_ICONERROR | MB_SYSTEMMODAL
-            res = ctypes.windll.user32.MessageBoxW(None, text, title, flags)
+            user32, shell32, _k32 = _win32()
+            if user32 is None:
+                raise RuntimeError("MessageBoxW 不可用")
+            res = user32.MessageBoxW(None, text, title, flags)
             shown = True
             if url and res == IDOK:
                 try:
-                    ctypes.windll.shell32.ShellExecuteW(
-                        None, "open", url, None, None, 1)
+                    shell32.ShellExecuteW(None, "open", url, None, None, 1)
                 except Exception:
                     pass
         except Exception:
@@ -271,13 +311,13 @@ def _write_crash_log(title, exc_type, exc, tb):
 def _notify_crash(log_path):
     """主线程致命崩溃时弹原生提示，附日志位置（失败则静默打印）。"""
     try:
-        import ctypes
         MB_ICONERROR = 0x10
         MB_SYSTEMMODAL = 0x1000
         lines = "程序发生未预期的错误，即将退出。"
         if log_path:
             lines += "\n\n崩溃详情已写入：\n%s\n\n请把该日志文件发给维护者以定位问题。" % log_path
-        ctypes.windll.user32.MessageBoxW(
+        _user32, _shell32, _k32b = _win32()
+        _user32.MessageBoxW(
             None, lines, "ADB 设备指令台 · 崩溃提示",
             MB_ICONERROR | MB_SYSTEMMODAL)
     except Exception:
@@ -384,7 +424,9 @@ def _process_age_seconds():
     try:
         import ctypes
         from ctypes import wintypes
-        k32 = ctypes.windll.kernel32
+        _u, _s, k32 = _win32()
+        if k32 is None:
+            return None
         created, exited = wintypes.FILETIME(), wintypes.FILETIME()
         kernel, user = wintypes.FILETIME(), wintypes.FILETIME()
         ok = k32.GetProcessTimes(k32.GetCurrentProcess(),

@@ -193,8 +193,15 @@ class CommandMixin:
                 files = win.create_file_dialog(
                     webview.OPEN_DIALOG, directory, False, None, ft)
             except TypeError:
-                files = win.create_file_dialog(
-                    webview.OPEN_DIALOG, directory, False)
+                # 最后一层兜底同样要兜住异常：否则 create_file_dialog 再抛一次
+                # 就冒到 js_api 桥接，用户看到的是「调用后端失败：...」这种
+                # 与「打开对话框」毫无关系的提示。
+                try:
+                    files = win.create_file_dialog(
+                        webview.OPEN_DIALOG, directory, False)
+                except Exception as e:
+                    self._push_status("warn", "⚠ 打开文件对话框失败：%s" % e)
+                    return ""
         except Exception as e:
             self._push_status("warn", "⚠ 打开文件对话框失败：%s" % e)
             return ""

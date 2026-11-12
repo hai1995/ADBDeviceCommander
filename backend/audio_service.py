@@ -507,6 +507,41 @@ class MicRecorder:
 
         self._winmm = winmm
         self._WAVEFORMATEX = WAVEFORMATEX
+        # ---- WinMM 原型必须显式声明 --------------------------------------
+        # 不声明 argtypes 时 ctypes 走「默认转换」：byref 对象被当成一个整数
+        # （它指向的地址）传下去，而 C int 只有 32 位 —— 64 位下指针就此被截断，
+        # waveInOpen / waveInPrepareHeader 拿到的是野指针，**电脑麦克风录音在
+        # Windows 上根本起不来**（报出来的是「设备被占用 / 无驱动」，与真实
+        # 原因毫无关系）。实测（本机 Python 3.11 / x86-64）：不声明时 byref
+        # 被转成截断后的 32 位地址 —— 这不是「也许」，是必然。
+        try:
+            winmm.waveInOpen.argtypes = [
+                ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint,
+                ctypes.POINTER(WAVEFORMATEX), ctypes.c_void_p,
+                ctypes.c_void_p, ctypes.c_uint]
+            winmm.waveInOpen.restype = ctypes.c_int
+            winmm.waveInPrepareHeader.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_WAVEHDR), ctypes.c_uint]
+            winmm.waveInPrepareHeader.restype = ctypes.c_int
+            winmm.waveInAddBuffer.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_WAVEHDR), ctypes.c_uint]
+            winmm.waveInAddBuffer.restype = ctypes.c_int
+            winmm.waveInStart.argtypes = [ctypes.c_void_p]
+            winmm.waveInStart.restype = ctypes.c_int
+            winmm.waveInStop.argtypes = [ctypes.c_void_p]
+            winmm.waveInStop.restype = ctypes.c_int
+            winmm.waveInReset.argtypes = [ctypes.c_void_p]
+            winmm.waveInReset.restype = ctypes.c_int
+            winmm.waveInUnprepareHeader.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_WAVEHDR), ctypes.c_uint]
+            winmm.waveInUnprepareHeader.restype = ctypes.c_int
+            winmm.waveInClose.argtypes = [ctypes.c_void_p]
+            winmm.waveInClose.restype = ctypes.c_int
+        except AttributeError:
+            # 替身不是 ctypes 函数对象（单测里的假 WinMM 是普通 Python 方法，
+            # 没有 argtypes 属性）—— 真实环境里 winmm.waveInOpen 一定是
+            # _FuncPtr，不会走到这里。
+            pass
         WAVE_CALLBACK = ctypes.CFUNCTYPE(
             None, ctypes.c_void_p, ctypes.c_uint,
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
@@ -524,7 +559,7 @@ class MicRecorder:
             if not self._stop.is_set():
                 try:
                     winmm.waveInAddBuffer(
-                        hwi, ctypes.cast(dwParam1, ctypes.c_void_p),
+                        hwi, ctypes.cast(dwParam1, ctypes.POINTER(_WAVEHDR)),
                         ctypes.sizeof(_WAVEHDR))
                 except Exception:
                     pass
@@ -542,7 +577,10 @@ class MicRecorder:
             phwi = ctypes.c_void_p()
             mr = winmm.waveInOpen(
                 ctypes.byref(phwi), 0, ctypes.byref(fmt),
-                self._callback, 0, CALLBACK_FUNCTION)
+                # dwCallback 是 DWORD_PTR（回调函数地址）：声明了 c_void_p 之后
+                # 必须显式 cast，直接传 CFUNCTYPE 实例会被拒。
+                ctypes.cast(self._callback, ctypes.c_void_p),
+                0, CALLBACK_FUNCTION)
             if not mr:
                 # 用实际打开成功的格式写 WAV 头：降级到单声道后若仍按立体声写头，
                 # 播放器会把音高/时长全算错。

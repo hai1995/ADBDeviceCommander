@@ -6144,3 +6144,76 @@ adb.exe 自己写文件，它不认 `\\?\` 前缀 → 目标路径超过 260 字
 - 远程 8 个改动文件与本地**逐字节一致（8/8）**；`/branches` 仍只有 `main`。
 - **真实 CI（run `43138844395`）**：`测试（Python 3.11 + 前端 jsdom）` → success；
   `打包（Windows x64）` → success。
+
+---
+
+# 第九十二轮（第八轮：Win32 / WinMM 的 ctypes 原型缺失 —— Windows 上的麦克风录音其实是坏的）
+
+## 触发
+
+「继续逐步进行修复」。这轮先用覆盖率找薄弱区：`backend/controllers/file.py` 64%、
+`core/win_theme.py` 67%、`core/shell.py` 69% —— 最低的三个恰恰都是 **Windows 专有
+代码**：在 Linux CI 上跑不到，纯靠人 review 必然漏。
+
+## 根因：ctypes 在没有 argtypes 时到底怎么传参
+
+ctypes 在**没有 argtypes** 时按「默认转换」传参：byref 对象被当成一个整数（它指向
+的地址）传下去，而 C int 只有 32 位 —— **64 位下指针就此被截断**。
+
+实测（本机 Python 3.11 / x86-64）：
+
+```
+libc.abs(ctypes.byref(buf))   -> 1210559696   # 不报错，但传的是截断后的地址
+```
+
+## 本项目因此真实坏掉的四处
+
+| 位置 | 调用 | 后果 |
+|---|---|---|
+| `backend/audio_service.py` | waveInOpen / waveInPrepareHeader / waveInAddBuffer | **Windows 上的电脑麦克风录音根本起不来**（报出来的是「设备被占用 / 无驱动 / 无权限」，与真实原因毫无关系） |
+| `core/win_theme.py` | EnumWindows / IsWindowVisible / GetWindowText* | 窗口句柄被截断 → 根本找不到窗口 → **原生标题栏配色静默失效** |
+| `backend/controllers/file.py` | SHBrowseForFolder / SHGetPathFromIDListW | PIDL 指针被截断 → **「选择目录」的兜底路径必然失败**（点了没反应） |
+| `main.py` | GetProcessTimes | 往被截断的野指针里写 FILETIME（**内存破坏**）→ 进程创建时间拿不到 → **启动日志里 `process_age` 那一行永远是空的** —— 而那正是判断「启动二十秒是 onefile 解压还是 WebView2 初始化」的关键数据 |
+
+## 修复
+
+### 1. 每个 Win32 / WinMM 调用点显式声明 argtypes / restype
+
+四处都补齐了原型声明（详见各处的注释）。其中 `core/clipboard.py` 本来就有（`_bind_win`），
+`main.py` 的 MessageBoxW / ShellExecuteW 这次也一并收进新建的 `_win32()` 辅助函数，
+声明与调用用同一个基对象写法，便于门禁核对。
+
+### 2. 顺带修掉三处相邻问题
+
+- **PIDL 从未释放**：`SHBrowseForFolder` 返回的 PIDL 要用 `CoTaskMemFree` 释放，
+  不释放就是每点一次「选择目录」漏一次 COM 内存（补上 finally 释放）。
+- **路径缓冲区只有 MAX_PATH(260)**：多层归档目录下 `SHGetPathFromIDListW` 直接失败，
+  用户明明选中了目录却说没选。放大到 4096，失败时再按它要的尺寸重试一次
+  （与第九十轮的长路径主题同源）。
+- **`_open_dialog` 的第三层签名兜底没有 except**：再抛一次就冒到 js_api 桥接，
+  用户看到的是「调用后端失败：…」，与「打开对话框」毫无关系。
+
+### 3. 全库门禁 `tests/test_win32_prototypes.py`
+
+AST 扫描 `core/` `backend/` `main.py`：所有 Win32 调用点都必须有对应的
+argtypes / restype 声明。
+
+- **怎么认出「这是 Win32 调用」**：基对象来自 `ctypes.windll.<dll>` /
+  `ctypes.WinDLL(...)`，或名字在常见 DLL 名单里（user32 / kernel32 / shell32 /
+  ole32 / winmm / dwmapi …）—— 后者覆盖「DLL 对象由函数参数传入」的写法
+  （`core/clipboard.py` 的 `_bind_win(user32, kernel32)` 就是这种，静态分析看不出
+  它的真实身份）。
+- **判定键**：基对象的源码写法 + 函数名。调用 `user32.OpenClipboard(...)` 与声明
+  `user32.OpenClipboard.argtypes = ...` 必须用同一个基对象写法。
+- 门禁做了**反向验证**：删掉一处 `waveInOpen` 的声明即失败并指出文件与函数。
+
+### 4. 兼容性
+
+`backend/audio_service.py` 的声明包在 `try/except AttributeError` 里：单测里的假
+WinMM 是**普通 Python 方法**（没有 argtypes 属性），真实环境里 `winmm.waveInOpen`
+一定是 `_FuncPtr`，不会走到那个分支。
+
+## 验证
+
+- 后端 **1477 passed / 1 skipped**（新增 2 条门禁用例）；`ruff check .` All checks passed。
+- 逐文件核对行尾：CRLF / LF 风格与改动前一致。

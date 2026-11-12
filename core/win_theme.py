@@ -115,6 +115,11 @@ def _dwm_setter():
         dwmapi = ctypes.windll.dwmapi
     except Exception:
         return None
+    # 显式声明原型：HWND 是 64 位指针，不声明时按 C int（32 位）传会被截断，
+    # DwmSetWindowAttribute 便作用在一个不存在的窗口上 —— 标题栏配色静默失效。
+    dwmapi.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                             ctypes.c_void_p, ctypes.c_uint]
+    dwmapi.DwmSetWindowAttribute.restype = ctypes.c_int
 
     def _set(hwnd, attr, value):
         import ctypes
@@ -194,6 +199,23 @@ def find_window(pid=None, title_hint=""):
         import ctypes
         from ctypes import wintypes
         user32 = ctypes.windll.user32
+        # Win32 原型必须显式声明：没有 argtypes 时 HWND 按 C int（32 位）传，
+        # 64 位下窗口句柄被截断 —— IsWindowVisible 判错、窗口根本找不到，
+        # 表现是「标题栏颜色一直没变」，而且没有任何报错。
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [
+            wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.EnumWindows.argtypes = [
+            ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
+            wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
     except Exception:
         return 0
     pid = int(pid or os.getpid())
@@ -210,7 +232,7 @@ def find_window(pid=None, title_hint=""):
                 return True
             n = user32.GetWindowTextLengthW(hwnd)
             buf = ctypes.create_unicode_buffer(n + 1)
-            user32.GetWindowTextW(hwnd, buf, n + 1)
+            user32.GetWindowTextW(hwnd, ctypes.cast(buf, wintypes.LPWSTR), n + 1)
             found.append((int(hwnd), buf.value or ""))
         except Exception:
             pass
