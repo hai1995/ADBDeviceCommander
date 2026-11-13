@@ -3,7 +3,7 @@
 from typing import ClassVar
 
 from backend.controller import (
-    os, safe_name, subprocess, sys, threading
+    os, safe_name, subprocess, sys, threading,
 )
 from core.longpath import long_path, path_isdir, path_isfile
 
