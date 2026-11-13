@@ -67,7 +67,7 @@ LOGCAT_BUFFERS = {
 # native crash 也不再被识别为异常。
 LOGCAT_RE = re.compile(
     # group(1)=pid, (2)=tid, (3)=level, (4)=tag, (5)=msg
-    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(\S+?)\s*:(.*)$"
+    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(\S+?)\s*:(.*)$",
 )
 
 # 异常/崩溃特征：Java 堆栈、AndroidRuntime、Native crash、信号量崩溃、ANR 等。
