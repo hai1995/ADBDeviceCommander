@@ -6,7 +6,7 @@ from backend.controller import (
     Path, ScrcpyLauncher, ShellSession, VideoRecorder,
     Workers, itertools, load_commands, load_prefs_checked, perf_stop_monitors,
     prefs_path, program_dir, resolve_save_dir, resource_path, save_click_deltas,
-    threading, tmpfiles
+    threading, tmpfiles,
 )
 
 class WebApiBase:

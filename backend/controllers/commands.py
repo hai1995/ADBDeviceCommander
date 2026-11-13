@@ -5,7 +5,7 @@ from backend.controller import (
     get_pref, is_subshell_command, json, merge_adb_shell_commands_detailed,
     merge_builtins, needs_device, os, program_dir,
     root_intent, save_user_commands, tempfile, time,
-    transform, unique_path, uuid
+    transform, unique_path, uuid,
 )
 from core.longpath import long_path
 
@@ -230,7 +230,7 @@ class CommandMixin:
             # json.loads 遇 \ufeff 直接报 "Unexpected UTF-8 BOM" —— 一个看不见的
             # 字符就让导入失败，且错误信息完全指不到真正原因。utf-8-sig 同时
             # 兼容无 BOM 的普通 UTF-8（与 config.json / 命令库的读法一致）。
-            with open(long_path(path), "r", encoding="utf-8-sig") as f:
+            with open(long_path(path), encoding="utf-8-sig") as f:
                 text = f.read()
         except Exception as e:
             return {"ok": False, "reason": "读取文件失败：%s" % e}

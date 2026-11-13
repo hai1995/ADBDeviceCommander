@@ -7,7 +7,7 @@ from backend.controller import (
     perf_list_installed, perf_parse_thresholds, perf_pkg_display, perf_rule_text,
     perf_stop_monitors, perf_threshold_items, perf_write_compare,
     perf_write_report, save_prefs_checked,
-    time
+    time,
 )
 
 class PerfMixin:
@@ -216,8 +216,8 @@ class PerfMixin:
     def _perf_threshold_payload(self):
         th, errs, expr = self._perf_thresholds()
         return {
-            "thresholds": dict((k, dict(v)) for k, v in th.items()),
-            "rules": dict((k, perf_rule_text(k, v)) for k, v in th.items()),
+            "thresholds": {k: dict(v) for k, v in th.items()},
+            "rules": {k: perf_rule_text(k, v) for k, v in th.items()},
             "items": perf_threshold_items(th),
             "crit_ratio": PERF_CRIT_RATIO,
             "expr": perf_format_thresholds(th) if th else "",
