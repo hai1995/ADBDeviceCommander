@@ -211,7 +211,7 @@ def check_adb(adb_path=None) -> DepProblem | None:
         detail="系统 PATH 中未找到 adb（Android 调试桥，连接设备必需）。",
         fix=("请确认已安装 adb 并把它加入系统环境变量 PATH，"
              "然后【重新打开】本程序；\n"
-             "   命令行里能执行 `adb devices` 即表示可用。"),
+             "  命令行里能执行 `adb devices` 即表示可用。"),
         blocking=False,
     )
 
