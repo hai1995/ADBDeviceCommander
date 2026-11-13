@@ -11,8 +11,8 @@ import os
 import re
 import uuid
 
-from core.constants import program_dir
 from core.builtin_commands import BUILTIN_COMMANDS
+from core.constants import program_dir
 from core.longpath import long_path, path_exists, path_isfile
 
 DEMO_COMMANDS = [
@@ -273,7 +273,6 @@ def primary_command_path(directory=None):
     if path_exists(p_legacy):
         return p_legacy
     return p_primary
-
 
 
 def normalize_commands(raw):
