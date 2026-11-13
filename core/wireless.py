@@ -293,7 +293,7 @@ def parse_connect_output(text):
     m = re.search(r"already connected to ([^\s,]+)", t, re.I)
     if m:
         return {"ok": True, "address": m.group(1), "message": "已连接（无需重复连接）"}
-    m = re.search(r"(?<![a-z])connected to ([^\s,]+)", t, re.I)
+    m = re.search(r"(?<!already )connected to ([^\s,]+)", t, re.I)
     if m:
         return {"ok": True, "address": m.group(1), "message": "连接成功"}
     return {"ok": False, "address": "", "message": explain_connect_failure(t)}
