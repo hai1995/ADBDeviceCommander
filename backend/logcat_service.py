@@ -19,24 +19,31 @@ backend.logcat_service —— Logcat 实时监控 + 抓取服务（与 UI 无关
 """
 import os
 import queue
-import threading
 import subprocess
+import threading
 import time
 import zipfile
 
-from core.constants import (LOGCAT_DISPLAY_MAX_LPS,
-                            LOGCAT_DROP_NOTICE_MIN, LOGCAT_DROP_NOTICE_SEC,
-                            LOGCAT_CAP_RECONNECT_MAX_S, LOGCAT_CAP_RECONNECT_POLL_S,
-                            LOGCAT_CAP_RESTART_MAX, LOGCAT_CAP_RESTART_NO_PROGRESS,
-                            LOGCAT_CAP_RESTART_BACKOFF_S,
-                            LOGCAT_CAP_RESTART_BACKOFF_MAX_S,
-                            LOGCAT_CAP_HOLE_WARN_S, LOGCAT_CAP_REPLAY_SKIP_MAX,
-                            LOGCAT_CAP_REBOOT_UPTIME_SLACK_S, adb_kwargs,
-                            adb_popen_kwargs)
-from core.logcat import (classify_line, match_filter, split_filter_terms,
-                         ts_epoch, ts_prefix as _ts_prefix)
-from core.longpath import long_path, path_exists, path_getsize, path_isfile
 from backend.screen_service import device_present
+from core.constants import (
+    LOGCAT_CAP_HOLE_WARN_S,
+    LOGCAT_CAP_REBOOT_UPTIME_SLACK_S,
+    LOGCAT_CAP_RECONNECT_MAX_S,
+    LOGCAT_CAP_RECONNECT_POLL_S,
+    LOGCAT_CAP_REPLAY_SKIP_MAX,
+    LOGCAT_CAP_RESTART_BACKOFF_MAX_S,
+    LOGCAT_CAP_RESTART_BACKOFF_S,
+    LOGCAT_CAP_RESTART_MAX,
+    LOGCAT_CAP_RESTART_NO_PROGRESS,
+    LOGCAT_DISPLAY_MAX_LPS,
+    LOGCAT_DROP_NOTICE_MIN,
+    LOGCAT_DROP_NOTICE_SEC,
+    adb_kwargs,
+    adb_popen_kwargs,
+)
+from core.logcat import classify_line, match_filter, split_filter_terms, ts_epoch
+from core.logcat import ts_prefix as _ts_prefix
+from core.longpath import long_path, path_exists, path_getsize, path_isfile
 
 
 def _terminate(proc):

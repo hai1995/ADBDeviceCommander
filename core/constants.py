@@ -2,10 +2,10 @@
 core.constants —— 全局常量、正则、纯函数（不依赖任何 UI）。
 与 旧 Tk 版（已移除）（Tk 版）顶部同源；Web 版统一引用此处。
 """
+import ctypes
 import os
 import re
 import sys
-import ctypes
 
 from core.longpath import path_exists
 

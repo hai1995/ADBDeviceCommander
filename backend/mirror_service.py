@@ -773,7 +773,7 @@ class SnapMirror:
             # 一段文本，界面上是一张破图，而日志与状态栏一个字都没有。
             # 按图片签名校验，并顺手切掉 PNG 前面那些前导垃圾（与截图同源问题，
             # 见 core.imgbytes）。
-            data, kind, note = imgbytes.normalize(data)
+            data, _, note = imgbytes.normalize(data)
             if not data:
                 return None, "设备返回的画面无法识别（%s）" % note
             return data, None

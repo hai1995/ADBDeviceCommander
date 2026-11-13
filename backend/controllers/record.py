@@ -3,11 +3,25 @@
 from typing import ClassVar
 
 from backend.controller import (
-    DeviceAudioCapture, KEY_POINTER_LOCATION, KEY_SHOW_TOUCHES, MicRecorder,
-    PipeMirror, SnapMirror, _have_ffmpeg, ffmpeg_mux,
-    find_player, find_scrcpy, load_prefs, os,
-    plan_size, probe_player, safe_name, scrcpy_probe_info,
-    ThreadPoolExecutor, time, zipfile,
+    KEY_POINTER_LOCATION,
+    KEY_SHOW_TOUCHES,
+    DeviceAudioCapture,
+    MicRecorder,
+    PipeMirror,
+    SnapMirror,
+    ThreadPoolExecutor,
+    _have_ffmpeg,
+    ffmpeg_mux,
+    find_player,
+    find_scrcpy,
+    load_prefs,
+    os,
+    plan_size,
+    probe_player,
+    safe_name,
+    scrcpy_probe_info,
+    time,
+    zipfile,
 )
 from backend.screen_service import device_clock
 from backend.video_join import join_segments

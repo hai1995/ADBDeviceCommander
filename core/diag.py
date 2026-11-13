@@ -38,9 +38,9 @@ import subprocess
 import tempfile
 import zipfile
 
+from core import devinfo
 from core.constants import VERSION, adb_kwargs, safe_name, unique_path
 from core.longpath import long_path, path_exists
-from core import devinfo
 
 # 默认 / 上限 logcat 行数。上限不是「随便定一个」：单条 threadtime 约 150 字节，
 # 5 万行 ≈ 7 MB，压缩后 1~2 MB，是能随手发出去的体积；再多就该用「logcat 抓取」
@@ -633,9 +633,9 @@ def collect(adb, serial, out_dir, with_logcat=True,
             manifest["notes"].append("内存分页明细读取失败")
 
         # ---- 3) 应用清单 ----
-        rc3, out3, _e3 = ctx.run(["shell", "pm", "list", "packages", "-3"],
+        _, out3, _e3 = ctx.run(["shell", "pm", "list", "packages", "-3"],
                                  timeout=TIMEOUT)
-        rca, outa, _ea = ctx.run(["shell", "pm", "list", "packages"],
+        _, outa, _ea = ctx.run(["shell", "pm", "list", "packages"],
                                  timeout=TIMEOUT)
         apps_text = (summarize_packages(out3, outa)
                      if (out3 or outa) else "（读取应用列表失败）\n")

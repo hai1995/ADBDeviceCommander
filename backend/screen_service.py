@@ -20,12 +20,24 @@ import time
 
 from backend.device_proc import kill_device_process
 from core import imgbytes
-from core.longpath import (
-    explain_long_path, is_too_long, long_path, path_exists, path_getsize)
 from core.constants import (
-    REC_MAX_SEGMENTS, REC_MAX_TOLERANCE_S, REC_REBOOT_POLL_S,
-    REC_REBOOT_WAIT_S, REC_SEGMENT_S,
-    adb_kwargs, adb_popen_kwargs, no_window_flags, safe_name)
+    REC_MAX_SEGMENTS,
+    REC_MAX_TOLERANCE_S,
+    REC_REBOOT_POLL_S,
+    REC_REBOOT_WAIT_S,
+    REC_SEGMENT_S,
+    adb_kwargs,
+    adb_popen_kwargs,
+    no_window_flags,
+    safe_name,
+)
+from core.longpath import (
+    explain_long_path,
+    is_too_long,
+    long_path,
+    path_exists,
+    path_getsize,
+)
 
 # adb 明确表示「这台设备已经不在了」的报错片段（用于把「设备掉线」与
 # 「文件还没写好」区分开，见 VideoRecorder._remote_probe）。

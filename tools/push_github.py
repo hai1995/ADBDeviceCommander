@@ -244,7 +244,7 @@ def check_not_stale():
     """
     if not _has_git_repo():
         return True, ""
-    rc, out = _git("fetch", "--quiet", "origin")
+    rc, _ = _git("fetch", "--quiet", "origin")
     if rc != 0:
         # 拉不下来（没网 / 凭证过期）不拦 —— 推送本身也会失败，让它去报错。
         return True, ""
@@ -258,7 +258,7 @@ def check_not_stale():
     # 远端有没有本地没有的提交？
     rc4, behind = _git("rev-list", "--count", "HEAD..origin/" + BRANCH)
     if rc4 == 0 and behind.strip() not in ("", "0"):
-        rc5, log = _git("log", "--oneline", "-5", "HEAD..origin/" + BRANCH)
+        _, log = _git("log", "--oneline", "-5", "HEAD..origin/" + BRANCH)
         return False, ("远端有 %s 个本地没有的提交（多半是别人发了版或改了东西）。"
                        "先执行 `git pull --rebase origin %s` 把它们取回来再推 —— "
                        "直接推会把远端那些改动**静默回退**（本地这份是旧的）。"
@@ -304,7 +304,7 @@ def do_init(url):
     if _has_git_repo():
         logs.append("仓库已存在，跳过 git init")
     else:
-        rc, out = _git("init", "-b", BRANCH)
+        rc, _ = _git("init", "-b", BRANCH)
         if rc != 0:                     # 老版本 git 不认 -b
             _git("init")
             _git("checkout", "-b", BRANCH)

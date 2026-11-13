@@ -25,12 +25,15 @@ import time
 # 发生在 main() 之前，原来的计时从 main() 起算会把这一段漏掉（实测 0.2s+）。
 _MODULE_T0 = time.perf_counter()
 
-from core.constants import PROJECT_ROOT, unique_path
-from core.longpath import long_path, path_isdir, path_isfile
 from backend.controller import WebApi
+from core.constants import PROJECT_ROOT, unique_path
 from core.envcheck import (
-    run_all, WEBVIEW2_DOWNLOAD_URL, WEBVIEW2_CLIENT_GUID, WEBVIEW2_PV_SUBKEYS,
+    WEBVIEW2_CLIENT_GUID,
+    WEBVIEW2_DOWNLOAD_URL,
+    WEBVIEW2_PV_SUBKEYS,
+    run_all,
 )
+from core.longpath import long_path, path_isdir, path_isfile
 
 # 注意：webview 不在模块顶层导入。它在预检通过后才于 _launch() 内局部导入——
 # 这样 pywebview 未安装时，能先弹友好中文提示，而不是裸 ImportError。
@@ -159,7 +162,7 @@ def _apply_user_adb_dir():
     运行中在关于页改配置则走 WebApi.save_settings（同一条注入逻辑）。
     """
     try:
-        from core.prefs import load_prefs, apply_adb_dir
+        from core.prefs import apply_adb_dir, load_prefs
         apply_adb_dir(load_prefs().get("adb_dir"))
     except Exception:
         pass

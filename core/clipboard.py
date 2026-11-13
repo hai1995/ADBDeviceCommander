@@ -229,7 +229,8 @@ def _pillow_rgba(data):
     延迟导入 + 只在 decode_png 里被调用（外层已兜异常），这里就不再重复 try 了。
     """
     import io
-    from PIL import Image                                   # 装了才用，没装是常态
+
+    from PIL import Image  # 装了才用，没装是常态
 
     img = Image.open(io.BytesIO(data))
     return img.convert("RGBA").tobytes()

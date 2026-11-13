@@ -536,8 +536,7 @@ def _migrate_rec_defaults(clean, warnings):
     _atomic_write(clean)
     if flipped:
         warnings = list(warnings) + [
-            "录屏的「同步录制 logcat」「结束自动压缩为 zip」已改为默认开启"
-            "（如不需要可在录屏卡里关掉）"]
+            "录屏的「同步录制 logcat」「结束自动压缩为 zip」已改为默认开启（如不需要可在录屏卡里关掉）"]
     return clean, warnings
 
 
@@ -600,8 +599,7 @@ def load_prefs_checked():
     if not os.path.exists(lp):
         migrated = _migrate_legacy_file()
         if migrated is not None:
-            return migrated, ["已从旧版 settings.json 迁移到 config.json"
-                              "（旧文件保留为备份，可自行删除）"]
+            return migrated, ["已从旧版 settings.json 迁移到 config.json（旧文件保留为备份，可自行删除）"]
     data = _read_json_file(p)
     if data is None:
         if not os.path.exists(lp):

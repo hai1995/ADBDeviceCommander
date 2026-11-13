@@ -353,7 +353,7 @@ class CommandMixin:
             return {"ok": False}
         # 复用 _execute 的「按设备展开 + transform + shell 合并」完整链路
         self.workers.spawn(None, self._execute, {
-            "id": "__custom__", "name": "自定义命令", "commands": [{"command": text}]},
+            "id": "__custom__", "name": "自定义命令", "commands": [{"command": text}],
         }, self._ws_id(ws))
         return {"ok": True}
 

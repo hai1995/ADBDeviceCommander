@@ -560,8 +560,7 @@ class PerfMonitor:
     def _read_device_info(self):
         try:
             r = self._run(["shell",
-                           "getprop ro.product.model; getprop ro.build.version.release; "
-                           "wm size 2>/dev/null"], timeout=8)
+                           "getprop ro.product.model; getprop ro.build.version.release; wm size 2>/dev/null"], timeout=8)
             lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
         except Exception:
             return

@@ -275,6 +275,7 @@ def primary_command_path(directory=None):
     return p_primary
 
 
+
 def normalize_commands(raw):
     """把各种 electerm 快捷命令导出格式归一化为程序内部格式：
         [{"id": str, "name": str, "labels": [str],
