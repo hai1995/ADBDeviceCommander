@@ -1,9 +1,14 @@
 """backend.controllers.update —— 版本更新检查 / 下载 / 跳过"""
 
 from backend.controller import (
-    VERSION, _host_allowed, get_pref, save_prefs_checked,
-    time, updater,
+    VERSION,
+    _host_allowed,
+    get_pref,
+    save_prefs_checked,
+    time,
+    updater,
 )
+
 
 class UpdateMixin:
     """版本更新检查/下载/跳过。"""
