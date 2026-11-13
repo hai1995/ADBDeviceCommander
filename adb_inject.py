@@ -56,7 +56,7 @@ def quote_serial(serial: str) -> str:
 #   (?:\s+-s\s+<serial>)?     可选的已存在 -s <serial>（裸词或带引号都认）
 ADB_RE = re.compile(
     r"(?<![A-Za-z0-9_\"\'$])adb(?:\.exe)?(?![A-Za-z0-9_])(?:\s+-s\s+%s)?"
-    % _SERIAL_TOKEN
+    % _SERIAL_TOKEN,
 )
 SCRCPY_RE = re.compile(r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_])")
 
@@ -314,6 +314,4 @@ def is_subshell_command(cmd: str) -> bool:
             if low == flag or low.startswith(flag + ":"):
                 return False
     # 后面跟的是脚本文件（`sh build.sh`、`powershell setup.ps1`）：同样跑完就退
-    if rest and not rest[0].startswith(("-", "/")):
-        return False
-    return True
+    return not (rest and not rest[0].startswith(("-", "/")))

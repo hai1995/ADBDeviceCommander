@@ -215,7 +215,7 @@ from backend.controllers import (
     WebApiBase, DeviceMixin, CommandMixin, AutoRefreshMixin,
     LogcatMixin, SettingsMixin, ApkMixin, DeviceInfoMixin,
     UpdateMixin, ScreenshotMixin, RecordMixin, PerfMixin,
-    FileMixin
+    FileMixin,
 )
 
 class WebApi(WebApiBase, DeviceMixin, CommandMixin, AutoRefreshMixin, LogcatMixin, SettingsMixin, ApkMixin, DeviceInfoMixin, UpdateMixin, ScreenshotMixin, RecordMixin, PerfMixin, FileMixin):
@@ -224,4 +224,3 @@ class WebApi(WebApiBase, DeviceMixin, CommandMixin, AutoRefreshMixin, LogcatMixi
     方法按领域拆分到上方各 mixin 类，由本类统一继承；
     方法名与旧版完全一致，RPC 契约不变。
     """
-    pass

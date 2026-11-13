@@ -48,9 +48,8 @@ def _payload_lines(ev):
         elif kind == "console":
             if p.get("kind") in ("out", "cmd"):
                 n = max(1, (p.get("text") or "").count("\n") + 1)
-        elif kind == "status":
-            if p.get("type") != "clear":
-                n = max(1, (p.get("text") or "").count("\n") + 1)
+        elif kind == "status" and p.get("type") != "clear":
+            n = max(1, (p.get("text") or "").count("\n") + 1)
         ev["_n"] = n
     return n
 
