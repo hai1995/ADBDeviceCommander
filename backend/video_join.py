@@ -31,7 +31,11 @@ import os
 import subprocess
 
 from backend.audio_service import (
-    _have_ffmpeg, _mp4_playable, _silent_remove, _video_duration)
+    _have_ffmpeg,
+    _mp4_playable,
+    _silent_remove,
+    _video_duration,
+)
 from core.constants import adb_kwargs
 from core.longpath import long_path, path_exists, path_getsize
 
@@ -173,7 +177,7 @@ def join_segments(paths, out_path, timeout=None):
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used, "skipped": skipped,
                     "reason": "合并产物不是可播放的 MP4（缺 moov 头或没有有效时长）"}
-        want, bad = _total_duration(used)
+        want, _ = _total_duration(used)
         if want:
             try:
                 got = float(_video_duration(temp))
