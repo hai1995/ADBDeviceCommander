@@ -17,6 +17,11 @@
 #   2026-11-11 第一批：B007 / B009 / B023 / B905 —— bugbear 仅剩的 4 条
 #   2026-11-11 第二批：RUF100（无效 noqa）/ RUF012（可变类属性未标 ClassVar）
 #   2026-11-11 第三批：UP009（冗余 utf-8 声明，52 处纯机械删除）
+#   2026-11-13 第四批：UP006 / UP015 / UP017 / UP022 / UP045 / C402 / COM812 /
+#               PIE790 / PIE810 / RET502 / RET504 / SIM103 —— 标准库现代化 +
+#               冗余清理（≈50 处，safe + 已逐处复核的 unsafe）。SIM102 故意
+#               未启用：剩 2 处是「嵌套 if 中间夹解释性注释」的刻意拆解，合并
+#               会丢失注释的上下文归属，可读性优先，留待人工判断。
 #
 # 仍未启用（留给后续批次）：UP031 897（% 格式化改 f-string，工程量大且 diff 巨大）、
 # BLE001 375 / S110 163（blind except / try-except-pass，绝大多数是有意的兜底，
@@ -48,6 +53,18 @@ select = [
     "RUF100", # 无效的 noqa 指令（指向未启用规则 / 已不需要）
     "RUF012", # 可变类属性未标注 ClassVar
     "UP009",  # 冗余的 utf-8 编码声明（Python 3 默认即 UTF-8）
+    "UP006",  # typing.List/Dict -> 内置 list/dict（PEP585）
+    "UP015",  # open() 冗余的 "r" 模式（默认即读）
+    "UP017",  # datetime.utcnow/utcfromtimestamp -> timezone.utc
+    "UP022",  # stdout=PIPE,stderr=PIPE -> capture_output=True
+    "UP045",  # Optional[X] -> X | None（PEP604）
+    "C402",   # dict(...) 生成器 -> 字面量 / 直接构造
+    "COM812", # 缺失尾逗号（与 Black 风格对齐）
+    "PIE790", # 无意义的 pass/... 占位语句
+    "PIE810", # a.startswith(x) or a.startswith(y) -> a.startswith((x, y))
+    "RET502", # 隐式返回（函数体内 return 与 fall-through 混用）
+    "RET504", # 不必要的「赋值后立刻返回」中间变量
+    "SIM103", # 不必要的 bool 包装（return x and y 等）
     "TID",    # 相对导入、被禁导入
 ]
 
