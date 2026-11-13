@@ -3,12 +3,12 @@ core.shell —— 持久 PowerShell 会话（ShellSession）。
 与 旧 Tk 版（已移除） 中的 ShellSession 同源；不依赖任何 UI。
 """
 import os
-import sys
 import queue
+import subprocess
+import sys
+import threading
 import time
 import uuid
-import threading
-import subprocess
 
 
 def _kill_tree(proc):
@@ -63,7 +63,7 @@ class ShellSession:
 
         打包态下，Python 进程的 cwd 可能是快捷方式的「起始位置」（常见为
         `C:\\Users\\...`），与 exe 所在目录不一致 —— 用户对着指令台执行
-        相对路径命令（`ls` / `.\adb.exe`）时会被绕晕。这里让 shell 主动
+        相对路径命令（`ls` / `.\\adb.exe`）时会被绕晕。这里让 shell 主动
         cd 到 start_dir（通常是程序根目录），让 prompt 显示的路径与用户
         直觉一致。子类（测试里用的 sh）按需 override。
         """
