@@ -2,7 +2,7 @@
 
 from backend.controller import (
     VERSION, _host_allowed, get_pref, save_prefs_checked,
-    time, updater
+    time, updater,
 )
 
 class UpdateMixin:

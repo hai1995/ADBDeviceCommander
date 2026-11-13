@@ -3,7 +3,7 @@
 from backend.controller import (
     adb_kwargs, apply_adb_dir, load_prefs, os,
     prefs_path, resolve_save_dir, save_prefs_checked, subprocess,
-    wifi
+    wifi,
 )
 from core import win_theme
 from core.devices import parse_devices

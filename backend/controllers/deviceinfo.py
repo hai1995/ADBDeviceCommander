@@ -2,7 +2,7 @@
 
 from backend.controller import (
     adb_kwargs, devinfo, diag, get_pref,
-    subprocess
+    subprocess,
 )
 
 class DeviceInfoMixin:

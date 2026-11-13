@@ -2,7 +2,7 @@
 
 from backend.controller import (
     adb_kwargs, load_prefs, os, resolve_save_dir, safe_name,
-    subprocess, time, unique_path
+    subprocess, time, unique_path,
 )
 from backend.logcat_service import pkg_pids_of
 from core.longpath import long_path
