@@ -12,7 +12,7 @@ backend.state —— 集中状态管理（前端可见状态的唯一数据源�
 """
 import threading
 
-from core.constants import VERSION, STATE_LABEL, LOGCAT_BUFFERS
+from core.constants import LOGCAT_BUFFERS, STATE_LABEL, VERSION
 
 
 class AppState:
