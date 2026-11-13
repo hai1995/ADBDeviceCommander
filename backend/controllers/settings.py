@@ -3,7 +3,7 @@
 from backend.controller import (
     adb_kwargs, apply_adb_dir, load_prefs, os,
     prefs_path, resolve_save_dir, save_prefs_checked, subprocess,
-    wifi
+    wifi,
 )
 from core import win_theme
 from core.devices import parse_devices
@@ -131,7 +131,7 @@ class SettingsMixin:
     def _prewarm_adb_server(self):
         """后台拉起 adb server（幂等）+ 探测真实 adb 版本。失败静默。
 
-        server 冷启一次要数百 ms，由「启动后第一次截图」承担这笔钱会很莫名；
+         server 冷启一次要数百 ms，由「启动后第一次截图」承担这笔钱会很莫名；
         在 boot 的后台线程里提前拉起来，用户点截图时它一定已在。
 
         boot 阶段的 adb 状态只是文件级查找（_adb_found），真实版本号在这里
