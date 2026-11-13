@@ -11,10 +11,15 @@ import subprocess
 import tempfile
 import uuid
 
+from core import tmpfiles
 from core.constants import adb_kwargs, parse_ls_output, posix_join, safe_name
 from core.longpath import (
-    explain_long_path, is_too_long, long_path, path_getsize, path_isfile)
-from core import tmpfiles
+    explain_long_path,
+    is_too_long,
+    long_path,
+    path_getsize,
+    path_isfile,
+)
 
 
 def shq(text) -> str:
@@ -25,7 +30,7 @@ def shq(text) -> str:
     （rm -rf / mv 时甚至可能误删相邻文件）。单引号包裹后远端 sh 视为一个
     整体参数；路径内含单引号时用 `'\\''` 转义（POSIX 标准做法）。
     """
-    return "'" + str(text).replace("'", "'\\''") + "'"
+    return "'" + str(text).replace("'", "'\\\\''") + "'"
 
 
 def _ls_says_empty(text):

@@ -1,14 +1,30 @@
 """backend.controllers.perf —— 性能监控"""
 
 from backend.controller import (
-    DEFAULT_INTERVAL, PERF_CRIT_RATIO, PERF_MAX_DEVICES, PERF_MAX_INTERVAL,
-    PERF_MIN_INTERVAL, PERF_PKG_CACHE_S, PerfMonitor, load_prefs,
-    os, perf_build_thresholds, perf_default_threshold_expr, perf_format_thresholds,
-    perf_list_installed, perf_parse_thresholds, perf_pkg_display, perf_rule_text,
-    perf_stop_monitors, perf_threshold_items, perf_write_compare,
-    perf_write_report, save_prefs_checked,
+    DEFAULT_INTERVAL,
+    PERF_CRIT_RATIO,
+    PERF_MAX_DEVICES,
+    PERF_MAX_INTERVAL,
+    PERF_MIN_INTERVAL,
+    PERF_PKG_CACHE_S,
+    PerfMonitor,
+    load_prefs,
+    os,
+    perf_build_thresholds,
+    perf_default_threshold_expr,
+    perf_format_thresholds,
+    perf_list_installed,
+    perf_parse_thresholds,
+    perf_pkg_display,
+    perf_rule_text,
+    perf_stop_monitors,
+    perf_threshold_items,
+    perf_write_compare,
+    perf_write_report,
+    save_prefs_checked,
     time,
 )
+
 
 class PerfMixin:
     """性能监控（采样/阈值/报告/对比）。"""
