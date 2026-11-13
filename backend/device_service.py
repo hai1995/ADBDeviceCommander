@@ -32,9 +32,15 @@ import threading
 import time
 
 from core.constants import (
-    adb_kwargs, state_label, is_usable, ABSENT_STATE,
-    DEVICE_POLL_TIMEOUT, DEVICE_RETRY_MAX, DEVICE_RETRY_GAP_S,
-    DEVICE_SERVER_HEAL_AFTER, FAIL_NOTICE_INTERVAL_S,
+    ABSENT_STATE,
+    DEVICE_POLL_TIMEOUT,
+    DEVICE_RETRY_GAP_S,
+    DEVICE_RETRY_MAX,
+    DEVICE_SERVER_HEAL_AFTER,
+    FAIL_NOTICE_INTERVAL_S,
+    adb_kwargs,
+    is_usable,
+    state_label,
 )
 from core.devices import parse_devices, plan_devices
 
