@@ -1,3 +1,0 @@
-first line
-second line with \ backslash and " quote
-tab	here
