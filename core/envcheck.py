@@ -20,7 +20,7 @@ Web 版依赖 pywebview（Windows 宿主为 WebView2 Runtime）。在同事电�
   起才提供。因此 WebView2 Runtime 主版本需 >= 121，否则初始化报
   「Unable to cast to ICoreWebView2Environment10 / E_NOINTERFACE」。
 """
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple
 
 # WebView2 Runtime 最低主版本（pywebview >= 6 创建控件所需接口的门槛）。
 MIN_WEBVIEW2_MAJOR = 121
@@ -43,10 +43,10 @@ WEBVIEW2_PV_SUBKEYS = (
 )
 
 
-def parse_version(s: Optional[str]):
+def parse_version(s: str | None):
     """把形如 '100.0.1185.36' 的版本串解析为 int 元组 (major, minor, build, patch)。
 
-    非字符串 / None / 含非数字段 / 为空 -> 返回 None（视为无法解析）。
+    非字符串 / None / 含非数字场 / 为空 -> 返回 None（视为无法解析）。
     解析只取开头连续的数字点分，忽略 'v' 前缀之类脏字符前后。
     """
     if s is None:
@@ -139,7 +139,7 @@ def _best_pv(get_pv):
     return best
 
 
-def check_webview2(get_pv=None) -> Optional[DepProblem]:
+def check_webview2(get_pv=None) -> DepProblem | None:
     """检查 WebView2 Runtime 是否已安装且版本达标。
 
     get_pv: () -> List[str]，返回收集到的 pv 版本串；默认 None 表示非 Windows / 无法
@@ -170,7 +170,7 @@ def check_webview2(get_pv=None) -> Optional[DepProblem]:
     )
 
 
-def check_pywebview(version=None) -> Optional[DepProblem]:
+def check_pywebview(version=None) -> DepProblem | None:
     """检查 pywebview 是否已安装且版本达标。
 
     version: 已装的 pywebview 版本串（由调用方经 importlib.metadata 取）；None 视为未装。
@@ -195,7 +195,7 @@ def check_pywebview(version=None) -> Optional[DepProblem]:
     )
 
 
-def check_adb(adb_path=None) -> Optional[DepProblem]:
+def check_adb(adb_path=None) -> DepProblem | None:
     """检查 adb 是否可调用。
 
     adb_path: shutil.which('adb') 结果；空 / None 视为不在 PATH（不可用）。
@@ -216,7 +216,7 @@ def check_adb(adb_path=None) -> Optional[DepProblem]:
     )
 
 
-def run_all(get_pv=None, pywebview_version=None, adb_path=None) -> List[DepProblem]:
+def run_all(get_pv=None, pywebview_version=None, adb_path=None) -> list[DepProblem]:
     """汇总执行全部检查，返回所有未通过项（可能为空）。
 
     各参数含义与单检查一致：由调用方收集平台原始值注入。返回顺序固定：
