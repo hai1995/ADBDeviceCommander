@@ -32,7 +32,7 @@ _DEVICE_STATES = (
 )
 _DEVICE_LINE_RE = re.compile(
     r"^(?P<serial>.+?)\s+(?P<state>%s)\b(?P<rest>.*)$"
-    % "|".join(re.escape(s) for s in _DEVICE_STATES)
+    % "|".join(re.escape(s) for s in _DEVICE_STATES),
 )
 
 
@@ -54,7 +54,7 @@ def parse_devices(raw: str):
     devices = []
     for line in (raw or "").splitlines():
         line = line.strip()
-        if not line or line.startswith("List of devices") or line.startswith("*"):
+        if not line or line.startswith(("List of devices", "*")):
             continue
         parsed = _split_device_line(line)
         if parsed is None:
@@ -92,7 +92,7 @@ def plan_devices(prev_checked, prev_state, prev_model, devices, prev_absent=None
         "added": [serial],            # 本轮新出现在列表的设备
         "recovered": [serial],        # 上一轮消失、本轮重连的设备
         "newly_absent": [serial],     # 本轮刚消失（仅首次播报，宽限内保留勾选）
-        "stat_changed": [serial],     # 状态/型号变化设备（不再强制取消勾选）
+        "stat_changed": [serial],    # 状态/型号变化设备（不再强制取消勾选）
         "state_changed": [serial],    # 其中**状态**真的变了的那部分（播报用）
         "model_changed": [serial],    # 仅型号补全 / 变化（不播报「状态变为」）
         "dropped": [serial],          # 兼容字段：新版不再因「不可用」强制取消勾选
