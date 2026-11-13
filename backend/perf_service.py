@@ -103,7 +103,7 @@ THRESHOLD_META = (
     ("temp", "max", (0.0, 90.0), "电池 42℃ 以上开始降频，性能数据会自己变差"),
     ("cpu", "max", (1.0, 100.0), "留 15% 余量，超过后系统调度互相抢占、帧率连锁下跌"),
 )
-_THRESHOLD_META = dict((k, (d, r, h)) for k, d, r, h in THRESHOLD_META)
+_THRESHOLD_META = {k: (d, r, h) for k, d, r, h in THRESHOLD_META}
 
 # 超标点数占比达到该值升级为严重（crit）：零星几点抖动是常态，
 # 占比超过 1/4 说明是持续性问题，不是偶发。
@@ -892,7 +892,7 @@ def parse_thresholds(expr, strict=False):
     raw = (expr or "").strip() if isinstance(expr, str) else ""
     errors = []
     if not raw:
-        return dict((k, dict(v)) for k, v in DEFAULT_THRESHOLDS.items()), errors
+        return {k: dict(v) for k, v in DEFAULT_THRESHOLDS.items()}, errors
     if raw.lower() in (THRESHOLDS_OFF, "none", "false", "0"):
         return {}, errors
 
@@ -931,7 +931,7 @@ def parse_thresholds(expr, strict=False):
         errors.append("无法识别的写法：%s（应形如 fps<45 或 jank>8）"
                       % "、".join(unparsed))
     if errors and strict:
-        return dict((k, dict(v)) for k, v in DEFAULT_THRESHOLDS.items()), errors
+        return {k: dict(v) for k, v in DEFAULT_THRESHOLDS.items()}, errors
     return out, errors
 
 
@@ -1091,7 +1091,7 @@ def _fmt_tick(v, span):
 
 
 def _ts(sec, fmt="%H:%M:%S"):
-    return datetime.datetime.fromtimestamp(sec, datetime.timezone.utc).astimezone().strftime(fmt)
+    return datetime.datetime.fromtimestamp(sec, datetime.UTC).astimezone().strftime(fmt)
 
 
 def _hover_strips(cells, y, ih, title_fn):
@@ -1358,7 +1358,7 @@ def _echarts_js():
     _ECHARTS_CACHE["tried"] = True
     try:
         path = resource_path(os.path.join("frontend", "vendor", "echarts.min.js"))
-        with open(long_path(path), "r", encoding="utf-8") as f:
+        with open(long_path(path), encoding="utf-8") as f:
             _ECHARTS_CACHE["js"] = f.read()
     except (OSError, UnicodeDecodeError):
         _ECHARTS_CACHE["js"] = ""
@@ -2169,7 +2169,7 @@ def _compare_alert_table(entries, th, alerts_per):
         "<th>%s</th>" % esc_html(threshold_rule_text(k, th[k])) for k in keys]
     rows = []
     for i, e in enumerate(entries):
-        got = dict((a["key"], a) for a in alerts_per[i])
+        got = {a["key"]: a for a in alerts_per[i]}
         cells = []
         for k in keys:
             a = got.get(k)
