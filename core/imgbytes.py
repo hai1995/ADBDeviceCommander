@@ -96,9 +96,7 @@ def _plausible_bmp(data, off):
     if not 14 <= offbits <= avail:
         return False
     # 部分写入器把文件大小字段留 0，此时只校验数据偏移
-    if size and not offbits <= size <= avail:
-        return False
-    return True
+    return not (size and not offbits <= size <= avail)
 
 
 def locate(data):
@@ -139,7 +137,7 @@ def png_size(data):
 
     为什么单独做这件事：`screencap` 的字节经 `adb exec-out` 回来时，个别
     Windows adb 或车机侧会把 0x0A 换成 0x0D 0x0A。PNG 签名里本来就有
-    `\\r\\n`，开头照样认得出来，`normalize` 也照旧返回 —— 但 IHDR 里的宽高
+    `\r\n`，开头照样认得出来，`normalize` 也照旧返回 —— 但 IHDR 里的宽高
     和 CRC 已经被改掉，落盘就是一张「分辨率不对」的坏图，看图软件 / 剪贴板
     只会报一句与真相无关的错。
 
