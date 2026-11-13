@@ -776,7 +776,7 @@ class VideoRecorder:
             serial, max_wait_s=REC_REBOOT_WAIT_S, interval_s=REC_REBOOT_POLL_S,
             should_abort=lambda: (self._sessions.get(serial) is not sess
                                   or bool(sess.get("stopping"))
-                                  or bool(sess.get("died")))
+                                  or bool(sess.get("died"))),
         )
         with self._lock:
             if self._sessions.get(serial) is not sess:
