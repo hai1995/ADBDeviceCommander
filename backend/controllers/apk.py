@@ -2,7 +2,7 @@
 
 from backend.controller import (
     adb_kwargs, apkinfo, load_prefs, os,
-    subprocess
+    subprocess,
 )
 from core.longpath import path_getsize, path_isfile
 

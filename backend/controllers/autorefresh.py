@@ -1,7 +1,7 @@
 """backend.controllers.autorefresh —— 自动轮询与孤儿回收"""
 
 from backend.controller import (
-    AUTO_REFRESH_MS, REC_DEATH_CHECK_S, time
+    AUTO_REFRESH_MS, REC_DEATH_CHECK_S, time,
 )
 from backend.screen_service import device_present
 from core.constants import (
