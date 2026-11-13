@@ -285,7 +285,7 @@ def _auto_message(items):
             areas.append("tests")
         elif path.startswith("tools/") or path in ("build.py", "main.py", "adb_inject.py"):
             areas.append("工具/入口")
-        elif path.endswith(".md") or path.endswith(".txt"):
+        elif path.endswith((".md", ".txt")):
             areas.append("文档")
     seen = []
     for a in areas:
