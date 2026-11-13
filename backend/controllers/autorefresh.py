@@ -1,11 +1,13 @@
 """backend.controllers.autorefresh —— 自动轮询与孤儿回收"""
 
 from backend.controller import (
-    AUTO_REFRESH_MS, REC_DEATH_CHECK_S, time,
+    AUTO_REFRESH_MS,
+    REC_DEATH_CHECK_S,
+    time,
 )
 from backend.screen_service import device_present
-from core.constants import (
-    REC_MAX_SEGMENTS, REC_REBOOT_WAIT_S, REC_SEGMENT_S)
+from core.constants import REC_MAX_SEGMENTS, REC_REBOOT_WAIT_S, REC_SEGMENT_S
+
 
 class AutoRefreshMixin:
     """自动轮询与孤儿回收（录屏/工具/录制）。"""
@@ -265,7 +267,7 @@ class AutoRefreshMixin:
                 # 用 stop_ex 取回**全部段**并记进会话：设备虽然掉了，掉之前录完的
                 # 那几段已经拉回本地，收尾时必须一并进包。只调 stop() 的话它们
                 # 就留在目录里、既不合成也不打包，用户以为没录上。
-                ok, paths, err = self._stop_video(s)
+                _, paths, _ = self._stop_video(s)
                 if paths:
                     with self._rec_lock:
                         sess = self._rec_session

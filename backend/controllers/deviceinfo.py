@@ -1,9 +1,13 @@
 """backend.controllers.deviceinfo —— 设备信息 / 诊断包"""
 
 from backend.controller import (
-    adb_kwargs, devinfo, diag, get_pref,
+    adb_kwargs,
+    devinfo,
+    diag,
+    get_pref,
     subprocess,
 )
+
 
 class DeviceInfoMixin:
     """设备信息、诊断包收集。"""

@@ -1,10 +1,14 @@
 """backend.controllers.apk —— APK 选择 / 安装"""
 
 from backend.controller import (
-    adb_kwargs, apkinfo, load_prefs, os,
+    adb_kwargs,
+    apkinfo,
+    load_prefs,
+    os,
     subprocess,
 )
 from core.longpath import path_getsize, path_isfile
+
 
 class ApkMixin:
     """APK 选择/安装。"""
