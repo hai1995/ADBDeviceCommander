@@ -16,11 +16,14 @@ import threading
 import time
 
 from backend.device_proc import kill_device_process
-from core.longpath import long_path
 from core.constants import (
-    _WAVEHDR, adb_kwargs, adb_popen_kwargs, safe_name, unique_path)
-from core.longpath import path_exists, path_getsize
-
+    _WAVEHDR,
+    adb_kwargs,
+    adb_popen_kwargs,
+    safe_name,
+    unique_path,
+)
+from core.longpath import long_path, path_exists, path_getsize
 
 # MMSYSERR / WAVERR 里最常见的几个：报错时直接翻成人话，用户才知道该动哪里。
 _MM_ERROR_TEXT = {
