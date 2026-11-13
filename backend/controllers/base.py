@@ -1,13 +1,32 @@
 """backend.controllers.base —— 共享状态 / 生命周期 / 事件桥 / 点击计数 / 手册"""
 
 from backend.controller import (
-    AppState, BackendBus, DeviceAudioCapture, DeviceManager,
-    FileService, FrameServer, LogcatCapture, LogcatMonitor,
-    Path, ScrcpyLauncher, ShellSession, VideoRecorder,
-    Workers, itertools, load_commands, load_prefs_checked, perf_stop_monitors,
-    prefs_path, program_dir, resolve_save_dir, resource_path, save_click_deltas,
-    threading, tmpfiles,
+    AppState,
+    BackendBus,
+    DeviceAudioCapture,
+    DeviceManager,
+    FileService,
+    FrameServer,
+    LogcatCapture,
+    LogcatMonitor,
+    Path,
+    ScrcpyLauncher,
+    ShellSession,
+    VideoRecorder,
+    Workers,
+    itertools,
+    load_commands,
+    load_prefs_checked,
+    perf_stop_monitors,
+    prefs_path,
+    program_dir,
+    resolve_save_dir,
+    resource_path,
+    save_click_deltas,
+    threading,
+    tmpfiles,
 )
+
 
 class WebApiBase:
     """WebApi 基：共享状态/生命周期/事件桥/点击计数/状态查询/手册。"""
