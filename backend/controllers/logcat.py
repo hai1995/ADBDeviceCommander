@@ -1,11 +1,18 @@
 """backend.controllers.logcat —— logcat 监控与抓取"""
 
 from backend.controller import (
-    adb_kwargs, load_prefs, os, resolve_save_dir, safe_name,
-    subprocess, time, unique_path,
+    adb_kwargs,
+    load_prefs,
+    os,
+    resolve_save_dir,
+    safe_name,
+    subprocess,
+    time,
+    unique_path,
 )
 from backend.logcat_service import pkg_pids_of
 from core.longpath import long_path
+
 
 class LogcatMixin:
     """logcat 实时监控与抓取。"""
