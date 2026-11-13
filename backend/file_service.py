@@ -30,7 +30,7 @@ def shq(text) -> str:
     （rm -rf / mv 时甚至可能误删相邻文件）。单引号包裹后远端 sh 视为一个
     整体参数；路径内含单引号时用 `'\\''` 转义（POSIX 标准做法）。
     """
-    return "'" + str(text).replace("'", "'\\\\''") + "'"
+    return "'" + str(text).replace("'", "'\\''") + "'"
 
 
 def _ls_says_empty(text):
