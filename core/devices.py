@@ -16,7 +16,9 @@ UI 消失：以虚拟 state=reconnecting 继续留在 items 里（置灰展示�
 import re
 
 from core.constants import (
-    is_usable, DEVICE_GONE_GRACE_CYCLES, ABSENT_STATE,
+    ABSENT_STATE,
+    DEVICE_GONE_GRACE_CYCLES,
+    is_usable,
 )
 
 # `adb devices -l` 的 state 字段是有限集合；其中 `no permissions` 含空格。
