@@ -1,9 +1,13 @@
 """backend.controllers.screenshot —— 截图"""
 
 from backend.controller import (
-    ScreenCapturer, clipboard, get_pref, os,
+    ScreenCapturer,
+    clipboard,
+    get_pref,
+    os,
 )
 from core.longpath import long_path, path_isfile
+
 
 class ScreenshotMixin:
     """截图（单设备/批量/剪贴板）。"""
