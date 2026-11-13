@@ -508,7 +508,7 @@ def run_pyinstaller(pyi_args, dry_run: bool):
     cmd = [sys.executable, "-m", "PyInstaller"] + pyi_args
     print("[3/4] " + " ".join(shlex.quote(str(c)) for c in cmd))
     if dry_run:
-        print（"（--dry-run：未真正执行）"）
+        print("（--dry-run：未真正执行）")
         return 0, ""
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
