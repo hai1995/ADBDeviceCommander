@@ -1,13 +1,20 @@
 """backend.controllers.settings —— 设置 / adb 状态 / Wi-Fi 无线调试"""
 
 from backend.controller import (
-    adb_kwargs, apply_adb_dir, load_prefs, os,
-    prefs_path, resolve_save_dir, save_prefs_checked, subprocess,
+    adb_kwargs,
+    apply_adb_dir,
+    load_prefs,
+    os,
+    prefs_path,
+    resolve_save_dir,
+    save_prefs_checked,
+    subprocess,
     wifi,
 )
 from core import win_theme
 from core.devices import parse_devices
 from core.longpath import path_exists
+
 
 class SettingsMixin:
     """设置、adb 状态、Wi-Fi 无线调试。"""
