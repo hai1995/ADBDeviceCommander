@@ -4,12 +4,11 @@
 # 任何新改动一旦引入同类问题就立刻拦住。不追求一次性把历史代码刷干净。
 #
 # 为什么不开全规则：全量扫描本仓库会报 1800+ 项，其中八成是 `%` 格式化
-# （UP031 897）、blind-except（BLE001 375）、类型标注（ANN 1812）这类风格项。
+# （UP031 600+）、blind-except（BLE001 385）、类型标注（ANN 1812）这类风格项。
 # 一次性启用只会让 CI 长期飘红，门禁随即被无视，比没有门禁更糟。
 #
 # 存量盘点（按批消化，清完一批就把规则加进 select、删掉对应 ignore 行）：
-#   UP031 897 / BLE001 375 / S110 163 / UP009 88 / I001 54 / PLW1510 48
-#   RUF059 38 / SIM115 14 / ISC004 3
+#   UP031 667 / BLE001 385 / S110 166 / PLW1510 47 / SIM115 2
 # 上面这些目前都不启用，改动集中在 perf_service.py / prefs.py / record.py
 # 等大文件，适合单独开 PR 处理，不混进日常改动。
 #
@@ -22,11 +21,16 @@
 #               冗余清理（≈50 处，safe + 已逐处复核的 unsafe）。SIM102 故意
 #               未启用：剩 2 处是「嵌套 if 中间夹解释性注释」的刻意拆解，合并
 #               会丢失注释的上下文归属，可读性优先，留待人工判断。
+#   2026-11-13 第五批：I001 / RUF059 / ISC004 —— import 块排序（controller.py
+#               整文件豁免，保住刻意编排的聚合 import）+ 未使用解包变量改名 `_` +
+#               集合内隐式字符串拼接合并（共 42 处：30 处安全自动修复、
+#               12 处 ruff 标 unsafe，逐处人工复核后改，字节级等价）。
 #
-# 仍未启用（留给后续批次）：UP031 897（% 格式化改 f-string，工程量大且 diff 巨大）、
-# BLE001 375 / S110 163（blind except / try-except-pass，绝大多数是有意的兜底，
-# 逐个改要人判断，误改会把静默降级变成真 bug）、I001 54（会重排 backend/controller.py
-# 里刻意编排的聚合 import 块，纯风格 churn）。
+# 仍未启用（留给后续批次）：UP031 667（% 格式化改 f-string，工程量大且 diff 巨大）、
+# BLE001 385 / S110 166（blind except / try-except-pass，绝大多数是有意的兜底，
+# 逐个改要人判断，误改会把静默降级变成真 bug）、PLW1510 47（subprocess 未加
+# check，多是有意的「失败不致命」调用）、SIM115 2（个别手写 open 未用 with，
+# 需逐个确认句柄生命周期后再改）。
 #
 # tests/ 排除：测试里大量临时文件句柄（SIM115）与夹具导入顺序是刻意写法，
 # 且 CI 的 pyflakes 门禁已覆盖 tests 的 F 规则。生产代码 ruff 全量覆盖。
@@ -51,7 +55,7 @@ select = [
     "LOG",    # logging 调用反模式
     "PGH",    # 无规则编码 / 泛化的 noqa、type: ignore
     "RUF100", # 无效的 noqa 指令（指向未启用规则 / 已不需要）
-    "RUF012", # 可变类属性未标注 ClassVar
+    "RUF012", # 可变类属性未标 ClassVar
     "UP009",  # 冗余的 utf-8 编码声明（Python 3 默认即 UTF-8）
     "UP006",  # typing.List/Dict -> 内置 list/dict（PEP585）
     "UP015",  # open() 冗余的 "r" 模式（默认即读）
@@ -66,9 +70,17 @@ select = [
     "RET504", # 不必要的「赋值后立刻返回」中间变量
     "SIM103", # 不必要的 bool 包装（return x and y 等）
     "TID",    # 相对导入、被禁导入
+    "I001",   # import 块排序 / 格式化（controller.py 整文件豁免）
+    "RUF059", # 解包出的变量未使用（-> 改为 _）
+    "ISC004", # 集合 / 元组字面量里多余的隐式字符串拼接
 ]
 
-# 按文件豁免：tools/package.py 必须在 sys.path.insert 之后 import 同目录的
-# bump_version（否则 import 不到），E402 在这里是有意为之。
+# 按文件豁免：
+#   tools/package.py 必须在 sys.path.insert 之后 import 同目录的 bump_version
+#   （否则 import 不到），E402 在这里是有意为之；
+#   backend/controller.py 的 import 块是刻意编排的「聚合 import」（把 backend.
+#   controllers 各 mixin 的公共符号集中导出供界面层少写一层前缀），I001 一排序
+#   就会把这套编排打散、纯风格 churn，故整文件豁免 I001。
 [lint.per-file-ignores]
 "tools/package.py" = ["E402"]
+"backend/controller.py" = ["I001"]
