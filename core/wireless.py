@@ -201,7 +201,7 @@ def parse_device_ip(raw):
             return 2
         if n.startswith("eth"):
             return 3
-        if n.startswith("ap") or n.startswith("swlan"):
+        if n.startswith(("ap", "swlan")):
             return 4
         if n.startswith("lo"):
             return 99
