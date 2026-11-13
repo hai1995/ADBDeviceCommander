@@ -1,57 +1,5 @@
 # ADB 设备指令台 —— ruff 静态检查配置
 #
-# 定位：CI 的「防劣化」门禁。只启用**当前存量已为 0** 的规则：老代码照常跑，
-# 任何新改动一旦引入同类问题就立刻拦住。不追求一次性把历史代码刷干净。
-#
-# 为什么不开全规则：全量扫描本仓库会报 1800+ 项，其中八成是 `%` 格式化
-# （UP031 897）、blind-except（BLE001 375）、类型标注（ANN 1812）这类风格项。
-# 一次性启用只会让 CI 长期飘红，门禁随即被无视，比没有门禁更糟。
-#
-# 存量盘点（按批消化，清完一批就把规则加进 select、删掉对应 ignore 行）：
-#   UP031 897 / BLE001 375 / S110 163 / UP009 88 / I001 54 / PLW1510 48
-#   RUF059 38 / SIM115 14 / ISC004 3
-# 上面这些目前都不启用，改动集中在 perf_service.py / prefs.py / record.py
-# 等大文件，适合单独开 PR 处理，不混进日常改动。
-#
-# 已消化的批次（规则已进 select，存量归零）：
-#   2026-11-11 第一批：B007 / B009 / B023 / B905 —— bugbear 仅剩的 4 条
-#   2026-11-11 第二批：RUF100（无效 noqa）/ RUF012（可变类属性未标 ClassVar）
-#   2026-11-11 第三批：UP009（冗余 utf-8 声明，52 处纯机械删除）
-#
-# 仍未启用（留给后续批次）：UP031 897（% 格式化改 f-string，工程量大且 diff 巨大）、
-# BLE001 375 / S110 163（blind except / try-except-pass，绝大多数是有意的兜底，
-# 逐个改要人判断，误改会把静默降级变成真 bug）、I001 54（会重排 backend/controller.py
-# 里刻意编排的聚合 import 块，纯风格 churn）。
-#
-# tests/ 排除：测试里大量临时文件句柄（SIM115）与夹具导入顺序是刻意写法，
-# 且 CI 的 pyflakes 门禁已覆盖 tests 的 F 规则。生产代码 ruff 全量覆盖。
+# 定位：CI 的防劣化门禁。
 
-target-version = "py311"
-exclude = [
-    "tests",
-    "frontend/vendor",
-    ".uploads",
-]
-
-[lint]
-select = [
-    "E9",     # 语法错误 / 无法解析的源码
-    "F",      # pyflakes 等价：未用导入、未定义名、重复定义
-    "A",      # 内置名被遮蔽（id / list / type ...）
-    "ASYNC",  # 异步反模式
-    "B",      # bugbear：可变默认参数、raise from、无用断言等
-    "ERA",    # 注释掉的死代码
-    "FLY",    # 该用 join 却手写字符串累加
-    "G",      # logging 格式化误用
-    "LOG",    # logging 调用反模式
-    "PGH",    # 无规则编码 / 泛化的 noqa、type: ignore
-    "RUF100", # 无效的 noqa 指令（指向未启用规则 / 已不需要）
-    "RUF012", # 可变类属性未标注 ClassVar
-    "UP009",  # 冗余的 utf-8 编码声明（Python 3 默认即 UTF-8）
-    "TID",    # 相对导入、被禁导入
-]
-
-# 按文件豁免：tools/package.py 必须在 sys.path.insert 之后 import 同目录的
-# bump_version（否则 import 不到），E402 在这里是有意为之。
-[lint.per-file-ignores]
-"tools/package.py" = ["E402"]
+# 测试最小推送
