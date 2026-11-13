@@ -573,8 +573,7 @@ def _win_write_powershell(path, raw=None):
         try:
             r = sp.run(["powershell", "-NoProfile", "-STA", "-Command", script],
                        input=b64.encode("ascii"), timeout=25,
-                       stdout=sp.PIPE, stderr=sp.PIPE,
-                       creationflags=flags)
+                       capture_output=True, creationflags=flags)
         except FileNotFoundError:
             return False, "未找到 powershell（.NET 兜底不可用）"
         except sp.TimeoutExpired:
@@ -649,7 +648,7 @@ def copy_macos(raw, png, pix, path):
               % (quoted, klass))
     try:
         r = subprocess.run(["osascript", "-e", script], timeout=20,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                           capture_output=True)
     except FileNotFoundError:
         return False, "未找到 osascript（非 macOS 环境）"
     except subprocess.TimeoutExpired:
@@ -675,8 +674,7 @@ def copy_linux(raw, png, pix, path):
         try:
             with open(long_path(path), "rb") as f:
                 r = subprocess.run(cmd, stdin=f, timeout=20,
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
+                                   capture_output=True)
         except FileNotFoundError:
             continue
         except subprocess.TimeoutExpired:

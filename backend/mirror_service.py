@@ -685,7 +685,7 @@ def _make_handler(server):
                     self.send_error(404, "not found")
                 except Exception:
                     pass
-                return
+                return None
             serial = ""
             if "?" in self.path:
                 serial = (parse_qs(self.path.split("?", 1)[1]).get("serial")
@@ -696,7 +696,7 @@ def _make_handler(server):
                     self.send_error(404, "no frame")
                 except Exception:
                     pass
-                return
+                return None
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")

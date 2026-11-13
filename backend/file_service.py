@@ -235,7 +235,7 @@ class FileService:
             if pr.returncode == 0 and path_isfile(tmp):
                 sz = path_getsize(tmp)
                 if sz <= max_inline_bytes:
-                    with open(long_path(tmp), "r", encoding="utf-8",
+                    with open(long_path(tmp), encoding="utf-8",
                               errors="replace") as f:
                         txt = f.read()
                     try:
