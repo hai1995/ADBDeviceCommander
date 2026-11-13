@@ -32,7 +32,7 @@ _DEVICE_STATES = (
 )
 _DEVICE_LINE_RE = re.compile(
     r"^(?P<serial>.+?)\s+(?P<state>%s)\b(?P<rest>.*)$"
-    % "|".join(re.escape(s) for s in _DEVICE_STATES)
+    % "|".join(re.escape(s) for s in _DEVICE_STATES),
 )
 
 
@@ -54,7 +54,7 @@ def parse_devices(raw: str):
     devices = []
     for line in (raw or "").splitlines():
         line = line.strip()
-        if not line or line.startswith("List of devices") or line.startswith("*"):
+        if not line or line.startswith(("List of devices", "*")):
             continue
         parsed = _split_device_line(line)
         if parsed is None:
