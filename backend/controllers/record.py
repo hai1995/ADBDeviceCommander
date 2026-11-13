@@ -7,7 +7,7 @@ from backend.controller import (
     PipeMirror, SnapMirror, _have_ffmpeg, ffmpeg_mux,
     find_player, find_scrcpy, load_prefs, os,
     plan_size, probe_player, safe_name, scrcpy_probe_info,
-    ThreadPoolExecutor, time, zipfile
+    ThreadPoolExecutor, time, zipfile,
 )
 from backend.screen_service import device_clock
 from backend.video_join import join_segments
@@ -487,17 +487,7 @@ class RecordMixin:
         try:
             files, zpath = self._session_teardown(sess)
             self._push_status("info", "⏹ 录屏已停止")
-            # 完成强提醒：收尾可能要拉文件 / 等设备端写 moov / 合成 / 打包，
-            # 耗时以秒计，用户很可能已切去别的页签——一条汇总 toast 说清
-            # 「存在哪」，明细（逐台合成/保存/打包）留在状态栏。
-            # 自动分段时文件不止一个：说清「几段」，用户才对得上「我录了 8 分钟」
-            # 和「目录里到底有几个文件」。段数只数 mp4（包里还有 logcat 的 txt）。
-            #
-            # 合并成功的场次，目录里只剩 1 个 mp4 —— 只数文件的话这句提示会变成
-            # 「1 个文件」，反而掩盖了「3 段拼接」这个事实。所以按收尾时记下的
-            # merged_segs（原始段数）说话。
-            mp4_n = len([f for f in files
-                         if str(f).lower().endswith(".mp4")])
+            mp4_n = len([f for f in files if str(f).lower().endswith(".mp4")])
             merged_n = sum(int(n) for n in
                            ((sess or {}).get("merged_segs") or {}).values()
                            if n)
@@ -545,16 +535,12 @@ class RecordMixin:
     def _screen_record_cancel_locked(self):
         """（须在持有 _rec_lock 时调用）取消并删除，返回给前端的结构。"""
         if not self._rec_session:
-            # 与「停止」同一套说法：不算错误，故不带 message（前端按 message 弹
-            # 错误 toast，会把「本来就没在录」说成「取消失败」）。
             self._push_status("info", "ℹ 当前没有进行中的录屏（无需取消）")
             return {"ok": False, "reason": "no_session"}
         sess = self._rec_session
         removed, kept, total = self._session_discard(sess)
         self._push_status("info", "🗑 录屏已取消（本次产物未保留）")
         if kept:
-            # 删不掉必须说：通常是文件还被别的程序占着（播放器开着刚拉回来的
-            # 那一段）。沉默地「取消成功」等于骗人 —— 文件还在磁盘上。
             self._push_toast(
                 "warn", "⚠ 已取消录屏，但有 %d 个文件未能删除（可能仍被其它程序"
                         "占用），请手动删除：%s"
@@ -578,12 +564,8 @@ class RecordMixin:
         文件」这种副作用带进取消路径，或者反过来让取消的删除混进正常收尾里。
         宁可重复几行，也不让「删用户的录像」和「保用户的录像」共用同一条链。
         """
-        # 设备 overlay（指针位置 / 触摸圆点）必须先恢复：它们是设备系统设置，
-        # 与这次录的东西留不留毫无关系，取消也得把设备状态还回去。
         self._restore_overlays(sess)
         candidates = []
-        # 1) 同步 logcat：先**全部**下发停止（异步、立刻返回），最后再统一等它们
-        #    写完。逐台「停一台等一台」会把 N 台的等待串起来，而取消本该越快越好。
         caps = dict(sess.get("logcat_captures") or {})
         for s in list(caps.keys()):
             try:
@@ -591,7 +573,6 @@ class RecordMixin:
             except Exception:
                 pass
         candidates.extend(p for p in caps.values() if p)
-        # 2) 设备侧：停止录制并丢弃（不拉当前段），已拉回的段交给下面一起删。
         videos_map = sess.get("videos", {}) or {}
         devaudio_map = sess.get("devaudio", {}) or {}
         pretaken = sess.get("video_segs", {}) or {}
@@ -604,13 +585,10 @@ class RecordMixin:
                     if fn is not None:
                         ok, paths, err = fn(s)
                     else:
-                        # 旧实现 / 测试替身没有 discard_ex：退化为正常停止 + 删除
-                        # （多花一次 pull，但语义仍然是「一个都不留」）。
                         ok, paths, err = self._stop_video(s)
                 except Exception as ex:
                     ok, paths, err = False, [], str(ex)
                 candidates.extend(paths or [])
-                # 「该设备未在录制」是正常情况（它已经自己收尾过了），不报警
                 if not ok and err and err != "该设备未在录制":
                     self._push_status(
                         "warn", "⚠ %s 取消时未能正常停止录屏（%s）；设备端可能还会"
@@ -619,13 +597,12 @@ class RecordMixin:
             if s in devaudio_map:
                 try:
                     local_a = self.device_audio.stop(s)
-                except Exception as ex:
+                except Exception as e:
                     local_a = None
                     self._push_status(
-                        "warn", "⚠ %s 取消时设备音频收尾失败：%s" % (s, ex))
+                        "warn", "⚠ %s 取消时设备音频收尾失败：%s" % (s, e))
                 if local_a:
                     candidates.append(local_a)
-        # 3) 电脑麦克风：stop() 会返回落盘路径，一并删。
         if self._mic is not None:
             mic = None
             try:
@@ -635,15 +612,11 @@ class RecordMixin:
             self._mic = None
             if mic:
                 candidates.append(mic)
-        # 4) 会话登记过的本地路径：第 1 段（discard_ex 不拉它，但可能早已存在）、
-        #    麦克风文件、以及「设备被拔掉时已经取回的那几段」（video_segs）。
         candidates.extend(p for p in videos_map.values() if p)
         for ps in pretaken.values():
             candidates.extend(ps or [])
         if sess.get("mic_path"):
             candidates.append(sess["mic_path"])
-        # 5) 等 logcat 把缓冲区写完再删：文件还在写的时候删，Windows 会直接拒绝
-        #    （PermissionError），结果就是「取消成功」但 txt 还在。
         for s in list(caps.keys()):
             for _ in range(20):
                 try:
@@ -690,14 +663,7 @@ class RecordMixin:
         返回 (产出文件列表, zip 路径或 None)，供调用方弹「已完成」汇总 toast；
         全失败的场景文件列表为空，此时明细 warn 已由内部逐条 toast。
         """
-        # 可视化 overlay 必须**先于**视频收尾恢复：它们是设备系统设置，
-        # 早一点恢复，用户设备就少一瞬处于「开着准星/圆点」的意外状态。
         self._restore_overlays(sess)
-        # 同步 logcat 必须**先于视频收尾**下发停止（stop 本身是异步的：置停止
-        # 标记 + 终止 adb，立刻返回）。视频 stop 要走「kill 设备端 → 等本地 adb
-        # 退出 → 轮询设备端文件就绪 → pull」，几台设备并行也要数秒；日志若等
-        # 它拉完再停，就会比视频多跑这几秒 —— 事后按时间轴对照视频找日志时，
-        # 两边差出的正是案发现场那一段。
         for s in list(sess.get("logcat_captures", {}).keys()):
             try:
                 self.logcat_capture.stop(s, zip_on_stop=False)
@@ -713,15 +679,9 @@ class RecordMixin:
             pretaken=sess.get("video_segs") or {})
         local_videos = {}
         for s, (vs, _a) in teardown.items():
-            # 长路径安全：这些是**用户保存目录**里的录屏分段，路径可以超长。
-            # Windows 上 os.path.exists 对超长路径返回 False → 分段会被当成
-            # 「没落盘」丢弃，用户的录屏就此消失，界面上还不给任何提示。
             keep = [p for p in (vs or []) if p and path_exists(p)]
             if keep:
                 local_videos[s] = keep
-        # 自动分段是**实现手段**，不是用户要的东西：先把多段合并成一个完整 mp4，
-        # 再走下面的音频合成 / 打包。合并失败时保持分段原样（见
-        # _merge_device_segments：宁可给 N 个能播的段，也不给一个坏成片）。
         merged_segs = {}
         for s in list(local_videos.keys()):
             one, n_used, _skipped = self._merge_device_segments(
@@ -730,8 +690,6 @@ class RecordMixin:
                 local_videos[s] = [one]
                 if n_used > 1:
                     merged_segs[s] = n_used
-        # 完成提示要按「几段拼成的」说话：合并之后目录里只剩 1 个 mp4，
-        # 用户对不上「我录了 8 分钟」和「为什么文件只有一个」。
         sess["merged_segs"] = merged_segs
         local_devaudio = {s: a for s, (_v, a) in teardown.items() if a}
         mic_path = None
@@ -741,9 +699,7 @@ class RecordMixin:
             except Exception:
                 mic_path = None
             self._mic = None
-        rec_files = []   # 最终要打包的产出文件
-        # 「勾了麦却没声」只在麦克风**确实启动过**时才提示：启动就失败的场景
-        # 上面已经 toast 过「电脑麦克风启动失败」，不再重复归因为「全程静音」。
+        rec_files = []
         mic_lost = bool(sess.get("with_mic") and sess.get("mic_started")
                         and not mic_path)
         for s, vlist in local_videos.items():
@@ -752,23 +708,14 @@ class RecordMixin:
                 audios.append(local_devaudio[s])
             if mic_path:
                 audios.append(mic_path)
-            # 拼接前的段数（合并后 vlist 只剩 1 个文件，看不出原本被切过几段）
             n_seg = merged_segs.get(s) or len(vlist)
             if audios and n_seg > 1:
                 if s in merged_segs:
-                    # 音频是**整场连续**的一条，画面却在那 N-1 处拼接点各缺了
-                    # 约 1 秒：声音不会跟着跳，于是从第 2 段起会一点点超前画面。
-                    # 不按段切音频（需要每段的精确起始偏移，算错更难排查），
-                    # 但必须说出来 —— 否则用户对着成片听半天，只会觉得「音画不同步」。
                     self._push_status(
                         "warn", "⚠ %s 的音频是整场连续录的，画面在 %d 处拼接点各缺"
                                 "约 1 秒，第 2 段起声音会超前画面（累计约 %d 秒）"
                                 % (s, n_seg - 1, n_seg - 1))
                 else:
-                    # 音频是**整场连续**的一条，视频却被切成了多段。按段切音频需要
-                    # 每一段的起始偏移，任何一处算错都会让后几段音画错位 —— 那比
-                    # 干脆没有声音更难排查。这里只把音频并进第 1 段，其余段保留为
-                    # 无音轨视频，并明确说出来（不说的话用户会以为是合成失败）。
                     self._push_status(
                         "warn", "⚠ %s 共 %d 段：音频只并入第 1 段，其余段为无音轨视频"
                                 % (s, len(vlist)))
@@ -781,8 +728,6 @@ class RecordMixin:
                         self._push_status("ok", "✓ 已合成音视频: %s" % merged)
                         rec_files.append(merged)
                     else:
-                        # 合成失败/产出不可播放时**保留原视频**，并说清原因：
-                        # 「未安装 ffmpeg」只是其中一种，音频为空、ffmpeg 过旧同样会走到这里。
                         why = "" if _have_ffmpeg() else "（未检测到 ffmpeg）"
                         self._push_toast(
                             "warn", "⚠ 合成音视频失败%s，原始视频已保存（无音轨）: %s"
@@ -794,39 +739,21 @@ class RecordMixin:
                     if path_exists(vlocal):
                         rec_files.append(vlocal)
         if mic_lost:
-            # 空录音（麦克风被占用 / 全程静音 / 无录音权限）现在会返回 None 并删除坏文件，
-            # 这里明确告诉用户「为什么没有声音」，否则用户只看到成片没音轨。
             self._push_toast(
                 "warn", "⚠ 未录到电脑麦克风声音（麦克风可能被占用、无权限或全程静音），"
                         "已按无音轨保存视频。")
-        # 设备端音频被 pull 到 %TEMP% 的临时 wav（adb_devaudio_*.wav），唯一用途就是
-        # 喂给 ffmpeg 合成；合成结束后这些文件已无用，必须清理，否则每次录屏都会在
-        # TEMP 留下孤儿文件，长期累积会悄悄占满系统盘。
         for lp in local_devaudio.values():
             try:
                 if lp and os.path.exists(long_path(lp)):
                     os.remove(long_path(lp))
             except Exception:
                 pass
-        # 同步 logcat 抓取收尾：**录屏结束，日志必须同时结束**。
-        # 日志的用途是事后按时间轴对照视频找问题，录像停了日志还在往下写、
-        # 或者日志比视频多跑一大截，两边就对不齐了。所以这里不做任何例外：
-        # 无论是用户点停止、还是录屏被意外中断，配套抓取都随会话一起停、并
-        # 一并打包（视频 + 日志一体包）。意外中断的断点由抓取侧写入的
-        # 「设备断开连接」缺口标记标明，分析时一眼能看出哪里缺了。
         for s, p in list(sess.get("logcat_captures", {}).items()):
-            # 停止已在收尾开头下发（与视频同步），这里只等它把缓冲区写完再取
-            # 文件（最多 2 秒）。抓取正在等设备重连时，stop 会立刻打断等待，
-            # 不会把这段时间拖进收尾流程。
             for _ in range(20):
                 if not self.logcat_capture.is_running(s):
                     break
                 time.sleep(0.1)
             if self.logcat_capture.is_running(s):
-                # 2 秒还没收尾（磁盘很慢 / 写盘阻塞）：绝不能把它塞进包里。
-                # 打包完会删源文件，而抓取还在往这个路径写 —— 尾部会落进已删除的
-                # inode：zip 里少一段、磁盘上也没有，日志就此彻底消失，且看不出来。
-                # 宁可不打包，保留原 txt 并说清位置。
                 self._push_toast(
                     "warn",
                     "⚠ %s 的 logcat 日志仍在收尾，未放入本次压缩包，"
@@ -834,12 +761,8 @@ class RecordMixin:
                 continue
             if path_exists(p):
                 rec_files.append(p)
-        # 覆盖度校验必须放在打包之前：打包会删源 txt，之后就没法再读时间戳了。
-        # 结论只进内存（sess["logcat_notes"]），由调用方在「✓ 录屏已完成」之后
-        # 逐条播报 —— 从这里直接弹 toast 会被后面那条成功提示盖掉。
         sess["logcat_notes"] = self._logcat_coverage_notes(
             sess, sess.get("logcat_captures") or {})
-        # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
         zpath = None
         if sess.get("with_zip") and rec_files:
             z = os.path.join(sess["dir"], "rec_%s.zip" % sess["ts"])
@@ -847,9 +770,6 @@ class RecordMixin:
                 zpath = z
                 self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
             else:
-                # 勾了「结束后打包」却没打成（磁盘满 / 目录被删 / 被占用）：
-                # 用户会照着按钮的勾选状态去目录里找 zip。必须说清「没有 zip」，
-                # 否则他会以为打包还在进行、或者以为程序把文件弄丢了。
                 self._push_toast(
                     "warn", "⚠ 录制产物打包失败（文件已单独保存，可直接使用）：%s"
                             % sess.get("dir"))
@@ -882,11 +802,7 @@ class RecordMixin:
             s, p = job
             out = []
             try:
-                # 长路径安全：logcat txt 落在用户的保存目录里。超长路径下
-                # os.path.isfile 返回 False → 会被误报成「配套 logcat 文件不存在」。
                 if not path_isfile(p):
-                    # 文件不在了（保存目录被删 / 同名文件被移走）：说明本次日志
-                    # 根本没落盘，别让用户以为包里那份是完整的。
                     return [("warn", "⚠ %s 的配套 logcat 文件不存在（%s），"
                                       "本次录制产物里没有该设备的日志" % (s, p))]
                 _first, last = read_time_bounds(p)
@@ -898,7 +814,6 @@ class RecordMixin:
                     facts = self.logcat_capture.capture_facts(s) or {}
                 except Exception:
                     facts = {}
-                # ① 抓取起点晚于录制起点：录制开头那段确实没有日志。
                 cap_started = facts.get("started_host")
                 if start_host and cap_started:
                     try:
@@ -910,22 +825,17 @@ class RecordMixin:
                             "warn",
                             "⚠ %s 的配套 logcat 比录制开始晚约 %s 才启动，"
                             "录制开头这一段没有日志" % (s, _fmt_span(late))))
-                # ② 设备不认 -T、走兼容模式：起点可能早于录制，开头可能是历史缓冲。
-                # 这只是事实说明，不代表一定缺录制期间的日志（兼容模式也会继续跟流）。
                 if facts.get("compat"):
                     out.append((
                         "info",
                         "ℹ %s 的 logcat 不支持从当前时刻起抓（无 -T），已回落兼容"
                         "模式：日志开头可能包含录制前的历史缓冲" % s))
-                # ③ 真的断过（掉线 / 意外退出 / 重连耗尽）：这是唯一能确证的缺口。
                 if facts.get("data_gap"):
                     out.append((
                         "warn",
                         "⚠ %s 的配套 logcat 在录制期间中断过（设备掉线 / logcat "
                         "意外退出），文件里 [logcat] 标记处存在时间缺口"
                         "（中断原因见状态信息）" % s))
-                # 设备时钟偏差：只影响「视频文件名（本机时间）」与「日志时间戳
-                # （设备时间）」的对照，与日志是否完整无关，故只做 info。
                 dev = device_clock(self.state.adb_path, s, timeout=3)
                 if dev:
                     dev_now, _tz_off = dev
@@ -944,8 +854,6 @@ class RecordMixin:
         if len(jobs) == 1:
             results = [_one(jobs[0])]
         else:
-            # 每台一次 adb shell，串行在台数多时会把「已停止」拖出好几秒；
-            # 各设备彼此独立，直接并行。
             with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
                 results = list(pool.map(_one, jobs))
         notes = []
@@ -1008,8 +916,6 @@ class RecordMixin:
             "info", "⏳ %s 共 %d 段，正在合并为一个完整视频…" % (serial, len(vlist)))
         res = join_segments(vlist, out)
         if not res.get("ok") or not res.get("path"):
-            # 合并失败 → **分段一个都不删**。用户拿到的是「N 个能播的段」，
-            # 而不是「一个播不了的成片」；宁可不合并，也不能悄悄把素材弄丢。
             self._push_toast(
                 "warn",
                 "⚠ %s 的 %d 段未能合并为一个视频：%s。已保留全部分段文件（%s），"
@@ -1022,13 +928,8 @@ class RecordMixin:
         skipped = res.get("skipped") or []
         final = merged
         if merged != vlist[0] and len(used) > 1:
-            # 只有真的新建了合并文件（而不是退化成「只剩一段可用」）才删中间段：
-            # 目录里留 3 个分段 + 1 个成片，用户第一反应是「哪几个是最终版」，
-            # 打包时体积也白翻一倍。
             for p in used:
                 if p and p != merged:
-                    # 长路径安全：中间段删除失败会被静默吞掉 → 目录里留着
-                    # 「3 个分段 + 1 个成片」，用户第一反应是「哪几个是最终版」。
                     try:
                         os.remove(long_path(p))
                     except Exception:
@@ -1038,8 +939,6 @@ class RecordMixin:
                 os.replace(long_path(merged), long_path(want))
                 final = want
             except Exception as e:
-                # 改不成名（目标被播放器占着等）不是失败：成片已经在 out 上，
-                # 只是名字带 `_full`。说清楚它到底叫什么，别让用户以为没合。
                 self._push_status(
                     "warn", "⚠ %s 已合并但未能改名为 %s（%s），成片仍是 %s"
                             % (serial, os.path.basename(want), e,
@@ -1050,8 +949,6 @@ class RecordMixin:
                       "（拼接点有约 1 秒画面缺失，见录屏卡片提示）"
                       % (serial, len(used), os.path.basename(final)))
         else:
-            # 多段里只有 1 段正常收尾（其余缺 moov）：它就是成片本身，
-            # 说「合并了 1 段」会让人以为拼过。
             self._push_status(
                 "ok", "✓ %s 只有 1 段正常收尾，已作为成片保留: %s"
                       % (serial, os.path.basename(final)))
@@ -1072,10 +969,6 @@ class RecordMixin:
         fn = getattr(self.video, "stop_ex", None)
         if fn is not None:
             return fn(serial)
-        # 旧 stop() 只有「路径」一个出口，失败时它可能带回来的是**残片**（缺 moov
-        # 的半截 mp4）。这里不能把它当成「已正常收尾的段」放进列表：那会让残片
-        # 混进压缩包，用户拿到一个播放不了的文件却分不出是哪个、为什么。路径改
-        # 由 err 带出去，信息不少一条，但不会被当成成品。
         ok, lp, err = self.video.stop(serial)
         if ok:
             return True, ([lp] if lp else []), err
@@ -1108,15 +1001,9 @@ class RecordMixin:
                     if ok:
                         local_vs = paths
                         if err:
-                            # 有段没取回来、当前段却是好的：不能静默。用户以为
-                            # 录了 8 分钟，包里只有 5 分钟，缺的那 3 分钟他会以为
-                            # 是「本来就没发生」。
                             self._push_toast(
                                 "warn", "⚠ %s 部分分段未取回：%s" % (s, err))
                     else:
-                        # paths 里全是**已正常收尾**的段（残片只在 err 里说明），
-                        # 必须整体保留：只报一句「收尾失败」会让用户把前面几段
-                        # 本来完好的视频一并扔掉。
                         local_vs = paths
                         where = ""
                         kept = ("已完成的 %d 段完整保留：%s。"
@@ -1125,8 +1012,6 @@ class RecordMixin:
                                              for x in local_vs))
                                 if local_vs else "")
                         if s in dead:
-                            # 进程意外死亡（续段失败 / adb root 等）：文案说清
-                            # 「视频不完整」，与普通收尾失败区分开。
                             self._push_toast(
                                 "warn",
                                 "⚠ %s 录屏被意外中断，这一段视频不完整（%s）。"
@@ -1138,11 +1023,6 @@ class RecordMixin:
                                 "warn", "⚠ 录屏收尾失败 %s：%s%s%s"
                                         % (s, err or "未知原因", where, kept))
                 else:
-                    # 会话已被其他路径收尾弹出（stop_all / 异常清理 / 设备被移除后
-                    # 强停）时，这里再用 stop() 只会得到「该设备未在录制」。必须用
-                    # 之前记录的路径兜底，否则这段视频既不合成音频、也不进 zip、
-                    # 界面也无提示。pretaken 是「设备被移除时已经取回的那几段」，
-                    # 没有它就只能拿到第一段。
                     local_vs = list((pretaken or {}).get(s) or [])
                     if not local_vs:
                         first = videos_map.get(s)
@@ -1152,7 +1032,6 @@ class RecordMixin:
                 try:
                     local_a = self.device_audio.stop(s)
                 except Exception as e:
-                    # 音频收尾失败不能连累视频落盘，也不能让整轮收尾中断
                     self._push_status(
                         "warn", "⚠ %s 设备音频收尾失败：%s" % (s, e))
                     local_a = None
@@ -1160,12 +1039,9 @@ class RecordMixin:
 
         if len(serials) <= 1:
             return dict(one(s) for s in serials)
-        # 上限 4：再多的设备同时 pull 也挤在同一条 adb server 通道上，
-        # 并发度拉满只会让每条都变慢，还平白多占内存。
         with ThreadPoolExecutor(max_workers=min(4, len(serials))) as pool:
             return dict(pool.map(one, serials))
 
-    # 已经压缩过的容器格式：再走 DEFLATE 只烧 CPU，几乎不减小体积。
     _PRECOMPRESSED_EXT: ClassVar[set[str]] = {
         ".mp4", ".m4a", ".m4v", ".mov", ".mkv", ".webm",
         ".mp3", ".aac", ".wav", ".ogg",
@@ -1196,23 +1072,14 @@ class RecordMixin:
                 os.remove(lzip)
             with zipfile.ZipFile(lzip, "w") as z:
                 for p in paths:
-                    # 长路径安全：Windows 上 os.path.exists / isfile 对超过
-                    # 260 字符的路径返回 False —— 文件会被**静默跳过**，打包
-                    # 出来的 zip 少了内容，而界面照样弹「✓ 已打包」。用户拿到
-                    # 的压缩包缺了录屏，却没有任何提示。
                     if (p and p != zip_path and path_exists(p)
                             and path_isfile(p)):
-                        # 视频/音频/图片本来就已经压缩过（H.264/AAC/PNG），
-                        # 再走 DEFLATE 只是把整个文件白算一遍：3 分钟的 1080p
-                        # 录屏能白白多花一两秒 CPU，体积却几乎不变。体积真正
-                        # 能压下来的是 logcat 的 txt，那类仍用 DEFLATE。
                         z.write(long_path(p), os.path.basename(p),
                                 compress_type=RecordMixin._zip_method_for(p))
                         written.append(p)
             if not os.path.exists(lzip):
                 return None
         except Exception:
-            # 打包中途失败：清掉可能残留的半成品 zip，源文件一律保留
             try:
                 if os.path.exists(lzip):
                     os.remove(lzip)
@@ -1330,10 +1197,10 @@ class RecordMixin:
             try:
                 alive = bool(m.alive())
             except Exception:
-                alive = False          # 探活本身抛错 = 当作已死，让用户能重开
+                alive = False
             if alive:
                 return m
-            table.pop(serial, None)    # 死条目摘掉，腾出「可重开」的位置
+            table.pop(serial, None)
         return None
 
     def _start_one_mirror(self, serial, pref, mode):
@@ -1351,8 +1218,6 @@ class RecordMixin:
                     res = {"started": [], "skipped": [], "failed": [(serial, str(ex))]}
                 if res["started"] or res["skipped"]:
                     return {"mode": "scrcpy", "frame_url": ""}
-                # 起不来（未授权 / 版本不兼容）→ 继续往下降级，别轻易放弃
-
         if mode in ("auto", "pipe"):
             kind, exe, note = find_player(pref["player_path"])
             if exe:
@@ -1371,8 +1236,6 @@ class RecordMixin:
                 pipe_err = note
         else:
             pipe_err = ""
-
-        # 兜底：只要 adb 能截图就一定有画面（帧率很低，但不会「点了没反应」）
         if not self._frame_server.start():
             return {"error": pipe_err or "帧服务启动失败（本地回环端口不可用）"}
         m = SnapMirror(self.state.adb_path, serial, self._frame_server,
@@ -1399,10 +1262,6 @@ class RecordMixin:
         pref = self._mirror_prefs()
         started, skipped, failed = [], [], []
         for s in serials:
-            # 查重与占位必须在同一把锁里完成：_start_one_mirror 是**同步**的
-            # （等首帧最长 6s），期间登记表里还没有这台设备。连点两次的间隙
-            # 足以让两条 js_api 调用都通过查重，各自拉起一个播放器窗口 + 一条
-            # 设备端 screenrecord，互相抢 adb 输入。
             with self._mirror_lock:
                 busy = (self._mirror_live(s) is not None
                         or s in self._mirror_starting)
@@ -1423,7 +1282,6 @@ class RecordMixin:
                                 "frame_url": res.get("frame_url") or ""})
             else:
                 failed.append({"serial": s, "reason": res.get("error") or "未知原因"})
-
         label = {"scrcpy": "scrcpy 窗口", "pipe": "播放器窗口（screenrecord 管道）",
                  "snap": "低帧率预览（screencap 轮询）"}
         if started:
@@ -1466,8 +1324,6 @@ class RecordMixin:
     def mirror_status(self):
         """当前备用投屏状态（前端用来刷新按钮与预览区可见性）。"""
         with self._mirror_lock:
-            # 顺便剪掉已死的条目：前端每次都调这个接口，下一次就不会再显示
-            # 「投屏中」而按钮却被跳过（见 _mirror_live 的说明）。
             return {
                 "pipe": [s for s in list(self._mirror_pipes)
                          if self._mirror_live(s) is not None],
