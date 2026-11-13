@@ -390,7 +390,7 @@ def parse_cpu(text):
                 continue
             if s.startswith("TOTAL"):
                 break
-            if s.startswith("Load:") or s.startswith("CPU usage"):
+            if s.startswith(("Load:", "CPU usage")):
                 continue
             pm = re.search(r"([\w.\-/]+):\s*(\d+(?:\.\d+)?)\s*%", s)
             if not pm or pm.group(1).upper() == "TOTAL":
