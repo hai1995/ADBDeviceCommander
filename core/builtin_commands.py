@@ -153,16 +153,16 @@ BUILTIN_COMMANDS = [
         "scope": "车机",
         "clickCount": 0, "builtin": True,
         "commands": [
-            {"delay": 0, "command": "adb root"}
-        ]
+            {"delay": 0, "command": "adb root"},
+        ],
     },
     {
         "id": "bi.remount-adb", "name": "remount", "labels": ["内置"], "section": "连接与投屏",
         "scope": "车机",
         "clickCount": 0, "builtin": True,
         "commands": [
-            {"delay": 0, "command": "adb remount"}
-        ]
+            {"delay": 0, "command": "adb remount"},
+        ],
     },
 
     # ------------------------------------------------------------------ #
