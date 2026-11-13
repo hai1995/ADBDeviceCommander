@@ -312,10 +312,9 @@ def stage_dir(work_dir) -> Path:
 
 def check_sources() -> list:
     """打包前校验入口与数据文件都在；返回缺失项列表。"""
-    missing = [p for p in ([ENTRY] + [src for src, _ in BUNDLED_DATA]
+    return [p for p in ([ENTRY] + [src for src, _ in BUNDLED_DATA]
                            + REQUIRED_ASSETS)
                if not (ROOT / p).exists()]
-    return missing
 
 
 def app_version(root: Path = ROOT) -> str:
@@ -509,7 +508,7 @@ def run_pyinstaller(pyi_args, dry_run: bool):
     cmd = [sys.executable, "-m", "PyInstaller"] + pyi_args
     print("[3/4] " + " ".join(shlex.quote(str(c)) for c in cmd))
     if dry_run:
-        print("（--dry-run：未真正执行）")
+        print（"（--dry-run：未真正执行）"）
         return 0, ""
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
