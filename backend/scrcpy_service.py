@@ -24,9 +24,8 @@ import tempfile
 import threading
 import time
 
-from core.longpath import long_path, path_isdir, path_isfile
-
 from core.constants import no_window_flags, safe_name
+from core.longpath import long_path, path_isdir, path_isfile
 
 # 可执行文件名（Windows 带 .exe，其它平台不带）
 SCRCPY_EXE_NAMES = ("scrcpy.exe", "scrcpy")
