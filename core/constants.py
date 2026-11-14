@@ -300,7 +300,7 @@ def fmt_size(n: int) -> str:
                 return "%d %s" % (int(n), unit)
             if n >= 10:
                 return "%d %s" % (int(n), unit)
-            return "%.1f %s" % (n, unit)
+            return "{:.1f} {}".format(n, unit)
     return "%d TB" % int(n)
 
 
