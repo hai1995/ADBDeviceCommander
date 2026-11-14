@@ -32,7 +32,7 @@ def quote_serial(serial: str) -> str:
 
     序列号**不是**完全可信的输入：USB 设备的序列号来自设备描述符，是设备端
     自己报的一串任意字符，`adb devices -l` 会原样打印它。一个伪装的 U 盘可以
-    自称 `x"; Remove-Item -Recurse C:\; "` —— 未加引号地拼进命令行就成了
+    自称 `x\"; Remove-Item -Recurse C:\\; \"` —— 未加引号地拼进命令行就成了
     PowerShell 注入（用户在指令台敲任何一条 adb 命令都会中招）。
 
     顺带修掉一个真 bug：mDNS 冲突时 adb 打印的序列号**本身含空格**
@@ -50,13 +50,12 @@ def quote_serial(serial: str) -> str:
 
 
 # 匹配 adb 或 adb.exe，且可附带已存在的 -s <serial>
-#   (?<![A-Za-z0-9_\"\'$])  前不能是单词字符，也不能是引号/$（避免误匹配字符串内或变量内的 adb）
+#   (?<![A-Za-z0-9_\"'$])  前不能是单词字符，也不能是引号/$（避免误匹配字符串内或变量内的 adb）
 #   adb(?:\.exe)?             adb 或 adb.exe
 #   (?![A-Za-z0-9_])          后不能有单词字符
 #   (?:\s+-s\s+<serial>)?     可选的已存在 -s <serial>（裸词或带引号都认）
 ADB_RE = re.compile(
-    r"(?<![A-Za-z0-9_\"\'$])adb(?:\.exe)?(?![A-Za-z0-9_])(?:\s+-s\s+%s)?"
-    % _SERIAL_TOKEN,
+    r"(?<![A-Za-z0-9_\"'$])adb(?:\.exe)?(?![A-Za-z0-9_])(?:\s+-s\s+{})?".format(_SERIAL_TOKEN),
 )
 SCRCPY_RE = re.compile(r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_])")
 
@@ -102,7 +101,7 @@ def transform(cmd: str, serial: str) -> str:
 
     # scrcpy（投屏也支持按设备下发）
     if SCRCPY_RE.search(new_cmd) and not re.search(
-            r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_]).*?-s\s+%s" % _SERIAL_TOKEN,
+            r"(?<![A-Za-z0-9_])scrcpy(?![A-Za-z0-9_]).*?-s\s+{}".format(_SERIAL_TOKEN),
             new_cmd):
         # 用**函数**替换而不是字符串替换：re.sub 的字符串替换里 `\` 会被当转义
         # 处理，序列号含反斜杠时要么被改写（`\b` 变成退格符）要么直接抛
@@ -128,7 +127,7 @@ def needs_device(cmd_obj) -> bool:
 # 交互式 adb shell 自动合并
 # ---------------------------------------------------------------------------
 SHELL_INTERACTIVE_RE = re.compile(
-    r"^adb(?:\.exe)?(?:\s+-s\s+%s)?\s+shell\s*$" % _SERIAL_TOKEN,
+    r"^adb(?:\.exe)?(?:\s+-s\s+{})?\s+shell\s*$".format(_SERIAL_TOKEN),
     re.IGNORECASE,
 )
 
