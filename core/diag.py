@@ -137,8 +137,8 @@ def _mb(kb):
     if n <= 0:
         return "-"
     if n >= 1024:
-        return "%.1f MB" % (n / 1024.0)
-    return "%d KB" % int(n)
+        return f"{n / 1024.0:.1f} MB"
+    return f"{int(n):d} KB"
 
 
 def top_memory(text, limit=PROC_TOP_N):
@@ -152,10 +152,10 @@ def top_memory(text, limit=PROC_TOP_N):
 def process_report(text, limit=PROC_TOP_N):
     """把 ps 输出整理成「摘要 + 原始表」的文本。"""
     rows = top_memory(text, limit)
-    head = ["== 内存占用 TOP %d（RSS，来自 ps）==" % len(rows)]
+    head = [f"== 内存占用 TOP {len(rows):d}（RSS，来自 ps）=="]
     if rows:
         for pid, rss, name in rows:
-            head.append("  %-7d %10s  %s" % (pid, _mb(rss), name))
+            head.append(f"  {pid:<7d} {_mb(rss):>10}  {name}")
     else:
         head.append("  （未能从 ps 输出里解析出 RSS 列，见下方原始输出）")
     head.append("")
@@ -225,10 +225,10 @@ def parse_meminfo(text):
 def meminfo_report(text, limit=PROC_TOP_N):
     """把 `dumpsys meminfo` 整理成「分页明细 TOP N + 内存汇总段」的文本。"""
     rows = parse_meminfo(text)[:max(1, int(limit or 1))]
-    head = ["== 内存分页明细 TOP %d（PSS，来自 dumpsys meminfo）==" % len(rows)]
+    head = [f"== 内存分页明细 TOP {len(rows):d}（PSS，来自 dumpsys meminfo）=="]
     if rows:
         for pss, name, _pid in rows:
-            head.append("  %-40s %12s" % (name, _mb(pss)))
+            head.append(f"  {name:<40} {_mb(pss):>12}")
     else:
         head.append("  （未能从 meminfo 输出里解析出 PSS 分段，见下方原始汇总）")
     head.append("")
@@ -321,8 +321,7 @@ def net_report(text):
     head = ["== 网络接口（状态 / IPv4）=="]
     if rows:
         for name, up, ip in rows:
-            head.append("  %-12s %s  %s" % (name, "UP  " if up else "DOWN",
-                                            ip or "（无 IP）"))
+            head.append(f"  {name:<12} {'UP  ' if up else 'DOWN'}  {ip or '（无 IP）'}")
     else:
         head.append("  （未能解析出网络接口，见下方原始输出）")
     head.append("")
@@ -416,15 +415,14 @@ def cpu_report(text):
         head.append("  1 分钟: {}   5 分钟: {}   15 分钟: {}".format(load.get("one", "-"), load.get("five", "-"),
                        load.get("fifteen", "-")))
         if "runnable" in load:
-            head.append("  运行队列: %d / 线程总数 %d"
-                        % (load["runnable"], load.get("total_threads", 0)))
+            head.append(f"  运行队列: {load['runnable']:d} / 线程总数 {load.get('total_threads', 0):d}")
     else:
         head.append("  （未能读取 /proc/loadavg）")
     head.append("")
-    head.append("== 进程 CPU 占比 TOP %d（来自 dumpsys cpuinfo）==" % len(procs))
+    head.append(f"== 进程 CPU 占比 TOP {len(procs):d}（来自 dumpsys cpuinfo）==")
     if procs:
         for pct, name in procs:
-            head.append("  {:6.1f}%  {}".format(pct, name))
+            head.append(f"  {pct:6.1f}%  {name}")
     else:
         head.append("  （cpuinfo 受限或无进程占比，仅看整体负载即可）")
     head.append("")
@@ -451,11 +449,11 @@ def summarize_packages(text3, text_all=""):
     # 时只给第三方清单经常查不到 —— 车机上的问题十有八九出在预置应用里。
     third_set = set(third)
     system = [n for n in total if n not in third_set]
-    lines = ["第三方应用：%d 个" % len(third)]
+    lines = [f"第三方应用：{len(third):d} 个"]
     if system:
-        lines.append("系统应用：%d 个" % len(system))
+        lines.append(f"系统应用：{len(system):d} 个")
     if total:
-        lines.append("全部应用：%d 个" % len(total))
+        lines.append(f"全部应用：{len(total):d} 个")
     lines.append("")
     lines.append("== 第三方应用包名 ==")
     lines.extend(["  " + n for n in sorted(third)] or ["  （无）"])
@@ -519,7 +517,7 @@ def _logcat_text(ctx, lines):
     rc2, out2, err2 = ctx.run(["logcat", "-d", "-v", "threadtime"], timeout=TIMEOUT)
     if rc2 == 0 and out2:
         tail = out2.splitlines()[-n:]
-        note = ("（本机 logcat 不支持 -t，已改为全量 dump 后截取尾部 %d 行）\n" % n)
+        note = f"（本机 logcat 不支持 -t，已改为全量 dump 后截取尾部 {n:d} 行）\n"
         return note + "\n".join(tail) + "\n", ""
     return "", (err or err2 or "logcat 无输出").strip()[:300]
 
@@ -551,7 +549,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
     try:
         os.makedirs(long_path(out_dir), exist_ok=True)
     except Exception as e:
-        return None, None, "无法创建保存目录 {}：{}".format(out_dir, e)
+        return None, None, f"无法创建保存目录 {out_dir}：{e}"
 
     ctx = _Ctx(adb, serial_s, runner)
     work = tempfile.mkdtemp(prefix="adb_diag_")
@@ -574,7 +572,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         device_text = ""
         if rc == 0 and out.strip():
             rows = devinfo.rows(info)
-            device_text = "\n".join("{}: {}".format(k, v) for k, v in rows)
+            device_text = "\n".join(f"{k}: {v}" for k, v in rows)
             if not device_text:
                 device_text = "（未能解析出设备信息，见 props.txt 原始输出）"
         else:
@@ -659,7 +657,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
 
         # ---- 4.5) 网络接口快照（ip addr / netcfg 双格式兜底）----
         rc, out, err = ctx.run(
-            ["shell", "ip addr 2>/dev/null; echo {}; netcfg 2>/dev/null".format(_NETCFG_SEP)],
+            ["shell", f"ip addr 2>/dev/null; echo {_NETCFG_SEP}; netcfg 2>/dev/null"],
             timeout=TIMEOUT)
         net_text = (net_report(out) if (rc == 0 and out.strip())
                     else "（读取网络接口失败：{}）\n".format((err or "无输出").strip()[:200]))
@@ -692,7 +690,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
                 manifest["notes"].append("logcat 读取失败")
             size = _write(os.path.join(work, F_LOGCAT), text)
             ctx.record(F_LOGCAT, not lerr, size,
-                       "adb logcat -d -t %d" % clamp_lines(logcat_lines), lerr)
+                       f"adb logcat -d -t {clamp_lines(logcat_lines):d}", lerr)
 
         manifest["parts"] = ctx.parts
         _write(os.path.join(work, F_META),
@@ -718,7 +716,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
                     os.remove(lzip)
             except Exception:
                 pass
-            return None, manifest, "打包失败：{}".format(e)
+            return None, manifest, f"打包失败：{e}"
         return zip_path, manifest, None
     finally:
         shutil.rmtree(long_path(work), ignore_errors=True)
@@ -740,14 +738,12 @@ def summary_line(zip_path, manifest):
     bad = [p.get("name") for p in parts if not p.get("ok")]
     if parts and len(bad) == len(parts):
         first = next((p.get("error") for p in parts if p.get("error")), "")
-        why = "，首个原因：{}".format(first.strip()[:80]) if first else ""
-        return ("⚠ 诊断包已保存，但 %d 项内容全部收集失败%s：%s"
-                "（设备可能已断开或未授权，建议重新连接后再收集）"
-                % (len(parts), why, zip_path))
+        why = f"，首个原因：{first.strip()[:80]}" if first else ""
+        return (f"⚠ 诊断包已保存，但 {len(parts):d} 项内容全部收集失败{why}：{zip_path}（设备可能已断开或未授权，建议重新连接后再收集）")
     tail = ""
     if bad:
         # 段名是文件名，全列出来会把状态栏撑成一行乱麻
         shown = "、".join(bad[:6])
-        more = "" if len(bad) <= 6 else " 等 %d 项" % len(bad)
-        tail = "，缺 {}{}".format(shown, more)
-    return "✓ 诊断包已保存: {}（{}{}）".format(zip_path, who, tail)
+        more = "" if len(bad) <= 6 else f" 等 {len(bad):d} 项"
+        tail = f"，缺 {shown}{more}"
+    return f"✓ 诊断包已保存: {zip_path}（{who}{tail}）"

@@ -26,7 +26,7 @@ class DeviceInfoMixin:
         except subprocess.TimeoutExpired:
             return {"ok": False, "reason": "读取设备信息超时（设备可能无响应）"}
         except Exception as e:
-            return {"ok": False, "reason": "读取设备信息失败：{}".format(e)}
+            return {"ok": False, "reason": f"读取设备信息失败：{e}"}
         info = devinfo.parse_info(r.stdout or "")
         # adb shell 会把设备端的报错并进 **stdout**（`error: closed`、
         # `sh: xxx: not found` 都在这一路），所以不能拿「stdout 是否为空」判断
@@ -36,7 +36,7 @@ class DeviceInfoMixin:
         if r.returncode != 0 and not any(v for _k, v in devinfo.rows(info)):
             detail = ((r.stderr or "").strip() or (r.stdout or "").strip()
                       or "设备未返回内容")[:160]
-            return {"ok": False, "reason": "读取设备信息失败：{}".format(detail)}
+            return {"ok": False, "reason": f"读取设备信息失败：{detail}"}
         rows = devinfo.rows(info)
         return {"ok": True, "serial": s, "info": info,
                 "rows": [[k, v] for k, v in rows],
@@ -91,10 +91,7 @@ class DeviceInfoMixin:
         try:
             self.bus.push("diag_state", {"running": True})
             self._push_status(
-                "info", "开始收集诊断包：%d 台设备（%s）"
-                        % (len(serials),
-                           "含 logcat 尾部 %d 行" % lines
-                           if with_logcat else "不含 logcat"))
+                "info", f"开始收集诊断包：{len(serials):d} 台设备（{f'含 logcat 尾部 {lines:d} 行' if with_logcat else '不含 logcat'}）")
             self.workers.spawn("diag", self._do_diag, serials, save_dir,
                                bool(with_logcat), lines)
         except Exception as e:
@@ -104,7 +101,7 @@ class DeviceInfoMixin:
             with self._diag_lock:
                 self._diag_running = False
             self.bus.push("diag_state", {"running": False})
-            self._push_toast("err", "⚠ 无法启动诊断包收集：{}".format(e))
+            self._push_toast("err", f"⚠ 无法启动诊断包收集：{e}")
             return {"ok": False, "reason": "spawn_error", "error": str(e)}
         return {"ok": True, "devices": serials}
 
@@ -120,7 +117,7 @@ class DeviceInfoMixin:
                         self._adb_argv(), s, save_dir,
                         with_logcat=with_logcat, logcat_lines=lines)
                 except Exception as e:      # 兜底：诊断包异常不能拖垮整批
-                    path, manifest, err = None, None, "内部错误：{}".format(e)
+                    path, manifest, err = None, None, f"内部错误：{e}"
                 if err or not path:
                     failed.append("{}：{}".format(s, err or "未知原因"))
                     self._push_status("err", "⚠ 诊断包失败 {}：{}".format(s, err or "未知原因"))
@@ -135,11 +132,9 @@ class DeviceInfoMixin:
                 self._diag_running = False
             self.bus.push("diag_state", {"running": False})
         if ok_count and not failed:
-            self._push_toast("ok", "✓ 诊断包已生成 %d 个，保存目录 %s"
-                             % (ok_count, save_dir))
+            self._push_toast("ok", f"✓ 诊断包已生成 {ok_count:d} 个，保存目录 {save_dir}")
         elif ok_count and failed:
             self._push_toast(
-                "warn", "⚠ 诊断包：%d 成功 / %d 失败（%s）"
-                        % (ok_count, len(failed), "；".join(failed)[:120]))
+                "warn", f"⚠ 诊断包：{ok_count:d} 成功 / {len(failed):d} 失败（{'；'.join(failed)[:120]}）")
         elif failed:
             self._push_toast("err", "⚠ 诊断包收集失败：{}".format("；".join(failed)[:160]))

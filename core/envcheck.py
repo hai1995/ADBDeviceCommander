@@ -114,7 +114,7 @@ class DepProblem(NamedTuple):
 
     def message(self) -> str:
         """展示用多行文案（弹窗/日志共用）。"""
-        return "{}\n  现状：{}\n  处理：{}".format(self.name, self.detail, self.fix)
+        return f"{self.name}\n  现状：{self.detail}\n  处理：{self.fix}"
 
 
 def _best_pv(get_pv):
@@ -159,14 +159,10 @@ def check_webview2(get_pv=None) -> DepProblem | None:
         return None  # 已达标
     return DepProblem(
         name="WebView2 Runtime 版本过旧",
-        detail=("当前版本 %s，低于本程序所需的 %d.0 及以上版本。"
-                "版本过旧会导致界面初始化失败"
-                "（报错：Unable to cast to ICoreWebView2Environment10）。")
-        % (_fmt_version(best), MIN_WEBVIEW2_MAJOR),
-        fix=("请把 WebView2 Runtime 升级到 %d.0 及以上（推荐升级到最新版）后重启本程序：\n"
-             "      %s\n"
-             "   下载后以【管理员身份】运行安装即可覆盖旧版本。")
-        % (MIN_WEBVIEW2_MAJOR, WEBVIEW2_DOWNLOAD_URL),
+        detail=f"当前版本 {_fmt_version(best)}，低于本程序所需的 {MIN_WEBVIEW2_MAJOR:d}.0 及以上版本。版本过旧会导致界面初始化失败（报错：Unable to cast to ICoreWebView2Environment10）。",
+        fix=(f"请把 WebView2 Runtime 升级到 {MIN_WEBVIEW2_MAJOR:d}.0 及以上（推荐升级到最新版）后重启本程序：\n"
+             f"      {WEBVIEW2_DOWNLOAD_URL}\n"
+             "   下载后以【管理员身份】运行安装即可覆盖旧版本。"),
     )
 
 

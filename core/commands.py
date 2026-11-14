@@ -179,18 +179,17 @@ def ensure_unique_ids(cmds, warnings=None):
             continue
         base, n = cid, 2
         while cid in used:
-            cid = "%s_%d" % (base, n)
+            cid = f"{base}_{n:d}"
             n += 1
         c["id"] = cid
         used.add(cid)
         renamed.append((base, c.get("name") or "", cid))
     if renamed and warnings is not None:
-        head = "；".join("「{}」→「{}」".format(name or base, new)
+        head = "；".join(f"「{name or base}」→「{new}」"
                          for base, name, new in renamed[:3])
-        more = "" if len(renamed) <= 3 else "，等 %d 条" % len(renamed)
+        more = "" if len(renamed) <= 3 else f"，等 {len(renamed):d} 条"
         warnings.append(
-            "有 %d 条命令在多份命令文件里用了相同的 id（内容不同），已自动改名"
-            "以免点错命令：%s%s" % (len(renamed), head, more))
+            f"有 {len(renamed):d} 条命令在多份命令文件里用了相同的 id（内容不同），已自动改名以免点错命令：{head}{more}")
     return cmds
 
 
@@ -214,18 +213,18 @@ def discover_commands(directory=None):
         try:
             raw = _read_json(p)
         except Exception as ex:
-            warnings.append("命令文件读取失败：{}（{}）".format(base, ex))
+            warnings.append(f"命令文件读取失败：{base}（{ex}）")
             continue
         if not isinstance(raw, (list, dict)):
-            warnings.append("命令文件 {} 顶层既不是数组也不是对象，已忽略".format(base))
+            warnings.append(f"命令文件 {base} 顶层既不是数组也不是对象，已忽略")
             continue
         try:
             cmds, w = normalize_commands(raw)
         except Exception as ex:
-            warnings.append("命令文件 {} 解析异常：{}".format(base, ex))
+            warnings.append(f"命令文件 {base} 解析异常：{ex}")
             continue
         for msg in w:
-            warnings.append("{}：{}".format(base, msg))
+            warnings.append(f"{base}：{msg}")
         per_file.append((p, cmds))
 
     if not per_file:
@@ -238,7 +237,7 @@ def discover_commands(directory=None):
         starter, _ = normalize_commands(DEMO_COMMANDS)
         if _write_json_atomic(target, DEMO_COMMANDS):
             warnings.append(
-                "未检测到有效的命令合集文件，已在运行目录生成 {}（可直接编辑其中命令）".format(PRIMARY_COMMAND_FILE))
+                f"未检测到有效的命令合集文件，已在运行目录生成 {PRIMARY_COMMAND_FILE}（可直接编辑其中命令）")
         else:
             warnings.append(
                 "未检测到有效的命令合集文件，且无法在运行目录生成 {}"
@@ -255,8 +254,7 @@ def discover_commands(directory=None):
     ensure_unique_ids(merged, warnings)
     if len(per_file) > 1 or removed:
         warnings.append(
-            "已合并 %d 个命令文件%s"
-            % (len(per_file), ("，去重 %d 条" % removed) if removed else ""))
+            f"已合并 {len(per_file):d} 个命令文件{f'，去重 {removed:d} 条' if removed else ''}")
     return merged, warnings, [p for p, _ in per_file]
 
 
@@ -299,19 +297,18 @@ def normalize_commands(raw):
     if isinstance(raw, dict):
         items = list(raw.values())
     elif not isinstance(raw, list):
-        warnings.append("快捷命令顶层结构既不是数组也不是对象（实际：{}），已全部忽略".format(type(raw).__name__))
+        warnings.append(f"快捷命令顶层结构既不是数组也不是对象（实际：{type(raw).__name__}），已全部忽略")
         return [], warnings
 
     out = []
     used_ids = set()
     for idx, c in enumerate(items):
         if not isinstance(c, dict):
-            warnings.append("第 %d 条命令不是对象（实际：%s），已跳过"
-                            % (idx + 1, type(c).__name__))
+            warnings.append(f"第 {idx + 1:d} 条命令不是对象（实际：{type(c).__name__}），已跳过")
             continue
 
         name = (c.get("name") or c.get("title") or c.get("id")
-                or ("命令%d" % (idx + 1)))
+                or (f"命令{idx + 1:d}"))
         if not isinstance(name, str):
             name = str(name)
 
@@ -323,7 +320,7 @@ def normalize_commands(raw):
         cid = raw_id.strip() if isinstance(raw_id, str) else (
             str(raw_id) if isinstance(raw_id, (int, float)) and not isinstance(raw_id, bool) else "")
         if not cid or cid in used_ids:
-            cid = "auto%d" % (idx + 1)
+            cid = f"auto{idx + 1:d}"
             while cid in used_ids:
                 cid += "_"
         used_ids.add(cid)
@@ -371,15 +368,13 @@ def normalize_commands(raw):
                         # 例如 {"command": ["adb", "devices"]}：类型不对，跳过并告警，
                         # 而不是让 .strip() 抛 AttributeError 把整次加载带崩。
                         warnings.append(
-                            "命令「%s」第 %d 个子项的 command 不是字符串（实际：%s），已跳过"
-                            % (name, j + 1, type(cmd).__name__))
+                            f"命令「{name}」第 {j + 1:d} 个子项的 command 不是字符串（实际：{type(cmd).__name__}），已跳过")
                 else:
-                    warnings.append("命令「%s」第 %d 个子项格式无法识别，已跳过"
-                                    % (name, j + 1))
+                    warnings.append(f"命令「{name}」第 {j + 1:d} 个子项格式无法识别，已跳过")
         # raw_cmds 为 None / 其他类型时不报错，交给下方"空命令"判断
 
         if not entries:
-            warnings.append("命令「{}」未解析到任何可执行命令，已跳过".format(name))
+            warnings.append(f"命令「{name}」未解析到任何可执行命令，已跳过")
             continue
 
         try:
@@ -529,7 +524,7 @@ def _write_json_atomic(path, data):
     可能同时落盘，固定 <path>.tmp 会让两个写入流互相截断 —— os.replace 之后
     文件里可能是「半份 A + 半份 B」的坏 JSON，下次启动整份命令库丢失。
     """
-    tmp = "{}.{}.tmp".format(path, uuid.uuid4().hex[:8])
+    tmp = f"{path}.{uuid.uuid4().hex[:8]}.tmp"
     ltmp, lpath = long_path(tmp), long_path(path)
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
@@ -591,7 +586,7 @@ def load_commands(directory=None):
         cmds, warnings, _files = discover_commands(directory or command_scan_dir())
     except Exception as ex:
         return merge_builtins([]), [
-            "快捷命令加载出现异常：{}（已回退到内置默认）".format(ex)]
+            f"快捷命令加载出现异常：{ex}（已回退到内置默认）"]
     if not cmds:
         return merge_builtins([]), warnings + [
             "未解析到任何用户命令，已回退到内置默认"]
@@ -616,4 +611,4 @@ def save_user_commands(commands):
     p = primary_command_path()
     if _write_json_atomic(p, commands or []):
         return True, None
-    return False, "无法写入 {}（目录只读 / 磁盘空间不足 / 文件被占用？）".format(p)
+    return False, f"无法写入 {p}（目录只读 / 磁盘空间不足 / 文件被占用？）"

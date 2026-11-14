@@ -358,7 +358,7 @@ def pkg_display(info):
     if mode == "system":
         return "全系统（仅整机指标）"
     if pkg:
-        return ("{}（跟随前台）".format(pkg)) if mode == "auto" else pkg
+        return (f"{pkg}（跟随前台）") if mode == "auto" else pkg
     if mode == "auto":
         return "跟随前台（未探测到）"
     return "（整机）"
@@ -404,11 +404,11 @@ def list_packages(adb="adb", serial="", timeout=12):
     try:
         r = subprocess.run(args, **adb_kwargs(timeout))
     except Exception as ex:
-        return {"ok": False, "reason": "adb 调用失败：{}".format(ex)}
+        return {"ok": False, "reason": f"adb 调用失败：{ex}"}
     if getattr(r, "returncode", 0) != 0:
         err = (r.stderr or "").strip() or (r.stdout or "").strip()
         return {"ok": False,
-                "reason": "读取应用列表失败：%s" % (err[:120] or "adb 返回非零")}
+                "reason": f"读取应用列表失败：{err[:120] or 'adb 返回非零'}"}
     sec = _split_sections(r.stdout or "")
     third = parse_package_list(sec.get("TP", ""))
     every = parse_package_list(sec.get("ALL", ""))
@@ -586,11 +586,11 @@ class PerfMonitor:
             # 不记原因的话，start() 只能报一句「读取设备状态失败（是否已授权？）」
             # —— 而真正的答案（device offline / unauthorized / adb 不存在）就在
             # 这个异常里，用户照着那句猜会去检查授权，方向完全是错的。
-            self.error = "读取设备状态失败：{}".format(ex)
+            self.error = f"读取设备状态失败：{ex}"
             return
         if getattr(r, "returncode", 0) != 0:
             err = (r.stderr or "").strip() or (r.stdout or "").strip()
-            self.error = "设备无响应：%s" % (err[:120] or "adb 返回非零")
+            self.error = f"设备无响应：{err[:120] or 'adb 返回非零'}"
         sec = _split_sections(r.stdout or "")
         self._prev = self._diff_state(sec)
         if self.auto_pkg:
@@ -619,11 +619,11 @@ class PerfMonitor:
         try:
             r = self._run(["shell", self._script()])
         except Exception as ex:
-            self.error = "adb 调用失败：{}".format(ex)
+            self.error = f"adb 调用失败：{ex}"
             return None
         if getattr(r, "returncode", 0) != 0:
             err = (r.stderr or "").strip() or (r.stdout or "").strip()
-            self.error = "设备无响应：%s" % (err[:120] or "adb 返回非零")
+            self.error = f"设备无响应：{err[:120] or 'adb 返回非零'}"
             return None
         sec = _split_sections(r.stdout or "")
         now = time.time()
@@ -676,7 +676,7 @@ class PerfMonitor:
             return False, self.error or "读取设备状态失败（设备是否已授权？）"
         self._stop.clear()
         self._thread = threading.Thread(
-            target=self._loop, daemon=True, name="perf-{}".format(self.serial))
+            target=self._loop, daemon=True, name=f"perf-{self.serial}")
         self._thread.start()
         return True, ""
 
@@ -699,7 +699,7 @@ class PerfMonitor:
                 self._stop.wait(wait)
         # 线程退出 = 会话结束（主动 stop 或连续失败）
         if self.on_status and not self._stop.is_set():
-            self.on_status("err", "性能监控已中断：%s" % (self.error or "设备无响应"))
+            self.on_status("err", f"性能监控已中断：{self.error or '设备无响应'}")
 
     def request_stop(self):
         """只置停止信号，不等待（供批量收尾先统一置信号，见 stop_monitors）。"""
@@ -860,7 +860,7 @@ def format_thresholds(thresholds):
     def num(v):
         # "%g" 而不是 _fmt：_fmt 的 int 分支会写成 "50.0"（报表里要一位小数），
         # 而配置文本里 `fps<50.0` 看着像有意保留小数，其实是格式噪声。
-        return "{:g}".format(float(v))
+        return f"{float(v):g}"
 
     parts = []
     for key, _dir, _rng, _hint in THRESHOLD_META:
@@ -950,10 +950,10 @@ def build_thresholds(values):
             try:
                 v = float(v.strip())
             except ValueError:
-                errors.append("{} 的阈值不是数字：{!r}".format(METRIC_LABEL.get(key, key), v))
+                errors.append(f"{METRIC_LABEL.get(key, key)} 的阈值不是数字：{v!r}")
                 continue
         if isinstance(v, bool) or not _is_num(v):
-            errors.append("{} 的阈值不是数字：{!r}".format(METRIC_LABEL.get(key, key), v))
+            errors.append(f"{METRIC_LABEL.get(key, key)} 的阈值不是数字：{v!r}")
             continue
         if not (lo <= float(v) <= hi):
             errors.append("{} 的阈值 {} 超出合理范围 {}~{}".format(METRIC_LABEL.get(key, key), _fmt(float(v)),
@@ -1062,8 +1062,8 @@ def _fmt(v, unit=""):
     if v is None:
         return "--"
     if isinstance(v, float) and abs(v - round(v)) < 1e-9:
-        return "%d%s" % (int(round(v)), unit)
-    return "{:.1f}{}".format(v, unit)
+        return f"{int(round(v)):d}{unit}"
+    return f"{v:.1f}{unit}"
 
 
 def _fmt_tick(v, span):
@@ -1078,10 +1078,10 @@ def _fmt_tick(v, span):
     except (TypeError, ValueError):
         span = 0.0
     if span >= 20:
-        return "%d" % int(round(v))
+        return f"{int(round(v)):d}"
     if span >= 2:
-        return ("{:.1f}".format(v)).rstrip("0").rstrip(".")
-    return ("{:.2f}".format(v)).rstrip("0").rstrip(".")
+        return (f"{v:.1f}").rstrip("0").rstrip(".")
+    return (f"{v:.2f}").rstrip("0").rstrip(".")
 
 
 def _ts(sec, fmt="%H:%M:%S"):
@@ -1107,9 +1107,7 @@ def _hover_strips(cells, y, ih, title_fn):
         right = cx if k == len(xs) - 1 else max(cx, (cx + xs[k + 1]) // 2)
         t, data = cells[cx]
         out.append(
-            '<rect x="%d" y="%d" width="%d" height="%d" fill="transparent">'
-            '<title>%s</title></rect>'
-            % (left, y, max(1, right - left + 1), ih, esc_html(title_fn(t, data))))
+            f'<rect x="{left:d}" y="{y:d}" width="{max(1, right - left + 1):d}" height="{ih:d}" fill="transparent"><title>{esc_html(title_fn(t, data))}</title></rect>')
     return out
 
 
@@ -1230,11 +1228,8 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
     for k in range(5):
         val = lo + (hi - lo) * k / 4.0
         y = y_of(val)
-        grid.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#1d2836" '
-                    'stroke-width="1"/>' % (pad_l, y, w - pad_r, y))
-        grid.append('<text x="%d" y="%.1f" fill="#6e8299" font-size="9" '
-                    'text-anchor="end" font-family="monospace">%s</text>'
-                    % (pad_l - 6, y + 3, _fmt_tick(val, hi - lo)))
+        grid.append(f'<line x1="{pad_l:d}" y1="{y:.1f}" x2="{w - pad_r:d}" y2="{y:.1f}" stroke="#1d2836" stroke-width="1"/>')
+        grid.append(f'<text x="{pad_l - 6:d}" y="{y + 3:.1f}" fill="#6e8299" font-size="9" text-anchor="end" font-family="monospace">{_fmt_tick(val, hi - lo)}</text>')
 
     # 超标色带：把「哪一段不达标」画成红色竖条，比让读者自己去和虚线比高低
     # 直观得多。同一段连续超标的点合并成一条色带（逐点画会在密集处叠出发黑的
@@ -1254,9 +1249,7 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
             x1, x2 = x_of(i), x_of(j)
             if x2 - x1 < 2.0:
                 x2 = x1 + max(2.0, step)
-            bands.append('<rect x="%.1f" y="%d" width="%.1f" height="%d" '
-                         'fill="#ff5f6b" opacity=".12"/>'
-                         % (x1, pad_t, x2 - x1, ih))
+            bands.append(f'<rect x="{x1:.1f}" y="{pad_t:d}" width="{x2 - x1:.1f}" height="{ih:d}" fill="#ff5f6b" opacity=".12"/>')
             i = j + 1
 
     # 折线（按 None 切段）
@@ -1273,7 +1266,7 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
     lines, areas = [], []
     for seg in segs:
         if len(seg) == 1:
-            lines.append('<circle cx="{:.1f}" cy="{:.1f}" r="1.6" fill="{}"/>'.format(seg[0][0], seg[0][1], color))
+            lines.append(f'<circle cx="{seg[0][0]:.1f}" cy="{seg[0][1]:.1f}" r="1.6" fill="{color}"/>')
             continue
         seg = _thin_seg(seg)                 # 同列只留最高/最低，尖峰不丢
         d = "M" + " L".join("{:.1f} {:.1f}".format(*p) for p in seg)
@@ -1289,15 +1282,8 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
     thline, thlabel = [], []
     if th_val is not None:
         ty = y_of(th_val)
-        thline.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#ff5f6b" '
-                      'stroke-width="1" stroke-dasharray="4 4" opacity=".6"/>'
-                      % (pad_l, ty, w - pad_r, ty))
-        thlabel.append('<text x="%d" y="%.1f" fill="#ff5f6b" font-size="9" '
-                       'text-anchor="end" font-family="monospace" opacity=".85">'
-                       '%s %s %s</text>'
-                       % (w - pad_r - 2, ty - 4,
-                          "≥" if th_dir == "min" else "≤",
-                          _fmt_tick(th_val, hi - lo), unit))
+        thline.append(f'<line x1="{pad_l:d}" y1="{ty:.1f}" x2="{w - pad_r:d}" y2="{ty:.1f}" stroke="#ff5f6b" stroke-width="1" stroke-dasharray="4 4" opacity=".6"/>')
+        thlabel.append(f"<text x=\"{w - pad_r - 2:d}\" y=\"{ty - 4:.1f}\" fill=\"#ff5f6b\" font-size=\"9\" text-anchor=\"end\" font-family=\"monospace\" opacity=\".85\">{'≥' if th_dir == 'min' else '≤'} {_fmt_tick(th_val, hi - lo)} {unit}</text>")
 
     t0 = samples[0].get("t") or 0
     t1 = samples[-1].get("t") or 0
@@ -1308,17 +1294,9 @@ def _svg_chart(samples, key, color, unit, cap=None, w=760, h=170, rule=None):
             cols[int(x_of(i))] = (samples[i].get("t") or 0, v)
     hots = _hover_strips(
         cols, pad_t, ih,
-        lambda t, v: "{}  {}{}".format(_ts(t), _fmt(v), unit))
+        lambda t, v: f"{_ts(t)}  {_fmt(v)}{unit}")
     return (
-        '<svg viewBox="0 0 %d %d" preserveAspectRatio="none" class="chart" '
-        'width="100%%" height="%d">%s%s%s%s%s%s%s'
-        '<text x="%d" y="%d" fill="#6e8299" font-size="9" font-family="monospace">%s</text>'
-        '<text x="%d" y="%d" fill="#6e8299" font-size="9" text-anchor="end" '
-        'font-family="monospace">%s</text>'
-        '</svg>'
-        % (w, h, h, "".join(grid), "".join(bands), "".join(areas),
-           "".join(thline), "".join(lines), "".join(hots), "".join(thlabel),
-           pad_l, h - 6, _ts(t0), w - pad_r, h - 6, _ts(t1)))
+        f"<svg viewBox=\"0 0 {w:d} {h:d}\" preserveAspectRatio=\"none\" class=\"chart\" width=\"100%\" height=\"{h:d}\">{''.join(grid)}{''.join(bands)}{''.join(areas)}{''.join(thline)}{''.join(lines)}{''.join(hots)}{''.join(thlabel)}<text x=\"{pad_l:d}\" y=\"{h - 6:d}\" fill=\"#6e8299\" font-size=\"9\" font-family=\"monospace\">{_ts(t0)}</text><text x=\"{w - pad_r:d}\" y=\"{h - 6:d}\" fill=\"#6e8299\" font-size=\"9\" text-anchor=\"end\" font-family=\"monospace\">{_ts(t1)}</text></svg>")
 
 
 # --------------------------------------------------------------------------- #
@@ -1659,9 +1637,7 @@ def _echarts_script(options, units, prefix):
 
 def _echart_card(title, unit, note, idx):
     """图表的卡片外壳：标题 + 一个 ECharts 容器（高度由 CSS .echart 决定）。"""
-    return ('<div class="card"><h2>%s <em>%s</em>%s</h2>'
-            '<div class="echart" id="ec%d"></div></div>'
-            % (title, unit.upper(), note, idx))
+    return (f'<div class="card"><h2>{title} <em>{unit.upper()}</em>{note}</h2><div class="echart" id="ec{idx:d}"></div></div>')
 
 
 _REPORT_CSS = """
@@ -1748,11 +1724,7 @@ def _alert_card_html(alerts, thresholds=None):
     rows = []
     for a in alerts:
         rows.append(
-            '<tr class="%s"><td>%s</td><td>%s</td><td>%d / %d</td><td>%s%%</td>'
-            '<td>%s</td><td>%s 秒</td><td>%s</td></tr>'
-            % (a["level"], a["title"], esc(a["rule"]), a["count"], a["total"],
-               _fmt(a["ratio"]), _fmt(a["worst"]), _fmt(a["longest_s"]),
-               _ts(a["first_t"])))
+            f"<tr class=\"{a['level']}\"><td>{a['title']}</td><td>{esc(a['rule'])}</td><td>{a['count']:d} / {a['total']:d}</td><td>{_fmt(a['ratio'])}%</td><td>{_fmt(a['worst'])}</td><td>{_fmt(a['longest_s'])} 秒</td><td>{_ts(a['first_t'])}</td></tr>")
     return (
         '<div class="card"><h2>阈值告警 <em>ALERTS</em></h2>'
         '<table><thead><tr><th>指标</th><th>规则</th><th>超标点</th><th>占比</th>'
@@ -1777,7 +1749,7 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
     t0 = samples[0].get("t") if samples else None
     t1 = samples[-1].get("t") if samples else None
     dur = (t1 - t0) if (t0 and t1) else 0
-    dur_txt = "%.1f 分钟" % (dur / 60.0) if dur >= 60 else "{:.0f} 秒".format(dur)
+    dur_txt = f"{dur / 60.0:.1f} 分钟" if dur >= 60 else f"{dur:.0f} 秒"
 
     rows = []
     for key, title, unit, _cap in METRICS:
@@ -1802,7 +1774,7 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
         if rule:
             # 标题旁标一行判定标准：色带与虚线都在图里，但「≥ 45」这个数字
             # 得能直接读到，不能指望每个人都会去图上找虚线标签。
-            note = ('<span class="thmark">{}</span>'.format(esc_html(threshold_rule_text(key, rule))))
+            note = (f'<span class="thmark">{esc_html(threshold_rule_text(key, rule))}</span>')
         if use_ec:
             opt = _echart_option(samples, key, title, colors[key], unit, cap, rule)
             if opt is None:
@@ -1815,7 +1787,7 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
                 ci += 1
         else:
             svg = _svg_chart(samples, key, colors[key], unit, cap, rule=rule)
-            charts.append('<div class="card"><h2>{} <em>{}</em>{}</h2>{}</div>'.format(title, unit.upper(), note, svg))
+            charts.append(f'<div class="card"><h2>{title} <em>{unit.upper()}</em>{note}</h2>{svg}</div>')
     chart_script = _echarts_script(opts, units, "ec") if use_ec else ""
     fallback_note = "" if use_ec else (
         '<div class="fallback-note">未能加载 ECharts'
@@ -1841,34 +1813,32 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
         ("时长", dur_txt),
         ("样本数", str(n)),
     ]
-    meta_html = "".join("<div><b>{}</b> <span>{}</span></div>".format(k, v)
+    meta_html = "".join(f"<div><b>{k}</b> <span>{v}</span></div>"
                         for k, v in meta)
 
     alert_html = _alert_card_html(evaluate_alerts(samples, th), th)
 
     return (
         '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8">'
-        '<title>性能监控报告 %s</title><style>%s</style></head><body>'
+        f'<title>性能监控报告 {generated_at}</title><style>{_REPORT_CSS}</style></head><body>'
         '<h1>性能监控报告</h1><div class="sub">PERFORMANCE MONITOR REPORT</div>'
-        '%s'
-        '<div class="meta">%s</div>'
+        f'{fallback_note}'
+        f'<div class="meta">{meta_html}</div>'
         '<div class="card"><h2>指标统计 <em>SUMMARY</em></h2>'
         '<table><thead><tr><th>指标</th><th>最小</th><th>平均</th><th>最大</th>'
-        '<th>P95</th></tr></thead><tbody>%s</tbody></table></div>'
-        '%s'
-        '%s'
-        '<details><summary>采样明细（前 %d 条）</summary><div class="card">'
-        '<table><thead><tr><th>时间</th><th>CPU%%</th><th>应用CPU%%</th>'
-        '<th>内存MB</th><th>PSS MB</th><th>FPS</th><th>卡顿%%</th><th>电量%%</th>'
+        '<th>P95</th></tr></thead><tbody>' f'{"".join(rows)}' '</tbody></table></div>'
+        f'{alert_html}'
+        f'{"".join(charts)}'
+        f'<details><summary>采样明细（前 {min(n, 2000):d} 条）</summary><div class="card">'
+        '<table><thead><tr><th>时间</th><th>CPU%</th><th>应用CPU%</th>'
+        '<th>内存MB</th><th>PSS MB</th><th>FPS</th><th>卡顿%</th><th>电量%</th>'
         '<th>温度℃</th>'
-        '</tr></thead><tbody>%s</tbody></table></div></details>'
-        '<div class="foot">由「ADB 设备指令台 · 性能监控」生成于 %s。'
-        '指标采集自 /proc 与 dumpsys，采样间隔 %s 秒。</div>'
-        '%s'
+        '</tr></thead><tbody>' f'{"".join(body_rows)}' '</tbody></table></div></details>'
+        f'<div class="foot">由「ADB 设备指令台 · 性能监控」生成于 {generated_at}。'
+        f'指标采集自 /proc 与 dumpsys，采样间隔 {info.get("interval") or DEFAULT_INTERVAL} 秒。</div>'
+        f'{chart_script}'
         '</body></html>'
-        % (generated_at, _REPORT_CSS, fallback_note, meta_html, "".join(rows),
-           alert_html, "".join(charts), min(n, 2000), "".join(body_rows),
-           generated_at, info.get("interval") or DEFAULT_INTERVAL, chart_script))
+    )
 
 
 CSV_HEADER = ["time", "cpu_percent", "app_cpu_percent", "mem_used_mb",
@@ -1918,7 +1888,7 @@ def write_report(samples, info, out_dir, thresholds=None):
     serial = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(info.get("serial") or "device"))
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     # 同一秒内连跑两次不能让后一份报告覆盖前一份（html 与 csv 同源，一起避让）
-    base = unique_path(os.path.join(out_dir, "perf_{}_{}".format(serial, stamp)),
+    base = unique_path(os.path.join(out_dir, f"perf_{serial}_{stamp}"),
                        suffixes=(".html", ".csv"))
     html_path = base + ".html"
     csv_path = os.path.join(out_dir, base + ".csv")
@@ -2002,11 +1972,8 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
     for k in range(5):
         val = lo + (hi - lo) * k / 4.0
         y = y_of(val)
-        grid.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#1d2836" '
-                    'stroke-width="1"/>' % (pad_l, y, w - pad_r, y))
-        grid.append('<text x="%d" y="%.1f" fill="#6e8299" font-size="9" '
-                    'text-anchor="end" font-family="monospace">%s</text>'
-                    % (pad_l - 6, y + 3, _fmt_tick(val, hi - lo)))
+        grid.append(f'<line x1="{pad_l:d}" y1="{y:.1f}" x2="{w - pad_r:d}" y2="{y:.1f}" stroke="#1d2836" stroke-width="1"/>')
+        grid.append(f'<text x="{pad_l - 6:d}" y="{y + 3:.1f}" fill="#6e8299" font-size="9" text-anchor="end" font-family="monospace">{_fmt_tick(val, hi - lo)}</text>')
 
     lines, dots = [], []
     shown_dots = 0
@@ -2024,13 +1991,13 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
             # 红点上限 400：整段全超标时逐点画会让报告膨胀几 MB，而那时候
             # 「满屏都是红的」本身就是结论，不需要每个点都留证。
             if bad and shown_dots < 400:
-                dots.append('<circle cx="{:.1f}" cy="{:.1f}" r="1.7" fill="#ff5f6b"/>'.format(x_of(t), y_of(v)))
+                dots.append(f'<circle cx="{x_of(t):.1f}" cy="{y_of(v):.1f}" r="1.7" fill="#ff5f6b"/>')
                 shown_dots += 1
         if cur:
             segs.append(cur)
         for seg in segs:
             if len(seg) == 1:
-                lines.append('<circle cx="{:.1f}" cy="{:.1f}" r="1.6" fill="{}"/>'.format(seg[0][0], seg[0][1], color))
+                lines.append(f'<circle cx="{seg[0][0]:.1f}" cy="{seg[0][1]:.1f}" r="1.6" fill="{color}"/>')
                 continue
             seg = _thin_seg(seg)             # 与单设备报告同一套路
             lines.append('<path d="M{}" fill="none" stroke="{}" stroke-width="1.7" '
@@ -2040,15 +2007,8 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
     thline, thlabel = [], []
     if th_val is not None:
         ty = y_of(th_val)
-        thline.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#ff5f6b" '
-                      'stroke-width="1" stroke-dasharray="4 4" opacity=".6"/>'
-                      % (pad_l, ty, w - pad_r, ty))
-        thlabel.append('<text x="%d" y="%.1f" fill="#ff5f6b" font-size="9" '
-                       'text-anchor="end" font-family="monospace" opacity=".85">'
-                       '%s %s %s</text>'
-                       % (w - pad_r - 2, ty - 4,
-                          "≥" if th_dir == "min" else "≤",
-                          _fmt_tick(th_val, hi - lo), unit))
+        thline.append(f'<line x1="{pad_l:d}" y1="{ty:.1f}" x2="{w - pad_r:d}" y2="{ty:.1f}" stroke="#ff5f6b" stroke-width="1" stroke-dasharray="4 4" opacity=".6"/>')
+        thlabel.append(f"<text x=\"{w - pad_r - 2:d}\" y=\"{ty - 4:.1f}\" fill=\"#ff5f6b\" font-size=\"9\" text-anchor=\"end\" font-family=\"monospace\" opacity=\".85\">{'≥' if th_dir == 'min' else '≤'} {_fmt_tick(th_val, hi - lo)} {unit}</text>")
 
     # 悬停热区（与单设备报告同一套路）：按像素列合并，一列一条提示，
     # 列出该时刻**每台设备**的读数 —— 对比图的提示必须一次看全各家，不然
@@ -2064,21 +2024,13 @@ def _svg_compare(series, key, unit, cap=None, rule=None, w=760, h=190):
     def _cmp_title(t, per):
         lines = [_ts(t)]
         for label, v in per.items():
-            lines.append("{}  {}{}".format(label, _fmt(v), unit))
+            lines.append(f"{label}  {_fmt(v)}{unit}")
         return "\n".join(lines)
 
     hots = _hover_strips(cols, pad_t, ih, _cmp_title)
 
     return (
-        '<svg viewBox="0 0 %d %d" preserveAspectRatio="none" class="chart" '
-        'width="100%%" height="%d">%s%s%s%s%s%s'
-        '<text x="%d" y="%d" fill="#6e8299" font-size="9" font-family="monospace">%s</text>'
-        '<text x="%d" y="%d" fill="#6e8299" font-size="9" text-anchor="end" '
-        'font-family="monospace">%s</text>'
-        '</svg>'
-        % (w, h, h, "".join(grid), "".join(thline), "".join(lines),
-           "".join(dots), "".join(hots), "".join(thlabel),
-           pad_l, h - 6, _ts(t0), w - pad_r, h - 6, _ts(t1)))
+        f"<svg viewBox=\"0 0 {w:d} {h:d}\" preserveAspectRatio=\"none\" class=\"chart\" width=\"100%\" height=\"{h:d}\">{''.join(grid)}{''.join(thline)}{''.join(lines)}{''.join(dots)}{''.join(hots)}{''.join(thlabel)}<text x=\"{pad_l:d}\" y=\"{h - 6:d}\" fill=\"#6e8299\" font-size=\"9\" font-family=\"monospace\">{_ts(t0)}</text><text x=\"{w - pad_r:d}\" y=\"{h - 6:d}\" fill=\"#6e8299\" font-size=\"9\" text-anchor=\"end\" font-family=\"monospace\">{_ts(t1)}</text></svg>")
 
 
 def _compare_legend(entries):
@@ -2100,7 +2052,7 @@ def _cell_num(v):
     if v is None:
         return "--"
     if abs(v) >= 1000:
-        return "%d" % int(round(v))
+        return f"{int(round(v)):d}"
     return _fmt(v)
 
 
@@ -2143,7 +2095,7 @@ def _compare_alert_table(entries, th, alerts_per):
         return ('<div class="card"><h2>阈值告警 <em>ALERTS</em></h2>'
                 '<div class="noalert">本次采样未启用阈值告警</div></div>')
     head = ["<th>设备</th>"] + [
-        "<th>{}</th>".format(esc_html(threshold_rule_text(k, th[k]))) for k in keys]
+        f"<th>{esc_html(threshold_rule_text(k, th[k]))}</th>" for k in keys]
     rows = []
     for i, e in enumerate(entries):
         got = {a["key"]: a for a in alerts_per[i]}
@@ -2192,7 +2144,7 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
         t0 = samples[0].get("t") or 0
         t1 = samples[-1].get("t") or 0
         dur = max(0.0, t1 - t0)
-        dur_txt = "%.1f 分钟" % (dur / 60.0) if dur >= 60 else "{:.0f} 秒".format(dur)
+        dur_txt = f"{dur / 60.0:.1f} 分钟" if dur >= 60 else f"{dur:.0f} 秒"
         color = COMPARE_COLORS[i % len(COMPARE_COLORS)]
         rows.append(
             '<tr><td><i class="dot" style="background:{}"></i>{}</td>'
@@ -2220,7 +2172,7 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
     ci = 0
     for key, title, unit, cap in METRICS:
         rule = (th or {}).get(key)
-        note = ('<span class="thmark">{}</span>'.format(esc_html(threshold_rule_text(key, th[key])))) if rule else ""
+        note = (f'<span class="thmark">{esc_html(threshold_rule_text(key, th[key]))}</span>') if rule else ""
         if use_ec:
             opt = _echart_compare_option(series_all, key, unit, cap, rule=rule)
             if opt is None:
@@ -2229,9 +2181,7 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
             else:
                 # ECharts 自带可点击图例，不再叠一份 HTML 图例（两份色标只会让人
                 # 分不清该点哪个）。
-                charts.append('<div class="card"><h2>%s <em>%s</em>%s</h2>'
-                              '<div class="echart" id="cc%d"></div></div>'
-                              % (title, unit.upper(), note, ci))
+                charts.append(f'<div class="card"><h2>{title} <em>{unit.upper()}</em>{note}</h2><div class="echart" id="cc{ci:d}"></div></div>')
                 opts.append(opt)
                 units.append(unit)
                 ci += 1
@@ -2258,26 +2208,21 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
 
     return (
         '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8">'
-        '<title>多设备对比性能报告 %s</title><style>%s</style></head><body>'
+        f'<title>多设备对比性能报告 {generated_at}</title><style>{_REPORT_CSS + _COMPARE_CSS}</style></head><body>'
         '<h1>多设备对比性能报告</h1>'
         '<div class="sub">MULTI-DEVICE PERFORMANCE COMPARISON</div>'
-        '%s'
-        '<div class="meta"><div><b>设备数</b> <span>%d</span></div>'
-        '<div><b>监控应用</b> <span>%s</span></div>'
-        '<div><b>时间范围</b> <span>%s</span></div>'
-        '<div><b>总采样点</b> <span>%d</span></div>'
-        '<div><b>生成时间</b> <span>%s</span></div></div>'
-        '%s%s%s%s'
-        '<div class="foot">由「ADB 设备指令台 · 性能监控」生成于 %s。%s。'
+        f'{fallback_note}'
+        f'<div class="meta"><div><b>设备数</b> <span>{len(entries):d}</span></div>'
+        f'<div><b>监控应用</b> <span>{esc_html(pkg_display(entries[0].get("info") or {}))}</span></div>'
+        f'<div><b>时间范围</b> <span>{esc_html(f"{_ts(t_first)} ~ {_ts(t_last)}")}</span></div>'
+        f'<div><b>总采样点</b> <span>{total_pts:d}</span></div>'
+        f'<div><b>生成时间</b> <span>{generated_at}</span></div></div>'
+        f'{meta_table}{matrix}{alert_html}{"".join(charts)}'
+        f'<div class="foot">由「ADB 设备指令台 · 性能监控」生成于 {generated_at}。{foot_meta}。'
         '指标采集自 /proc 与 dumpsys。每台设备的逐条原始数据见各自的 CSV。</div>'
-        '%s'
+        f'{chart_script}'
         '</body></html>'
-        % (generated_at, _REPORT_CSS + _COMPARE_CSS, fallback_note, len(entries),
-           esc_html(pkg_display(entries[0].get("info") or {})),
-           esc_html("{} ~ {}".format(_ts(t_first), _ts(t_last))),
-           total_pts, generated_at,
-           meta_table, matrix, alert_html, "".join(charts), generated_at,
-           foot_meta, chart_script))
+    )
 
 
 _COMPARE_CSS = """
@@ -2306,7 +2251,7 @@ def write_compare_report(entries, out_dir, thresholds=None):
     os.makedirs(long_path(out_dir), exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = unique_path(os.path.join(
-        out_dir, "perf_compare_%d_dev_%s.html" % (len(entries), stamp)))
+        out_dir, f"perf_compare_{len(entries):d}_dev_{stamp}.html"))
     with open(long_path(path), "w", encoding="utf-8") as f:
         f.write(html)
     return {"html": path, "devices": len(entries)}

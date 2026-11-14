@@ -94,7 +94,7 @@ def format_version(v) -> str:
     """把 parse_version 的元组还原成 YYYY.MMDD.HHMM 展示串。"""
     if not v:
         return ""
-    return "%d.%04d.%04d" % tuple(v)
+    return f"{v[0]:d}.{v[1]:04d}.{v[2]:04d}"
 
 
 def is_newer(remote, local) -> bool:
@@ -285,7 +285,7 @@ def check(current: str, feed=None, opener=None, timeout: int = TIMEOUT) -> dict:
                 "version": "", "notes": "", "url": "", "asset": {},
                 "error": "没有配置任何更新源。", "checked_at": _now()}
     if len(feeds) > 1:
-        last["error"] = "%s（已按顺序尝试 %d 个更新源）" % (last["error"], len(feeds))
+        last["error"] = f"{last['error']}（已按顺序尝试 {len(feeds):d} 个更新源）"
     return last
 
 
@@ -318,7 +318,7 @@ def _check_one(current: str, feed: str, opener, timeout: int) -> dict:
                         "内网自建地址。".format(code))
         return out
     if code != 200:
-        out["error"] = "更新源返回异常状态 HTTP {}。".format(code)
+        out["error"] = f"更新源返回异常状态 HTTP {code}。"
         return out
 
     try:
@@ -368,4 +368,4 @@ def download_size(res: dict) -> str:
         n = 0
     if n <= 0:
         return ""
-    return "%.1f MB" % (n / 1024.0 / 1024.0)
+    return f"{n / 1024.0 / 1024.0:.1f} MB"
