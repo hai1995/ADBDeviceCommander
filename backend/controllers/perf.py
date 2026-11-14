@@ -122,8 +122,6 @@ class PerfMixin:
             started[s] = mon
             infos[s] = dict(mon.info)
         if not started:
-            # 全部失败：把**每台**的原因都说出来。只报第一台时，用户按那句
-            # 「设备离线」去查，而真正卡住的是另一台的「包名不存在」。
             if len(failed) > 1:
                 reason = "；".join("{}（{}）".format(k, v) for k, v in failed.items())
                 self._push_status(
@@ -134,7 +132,6 @@ class PerfMixin:
                 self._push_status("err", "⚠ 性能监控启动失败：{}".format(reason))
             return {"ok": False, "reason": "start_failed", "error": reason,
                     "failed": failed}
-        # 新会话就位后再关旧会话：启动失败时旧数据还在，用户不会白丢一段曲线。
         with self._perf_lock:
             old, self._perfs = dict(self._perfs), started
         perf_stop_monitors(old.values())
@@ -148,9 +145,6 @@ class PerfMixin:
                 "ok", "✓ 已开始性能监控：%d 台设备（%s · 每 %.1f 秒采样一次）"
                 % (len(started), perf_pkg_display(info), interval))
         if failed:
-            # 部分成功：失败的那几台**必须**单独说清楚。旧实现只把 failed 塞进
-            # 返回值，而前端从不读它 —— 勾了 3 台、实际只监控 2 台，界面上没有
-            # 任何提示，导出对比报告时才发现少了一台，也查不到原因。
             self._push_status(
                 "warn", "⚠ 有 %d 台设备未能开始性能监控：%s"
                 % (len(failed),
@@ -264,10 +258,6 @@ class PerfMixin:
         if errs:
             return {"ok": False, "reason": "invalid", "errors": errs}
         expr = perf_format_thresholds(th) if th else "off"
-        # 用 save_prefs_checked 而不是 save_prefs：后者把落盘失败整个吞掉
-        # （只读目录 / 文件被占用时返回 False 但没人看），于是界面照旧弹
-        # 「✓ 告警阈值已更新」，下次启动阈值却又回到旧值 —— 用户只能怀疑
-        # 自己没点对。这里宁可报一句「配置无法写入」，也不要假成功。
         _merged, wrote = save_prefs_checked({"perf_thresholds": expr})
         if not wrote:
             return {"ok": False, "reason": "save_failed",
@@ -337,8 +327,6 @@ class PerfMixin:
             why = next(iter(errors.values()), "没有采样数据")
             self._push_status("err", "⚠ 报告生成失败：{}".format(why))
             return {"ok": False, "reason": why, "errors": errors}
-        # 多设备时再出一份「横向对比」报告：三份独立报告摊在桌上自己对照，
-        # 是导出这件事里最费劲的一步，合并成一份能省掉全部来回翻页。
         compare = ""
         if len(compare_entries) > 1:
             try:
@@ -357,8 +345,6 @@ class PerfMixin:
                 len(saved), total_rows, os.path.dirname(saved[0]["html"]) or ".")
         self._push_status("ok", msg, toast=True)
         if errors:
-            # 只报「✓ 已生成 N 份」会让用户以为全都导出了：对比报告正是拿这批
-            # 文件拼的，少一台等于结论缺一半。失败的设备单独说清楚。
             self._push_status(
                 "warn", "⚠ 有 %d 份报告未生成：%s" % (
                     len(errors),
