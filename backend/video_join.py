@@ -153,11 +153,11 @@ def join_segments(paths, out_path, timeout=None):
         try:
             with open(long_path(list_path), "w", encoding="utf-8") as f:
                 for p in used:
-                    f.write("file '%s'\n" % _concat_quote(p))
+                    f.write("file '{}'\n".format(_concat_quote(p)))
         except Exception as e:
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped,
-                    "reason": "无法写入合并清单：%s" % e}
+                    "reason": "无法写入合并清单：{}".format(e)}
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                "-f", "concat", "-safe", "0", "-i", list_path,
                "-c", "copy", temp]
@@ -166,13 +166,13 @@ def join_segments(paths, out_path, timeout=None):
         except Exception as e:
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,
-                    "skipped": skipped, "reason": "ffmpeg 合并失败：%s" % e}
+                    "skipped": skipped, "reason": "ffmpeg 合并失败：{}".format(e)}
         if r.returncode != 0 or not path_exists(temp):
             why = _err_text(r)
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used, "skipped": skipped,
                     "reason": "ffmpeg 合并失败%s"
-                              % ("（%s）" % why if why else "")}
+                              % ("（{}）".format(why) if why else "")}
         if not _mp4_playable(temp):
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used, "skipped": skipped,
@@ -190,15 +190,15 @@ def join_segments(paths, out_path, timeout=None):
                 _silent_remove(temp)
                 return {"ok": False, "path": None, "used": used,
                         "skipped": skipped,
-                        "reason": "合并产物时长 %.1f 秒，各段合计 %.1f 秒，"
-                                  "拼接结果不可信" % (got, want)}
+                        "reason": "合并产物时长 {:.1f} 秒，各段合计 {:.1f} 秒，"
+                                  "拼接结果不可信".format(got, want)}
         try:
             os.replace(long_path(temp), long_path(out_path))
         except Exception as e:
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped,
-                    "reason": "合并产物无法写入 %s：%s" % (out_path, e)}
+                    "reason": "合并产物无法写入 {}：{}".format(out_path, e)}
         return {"ok": True, "path": out_path, "used": used,
                 "skipped": skipped, "reason": None}
     finally:
