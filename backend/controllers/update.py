@@ -39,10 +39,13 @@ class UpdateMixin:
         return {"ok": True,
                 "version": VERSION,
                 "enabled": enabled,
+                # 展示用：没配就显示内置首选地址（静态 latest.json）
                 "feed": self._update_feed() or updater.FEED_URL,
                 "interval_s": updater.CHECK_INTERVAL_S,
                 "checking": self._update_busy,
                 "last": dict(last) if isinstance(last, dict) else None,
+                # 当前被「跳过此版本」屏蔽的版本号（空串 = 没跳过任何版本）：
+                # 关于页据此显示「已跳过 vX · 恢复」出口，否则用户跳过后无从反悔。
                 "skipped": skipped}
 
     def update_check(self, force=None):
@@ -64,6 +67,7 @@ class UpdateMixin:
                 return {"ok": True, "status": "skipped"}
         with self._update_lock:
             if self._update_busy:
+                # 已经有一次在查：不排队（排队会让用户看到过期的结果被当成新的）
                 if force:
                     self._push_status("info", "ℹ 正在检查更新，请稍等…")
                 return {"ok": False, "reason": "busy"}
@@ -73,6 +77,11 @@ class UpdateMixin:
             self.workers.spawn("update", self._do_update_check,
                                self._update_feed(), force)
         except Exception as e:
+            # 线程起不来（线程数耗尽 / 内存告急）：_update_busy 已置位、
+            # update_state 已广播 running=true，不回滚的话「检查更新」按钮永久
+            # 转圈，之后的每一次点击都被上面的 busy 判断挡回「正在检查」——
+            # 而那次检查根本没有发生。与诊断包同一个坑（_do_update_check 的
+            # except 里专门保了这一点，spawn 这一层当时漏了）。
             with self._update_lock:
                 self._update_busy = False
             self.bus.push("update_state", {"running": False})
@@ -83,9 +92,10 @@ class UpdateMixin:
     def _do_update_check(self, feed, manual):
         """真正的检查（后台线程）：广播结果；自动检查失败时保持沉默。"""
         try:
+            # feed 为空串 = 用 core.update.FEEDS（静态 → API 依次尝试）
             res = updater.check(VERSION, feed or None)
-        except Exception as e:
-            res = {"status": "error", "current": VERSION, "feed": feed,
+        except Exception as e:      # 兜底：这条线程不能带着 _update_busy=True 死掉，
+            res = {"status": "error", "current": VERSION, "feed": feed,   # 否则按钮永久转圈
                    "version": "", "notes": "", "url": "", "asset": {},
                    "error": "检查更新时发生内部错误：{}".format(e)}
         finally:
@@ -95,6 +105,8 @@ class UpdateMixin:
 
         self._update_last = res
         now = time.time()
+        # 节流时间戳：查成功（含「已是最新」）按整间隔算；查失败只等 1 小时再试 ——
+        # 开会切网 / VPN 掉线这类短暂断网，不该让更新提示消失半天。
         if res.get("status") == "error":
             self._update_last_ts = now - updater.CHECK_INTERVAL_S + 3600
         else:
@@ -108,9 +120,12 @@ class UpdateMixin:
         if (res.get("status") == "update" and not manual and skipped
                 and updater.parse_version(skipped) == updater.parse_version(
                     res.get("version"))):
+            # 用户点过「跳过此版本」：不弹窗，但结果照常广播（关于页仍能看到）
             self.bus.push("update", dict(res, silenced=True))
             return
         self.bus.push("update", dict(res, silenced=False))
+        # 手动查：无论什么结果都说一句（否则用户不知道点没点上）；
+        # 自动查：只有真有新版才说，其余情况（已是最新 / 网络不通）一律闭嘴。
         if manual or res.get("status") == "update":
             kind = {"update": "info", "latest": "ok", "ahead": "info"}.get(
                 res.get("status"), "err")
@@ -133,6 +148,8 @@ class UpdateMixin:
         if not _host_allowed(target, extra):
             why = ("拒绝打开这个地址：{}（只允许 GitHub 域名，"
                    "或 config.json 里 update_feed 所配置的域名）".format(target[:100]))
+            # 必须播报：前端历史上不检查这里的返回，于是「点了去下载、浏览器没
+            # 打开、界面毫无反应」——用户既看不到原因，也以为程序卡了。
             self._push_status("err", "⚠ " + why)
             return {"ok": False, "reason": why}
         try:
@@ -143,6 +160,11 @@ class UpdateMixin:
             self._push_status("err", "⚠ " + why)
             return {"ok": False, "reason": why}
         if not opened:
+            # webbrowser.open 在「没有默认浏览器 / 被组策略或安全软件拦下 /
+            # 远程桌面会话里没有浏览器关联」时是**返回 False**，不抛异常。
+            # 旧实现不看返回值，照样报「已在浏览器中打开下载页」——用户盯着
+            # 毫无反应的屏幕，只能猜是程序卡了还是浏览器崩了，而地址就在
+            # 提示里，抄下来手开就完事了。
             self._push_status("warn", "⚠ 没能唤起浏览器，请手动访问：{}".format(target))
             return {"ok": False, "url": target, "opened": False,
                     "reason": ("没能唤起系统浏览器（没有默认浏览器，或被安全策略"
@@ -161,6 +183,9 @@ class UpdateMixin:
             return {"ok": False, "reason": "版本号格式不认识：{}".format(ver[:40])}
         _merged, wrote = save_prefs_checked({"update_skipped_version": ver})
         if not wrote:
+            # 写盘失败（程序装在只读目录 / 配置文件被占用 / 磁盘满）：不能报
+            # 「已跳过」。重启后同一个版本照样弹窗，用户会以为这个按钮坏了，
+            # 再点几次也一样 —— 他要处理的是目录权限，而不是一个假成功。
             msg = "配置无法写入（程序目录是否只读？），未能记住跳过版本"
             self._push_status("err", "⚠ " + msg)
             return {"ok": False, "reason": msg, "version": ver}
@@ -197,6 +222,11 @@ class UpdateMixin:
             try:
                 self.update_check(False)
             except Exception:
-                pass
+                pass        # 检查更新出任何问题都不能拖垮这条后台线
+            # 睡到「due() 认为该查了」为止，而不是死睡一个间隔：查失败时
+            # _do_update_check 把时间戳回拨到 1 小时后，死睡 12 小时会让那条
+            # 重试逻辑形同虚设。剩余时间取不到正数（首次启动 / 本次被开关或
+            # busy 挡回）就退回整间隔 —— 否则时间戳一直是 0 时这里会退化成
+            # 每 60 秒空转一次的忙循环。
             wait_s = updater.next_wait_s(self._update_last_ts)
             self._update_sleep(wait_s if wait_s > 0 else updater.CHECK_INTERVAL_S)

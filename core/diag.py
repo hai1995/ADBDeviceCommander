@@ -1,14 +1,33 @@
 """
 core.diag —— 「一键诊断包」：把一次问题的现场证据收齐，打成一个 zip。
 ====================================================================
-为什么需要它：车机上复现一个 bug 之后，要发回给开发的东西每次都一样。
+为什么需要它：车机上复现一个 bug 之后，要发回给开发的东西每次都一样 ——
+
+  设备是什么机器 / 什么系统版本、当时的 logcat 尾部、谁在吃内存、
+  装了哪些应用、有没有 ANR / tombstone。
+
+这些以前要点 4~5 次不同功能、分别存文件、再自己打包命名；忙起来就漏，事后
+补不回来。本模块把「收集 + 命名 + 打包 + 写清单」一次做完，产出**一个 zip**，
+直接发给同事即可。
 
 设计要点
 --------
-* **尽量少的 adb 调用**。
-* **每段独立失败**。
-* **清单可读**。
-* **纯函数 + runner 注入**。
+* **尽量少的 adb 调用**：设备信息（getprop / wm / battery / df / meminfo /
+  uptime）复用 core.devinfo 的单次 shell 脚本；整个诊断包共 8 次调用
+  （另含一次 `dumpsys meminfo`、一次网络接口快照、一次 CPU 负载快照），
+  USB 上约 4~12 秒。meminfo 只抽取头部的汇总段（Total PSS by process /
+  by category / Total RAM），**丢弃几 MB 的进程详情**，既精准回答「谁在吃内存」
+  （PSS 比 ps 的 RSS 更准）又不撑爆包体；网络快照用 `ip addr` / `netcfg`
+  双格式兜底，回答「接口通不通、有没有拿到 IP」（车机联网问题最常见）；
+  CPU 快照用 `/proc/loadavg` 取整体负载、再用 `dumpsys cpuinfo` 补进程占比，
+  回答「整机卡不卡、谁在吃 CPU」（车机卡顿 / 发热排查的必看项）。
+* **每段独立失败**：logcat 拉不到、/data/anr 无权限，都只在该文件里写一行
+  中文说明并记进清单，绝不让整包失败 —— 收集现场时「有 4 份、缺 1 份」远好过
+  「什么都没有」。
+* **清单可读**：meta.json 记录收集时间、程序版本、每份文件的来源命令与字节数、
+  失败原因，方便判断这份包是不是完整。
+* **纯函数 + runner 注入**：本模块不直接依赖 subprocess，单测可用假 runner
+  复现各种 ROM 的怪异输出（无 ps -o、logcat 不支持 -t、无 /data/anr 权限）。
 """
 import datetime
 import json
@@ -23,23 +42,32 @@ from core import devinfo
 from core.constants import VERSION, adb_kwargs, safe_name, unique_path
 from core.longpath import long_path, path_exists
 
+# 默认 / 上限 logcat 行数。上限不是「随便定一个」：单条 threadtime 约 150 字节，
+# 5 万行 ≈ 7 MB，压缩后 1~2 MB，是能随手发出去的体积；再多就该用「logcat 抓取」
+# 那种落盘模式了。
 DEFAULT_LOGCAT_LINES = 2000
 MAX_LOGCAT_LINES = 50000
+# 单次 adb 调用的超时。logcat 尾部 5 万行在慢设备上要十几秒，故给宽一些。
 TIMEOUT = 40
+# 进程表只展示内存 TOP N（全量仍原样写进文件，只是把摘要放最上面）。
 PROC_TOP_N = 15
 
-F_DEVICE = "device.txt"
-F_PROPS = "props.txt"
-F_LOGCAT = "logcat.txt"
-F_PROCESS = "process.txt"
-F_APPS = "apps.txt"
-F_ANR = "anr.txt"
-F_MEMINFO = "meminfo.txt"
-F_NET = "net.txt"
-F_CPU = "cpu.txt"
-F_META = "meta.json"
+# 诊断包内的文件名（顺序即 zip 内的展示顺序）
+F_DEVICE = "device.txt"      # 设备信息（人读摘要）
+F_PROPS = "props.txt"        # getprop 全量（机器可读的原始值）
+F_LOGCAT = "logcat.txt"      # 日志尾部
+F_PROCESS = "process.txt"    # 进程 + 内存 TOP
+F_APPS = "apps.txt"          # 已安装应用（第三方 + 系统包名清单）
+F_ANR = "anr.txt"            # 前台 Activity / ANR / tombstone 线索
+F_MEMINFO = "meminfo.txt"    # 内存分页明细（PSS by process TOP N + 汇总）
+F_NET = "net.txt"            # 网络接口状态 / IP（ip addr 与 netcfg 兜底）
+F_CPU = "cpu.txt"            # CPU 负载 / 进程 CPU 占比（loadavg + cpuinfo 兜底）
+F_META = "meta.json"         # 清单
 
 
+# ---------------------------------------------------------------------------
+# 入参归一化
+# ---------------------------------------------------------------------------
 def clamp_lines(n, default=DEFAULT_LOGCAT_LINES):
     """把用户给的行数夹到合法区间；非数字 / None 用默认值。"""
     try:
@@ -51,8 +79,17 @@ def clamp_lines(n, default=DEFAULT_LOGCAT_LINES):
     return min(MAX_LOGCAT_LINES, v)
 
 
+# ---------------------------------------------------------------------------
+# 解析：ps 内存 TOP
+# ---------------------------------------------------------------------------
 def parse_ps(text):
-    """解析 `ps` / `ps -A` / `ps -A -o PID,RSS,NAME` 输出。"""
+    """解析 `ps` / `ps -A` / `ps -A -o PID,RSS,NAME` 输出。
+
+    返回 (rows, cols)：rows 为 [(pid, rss_kb, name)]，cols 为表头里认出来的
+    列名映射（认不出时为空 dict）。不同 ROM 的列顺序差别很大（老 Toybox 是
+    `USER PID PPID VSZ RSS WCHAN PC NAME`，新的是 `PID TTY TIME CMD`），
+    所以优先按表头定位 RSS 列，表头认不出时退回「第 5 列」这一历史惯例。
+    """
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
     if not lines:
         return [], {}
@@ -67,7 +104,7 @@ def parse_ps(text):
         elif "CMD" in up:
             idx["name"] = up.index("CMD")
         body = lines[1:]
-    else:
+    else:                       # 无表头的裁剪输出
         body = lines
     out = []
     for ln in body:
@@ -126,8 +163,17 @@ def process_report(text, limit=PROC_TOP_N):
     return "\n".join(head) + "\n" + (text or "")
 
 
+# ---------------------------------------------------------------------------
+# 解析：dumpsys meminfo 内存分页明细
+# ---------------------------------------------------------------------------
 def _meminfo_summary_block(text):
-    """从 `dumpsys meminfo` 输出里抽取头部汇总段（丢弃几 MB 的进程详情）。"""
+    """从 `dumpsys meminfo` 输出里抽取头部汇总段（丢弃几 MB 的进程详情）。
+
+    返回从「Total PSS by process:」到「Total RAM:」之间的文本——这一段同时
+    覆盖 by process / by OOM adjustment / by category 三个汇总表与全局 Total RAM
+    画像，是诊断「谁在吃内存」最有价值、体积又最小的部分。老 ROM 没有这些标记
+    时返回空串（调用方据此写失败原因，绝不抛异常）。
+    """
     if not text:
         return ""
     start = text.find("Total PSS by process:")
@@ -136,13 +182,22 @@ def _meminfo_summary_block(text):
     end = text.find("Total RAM:", start)
     if end < 0:
         return text[start:]
+    # 含 Total RAM 那一行（其后的 Free/Used/Lost RAM 也一并保留，画像更完整）
     nl = text.find("\n", end)
     return text[start:(nl if nl > 0 else len(text))]
 
 
 def parse_meminfo(text):
-    """解析 `dumpsys meminfo` 的「Total PSS by process」段。"""
+    """解析 `dumpsys meminfo` 的「Total PSS by process」段。
+
+    返回 [(pss_kb, name, pid_or_none)]，按 PSS 降序。每行形如
+    `  123456 kB: com.abc (pid 1234) (foreground)`，不同 ROM 还可能带
+    `(uid NNN)` 或没有 pid；name 会剔除这些括号后缀。认不出 PSS 数字的行
+    （如总计行）会被忽略。
+    """
     block = _meminfo_summary_block(text)
+    # 只解析 by process 段：by OOM / by category 段也有「NNN kB: 名字」格式，
+    # 会把 Native/Dalvik/Foreground 之类错当成进程，必须限定在 process 段内。
     m = re.search(r"Total PSS by process:\s*(.*?)(?=Total PSS by |\Z)",
                   block, re.S)
     if m:
@@ -186,13 +241,22 @@ def meminfo_report(text, limit=PROC_TOP_N):
     return "\n".join(head) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# 解析：网络接口（ip addr 与 netcfg 双格式兜底）
+# ---------------------------------------------------------------------------
 _NETCFG_SEP = "__NETCFG__"
 
 
 def _parse_ip_addr(block):
-    """解析 `ip addr` 输出，返回 [(name, up, ipv4)]。"""
+    """解析 `ip addr` 输出，返回 [(name, up, ipv4)]。
+
+    `ip addr` 是 Android 5.0+ 的标准命令；接口行形如
+    `2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> ... state UP ...`，IP 在后续
+    `inet 192.168.1.5/24 ...` 行。只取第一个 IPv4（inet6 行不匹配），一个接口
+    没有 inet（无 IP）也照样登记——「接口 UP 但没 IP」正是车机最常踩的坑。
+    """
     out = []
-    cur = None
+    cur = None                      # [name, up, ip]
     for ln in (block or "").splitlines():
         m = re.match(r"^\d+:\s*([\w.@-]+):\s*<([^>]*)>", ln)
         if m:
@@ -213,7 +277,11 @@ def _parse_ip_addr(block):
 
 
 def _parse_netcfg(block):
-    """解析 `netcfg` 输出，返回 [(name, up, ipv4)]。"""
+    """解析 `netcfg` 输出，返回 [(name, up, ipv4)]。
+
+    老 ROM（Android 4.x）没有 `ip addr`，用 `netcfg` 兜底，格式是
+    `lo  UP  127.0.0.1/8  0x...  MAC`。IP 为 `0.0.0.0` 表示未分配到地址，记为空。
+    """
     out = []
     for ln in (block or "").splitlines():
         toks = ln.split()
@@ -222,6 +290,7 @@ def _parse_netcfg(block):
         if toks[1] not in ("UP", "DOWN"):
             continue
         ip = toks[2].split("/")[0]
+        # 0.0.0.0 表示接口未分配到地址，等同于「无 IP」（车机常见：网线插了却没拿到地址）
         if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip) or ip == "0.0.0.0":
             ip = ""
         out.append((toks[0], toks[1] == "UP", ip))
@@ -229,7 +298,11 @@ def _parse_netcfg(block):
 
 
 def parse_net(text):
-    """从 `ip addr ; netcfg` 的组合输出里提取网络接口列表。"""
+    """从 `ip addr ; netcfg` 的组合输出里提取网络接口列表。
+
+    优先 `ip addr`（现代 ROM），完全解析不到时退回 `netcfg`（老 ROM）。
+    返回 [(name, up, ipv4)]，解析不出任何接口时返回空 list（绝不抛异常）。
+    """
     if not text:
         return []
     if _NETCFG_SEP in text:
@@ -258,11 +331,26 @@ def net_report(text):
     return "\n".join(head) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# 解析：CPU 负载 / 进程 CPU 占比（/proc/loadavg 与 dumpsys cpuinfo 兜底）
+# ---------------------------------------------------------------------------
 _CPUINFO_SEP = "__CPUINFO__"
 
 
 def parse_cpu(text):
-    """从 `cat /proc/loadavg ; dumpsys cpuinfo` 的组合输出里提取 CPU 现场。"""
+    """从 `cat /proc/loadavg ; dumpsys cpuinfo` 的组合输出里提取 CPU 现场。
+
+    返回 `(load, procs)`：
+      * load  为 dict：{one, five, fifteen, runnable, total_threads, last_pid}
+        （字段缺失时省去对应键）；`/proc/loadavg` 是 Linux 通用接口，Android
+        全版本都有，是「整机忙不忙」最可靠的单一指标。
+      * procs 为 [(pct, name)]，按 CPU 占用降序；来源是 `dumpsys cpuinfo` 的
+        进程段（`包名: N%`）。Android 8+ 对 cpuinfo 做了限制，可能输出为空或
+        只有 TOTAL，此时 procs 为空 list（绝不抛异常，调用方据此只报负载）。
+
+    解析严格限定在进程段内（cpuinfo 末尾的 TOTAL 行只用于说明、不计入进程），
+    避免把 `TOTAL:` 这种汇总行误当成某个进程。
+    """
     load = {}
     procs = []
     if not text:
@@ -272,6 +360,7 @@ def parse_cpu(text):
     else:
         la_part, ci_part = text, ""
     toks = (la_part or "").split()
+    # /proc/loadavg: 1min 5min 15min runnable/total_threads last_pid
     if len(toks) >= 5:
         try:
             load["one"] = float(toks[0])
@@ -290,6 +379,9 @@ def parse_cpu(text):
             load["last_pid"] = int(toks[4])
         except ValueError:
             pass
+    # dumpsys cpuinfo 进程段：每行形如 `com.abc (pid 123): 12%` / `com.abc: 12%`
+    # / `12% 1234/com.abc: 8% user + 4% kernel`。进程段从「Load: / CPU usage
+    # from」表头之后开始，遇到 `TOTAL:` 汇总行即结束。`TOTAL` 不计入进程。
     rows = []
     if ci_part:
         for ln in ci_part.splitlines():
@@ -304,7 +396,7 @@ def parse_cpu(text):
             if not pm or pm.group(1).upper() == "TOTAL":
                 continue
             name = pm.group(1)
-            if "/" in name:
+            if "/" in name:                  # 去掉前导 PID（如 `1234/com.abc`）
                 name = name.rsplit("/", 1)[-1]
             try:
                 pct = float(pm.group(2))
@@ -341,6 +433,9 @@ def cpu_report(text):
     return "\n".join(head) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# 解析：应用清单摘要
+# ---------------------------------------------------------------------------
 def summarize_packages(text3, text_all=""):
     """`pm list packages -3` / `pm list packages` → 一段中文摘要。"""
     def names(t):
@@ -352,6 +447,8 @@ def summarize_packages(text3, text_all=""):
         return out
     third = names(text3)
     total = names(text_all)
+    # 系统应用 = 全量 − 第三方。排查「这个弹窗是哪来的 / 这个服务谁在拉起」
+    # 时只给第三方清单经常查不到 —— 车机上的问题十有八九出在预置应用里。
     third_set = set(third)
     system = [n for n in total if n not in third_set]
     lines = ["第三方应用：%d 个" % len(third)]
@@ -369,6 +466,9 @@ def summarize_packages(text3, text_all=""):
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# 执行
+# ---------------------------------------------------------------------------
 def _default_runner(adb, serial, args, timeout):
     """真实执行 `adb -s <serial> <args>`，返回 (rc, stdout, stderr)。"""
     r = subprocess.run([adb, "-s", serial] + list(args), **adb_kwargs(timeout))
@@ -383,12 +483,12 @@ class _Ctx:
         self.serial = serial
         self.runner = runner or (
             lambda args, timeout: _default_runner(adb, serial, args, timeout))
-        self.parts = []
+        self.parts = []          # [{name, ok, bytes, source, error}]
 
     def run(self, args, timeout=TIMEOUT):
         try:
             return self.runner(list(args), timeout)
-        except Exception as e:
+        except Exception as e:      # 超时 / adb 不存在 / 设备拔掉
             return 1, "", str(e)
 
     def record(self, name, ok, size=0, source="", error=""):
@@ -405,7 +505,12 @@ def _write(path, text):
 
 
 def _logcat_text(ctx, lines):
-    """取 logcat 尾部 N 行。返回 (text, error)。"""
+    """取 logcat 尾部 N 行。返回 (text, error)。
+
+    老设备（Android 4.x 部分定制 ROM）不支持 `-t`，会直接报 unknown option：
+    此时退回 `-d` 全量 dump 再在本地截尾部 —— 全量可能几十万行，但这是在
+    「拿不到」和「拿一大坨再截」之间唯一可行的折中，且截断后就地释放。
+    """
     n = clamp_lines(lines)
     rc, out, err = ctx.run(["logcat", "-d", "-v", "threadtime",
                             "-t", str(n)], timeout=TIMEOUT)
@@ -422,7 +527,24 @@ def _logcat_text(ctx, lines):
 def collect(adb, serial, out_dir, with_logcat=True,
             logcat_lines=DEFAULT_LOGCAT_LINES, runner=None, now=None,
             app_version=None):
-    """收集一台设备的诊断包。"""
+    """收集一台设备的诊断包。
+
+    参数
+    ----
+    adb          adb 可执行文件
+    serial       设备序列号
+    out_dir      输出目录（不存在会自动创建）
+    with_logcat  是否包含 logcat 尾部（抓大日志要十几秒，用户可关掉）
+    logcat_lines logcat 尾部行数（会被夹到 1~MAX_LOGCAT_LINES）
+    runner       `(args, timeout) -> (rc, out, err)`，默认走真实 adb（测试注入）
+    now          当前时间（注入用）
+    app_version  写进清章的程序版本，默认取 core.constants.VERSION
+
+    返回 `(zip_path, manifest, error)`：
+      * 成功：zip_path 为产出的 zip 绝对路径，error 为 None；
+      * 失败（目录不可写 / 打包异常）：zip_path 为 None，error 为中文原因。
+    单段失败不算整包失败（该文件里会写明原因，清单里也标出来）。
+    """
     dt = now or datetime.datetime.now()
     ts = dt.strftime("%Y%m%d_%H%M%S")
     serial_s = str(serial or "")
@@ -446,6 +568,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         "notes": [],
     }
     try:
+        # ---- 1) 设备信息 + getprop 全量（一次 shell 取全）----
         rc, out, err = ctx.run(["shell", devinfo.SCRIPT], timeout=TIMEOUT)
         info = devinfo.parse_info(out) if rc == 0 else {}
         device_text = ""
@@ -461,6 +584,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         ctx.record(F_DEVICE, bool(device_text and rc == 0), size,
                    "adb shell <devinfo.SCRIPT>",
                    "" if rc == 0 else (err or "")[:200])
+        # getprop 原样落地：型号 / 版本这类信息出问题时，开发常要自己 grep
         props = devinfo._section(out, devinfo.MARK_PROP,
                                  (devinfo.MARK_WM, devinfo.MARK_BATT,
                                   devinfo.MARK_DF, devinfo.MARK_MEM,
@@ -479,8 +603,10 @@ def collect(adb, serial, out_dir, with_logcat=True,
             "uptime_s": info.get("uptime_s", 0),
         }
 
+        # ---- 2) 进程 / 内存 ----
         rc, out, err = ctx.run(["shell", "ps", "-A"], timeout=TIMEOUT)
         if rc != 0 or not out.strip():
+            # 老设备没有 -A（用 ps 全量）；再不行就写失败原因
             rc, out, err = ctx.run(["shell", "ps"], timeout=TIMEOUT)
         proc_text = (process_report(out) if (rc == 0 and out.strip())
                      else "（读取进程列表失败：{}）\n".format((err or "ps 无输出").strip()[:200]))
@@ -491,6 +617,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("进程列表读取失败")
 
+        # ---- 2.5) 内存分页明细（dumpsys meminfo 的 PSS 汇总段）----
         rc, out, err = ctx.run(["shell", "dumpsys", "meminfo"], timeout=TIMEOUT)
         mem_text = (meminfo_report(out) if (rc == 0 and out.strip())
                     else "（读取内存分页明细失败：{}）\n".format((err or "dumpsys meminfo 无输出").strip()[:200]))
@@ -501,6 +628,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("内存分页明细读取失败")
 
+        # ---- 3) 应用清单 ----
         _, out3, _e3 = ctx.run(["shell", "pm", "list", "packages", "-3"],
                                  timeout=TIMEOUT)
         _, outa, _ea = ctx.run(["shell", "pm", "list", "packages"],
@@ -512,6 +640,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
                    "adb shell pm list packages [-3]",
                    "" if (out3 or outa) else "pm list packages 无输出")
 
+        # ---- 4) 前台 Activity / ANR / tombstone 线索 ----
         anr_cmd = ("dumpsys window 2>/dev/null | grep -E "
                    "'mCurrentFocus|mFocusedApp' | head -8; "
                    "echo '-- lastanr --'; "
@@ -528,6 +657,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("ANR 线索读取失败（部分机型需 root）")
 
+        # ---- 4.5) 网络接口快照（ip addr / netcfg 双格式兜底）----
         rc, out, err = ctx.run(
             ["shell", "ip addr 2>/dev/null; echo {}; netcfg 2>/dev/null".format(_NETCFG_SEP)],
             timeout=TIMEOUT)
@@ -540,6 +670,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("网络接口读取失败")
 
+        # ---- 4.75) CPU 负载 / 进程占比（loadavg + dumpsys cpuinfo 兜底）----
         rc, out, err = ctx.run(
             ["shell", "cat /proc/loadavg 2>/dev/null; echo {}; "
              "dumpsys cpuinfo 2>/dev/null".format(_CPUINFO_SEP)],
@@ -553,6 +684,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
         if rc != 0:
             manifest["notes"].append("CPU 负载读取失败")
 
+        # ---- 5) logcat 尾部（可选：抓大日志要十几秒）----
         if with_logcat:
             text, lerr = _logcat_text(ctx, logcat_lines)
             if not text:
@@ -566,7 +698,11 @@ def collect(adb, serial, out_dir, with_logcat=True,
         _write(os.path.join(work, F_META),
                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 
+        # ---- 打包 ----
         name = "diag_{}_{}.zip".format(safe_name(serial_s, "device"), ts)
+        # 时间戳只到秒，而 batch 里同一台设备被连点两次 / 用户「再收一份」很容易
+        # 落在同一秒：ZipFile(..., "w") 会直接把同名文件截断 —— 用户手上那份
+        # （可能已经发出去）悄悄变成第二份的内容。宁可多一个 _2。
         zip_path = unique_path(os.path.join(out_dir, name))
         lzip = long_path(zip_path)
         try:
@@ -589,7 +725,14 @@ def collect(adb, serial, out_dir, with_logcat=True,
 
 
 def summary_line(zip_path, manifest):
-    """一行中文结果说明（状态栏 / toast 用）。"""
+    """一行中文结果说明（状态栏 / toast 用）。
+
+    全部段落都失败时不能再用「✓」开头：设备掉线 / 未授权时每一段 adb 命令都
+    报错，包里其实只有几个「（读取设备信息失败：…）」占位文件 —— 而它们的
+    文件名（设备信息.txt / props.txt / 进程列表.txt…）与正常包一模一样。用户
+    扫到状态栏那个 ✓ 就以为收集成功了，直到拿这个包去分析才发现空无一物，
+    而那一刻设备往往已经不在手边，没法重新收集。
+    """
     m = manifest or {}
     dev = m.get("device") or {}
     who = dev.get("model") or (m.get("serial") or "设备")
@@ -603,6 +746,7 @@ def summary_line(zip_path, manifest):
                 % (len(parts), why, zip_path))
     tail = ""
     if bad:
+        # 段名是文件名，全列出来会把状态栏撑成一行乱麻
         shown = "、".join(bad[:6])
         more = "" if len(bad) <= 6 else " 等 %d 项" % len(bad)
         tail = "，缺 {}{}".format(shown, more)

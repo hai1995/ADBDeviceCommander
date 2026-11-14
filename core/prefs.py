@@ -364,24 +364,21 @@ def sanitize_prefs(raw):
                 # 只有「确实认不出」才提示。1 / 0 转成 True / False 属于等价写法，
                 # 提示「1 不是有效的开关，已恢复为 开」只会让人以为配置写错了。
                 if _as_bool(v, None) is None:
-                    warnings.append("%s 的值 %r 不是有效的开关，已恢复为 %s"
-                                    % (k, v, "开" if nv else "关"))
+                    warnings.append("{} 的值 {!r} 不是有效的开关，已恢复为 {}".format(k, v, "开" if nv else "关"))
         elif k in CHOICE_KEYS:
             allowed = CHOICE_KEYS[k]
             if v not in allowed:
                 clean[k] = dv
-                warnings.append("%s 的值 %r 不是合法选项（%s），已恢复为 %r"
-                                % (k, v, "/".join(allowed), dv))
+                warnings.append("{} 的值 {!r} 不是合法选项（{}），已恢复为 {!r}".format(k, v, "/".join(allowed), dv))
         elif k in STR_KEYS:
             if not isinstance(v, str):
                 clean[k] = dv
-                warnings.append("%s 的值 %r 不是文本，已恢复为 %r" % (k, v, dv))
+                warnings.append("{} 的值 {!r} 不是文本，已恢复为 {!r}".format(k, v, dv))
         elif k in LEVEL_LIST_KEYS:
             nv = _as_levels(v, dv)
             if nv != v:
                 clean[k] = nv
-                warnings.append("%s 的级别选择 %r 含无效项，已恢复为 %r"
-                                % (k, v, nv))
+                warnings.append("{} 的级别选择 {!r} 含无效项，已恢复为 {!r}".format(k, v, nv))
         elif k in INT_KEYS:
             lo, hi = INT_RANGES.get(k, (0, 1 << 30))
             nv = _as_int(v, dv, lo, hi)
@@ -498,7 +495,7 @@ def _atomic_write(prefs: dict) -> bool:
     import json
     import uuid
     p = prefs_path()
-    tmp = "%s.%s.tmp" % (p, uuid.uuid4().hex[:8])
+    tmp = "{}.{}.tmp".format(p, uuid.uuid4().hex[:8])
     lp, ltmp = long_path(p), long_path(tmp)
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
@@ -673,9 +670,8 @@ def resolve_save_dir(prefs=None, default=None, ensure_dir=False):
     if os.path.isdir(lcfg):
         if os.access(lcfg, os.W_OK):
             return cfg, None
-        return default, ("配置里的保存目录不可写，已改用默认目录：%s" % default)
-    return default, ("配置里的保存目录在本机不存在，已改用默认目录：%s%s"
-                     % (default, "（%s）" % mkdir_err if mkdir_err else ""))
+        return default, ("配置里的保存目录不可写，已改用默认目录：{}".format(default))
+    return default, ("配置里的保存目录在本机不存在，已改用默认目录：{}{}".format(default, "（{}）".format(mkdir_err) if mkdir_err else ""))
 
 
 def get_pref(key, default=None):

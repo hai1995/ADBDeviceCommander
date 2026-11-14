@@ -273,6 +273,7 @@ def primary_command_path(directory=None):
     return p_primary
 
 
+
 def normalize_commands(raw):
     """把各种 electerm 快捷命令导出格式归一化为程序内部格式：
         [{"id": str, "name": str, "labels": [str],
@@ -446,7 +447,7 @@ def _as_color(v) -> str:
 def _as_text(v) -> str:
     """把可选的备注 / 描述类字段归一化为字符串（否则返回 ""）。
 
-    备注支持多行：前端 textarea 里的 \n 原样保留、落盘 JSON 后下次启动
+    备注支持多行：前端 textarea 里的 \\n 原样保留、落盘 JSON 后下次启动
     仍能完整回填。类型不对（dict / list / None / bool）一律空串 ——
     用户手写 json 的笔误不该让整条命令加载失败。数字、布尔则转字符串，
     毕竟用户不太可能真的想把 "note": 123 当备注展示。

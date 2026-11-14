@@ -174,7 +174,7 @@ def repo_state():
     _rc, br = _git("rev-parse", "--abbrev-ref", "HEAD")
     if _rc != 0 or not br.strip():
         # 还没有第一个提交（unborn branch）时 rev-parse 会失败，
-        # 但 symbolic-ref 是能读出来的——否则会显示成「分支：（未知）」，
+        # 但 symbolic-ref 是能读出来的——否则会显示成「分支：(未知)」，
         # 看着像仓库坏了，其实只是还没初始化好第一个提交。
         rc2, br2 = _git("symbolic-ref", "--short", "HEAD")
         br = br2 if rc2 == 0 else ""

@@ -26,6 +26,9 @@ class LogcatMixin:
             serial, buffers, level_filter=level_filter,
             keyword=keyword or "", only_exc=bool(only_exc))
         if not ok:
+            # 前端是事件驱动、不看返回值的（callApi 结果只作兜底）：这里不播报，
+            # 用户点「开始监控」看到的就是彻底的静默 —— 分不清是设备在忙、
+            # 还是按钮没点上。
             self._push_status(
                 "warn", "⚠ 设备 {} 已在 logcat 监控中，不用重复开始".format(serial))
             return {"ok": False, "reason": "already_running"}
@@ -91,14 +94,19 @@ class LogcatMixin:
     def logcat_capture_start(self, serial, save_dir, buffers, level_filter=None):
         if not serial:
             return {"ok": False, "reason": "no_device"}
+        # 与截图/录屏/录音保持一致：未指定目录时回退到默认保存目录，
+        # 避免 save_dir 为 None 时 os.makedirs(None) 抛 TypeError 直接失败。
         save_dir = save_dir or self._default_save_dir()
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
+            # 同上：返回前端也不看。保存目录不可写（只读盘 / 盘符不存在 /
+            # 路径被同名文件占位）时，用户点「开始抓取」后什么都不发生。
             self._push_status(
                 "err", "⚠ 无法创建保存目录 {}：{}".format(save_dir, e))
             return {"ok": False, "reason": "mkdir", "text": str(e)}
         ts = time.strftime("%Y%m%d_%H%M%S")
+        # safe_name：无线 ADB 序列号（IP:端口）含冒号，Windows 下文件名非法
         path = unique_path(
             os.path.join(save_dir, "logcat_{}_{}.txt".format(safe_name(serial), ts)),
             suffixes=(".zip",))
@@ -128,6 +136,8 @@ class LogcatMixin:
         if not serial:
             return {"ok": False, "reason": "no_device"}
         if not self.logcat_capture.stop(serial, zip_on_stop=zip_on_stop):
+            # 没在抓取（设备刚被移除 / 上一轮已经停了）：说一句，而不是让用户
+            # 对着一个"点了没反应"的按钮反复点。
             self._push_status(
                 "info", "ℹ 设备 {} 当前没有进行中的 logcat 抓取".format(serial))
             return {"ok": False, "reason": "not_running"}
@@ -141,6 +151,9 @@ class LogcatMixin:
         目录（见 core.prefs.resolve_save_dir），绝不让程序往一个不存在的
         路径里写文件。**不回写配置文件**：文件里的原值在源机器上仍然正确。
         """
+        # 不建目录：这里读的是「配置里带来的路径」，若它在本机不存在，
+        # 多半是从别的电脑同步过来的失效路径（父目录都不在了），
+        # 建不出来也不该建 —— 交由 resolve_save_dir 回退默认目录。
         eff, _note = resolve_save_dir(load_prefs())
         return eff
 

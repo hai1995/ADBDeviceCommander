@@ -27,8 +27,12 @@ import time
 from core.constants import no_window_flags, safe_name
 from core.longpath import long_path, path_isdir, path_isfile
 
+# 可执行文件名（Windows 带 .exe，其它平台不带）
 SCRCPY_EXE_NAMES = ("scrcpy.exe", "scrcpy")
 
+# 启动后观察窗口：scrcpy 在「设备未授权 / 版本不兼容 / adb 报错」时会**秒退**，
+# 此时窗口一闪而过、用户只看到"点了没反应"。等这么久再确认它是否还活着，
+# 才有机会把 stderr 里的原因回显到状态栏。
 START_SETTLE_S = 0.7
 
 
@@ -43,6 +47,7 @@ def _extra_dirs():
             base = os.environ.get(env)
             if not base:
                 continue
+            # winget（Genymobile.scrcpy）与手动解压两派布局都覆盖
             dirs += [
                 os.path.join(base, "scrcpy"),
                 os.path.join(base, "Programs", "scrcpy"),
@@ -64,6 +69,7 @@ def _as_exe(path):
     p = str(path).strip().strip('"')
     if not p:
         return None
+    # 目录 → 在里面找可执行文件
     if path_isdir(p):
         for name in SCRCPY_EXE_NAMES:
             cand = os.path.join(p, name)
@@ -81,23 +87,28 @@ def find_scrcpy(pref_path=""):
     返回 (可执行文件路径 or None, 说明文字)。说明文字用于前端展示探测过程，
     找不到时它同时也是可执行的处理建议（而不是一句"未找到"了事）。
     """
+    # 1) 用户显式配置（目录或全路径都认）
     if pref_path:
         exe = _as_exe(pref_path)
         if exe:
             return exe, "来自配置的路径"
+        # 配置了但无效：继续往下探测，但把这件事说清楚（否则用户会以为配置生效了）
         note_prefix = "配置的路径无效（{}），已改用自动探测；".format(pref_path)
     else:
         note_prefix = ""
 
+    # 2) 系统 PATH
     for name in SCRCPY_EXE_NAMES:
         exe = shutil.which(name)
         if exe:
             return exe, note_prefix + "来自系统 PATH"
 
+    # 3) 常见安装目录
     for d in _extra_dirs():
         if not path_isdir(d):
             continue
         if d.rstrip("\\/").lower().endswith("packages"):
+            # winget 布局是 Packages/<包名>/<版本>/scrcpy.exe，往下扫两层
             try:
                 pkgs = sorted(os.listdir(d), reverse=True)
             except OSError:
@@ -106,7 +117,7 @@ def find_scrcpy(pref_path=""):
                 pkg_dir = os.path.join(d, pkg)
                 if not path_isdir(pkg_dir):
                     continue
-                exe = _as_exe(pkg_dir)
+                exe = _as_exe(pkg_dir)          # 有的包直接铺在包目录下
                 if exe:
                     return exe, note_prefix + "来自 winget 安装目录"
                 try:
@@ -140,7 +151,7 @@ def probe(pref_path=""):
         out = (r.stdout or "").strip() or (r.stderr or "").strip()
         version = out.splitlines()[0].strip() if out else ""
     except Exception:
-        version = ""
+        version = ""      # 取不到版本不影响可用性（老版本 scrcpy 也支持 -s）
     return {"ok": True, "path": exe, "version": version, "note": note}
 
 
@@ -166,11 +177,12 @@ class ScrcpyLauncher:
     """
 
     def __init__(self):
-        self._procs = {}
-        self._logs = {}
-        self._pending = set()
+        self._procs = {}            # serial -> Popen
+        self._logs = {}             # serial -> 日志临时文件路径
+        self._pending = set()       # 正在 _spawn 中、还没登记进 _procs 的序列号
         self._lock = threading.Lock()
 
+    # ---- 查询 ----
     def alive(self):
         """当前仍在投屏的序列号列表（顺带清理已退出的句柄与日志）。"""
         with self._lock:
@@ -198,6 +210,7 @@ class ScrcpyLauncher:
         except Exception:
             pass
 
+    # ---- 启动 ----
     def launch(self, serials, exe):
         """对每台设备拉一个 scrcpy 窗口。
 
@@ -213,6 +226,11 @@ class ScrcpyLauncher:
                 if old is not None and old.poll() is None:
                     skipped.append(serial)
                     continue
+                # 「正在启动中」也算已在投屏。_spawn 里要等 START_SETTLE_S 才把
+                # Popen 登记进 _procs，这段时间 _procs 还是空的 —— 而 launch()
+                # 的「查重」和「登记」本来就分处锁的两端，锁只护住了后半段。
+                # 于是连点两次「投屏」（或快捷键重复触发）各走一遍 _spawn，
+                # 同一台设备开出两个 scrcpy 窗口，互相抢 adb 输入。
                 if serial in self._pending:
                     skipped.append(serial)
                     continue
@@ -248,6 +266,8 @@ class ScrcpyLauncher:
         except Exception as e:
             if f is not None:
                 f.close()
+                # 刚建的日志文件是空的，Popen 都没起来就没人会用：顺手删掉，
+                # 免得每失败一次就在 TEMP 里留一个 0 字节文件。
                 try:
                     os.remove(long_path(log_path))
                 except Exception:
@@ -255,8 +275,9 @@ class ScrcpyLauncher:
             return False, "启动失败：{}".format(e)
         else:
             if f is not None:
-                f.close()
+                f.close()      # 子进程持有自己的句柄，父进程关掉不影响它写
 
+        # 观察 START_SETTLE_S：秒退说明 scrcpy 自己报错（未授权 / 版本不兼容 / adb 不可用）
         time.sleep(START_SETTLE_S)
         rc = p.poll()
         if rc is not None:
@@ -271,6 +292,7 @@ class ScrcpyLauncher:
             self._logs[serial] = log_path
         return True, ""
 
+    # ---- 收尾 ----
     def close_all(self):
         """关闭程序时收掉本程序开出的投屏窗口（用户自己关的不会受影响）。"""
         with self._lock:
@@ -284,6 +306,7 @@ class ScrcpyLauncher:
                     p.terminate()
             except Exception:
                 pass
+        # 日志文件可能还被刚刚 terminate 的进程短暂占用，留给系统临时目录清理
         for path in logs:
             try:
                 if os.path.exists(long_path(path)):

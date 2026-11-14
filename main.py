@@ -1,13 +1,28 @@
 """
 main.py —— ADB 设备指令台（Web 版入口 / pywebview 宿主）
 =========================================================
-界面由 frontend/ 下的 HTML/CSS/JS 渲染，后端业务由 backend/ + core/ 提供。
+界面由 frontend/ 下的 HTML/CSS/JS 渲染，后端业务由 backend/ + core/ 提供：
+
+  * core/            纯逻辑（shell 会话 / 命令 / 设备 / logcat / 常量）
+  * backend/         服务层：state（状态）/ workers（线程）/ device_service /
+                     bus（事件队列）/ controller（pywebview js_api 桥）
+  * main.py          本文件只负责「创建窗口 + 托管生命周期」
+
+启动：
+    python main.py            # 正常运行
+    python main.py --debug    # 打开 WebView2 开发者工具（调 UI 用）
+
+注意：
+  * 本项目已全面转向 Web 版（pywebview + backend/* + core/*），不再维护 Tk 版。
+  * backend / core 为纯逻辑，配有独立单测（tests/ 下以 test_backend_* / test_core_* 开头）。
 """
 import argparse
 import os
 import sys
 import time
 
+# 进程内最早可测的时刻，刻意放在业务模块 import 之前：backend/core 的 import
+# 发生在 main() 之前，原来的计时从 main() 起算会把这一段漏掉（实测 0.2s+）。
 _MODULE_T0 = time.perf_counter()
 
 from backend.controller import WebApi
@@ -20,11 +35,25 @@ from core.envcheck import (
 )
 from core.longpath import long_path, path_isdir, path_isfile
 
+# 注意：webview 不在模块顶层导入。它在预检通过后才于 _launch() 内局部导入——
+# 这样 pywebview 未安装时，能先弹友好中文提示，而不是裸 ImportError。
+
+# 固定 GUI 后端，用 setdefault —— 调试时仍可 PYWEBVIEW_GUI=qt 之类显式覆盖。
+# 更正第八十四轮记录里的错误结论：pywebview 6.x 的 Windows 分支**无论**
+# PYWEBVIEW_GUI 取何值都只调用 import_winforms（winforms 内部再按 WebView2
+# 可用性选渲染引擎），并不存在「逐个探测 cef/gtk/qt/winforms/edgechromium」
+# 这回事，所以这一行不是启动提速，只是钉住后端、避免将来 pywebview 改默认
+# 行为时窗口表现漂移。真正的启动耗时在 import webview 与 WebView2 初始化，
+# 见下方 _make_boot_mark 的分段日志。
 os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
+
+# 版本号只有一个真源：core/constants.py 的 VERSION。本文件既不定义、也不导入
+# 副本 —— 副本漂移过一次就够受的了（bump_version.py 只写 core/constants.py，
+# README 标题另行同步）。需要版本号时从 core.constants 导入。
 
 
 def _refresh_system_path():
-    """从注册表同步用户/系统 PATH 到当前进程。"""
+    """从注册表同步用户/系统 PATH 到当前进程（保证子进程能找到 adb / powershell）。"""
     try:
         import winreg
         keys = [
@@ -50,16 +79,38 @@ def _refresh_system_path():
 
 
 def _resolve_index_url():
-    """frontend/index.html -> file:// URL（中文 / 空格 / # % ? 等都能正确处理）。"""
+    """frontend/index.html -> file:// URL（中文 / 空格 / # % ? 等都能正确处理）。
+
+    不要手工拼 "file:///" 再 replace(" ", "%20")：路径里出现 `#`（会被当作片段
+    分隔符，后面全部截断）、`%`、`?` 时 URL 会被改错，窗口直接空白；而打包成
+    --windowed 时又没有任何控制台可看。pathlib 的 as_uri() 会按 RFC 3986 正确
+    转义与规范化。
+    """
     from pathlib import Path
     index = os.path.join(PROJECT_ROOT, "frontend", "index.html")
+    # 长路径安全：项目根目录可以很深（用户把源码 clone 在归档目录里）。
+    # os.path.exists 对超长路径返回 False → 这里会误报「未找到 index.html，
+    # 窗口可能显示空白」，而文件其实好好地在那儿。
     if not path_isfile(index):
         print("[main] 警告：未找到 {}，窗口可能显示空白（前端尚未就绪）。".format(index), file=sys.stderr)
     return Path(index).resolve().as_uri()
 
 
+# ---------------------------------------------------------------------------
+# 启动前环境预检：收集平台原始值（注册表 / importlib.metadata / PATH）注入纯逻辑
+# core.envcheck，任一阻断项失败即弹友好中文提示并退出。避免同事电脑上因
+# WebView2 过旧 / 依赖缺失 / adb 缺失而只抛英文底层异常、无从下手。
+# ---------------------------------------------------------------------------
 def _collect_pv_list():
-    """读取已安装 WebView2 Runtime 版本（pv），返回 pv 版本串列表。"""
+    """读取已安装 WebView2 Runtime 版本（pv），返回 pv 版本串列表。
+
+    仅 Windows 生效：按官方 Microsoft Learn 方法，读 HKLM(WOW6432Node)+HKCU
+    两处注册表键的 pv(REG_SZ)。任一成功即视为已安装；读取不到返回 []（非 Windows
+    或键不存在都会落回这里，由 core.envcheck 判定为未安装）。
+
+    注册表位置取自 core.envcheck 的**单一来源**：早前这里自己抄了一份 GUID 与路径，
+    两处一旦漂移，改 envcheck 里的常量就会毫无效果。
+    """
     try:
         import winreg
     except ImportError:
@@ -68,17 +119,22 @@ def _collect_pv_list():
     subkeys = [sub.format(GUID=WEBVIEW2_CLIENT_GUID)
                for sub in WEBVIEW2_PV_SUBKEYS]
     for hkey, sub in (
+        # HKLM（64 位进程从 WOW6432Node 读到 64 位注册表视图）
         (winreg.HKEY_LOCAL_MACHINE, subkeys[0]),
+        # HKCU（按用户安装）
         (winreg.HKEY_CURRENT_USER, subkeys[1]),
     ):
         try:
             with winreg.OpenKey(hkey, sub) as k:
                 val, _ = winreg.QueryValueEx(k, "pv")
+                # pv 官方为 REG_SZ；万一被写成别的类型（REG_DWORD），val 就不是 str，
+                # 直接 .strip() 会抛 AttributeError 并被上层吞成「没读到 pv」——
+                # 于是「装了 WebView2」被误判成「没装」而挡住启动。统一转字符串。
                 text = str(val).strip() if val is not None else ""
                 if text:
                     found.append(text)
         except OSError:
-            continue
+            continue  # 键不存在 / 无权限，尝试下一处
     return found
 
 
@@ -98,7 +154,12 @@ def _adb_on_path():
 
 
 def _apply_user_adb_dir():
-    """把 config.json 配置的 adb 所在目录前插到 PATH（幂等，失败静默）。"""
+    """把 config.json 配置的 adb 所在目录前插到 PATH（幂等，失败静默）。
+
+    同事机器上 adb 不一定在系统 PATH。这里让「关于」页填写的 adb 目录在启动
+    阶段即生效，后续 preflight 的 adb 检测与所有子进程（adb/shell）都能找到；
+    运行中在关于页改配置则走 WebApi.save_settings（同一条注入逻辑）。
+    """
     try:
         from core.prefs import apply_adb_dir, load_prefs
         apply_adb_dir(load_prefs().get("adb_dir"))
@@ -107,7 +168,13 @@ def _apply_user_adb_dir():
 
 
 def _ensure_config_file():
-    """确保 exe 同目录有 config.json（缺失则按默认值补建，尽力而为）。"""
+    """确保 exe 同目录有 config.json（缺失则按默认值补建，尽力而为）。
+
+    build.py 会在 dist/ 放一份默认配置，但用户可能手动删掉它、或从源码直接
+    跑（工程根没有该文件）。启动即补建后，load/save 始终有同一个文件可依，
+    「每次启动都加载以往的设置」才有着落；写不进去（只读目录等）时静默跳过，
+    行为与从前一致——首次改动设置时才由 save_prefs 尝试创建。
+    """
     try:
         from core.prefs import ensure_prefs_file
         ensure_prefs_file()
@@ -116,7 +183,16 @@ def _ensure_config_file():
 
 
 def _win32():
-    """取得本文件用到的 Win32 对象，并**显式声明它们的原型**。"""
+    """取得本文件用到的 Win32 对象，并**显式声明它们的原型**。
+
+    为什么必须声明：ctypes 在没有 argtypes 时按「默认转换」传参 —— byref 对象
+    被当成一个整数（它指向的地址）传下去，而 C int 只有 32 位，64 位下指针就此
+    被截断。GetProcessTimes 会往被截断的野指针里写 FILETIME（内存破坏），
+    进程创建时间也拿不到 —— 启动日志里「process_age 那一行」于是永远是空的，
+    而那正是判断「启动二十秒是 onefile 解压还是 WebView2 初始化」的关键数据。
+
+    非 Windows 返回 (None, None, None)，调用方按「不支持」处理。
+    """
     if os.name != "nt":
         return None, None, None
     try:
@@ -146,7 +222,13 @@ def _win32():
 
 
 def _show_native_error(title, lines, url=None):
-    """用不依赖 WebView2/Tk 的原生方式展示错误并退出前调用。"""
+    """用不依赖 WebView2/Tk 的原生方式展示错误并退出前调用。
+
+    Windows：Win32 MessageBoxW（MB_ICONERROR|MB_SYSTEMMODAL，置顶模态）。
+    若传了 url，按钮改为「确定 / 取消」，点击「确定」会用系统默认浏览器打开
+    该链接，方便同事直接跳转下载页，无需手动复制链接。
+    非 Windows / 调用失败：回退为逐行打印到 stderr（不阻塞正常控制台用户）。
+    """
     text_lines = list(lines)
     if url:
         text_lines.append("点击「确定」将打开浏览器前往下载页面；「取消」关闭此窗口。")
@@ -180,6 +262,12 @@ def _show_native_error(title, lines, url=None):
     return shown
 
 
+# ---------------------------------------------------------------------------
+# 全局崩溃兜底：--windowed 打包的 exe 没有控制台，未捕获异常若只抛到 stderr
+# 表现为「闪一下就没」，同事无从排查。这里把 主线程 + 所有后台线程 的未捕获
+# 异常统一落盘为 crash_*.log（程序目录，不可写时退回系统临时目录），主线程
+# 的致命崩溃再补一个原生弹窗提示日志位置。钩子本身保证绝不二次抛异常。
+# ---------------------------------------------------------------------------
 def _write_crash_log(title, exc_type, exc, tb):
     """把一次未捕获异常写入 crash_<时间戳>.log，返回日志路径（失败返回 None）。"""
     try:
@@ -200,6 +288,8 @@ def _write_crash_log(title, exc_type, exc, tb):
         body,
         "",
     ])
+    # 优先写程序（exe / 脚本）所在目录，方便同事把崩溃日志随包发回；
+    # 目录不存在 / 无写权限时退回系统临时目录兜底。
     if getattr(sys, "frozen", False):
         base = os.path.dirname(os.path.abspath(sys.executable))
     else:
@@ -211,6 +301,8 @@ def _write_crash_log(title, exc_type, exc, tb):
         try:
             os.makedirs(long_path(d), exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
+            # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
+            # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
             path = unique_path(os.path.join(d, "crash_{}.log".format(stamp)))
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
@@ -242,7 +334,7 @@ def _install_crash_hooks():
 
     def _sys_hook(exc_type, exc, tb):
         if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
-            return
+            return  # 主动退出路径不需要记录
         log = _write_crash_log("主线程未捕获异常", exc_type, exc, tb)
         _notify_crash(log)
 
@@ -257,23 +349,32 @@ def _install_crash_hooks():
                 pass
 
     sys.excepthook = _sys_hook
-    if hasattr(threading, "excepthook"):
+    if hasattr(threading, "excepthook"):      # Python 3.8+
         threading.excepthook = _thread_hook
 
 
 def _preflight():
-    """启动前环境预检：任一阻断项不通过即弹窗提示并退出（码 2）。"""
+    """启动前环境预检：任一阻断项不通过即弹窗提示并退出（码 2）。
+
+    adb 缺失**不阻断启动**：工具采用「可启动 + 引导配置」策略——启动后界面
+    （boot 广播）会提示到「关于」页填写 adb 所在目录并保存，避免只想先浏览
+    界面/命令的同事被挡在门外。
+    """
     problems = run_all(
         get_pv=_collect_pv_list,
         pywebview_version=_pywebview_version(),
         adb_path=_adb_on_path(),
     )
+    # adb 缺失为非阻断项（界面内引导配置）：按 DepProblem.blocking 过滤，而不是
+    # 匹配 name 字符串——文案一改，字符串过滤就会静默失效，把「不阻断」悄悄变回
+    # 「阻断」（同事没装 adb 时连界面都打不开）。
     problems = [p for p in problems if p.blocking]
     if not problems:
         return
     lines = ["检测到以下问题，请处理后重新运行本程序："]
     for p in problems:
         lines.append("• {}\n  {}\n  → {}".format(p.name, p.detail, p.fix))
+    # 如果问题涉及 WebView2，给弹窗附带可点击跳转的下载链接。
     url = None
     for p in problems:
         if "WebView2" in p.name:
@@ -284,13 +385,13 @@ def _preflight():
 
 
 def _boot_timing_path():
-    """启动分段耗时日志的位置：系统临时目录。"""
+    """启动分段耗时日志的位置：系统临时目录（程序目录可能只读，写不进去）。"""
     import tempfile
     return os.path.join(tempfile.gettempdir(), "adbdc_boot_timing.log")
 
 
 def _reset_boot_timing_log():
-    """每次启动重新起一份耗时日志。"""
+    """每次启动重新起一份耗时日志：反馈「这次启动慢」时只看得到本次分段。"""
     try:
         with open(long_path(_boot_timing_path()), "w", encoding="utf-8") as f:
             f.write("=== {} 启动 ===\n".format(time.strftime("%Y-%m-%d %H:%M:%S")))
@@ -299,7 +400,8 @@ def _reset_boot_timing_log():
 
 
 def _make_boot_mark(t0):
-    """返回启动分段打点函数。"""
+    """返回启动分段打点函数：同一行既写 stderr（源码跑可见）也追加到日志
+    文件——--windowed 打包的 exe 没有控制台，用户只能从文件里读这份分段。"""
     def mark(tag):
         line = "[boot {:5.2f}s] {}".format(time.perf_counter() - t0, tag)
         try:
@@ -315,7 +417,12 @@ def _make_boot_mark(t0):
 
 
 def _process_age_seconds():
-    """进程创建到现在过了多少秒；取不到返回 None（非 Windows）。"""
+    """进程创建到现在过了多少秒；取不到返回 None（非 Windows）。
+
+    单文件 exe（PyInstaller onefile）在 Python 代码执行**之前**要先把整包解压到
+    临时目录，这段耗时程序内部任何计时都看不到——只能向系统要进程创建时间。
+    启动日志里把它单列出来，才能判断「启动二十秒」是解压还是 WebView2 初始化。
+    """
     if not sys.platform.startswith("win"):
         return None
     try:
@@ -331,28 +438,99 @@ def _process_age_seconds():
                                  ctypes.byref(kernel), ctypes.byref(user))
         if not ok:
             return None
+        # FILETIME：100ns 计数，起点 1601-01-01；11644473600 是 1601→1970 的秒数
         ft = (created.dwHighDateTime << 32) | created.dwLowDateTime
         return max(0.0, time.time() - (ft / 1e7 - 11644473600))
     except Exception:
         return None
 
 
+# ---------------------------------------------------------------------------
+# 打包态 Windows：清除「来自网络」标记（Mark-of-the-Web / Zone.Identifier）
+#
+# 为什么需要（**目录模式**下）：分发件是打包后的文件夹，用户从浏览器/IM/邮件
+# 下载后解压，Windows 会给每个解出来的文件挂一条 NTFS 备用数据流
+# Zone.Identifier（ZoneId=3 = Internet）。.NET Framework 的程序集加载器
+# **拒绝加载**带此标记的托管 DLL：pythonnet 在 import clr /
+# clr.AddReference 时抛 .NET 的 FileLoadException（HRESULT 0x80131515，
+# 「未能加载文件或程序集 Microsoft.Web.WebView2.Core.dll」），内层是
+# NotSupportedException「尝试从一个网络位置加载程序集」—— 也就是 .NET 的
+# CAS 加载器判定「这个程序集来自网络」直接拒绝。
+#
+# 实测踩过的坑（本轮崩溃的真正原因）：**清理目录清单是手写的**，只列了
+# pythonnet/runtime 与 clr_loader/ffi/dlls 两处，漏掉了 webview/lib。
+# 于是 pythonnet 修好了、WebView2 的托管程序集紧接着炸 —— 报错路径
+# "webview\lib\Microsoft.Web.WebView2.Core.dll" 正是漏网的那一个。
+# 结论：**不能再靠手写清单**，改成「递归扫整个运行时目录树」。
+#
+# 为什么递归扫不会拖慢启动：实测（4500 个文件的合成树）整树 scandir 遍历
+# 只要 ~4.5ms；真正耗时的是 DeleteFileW 的文件系统调用，而它只对**二进制**
+# 后缀的文件发生（.dll/.pyd/.exe/.manifest），Python 源码/缓存一律跳过。
+# 递归一次换掉「每加一个依赖就补一行清单」的长期失修，这笔买卖很划算。
+#
+# 解法：在 import clr 之前（webview.start 里才会 import，这里来得及）删掉这些
+# 二进制的 :Zone.Identifier。删 ADS 不需要管理员权限，ADS 不存在时
+# DeleteFileW 直接返回 FALSE、无副作用。
+#
+# **单文件模式（onefile）下这段清理基本是空转，但它必须留着**：
+#   * 单文件模式把整包解压到 %TEMP% 下**每次新建**的目录，那些文件是当场
+#     创建的，本就不带 Zone.Identifier —— .NET 不会再拒绝加载。也就是说
+#     **崩溃在单文件模式下从结构上就消失了**（这正是改用单文件分发的
+#     主要收益之一：同事只需要下载并双击一个 exe，不会再因为「解压目录
+#     里的 DLL 带下载标记」而启动失败）。
+#   * 但「用户可能把 exe 放在从网络下载的位置」这件事仍然存在：exe 自身
+#     会带 Zone.Identifier，某些企业策略下这仍可能拦下 DLL 加载。留着
+#     递归清理当兜底，代价只有几毫秒。
+#   * 关键：**绝不能**因此去扫 exe 同目录（那可能是用户的「下载」文件夹，
+#     里面还有别的下载物）。判定见 _motw_cleanup_dirs 的说明。
+# ---------------------------------------------------------------------------
 _MOTW_BINARY_SUFFIXES = (".dll", ".pyd", ".exe", ".manifest")
 
 
 def _motw_needed():
-    """只有「Windows + PyInstaller 打包态」才需要清理。"""
+    """只有「Windows + PyInstaller 打包态」才需要清理（源码运行 / Linux 空操作）。"""
     return os.name == "nt" and bool(getattr(sys, "frozen", False))
 
 
 def _motw_cleanup_dirs():
-    """需要递归清理的根目录。"""
+    """需要递归清理的根目录。
+
+    **只清「运行时目录树」（sys._MEIPASS）**，以及在「目录模式」下额外清
+    exe 同目录。两种打包布局的差别很要紧：
+
+    * 目录模式（onedir）：_MEIPASS = exe 旁的 _internal/，exe 同目录就是
+      **程序自己的目录**（里面只有本程序的文件）。老版本 PyInstaller 还会
+      把部分 DLL 平铺在 exe 旁边，一并清掉。
+    * 单文件模式（onefile）：_MEIPASS = %TEMP% 下**每次新建**的临时目录
+      （解出来的文件是当场创建的，本来就不带 Zone.Identifier）；而 exe
+      同目录是**用户自己放 exe 的地方** —— 很可能就是「下载」文件夹，
+      里面还有用户别的下载物。递归扫它会顺手删掉那些文件的「来自网络」
+      标记（等于替用户解除了别的程序的下载来源标记），既越界又慢。
+      故 onefile 下**只清 _MEIPASS**。
+
+    判据用「_MEIPASS 是否位于 exe 同目录之下」：onedir 是（_internal 在
+    exe 旁），onefile 不是（临时目录在别处）。这个判据不依赖 PyInstaller
+    的内部命名约定。
+
+    长路径安全：程序装在深层目录时，os.path.isdir 对超长路径返回 False →
+    目录找不到 → MOTW 清理**静默跳过** → 那个崩溃又回来了，还查不出原因。
+    """
     roots = []
     meipass = getattr(sys, "_MEIPASS", "")
     if meipass and path_isdir(meipass):
         roots.append(meipass)
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     if exe_dir and path_isdir(exe_dir) and exe_dir not in roots:
+        # 判据：_MEIPASS 位于 exe 同目录**之下** → 这是目录模式（onedir）。
+        # 那种布局下 exe 同目录就是程序自己的目录（只有本程序的文件），
+        # 老版本 PyInstaller 还会把部分 DLL 平铺在 exe 旁边，一并清掉。
+        #
+        # 单文件模式（onefile）不满足这个判据：_MEIPASS 在 %TEMP% 下每次
+        # 新建，exe 同目录是**用户自己放 exe 的地方**（很可能是「下载」
+        # 文件夹，里面还有别的下载物）。递归扫它会顺手删掉那些文件的
+        # 「来自网络」标记 —— 越界且慢。这种情况下只清 _MEIPASS。
+        #
+        # 这个判据只依赖「目录包含关系」，不依赖 PyInstaller 的内部命名约定。
         if any(_is_under(exe_dir, r) for r in roots):
             roots.append(exe_dir)
     return roots
@@ -371,11 +549,20 @@ def _is_under(parent, child):
 
 
 def _iter_motw_files(root):
-    """递归遍历 root，产出其中所有「二进制」文件的路径。"""
+    """递归遍历 root，产出其中所有「二进制」文件的路径。
+
+    只认二进制后缀（.dll/.pyd/.exe/.manifest）：Python 源码与 .pyc 带上
+    Zone.Identifier 也不会让 .NET 拒绝加载它们，为它们多花 DeleteFileW 的
+    系统调用纯属浪费。
+
+    用显式栈而不是递归函数：目录层级不可控（用户可能把程序放在归档目录里），
+    递归版遇到极深目录会撞 Python 的递归上限。
+    """
     stack = [root]
     seen = set()
     while stack:
         current = stack.pop()
+        # 目录可能被符号链接绕回自己：用 realpath 去重，防无限循环。
         try:
             key = os.path.realpath(current)
         except OSError:
@@ -400,7 +587,13 @@ def _iter_motw_files(root):
 
 
 def _delete_zone_identifier(ads_path):
-    """删除一条 :Zone.Identifier 备用数据流路径，非 Windows / 失败静默返回 False。"""
+    """删除一条 :Zone.Identifier 备用数据流路径，非 Windows / 失败静默返回 False。
+
+    ads_path 形如
+    ``C:\\app\\_internal\\pythonnet\\runtime\\Python.Runtime.dll:Zone.Identifier``。
+    由调用方拼好流名再传进来：这样清理逻辑一眼能看出动的是 ADS 而不是 DLL
+    本体，单测也直接断言传参以 ``:Zone.Identifier`` 结尾即可。
+    """
     if os.name != "nt":
         return False
     try:
@@ -414,7 +607,11 @@ def _delete_zone_identifier(ads_path):
 
 
 def _strip_mark_of_the_web():
-    """清掉运行时目录树下所有二进制的「来自网络」标记，返回清理的文件数。"""
+    """清掉运行时目录树下所有二进制的「来自网络」标记，返回清理的文件数。
+
+    全程不抛异常：清理失败只是让后面的 GUI 初始化仍可能失败，那种情况由
+    _report_gui_init_failure 给出可操作的中文指引，绝不能在这里先崩掉。
+    """
     if not _motw_needed():
         return 0
     count = 0
@@ -450,7 +647,10 @@ def _gui_failure_lines(exc):
 
 
 def _report_gui_init_failure(exc):
-    """GUI 初始化失败：留一份完整崩溃日志 + 中文自救弹窗 + 一行启动打点。"""
+    """GUI 初始化失败：留一份完整崩溃日志 + 中文自救弹窗 + 一行启动打点。
+
+    不重新抛异常，避免 crash hook 再弹一个通用「请把日志发给维护者」的重复窗口。
+    """
     lines = _gui_failure_lines(exc)
     try:
         log = _write_crash_log("窗口启动失败（GUI 初始化）", type(exc), exc,
@@ -471,17 +671,26 @@ def _report_gui_init_failure(exc):
 
 
 def main():
+    # 启动分段耗时日志：把「双击 → 窗口出现」这条链路的每一步都打出来，
+    # 以后再觉得慢时能一眼定位卡在 import webview、_preflight 还是 WebApi 构造。
     _T0 = _MODULE_T0
     _reset_boot_timing_log()
     _MARK = _make_boot_mark(_T0)
     _MARK("main_enter（以上为 import backend/core）")
+    # 双击 → 这里的耗时（onefile 解压 + 解释器启动）单独报一行：它不出现在
+    # 任何一段 Python 计时里，却往往是「启动二十秒」的全部。
     age = _process_age_seconds()
     if age is not None:
         _MARK("process_age {:.2f}s（进程创建 → Python 代码，含 onefile 解压）".format(age))
 
+    # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
     _MARK("crash_hooks_done")
 
+    # 必须在任何 import clr 之前（它发生在下面的 webview.start 里）：清掉
+    # onedir 分发件从网络下载后带上的「来自网络」标记，否则 .NET Framework
+    # 拒绝加载 Python.Runtime.dll，窗口起不来。清理只扫少数二进制文件，
+    # 打点里能看到它有没有意外变成新的启动瓶颈。
     n_motw = _strip_mark_of_the_web()
     if n_motw:
         _MARK("motw_cleared %d binaries" % n_motw)
@@ -496,10 +705,15 @@ def main():
     if not args.no_path_sync:
         _refresh_system_path()
 
+    # 先补建配置文件（缺失时按默认值生成），再读其中的 adb 目录注入 PATH，
+    # 最后进入 preflight 的 adb 检测。
     _ensure_config_file()
     _apply_user_adb_dir()
     _MARK("path_ready")
 
+    # 预检在创建窗口之前；adb 检查需在 PATH 同步之后，故放这里。
+    # 注意：依赖缺失时此处弹窗后即 sys.exit(2)，不会往下走到 import webview。
+    # adb 缺失为非阻断项（界面内引导配置），见 core.envcheck / WebApi.boot。
     _preflight()
     _MARK("preflight_done")
 
@@ -510,7 +724,18 @@ def main():
 
 
 def _theme_window(window):
-    """窗口就绪后把原生标题栏改成与界面一致的主题（非 Windows / 失败静默）。"""
+    """窗口就绪后把原生标题栏改成与界面一致的主题（非 Windows / 失败静默）。
+
+    标题栏是系统绘制的（本程序用原生标题栏，没有自绘），默认跟随 Windows 的
+    「应用主题」：系统是浅色时，深色界面顶着一根近白的标题栏，割裂感很强。
+    具体的 DWM 调用在 core/win_theme.py（可 headless 单测），这里只负责在
+    合适的时机（窗口对象已经存在）把它叫起来，并按 config.json 的 theme
+    （dark / light / system）决定标题栏上色方案——浅色界面配浅色标题栏，
+    深/浅才不割裂。
+
+    设置页运行时切换主题走 WebApi.set_theme → win_theme.apply_for_mode（同一套
+    上色逻辑，只是按 pid 回退找句柄），与这里的启动期上色共用底层实现。
+    """
     try:
         from core import win_theme
         from core.prefs import load_prefs
@@ -521,13 +746,16 @@ def _theme_window(window):
                 mode = m
         except Exception:
             pass
+        # attach 会轮询等待窗口句柄就绪（start(func=) 的线程里窗口可能尚未建出），
+        # 再按 mode 上色；非 Windows / 句柄拿不到都静默返回。
         win_theme.attach(getattr(window, "native", None), mode=mode)
     except Exception:
-        pass
+        pass                      # 配色是锦上添花，任何异常都不能挡住启动
 
 
 def _launch(args, api, url, _T0=None):
-    """预检通过后真正拉起窗口。webview 在此函数内局部导入。"""
+    """预检通过后真正拉起窗口。webview 在此函数内局部导入，保证即使 pywebview
+    缺失，上面的 _preflight 也已先给出友好提示而非裸 ImportError。"""
     _T0 = _T0 or time.perf_counter()
     _MARK = _make_boot_mark(_T0)
 
@@ -541,22 +769,41 @@ def _launch(args, api, url, _T0=None):
         width=1380,
         height=880,
         min_size=(980, 620),
+        # 与前端画布同色（frontend/css/app.css 的 --bg #0b0f14）：
+        # 窗口未渲染出内容前的底色不再闪一下旧灰，启动观感与界面一致。
         background_color="#0b0f14",
-        maximized=True,
+        maximized=True,   # 启动时即最大化（创建时直接置窗体状态，避免先小窗再放大）
     )
     _MARK("window_created")
 
+    # 窗口「真正显示」与「页面 DOM 就绪」两个时间点：启动慢时用来区分是
+    # WebView2 运行时初始化慢（window_created → shown 很长），还是页面渲染慢
+    # （shown → loaded）。没有这两点，日志停在 window_created，无法定位。
     try:
         window.events.shown += lambda: _MARK("window_shown")
         window.events.loaded += lambda: _MARK("dom_loaded")
     except Exception:
-        pass
+        pass                      # 事件挂不上只是少两行日志，绝不能挡住启动
 
+    # 采用原生标题栏：启动即最大化（maximized=True），用户可随时用原生标题栏
+    # 的「还原」按钮将窗口缩小为可自由调整的大小——不再需要自绘标题栏与
+    # Win32 拖拽（相关遗留代码已随 v2026.0908.2228 清理，见 README）。
+    # 配色用 DWM 属性改成与界面同色（core/win_theme.py），既保留系统的窗口
+    # 行为（贴边分屏 / 双击最大化 / 高 DPI），又不让浅色标题栏压在深色界面上。
+
+    # 窗口生命周期：webview.start() 在全部窗口关闭后返回，这里兜底做优雅收尾
+    # （杀 PowerShell 会话、停自动轮询线程），避免残留后台进程。
     try:
+        # start(func=...) 会在 GUI 循环起来后另开一个线程执行 func：那一刻窗口
+        # 才真正存在，正好用来套用深色标题栏（见 _theme_window）。
         webview.start(debug=args.debug, func=_theme_window, args=(window,))
     except KeyboardInterrupt:
         print("[main] 收到中断信号，正在退出…", file=sys.stderr)
     except Exception as exc:
+        # pythonnet / WebView2 初始化失败（典型：onedir 分发件的 DLL 带
+        # 「来自网络」标记，.NET Framework 拒绝加载）。MOTW 清理由上面兜底，
+        # 这里再兜一层：只读目录 / 企业策略删不掉 ADS 时，给用户一条能自己
+        # 操作的中文指引，而不是只留一句英文 RuntimeError + 通用崩溃弹窗。
         _report_gui_init_failure(exc)
         sys.exit(3)
     finally:

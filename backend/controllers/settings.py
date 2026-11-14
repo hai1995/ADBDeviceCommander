@@ -30,12 +30,22 @@ class SettingsMixin:
         merged, wrote = save_prefs_checked(patch)
         if "adb_dir" in patch:
             apply_adb_dir(merged.get("adb_dir"))
+            # 配置变更后立即回测一次，供前端即时更新关于页 / 引导文案
             merged["_adb_ok"] = self._probe_adb()["ok"]
+        # 保存目录改动后立刻回报「本机实际生效的目录」：用户填了一个本机
+        # 不存在的路径时，界面要马上说清已改用默认目录，而不是等下一次
+        # 截图失败才发现（配置文件里的原值保持不动）。
         if "save_dir" in patch:
+            # ensure_dir=True：用户在本机新填的路径本就不存在，这是正常
+            # 流程 —— 顺手建出来（与旧行为一致：回退目录会被自动创建）。
             eff, note = resolve_save_dir(merged, ensure_dir=True)
             merged["_save_dir_effective"] = eff
             merged["_save_dir_note"] = note
         if not wrote:
+            # 内存里已经生效（本次运行可用），但文件没写进去——重启就没了。
+            # 早前这里无条件回 ok=True，用户改完主题 / 保存目录 / 投屏参数，
+            # 界面一切正常，第二天打开又是旧设置，且没有任何线索可查。
+            # 典型场景：程序放在 Program Files，或 config.json 被标成只读。
             note = ("设置未能写入 {}（目录只读 / 文件被占用 / 磁盘已满？），"
                     "本次改动只在当前运行生效，重启后会恢复原值。"
                     "可把程序放到可写目录，或去掉 config.json 的只读属性后重试。".format(prefs_path()))
@@ -57,11 +67,12 @@ class SettingsMixin:
             return {"ok": False, "reason": "invalid_mode", "mode": mode}
         try:
             res = win_theme.apply_for_mode(mode, pid=os.getpid())
-        except Exception as e:
+        except Exception as e:  # 标题栏配色是锦上添花，任何异常都不能影响切换
             self._push_status(
                 "err", "⚠ 原生标题栏配色未能应用（界面主题已切换）：{}".format(e))
             return {"ok": False, "reason": "apply_failed", "mode": mode,
                     "error": str(e)}
+        # 非 Windows 上 win_theme 恒返回 unsupported —— 那是预期内，不算失败。
         applied = bool(res.get("ok")) or res.get("reason") == "unsupported"
         return {"ok": applied, "mode": mode, "title_bar": res}
 
@@ -183,8 +194,13 @@ class SettingsMixin:
         """把地址写进「最近连接」（config.json），并记住端口。"""
         recent = wifi.add_recent(self._wifi_recent(), addr)
         patch = {"wifi_recent": wifi.recent_to_pref(recent)}
+        # 只有地址里真的写了端口才更新 wifi_port。mDNS 服务名（Android 11+ 的
+        # 无线调试）不带端口，split_endpoint 会回落到默认 5555 —— 照抄就会把
+        # 用户自定义过的端口悄悄改回 5555。
         if wifi.has_explicit_port(addr):
             patch["wifi_port"] = wifi.split_endpoint(addr)[1]
+        # 配置只读时**不能让连接本身失败**，但也绝不能说没事：这条地址本该出现在
+        # 「最近连接」里，下次进来却发现是空的 —— 用户会以为程序没记住，只能重敲。
         try:
             wrote = save_prefs_checked(patch)[1]
         except Exception as e:
@@ -241,6 +257,8 @@ class SettingsMixin:
                     "address": addr}
         res = wifi.parse_connect_output(
             (r.stdout or "") + "\n" + (r.stderr or ""))
+        # 以 adb devices 的实际状态对账（见方法 docstring）。adb connect 报成功但
+        # 设备还没上线、报失败但设备其实已注册，都要在这里被纠偏，否则就是「假失败」。
         state = self._wifi_device_state(addr)
         if state == "device":
             return self._wifi_connect_ok(addr)
@@ -262,12 +280,18 @@ class SettingsMixin:
         if not res["ok"]:
             self._push_status("err", "✗ 无线连接失败（{}）：{}".format(addr, res["message"]), toast=True)
             return {"ok": False, "reason": res["message"], "address": addr}
+        # adb connect 成功且设备已在列表（状态非上述三类，理论不会到这）：兜底仍按
+        # 成功处理，避免「连上了却报失败」。
         return self._wifi_connect_ok(addr)
 
     def _wifi_connect_ok(self, addr):
         """连接成功的统一收尾：记最近、推成功、刷设备列表。"""
         recent = self._wifi_remember(addr)
         self._push_status("ok", "✓ 无线调试已连接：{}".format(addr), toast=True)
+        # 连上不代表 `adb devices` 立刻可见（首次连接要等设备完成认证），但刷新一次
+        # 能让已就绪的设备马上出现在左侧列表里。key 独立于常规刷新（refresh）：
+        # 那个 key 被自动刷新循环与手动刷新共用，撞上就会「复用存活线程」而这次
+        # 刷新被静默吞掉——表现是「提示已连接，但左边列表里没有这台设备」。
         self.workers.spawn("refresh_wifi", self.devices.refresh,
                            self._adb_argv(), True)
         return {"ok": True, "address": addr, "message": "连接成功",
@@ -301,7 +325,7 @@ class SettingsMixin:
             if err:
                 return {"ok": False, "reason": err}
         else:
-            addr = raw
+            addr = raw                      # mDNS 服务名：adb 原样接受
         try:
             r = subprocess.run([self._adb_argv(), "disconnect", addr],
                                **adb_kwargs(20))
@@ -372,6 +396,8 @@ class SettingsMixin:
         ok_any = any(x["ok"] for x in results)
         first_addr = next((x["address"] for x in results if x["address"]), "")
         if ok_any:
+            # 端口记不住时，下次「开启无线调试」会退回默认端口 —— 而这次明明
+            # 是按用户填的端口开的，之后连不上没有任何线索。宁可提示一句。
             try:
                 wrote = save_prefs_checked({"wifi_port": p})[1]
             except Exception as e:

@@ -15,6 +15,7 @@ match...]` —— 一串英文错误码 + 设备端原文。本模块把它翻�
 """
 import re
 
+# 失败码 → 用户能照着做的说明。键是设备的 INSTALL_* 常量，值是中文建议。
 INSTALL_REASONS = {
     "INSTALL_FAILED_ALREADY_EXISTS":
         "设备上已有同包名应用，勾选「覆盖安装（-r）」再试",
@@ -109,6 +110,7 @@ def parse_install_output(text):
         return {"ok": False, "code": code,
                 "message": (detail or code) + "（{}）".format(code)}
 
+    # 没有 `Failure [...]` 的失败：设备离线 / 文件不存在等 adb 客户端错误
     for needle, hint in _SYS_HINTS:
         if needle in low:
             return {"ok": False, "code": "", "message": hint}
@@ -117,6 +119,8 @@ def parse_install_output(text):
         return {"ok": True, "code": "", "message": "安装成功"}
 
     if "performing streamed install" in low and "failure" not in low:
+        # 老 adb 只在流式安装时打这一行，随后才是 Success；走到这里说明输出被
+        # 截断了（进程被杀）。按失败处理，并给出可执行的下一步。
         return {"ok": False, "code": "",
                 "message": "安装结果不完整（adb 输出被中断），重试一次；反复出现可 adb kill-server"}
 

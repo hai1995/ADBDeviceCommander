@@ -42,9 +42,13 @@ class CommandMixin:
         if cmd_obj is None:
             self._push_status("err", "⚠ 未找到命令：{}".format(cmd_id))
             return {"ok": False}
+        # 只判断「默认工作区的会话是否就绪」，不在这里**创建**会话：非默认工作区
+        # 的会话是懒创建的，在本次调用里建会阻塞 UI 线程 0.5~1.5 秒（powershell
+        # 冷启），表现为「点完命令界面卡一下」。真正的创建放在后台 worker 里。
         if self._ws_id(ws) == self.WS_DEFAULT and self.session is None:
             self._push_status("err", "⚠ 会话尚未初始化，请稍后重试。")
             return {"ok": False}
+        # 命中一次计一次使用频次（驱动「常用命令靠前」排序）
         self._bump_click(cmd_id)
         self.workers.spawn(None, self._execute, cmd_obj, self._ws_id(ws))
         return {"ok": True}
@@ -52,6 +56,7 @@ class CommandMixin:
     def save_commands(self, commands):
         """前端维护的命令（界面增删改后）整体回写 commands.json。
 
+        commands 已是归一化结构（仅用户自定义命令；前端已过滤掉内置默认）。
         后端只负责原子写回与内存态同步（state.commands），不重新归一化——
         前端持有的就是界面真实展示的命令，直接写回能完整保留 clickCount，
         避免下次启动「常用命令靠前」排序被重置。失败回 err 状态并 ok=False。
@@ -62,6 +67,8 @@ class CommandMixin:
         if not ok:
             self._push_status("err", "⚠ 保存命令失败：{}".format(err))
             return {"ok": False, "reason": err}
+        # 同步内存态：用户命令并入内置默认，保持与 boot 后一致，使后续
+        # run_command / 点击计数基于最新列表（state.commands 是 run_command 的来源）。
         user_cmds = []
         for c in (commands or []):
             if isinstance(c, dict):
@@ -69,11 +76,18 @@ class CommandMixin:
                 c.pop("builtin", None)
                 user_cmds.append(c)
         self.state.commands = merge_builtins(user_cmds)
+        # 用 user_cmds 的长度而不是 len(commands)：commands 为 None 时后者
+        # 直接 TypeError —— 而此刻文件其实已经写成功了，用户看到的是一条
+        # 「保存失败」似的异常，重试还是同样的结果。顺带也扣掉了非对象条目。
         self._push_status("ok", "✓ 命令已保存（%d 条）" % len(user_cmds))
         return {"ok": True}
 
     def export_commands(self):
-        """导出用户自定义命令（界面维护的命令，已过滤内置默认），供备份 / 分享。"""
+        """导出用户自定义命令（界面维护的命令，已过滤内置默认），供备份 / 分享。
+
+        返回归一化结构（与 import_commands 互为逆操作）：仅用户命令，
+        含 id / name / labels / commands / clickCount / inputOnly。
+        """
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
         user_cmds = []
@@ -88,15 +102,24 @@ class CommandMixin:
                 "commands": d.get("commands") or [],
                 "clickCount": d.get("clickCount") or 0,
                 "inputOnly": bool(d.get("inputOnly")),
+                # 备注（可选）：支持换行，导出/导入后恢复原样。
+                # 只接受非空字符串 —— 用户手写 json 里 "note": 123 这类
+                # 类型错误不能让导出产物坏掉；空串也不写（保持文件干净）。
                 **({"note": d["note"]} if isinstance(d.get("note"), str)
                                         and d["note"].strip() else {}),
+                # 自定义按钮配色：导出要能完整带去别人的机器上，否则备份
+                # 恢复后「颜色没了」；没有配色的命令不写空字段。
                 **({"bg": d["bg"]} if d.get("bg") else {}),
                 **({"fg": d["fg"]} if d.get("fg") else {}),
             })
         return {"ok": True, "commands": user_cmds, "count": len(user_cmds)}
 
     def export_commands_save(self):
-        """把导出的命令写入「程序运行处」目录并返回本地路径（前端可 open_local_file）。"""
+        """把导出的命令写入「程序运行处」目录并返回本地路径（前端可 open_local_file）。
+
+        默认落在程序所在目录（exe 旁 / 开发态项目根），用户不指定路径时
+        即可在程序同目录找到备份文件；该目录不可写时回退系统临时目录。
+        """
         data = self.export_commands()
         if not data.get("ok"):
             return data
@@ -104,6 +127,11 @@ class CommandMixin:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         name = "commands_export_{}.json".format(ts)
         primary = program_dir()
+        # 先试程序目录，**真的写不进去才**退到系统临时目录。早前只判断
+        # makedirs 有没有抛错：程序装在 Program Files 这类只读位置时目录本来
+        # 就在，makedirs 一声不响地成功，"回退" 永远不触发 —— 用户点「导出
+        # 备份」只得到一句 Permission denied，而导出恰恰是他换电脑前最需要
+        # 做的事。unique_path：同一秒内连点两次不会把第一份覆盖掉。
         last_err = ""
         for out_dir in (primary, tempfile.gettempdir()):
             try:
@@ -121,20 +149,39 @@ class CommandMixin:
         return {"ok": False, "reason": "写入失败：{}".format(last_err)}
 
     def _dialog_types(self, pairs):
-        """把 ((描述, 通配符), ...) 转成当前 pywebview 版本接受的 file_types。"""
+        """把 ((描述, 通配符), ...) 转成当前 pywebview 版本接受的 file_types。
+
+        pywebview 在 5.x 之前 / 之后改了 file_types 格式：
+
+        * 旧版(<5)：期望 ``(('描述', '*.ext'), ...)`` 这样的元组；
+        * 新版(>=5)：期望 ``('描述 (*.ext)', ...)`` 这样的字符串，内部用
+          ``re.search`` 解析。
+
+        若按旧版元组传给新版，``parse_file_type`` 会对「元组」做正则匹配，
+        抛出 ``TypeError: expected string or bytes-like object`` —— 正是
+        Windows 下导入报错的根因。这里运行时探测一次，生成正确格式。
+        """
         pairs = tuple(pairs)
         try:
             from webview.util import parse_file_type
         except Exception:
+            # 拿不到探测函数时，回退到兼容性最好的「字符串格式」
             return tuple("{} ({})".format(desc, ext) for desc, ext in pairs)
+        # 探测新版字符串格式是否可用：能解析字符串就说明是新版
         try:
             parse_file_type("探测 (*.json)")
         except Exception:
+            # 解析失败 -> 旧版，用元组格式
             return pairs
+        # 新版：拼成 '描述 (*.ext)' 字符串
         return tuple("{} ({})".format(desc, ext) for desc, ext in pairs)
 
     def _open_dialog(self, pairs, label=""):
-        """弹原生「打开文件」对话框，返回选中文件路径；取消 / 不可用返回空串。"""
+        """弹原生「打开文件」对话框，返回选中文件路径；取消 / 不可用返回空串。
+
+        统一收口各版本的 create_file_dialog 签名差异与取消语义，调用方只需
+        判断返回是否为空。
+        """
         try:
             import webview
         except Exception as e:
@@ -156,10 +203,14 @@ class CommandMixin:
                 webview.OPEN_DIALOG, directory=directory,
                 allow_multiple=False, file_types=ft)
         except TypeError:
+            # 不同版本签名略有差异，做一次位置参数兜底
             try:
                 files = win.create_file_dialog(
                     webview.OPEN_DIALOG, directory, False, None, ft)
             except TypeError:
+                # 最后一层兜底同样要兜住异常：否则 create_file_dialog 再抛一次
+                # 就冒到 js_api 桥接，用户看到的是「调用后端失败：...」这种
+                # 与「打开对话框」毫无关系的提示。
                 try:
                     files = win.create_file_dialog(
                         webview.OPEN_DIALOG, directory, False)
@@ -174,7 +225,15 @@ class CommandMixin:
         return files[0] if isinstance(files, (list, tuple)) else str(files)
 
     def import_commands_dialog(self):
-        """弹出原生文件选择框（默认定位到程序目录），读取 JSON 并导入合并。"""
+        """弹出原生文件选择框（默认定位到程序目录），读取 JSON 并导入合并。
+
+        对话框复用 _open_dialog：早前这里另抄了一份（连三种签名兜底一起抄），
+        两处随即开始漂移 —— _open_dialog 早已兼容「后端返回字符串而不是列表」
+        （GTK / QT 在 allow_multiple=False 时正是如此），这份没有，于是
+        `files[0]` 取到的是**路径的第一个字符**，接着报
+        「读取文件失败：[Errno 2] No such file or directory: 'C'」。
+        取消选择时返回 reason="cancelled"，调用方可据此静默忽略。
+        """
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
         path = self._open_dialog((("JSON 命令备份", "*.json"),
@@ -182,6 +241,10 @@ class CommandMixin:
         if not path:
             return {"ok": False, "reason": "cancelled"}
         try:
+            # utf-8-sig：用户在记事本里「另存为 UTF-8」会写入 BOM，而
+            # json.loads 遇 \ufeff 直接报 "Unexpected UTF-8 BOM" —— 一个看不见的
+            # 字符就让导入失败，且错误信息完全指不到真正原因。utf-8-sig 同时
+            # 兼容无 BOM 的普通 UTF-8（与 config.json / 命令库的读法一致）。
             with open(long_path(path), encoding="utf-8-sig") as f:
                 text = f.read()
         except Exception as e:
@@ -189,12 +252,19 @@ class CommandMixin:
         return self.import_commands(text)
 
     def import_commands(self, payload):
-        """导入命令（备份 / 分享文件）。payload 可为：列表 / 字典 / JSON 字符串。
-        按 id 合并：已存在则覆盖，不存在则新增（缺失 id 自动生成）。"""
+        """导入命令（备份 / 分享文件）。payload 可为：
+          * 列表：[{id,name,labels,commands,...}, ...]
+          * 字典：{"commands": [...]}
+          * 上述结构的 JSON 字符串
+        按 id 合并：已存在则覆盖，不存在则新增（缺失 id 自动生成）。
+        导入后整体回写 commands.json 并同步内存态。
+        """
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
         if isinstance(payload, str):
             try:
+                # 前端 / 第三方工具传进来的字符串可能带 BOM（记事本另存为 UTF-8），
+                # json.loads 对 \ufeff 直接报 "Unexpected UTF-8 BOM"。
                 payload = json.loads(payload.lstrip("\ufeff"))
             except Exception as e:
                 return {"ok": False, "reason": "JSON 解析失败：{}".format(e)}
@@ -239,7 +309,13 @@ class CommandMixin:
 
     @staticmethod
     def _norm_cmd_id(raw_id):
-        """命令 id 归一化（与 core.commands.normalize_commands 同一规则）。"""
+        """命令 id 归一化（与 core.commands.normalize_commands 同一规则）。
+
+        导入的备份可能来自手写 json：`"id": 1`（数字）。不归一化的话它会以
+        整数 1 作为合并键，与内存态里的 "1" 各占一条 —— 文件里存下两条只差
+        一个引号的同 id 命令，下次启动时后一条被判重名、静默改成 auto2，
+        用户看到的是「导入成功，但那条命令莫名其妙重复出现」。
+        """
         if isinstance(raw_id, str):
             return raw_id.strip()
         if isinstance(raw_id, (int, float)) and not isinstance(raw_id, bool):
@@ -247,7 +323,10 @@ class CommandMixin:
         return ""
 
     def load_commands(self):
-        """返回当前完整命令列表（用户命令 + 内置默认，已 merge_builtins 归一化）。"""
+        """返回当前完整命令列表（用户命令 + 内置默认，已 merge_builtins 归一化）。
+
+        前端用于导入 / 外部改动后刷新界面（避免重启应用）。
+        """
         if self.state.shutting_down:
             return {"ok": False, "reason": "shutting_down"}
         out = []
@@ -259,7 +338,8 @@ class CommandMixin:
     def run_custom(self, text, ws=None):
         """执行自定义命令：与快捷指令同源——按受控设备逐台循环并通过
         adb_inject.transform 自动注入 `-s <serial>`，彻底告别
-        "more than one device/emulator"。纯 PC 脚本走单次执行旁路。
+        "more than one device/emulator"。纯 PC 脚本（不含 adb/scrcpy）
+        走单次执行旁路。
 
         ws：指令台工作区（子 tab）id，省略即默认工作区。
         """
@@ -271,13 +351,18 @@ class CommandMixin:
         if self._ws_id(ws) == self.WS_DEFAULT and self.session is None:
             self._push_status("err", "⚠ 会话尚未初始化，请稍后重试。")
             return {"ok": False}
+        # 复用 _execute 的「按设备展开 + transform + shell 合并」完整链路
         self.workers.spawn(None, self._execute, {
             "id": "__custom__", "name": "自定义命令", "commands": [{"command": text}],
         }, self._ws_id(ws))
         return {"ok": True}
 
     def stop_run(self, ws=None):
-        """终止**指定工作区**的当前命令。"""
+        """终止**指定工作区**的当前命令（等价 Tk 版 ctrl+c / 停止）。
+
+        ws 是关键：工作区 1 正在跑长命令时，用户在工作区 2 点「停止」只应停掉
+        工作区 2 自己的那条 —— 一律停 self.session 会顺手掐掉另一个工作区的活。
+        """
         wid = self._ws_id(ws)
         sess = self._ws_session(wid, create=False)
         if sess is not None:
@@ -292,8 +377,19 @@ class CommandMixin:
         return {"ok": True}
 
     def _execute(self, cmd_obj, ws=None):
-        """执行一条快捷指令：按需逐设备循环 + 每条命令带 delay。"""
-        wid = self._ws_set_cur(ws)
+        """执行一条快捷指令：按需逐设备循环 + 每条命令带 delay。
+
+        用户命令「单飞」：**同一工作区内**同一时刻只允许一条命令真正执行
+        （每个工作区一把 _ws_lock，排队），后续命令等上一条结束后再跑——避免
+        连点多条时输出交错混淆；也保证 stop_run 的语义是「停掉当前这一条」。
+        不同工作区之间互不排队（各自独立的会话与锁）。shutdown 后排队任务直接
+        放弃，不再往已终止的会话里写命令。
+
+        整体兜异常：命令下发链路（transform / 会话 / 设备快照）任何未预期错误
+        都只转化为一条错误状态，绝不让 worker 线程裸抛到 threading.excepthook
+        （那只会落一份崩溃日志，用户在界面上看不到任何反馈）。
+        """
+        wid = self._ws_set_cur(ws)      # 线程局部：本线程内所有播报归到该工作区
         sess = self._ws_session(wid)
         try:
             with self._ws_lock(wid):
@@ -324,6 +420,11 @@ class CommandMixin:
                         self._ws_status(
                             "err", "⚠ 命令执行出现异常：{}".format(ex))
                 finally:
+                    # 交互式 adb shell（`adb shell` 直通）结束后会话仍是交互态：此时
+                    # 「停止」按钮必须继续亮着，用户才能把这条交互会话 kill 掉。
+                    # AppState 的 busy 本就包含交互态，但没人通知它——这里在 end_run
+                    # 之前按会话实际状态同步一次（交互态下 busy 不变，不会重复广播；
+                    # 非交互命令照常由 end_run 熄灭按钮）。
                     self._sync_stop_state(ws=wid)
                     busy, changed = self._ws_end(wid)
                     if changed:
@@ -332,7 +433,13 @@ class CommandMixin:
             self._ws_clear_cur()
 
     def _no_device_hint(self, name):
-        """「命令需要设备，却一台都不可下发」时的提示。"""
+        """「命令需要设备，却一台都不可下发」时的提示。
+
+        设备离线 / 未授权 / 正在重连时 `selected_serials()` 同样是空，与「压根
+        没勾选」表现一致。旧提示一律是「请先在左侧勾选设备」，于是用户会去点
+        一个**已经勾好**的设备，反复几次也解决不了——真正要处理的是设备状态
+        （授权弹窗没点、USB 掉了、adb 掉线）。
+        """
         try:
             checked = [s for s, on in (self.devices.device_checked or {}).items()
                        if on]
@@ -345,7 +452,15 @@ class CommandMixin:
         return "⚠ 命令「{}」需要指定设备，请先在左侧勾选设备。".format(name)
 
     def _run_entries(self, entries, serial):
-        """逐条下发命令；返回 False 表示执行被中断（超时/停止）。"""
+        """逐条下发命令；adb shell 交互 / 合并 / delay 与 legacy 语义一致。
+        返回 False 表示执行被中断（超时/停止），上层据此停止后续设备。"""
+        # 取局部引用：shutdown() 会把会话置空（kill 完再清引用），而本方法跑在
+        # 后台 worker 里。用会话自身的话，关窗恰好发生在这条命令序列中途时，
+        # 下一条命令会踩到 None 抛 AttributeError，被 _execute 翻译成一句
+        # 「命令执行出现异常：'NoneType' object has no attribute 'run'」—— 关窗
+        # 瞬间用户看到一条完全没有意义的报错。这里静默放弃即可。
+        # 会话按**当前线程所属工作区**取（见 _ws_cur）：不同工作区各跑各的，
+        # 谁也不会把命令塞进别人的 shell。
         sess = self._ws_session(self._ws_cur(), create=False)
         if sess is None:
             return False
@@ -357,17 +472,29 @@ class CommandMixin:
         for cmd, end_idx in merged:
             if not cmd.strip():
                 continue
+            # 关窗 / 已开始收尾：剩下的命令不再下发（写进一个正在关闭的会话只会
+            # 得到一串失败，用户还来不及看）
             if self.state.shutting_down:
                 return False
+            # root / unroot 切换保护（见 _skip_root_switch）：已在目标状态、
+            # 或该设备有进行中的录屏 / 抓取时，本条命令不下发。
             if self._skip_root_switch(cmd, serial):
                 continue
             stripped = cmd.strip()
             was_interactive = bool(sess.in_interactive_shell)
+            # 交互式（直通）判定的三个来源：
+            #   1. 已经在子 shell 里（上一轮 adb shell / powershell 的直通）；
+            #   2. 裸 `adb shell`：后面几条已被 merge 合并，只剩单独一条时才直通；
+            #   3. 裸 powershell / cmd / bash —— 这类命令没人合并，它在持久会话
+            #      里另起一个进程抢走 stdin，后面每条的结束标记都被内层读走；
+            #      `exit` 更是连标记一起丢掉再退出，外层永远等不到 → 死锁。
             interactive = (was_interactive
                            or bool(SHELL_INTERACTIVE_RE.match(stripped))
                            or is_subshell_command(stripped))
             self._push_cmd(cmd)
             if interactive and not was_interactive:
+                # 推在指令台而不是顶栏：用户此刻盯着就是这块面板，而且「后续命令
+                # 去哪了」本身就是命令流的一部分，混进全局跑马灯很容易错过。
                 self._push_console(
                     "info",
                     "» 已进入交互式 shell：后续命令直接送入该子 shell，"
@@ -375,12 +502,22 @@ class CommandMixin:
             if interactive:
                 ok = sess.run(cmd, interactive=True)
                 if ok and _EXIT_RE.match(stripped):
+                    # `exit` 退出的是内层子 shell，外层会话仍然活着。不复位
+                    # 直通态的话，之后每条命令都只能"盲写"（不写结束标记、
+                    # 无法判断成败），等于把会话永久降级。
                     sess.leave_interactive()
+                    # 子进程退出是异步生效的：紧接着写的命令有概率仍被投递给
+                    # 正在退出的那个 shell，留一点间隔再继续。
                     self._interruptible_sleep(0.15)
                     self._push_console("info", "« 已退出交互式子 shell，恢复逐条执行")
             else:
+                # 兜底超时：没有它，任何一条"哑"命令（读 stdin 的工具、卡住的
+                # adb）都会永久占用 _user_lock，后续命令全部排队 —— 界面表现
+                # 就是「整程序卡死、点不动」。超时由 run() 内部杀会话并返回 False。
                 ok = sess.run(cmd, timeout=timeout)
             if not ok:
+                # 带上会话给的失败原因：只写「执行中断」时，用户分不清是自己点了
+                # 停止、命令超时，还是 powershell 会话被安全软件干掉后静默重建了。
                 reason = (getattr(sess, "last_error", "") or "").strip()
                 self._ws_status("info", "✗ 执行中断" + ("：{}".format(reason) if reason else ""))
                 return False
@@ -388,6 +525,9 @@ class CommandMixin:
             if not interactive and 0 <= end_idx < len(entries):
                 delay = int(entries[end_idx].get("delay", 0) or 0)
             if delay:
+                # 旧实现把 Start-Sleep 塞进 powershell 会话：命令间 delay 超过
+                # run(timeout=10) 会被误判超时杀掉整个会话，且占用 shell 影响
+                # 并发命令。改为 Python 侧可打断 sleep（不占会话、可被停止）。
                 self._interruptible_sleep(delay / 1000.0)
         self._ws_status("info", "✓ 完成")
         return True
@@ -401,10 +541,25 @@ class CommandMixin:
         return v if v > 0 else None
 
     def _skip_root_switch(self, cmd, serial):
-        """本条命令是否应跳过（不下发）：root 状态切换的两种「跳过」情形。"""
+        """本条命令是否应跳过（不下发）：root 状态切换的两种「跳过」情形。
+
+        `adb root` / `adb unroot` 会重启设备端 adbd，杀掉经它拉起的
+        screenrecord / tinycap（录屏视频缺 moov、不完整），并断开 logcat
+        监控 / 抓取与文件操作。而重复切换（已在目标状态）除了重启没有任何
+        效果——这是最常见的误伤：用户随手再点一次「root」，在录的屏就断了。
+        因此下发前逐设备判断：
+
+          1. 已在目标状态（要 root 的已 root / 要 unroot 的未 root）→ 跳过；
+          2. 状态确实要变、但该设备有进行中的任务 → 跳过并说明，避免静默
+             数据丢失（想切换请先停止录屏 / 抓取）。
+
+        复合命令（`adb root && adb shell xx`）无法只跳过其中一段，整条跳过。
+        返回 True 表示调用方应 `continue`（本条不下发，其 delay 一并跳过）。
+        """
         intent = root_intent(cmd)
         if not intent:
             return False
+        # 无序列号（纯 PC 旁路）不可能是设备 root 切换，直接放行
         if not serial:
             return False
         adb = self.state.adb_path or "adb"
@@ -412,17 +567,24 @@ class CommandMixin:
             rooted = root_state(adb, serial)
         except Exception:
             rooted = None
+        # 无法确认（adb 瞬断 / 设备忙 / 该 ROM 没有 id 与 whoami）时**不能猜**：
+        # 猜成「未 root」会让 `adb unroot` 被判成「已在目标状态」直接跳过 ——
+        # 用户明明 root 了却 unroot 不掉，界面还告诉他「已未 root」，方向反了。
+        # 这时放行指令并说明，是否切换交给用户判断；「有进行中任务则拦」的
+        # 保护照常生效（状态未知不代表可以打断录屏）。
         if rooted is None:
             self._ws_status(
                 "warn",
                 "⚠ 无法确认设备 {} 当前是否 root（adb 未返回 id/whoami 输出），"
                 "已按指令下发 `{}`；若它已在目标状态，这次切换只会重启 adbd。".format(serial, cmd.strip()))
+        # 已在目标状态：切换是零收益的无谓重启
         elif (intent == "root") == bool(rooted):
             self._ws_status(
                 "info",
                 "ℹ 设备 {} 已{}，跳过 `{}`（重复切换只会重启 adbd，"
                 "可能中断进行中的录屏 / 抓取）".format(serial, "处于 root" if rooted else "未 root", cmd.strip()))
             return True
+        # 状态确实要变：该设备有进行中的任务则跳过（任务会随 adbd 重启全断）
         busy = self._device_busy_tasks(serial)
         if busy:
             self._ws_toast(
@@ -450,7 +612,12 @@ class CommandMixin:
         return tasks
 
     def _interruptible_sleep(self, seconds):
-        """Python 侧延时等待，stop_run / 窗口关闭时提前返回。"""
+        """Python 侧延时等待，stop_run / 窗口关闭时提前返回。
+
+        以 50ms 步长轮询而非一次性 sleep：kill 会让 ShellSession.aborted 置位，
+        延时中的批处理能及时感知停止，关闭时也无需等满整个 delay。
+        """
+        # 按当前线程所属工作区取会话（不创建：延时期间不该顺手拉起一个 shell）
         sess = self._ws_session(self._ws_cur(), create=False)
         deadline = time.time() + seconds
         while time.time() < deadline:

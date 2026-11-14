@@ -148,7 +148,8 @@ def _pick_folder(initial=None):
 
     优先走 pywebview 的原生对话框（Windows 下是 WinForms 的 FolderBrowserDialog，
     自带 owner 窗口与置前行为，也可定位到初始目录）。路径非空即成功；否则
-    reason ∈ {"cancelled", "unsupported", "error:<详情>"}
+    reason ∈ {"cancelled", "unsupported", "error:<详情>"}。
+
     区分这三档不是为了好看：把「用户点了取消」和「对话框根本没打开」都揉成
     一个 None，前台就只能一律静默 —— 那正是「按钮点了没反应」的成因。
     """
@@ -190,6 +191,8 @@ def _pick_folder(initial=None):
 class FileMixin:
     """设备文件浏览/增删改/上传下载/预览。"""
 
+    # 目录刷新合并窗口（秒）。一次多选上传 N 个文件会在几秒内连续完成 N 次
+    # 上传，每次都刷一次目录的话就是 N 次 `adb shell ls` + N 次列表重建。
     _FILE_REFRESH_DEBOUNCE_S = 0.4
 
     _FILE_OP_LABELS: ClassVar[dict[str, str]] = {
@@ -202,6 +205,9 @@ class FileMixin:
     def open_save_dir(self, dir_path=None):
         """在系统文件管理器打开保存目录（Windows 用 explorer / startfile）。"""
         d = (dir_path or "").strip() or self._default_save_dir()
+        # 保留建目录的真实原因：路径落在只读位置 / 父目录不存在时，旧实现把
+        # OSError 整个吞掉，转头发一句「目录不存在」——用户照着这句话去查，
+        # 目录明明在，真正的问题是没权限。
         mkdir_err = ""
         try:
             os.makedirs(long_path(d), exist_ok=True)
@@ -236,6 +242,7 @@ class FileMixin:
         """
         path, why = _pick_folder(current)
         if not path and why == "unsupported" and sys.platform.startswith("win"):
+            # pywebview 拿不到活动窗口（极少见）：退到系统原生对话框
             path = _win_select_folder("选择保存目录")
             why = "" if path else "cancelled"
         if path:
@@ -258,8 +265,16 @@ class FileMixin:
         if not serial:
             self._push_status("warn", "⚠ 请先在左侧勾选一台设备，再浏览它的文件")
             return {"ok": False, "reason": "no_device"}
+        # 每次列目录用**唯一** worker key + 记录「该设备最新一次请求」：
+        #  · 唯一 key：旧实现固定用 "file_<serial>"，上一次 `ls -la` 还没结束时
+        #    （大目录 / 慢设备）用户再点进另一个目录，Workers 会按同名去重直接
+        #    丢弃新请求且不报错 —— 界面停在旧目录，看起来「点了没反应」；
+        #  · 最新序号：新请求发起后，先前那次迟到的响应会被丢弃，避免旧目录的
+        #    内容覆盖刚打开的目录。
         seq = next(self._file_seq)
         self._file_req[serial] = seq
+        # 记住「这台设备当前看的是哪个目录」：批量上传的合并刷新据此判断
+        # 用户是否已经切走（切走了就别再把他弹回旧目录）。
         self._file_dir[serial] = path
         self.workers.spawn("filelist_%s_%d" % (serial, seq),
                            self._run_file_op, self._do_file_list,
@@ -313,6 +328,8 @@ class FileMixin:
             self._file_refresh_timers.pop(serial, None)
         if self.state.shutting_down:
             return
+        # 用户在这 0.4 秒里点进了别的目录：这次刷新只会把界面弹回上传时的
+        # 目录（而文件其实已经传好了）。直接丢弃，别打断他的浏览。
         cur = self._file_dir.get(serial)
         if cur and cur != target:
             return
@@ -418,6 +435,13 @@ class FileMixin:
         import base64
         import tempfile
         import uuid
+        # 临时文件名带随机串：多设备/多文件并行上传同名文件时，固定名会互相覆盖，
+        # 导致其中一个线程上传的是别人的内容（或中途被删而上传失败）。
+        # 前端传来的 name 一律先取 basename 并净化：它若含路径分隔符，会把临时文件
+        # 写到 %TEMP% 之外（甚至覆盖任意可写文件）。
+        # 内容为空就直接失败：以前会照常写出一个 0 字节中转文件、push 上去，
+        # 然后报「✓ 上传完成」—— 设备上多出一个空文件，用户以为传成功了。
+        # 前端那一侧也已拦住，这里再兜一层（桥接直调 / 自动化脚本同样受保护）。
         if not (b64 or "").strip():
             self._push_status(
                 "err", "⚠ 上传失败 %s：没有收到文件内容（读取结果为空）"
@@ -433,6 +457,8 @@ class FileMixin:
         except Exception as e:
             self._push_status("err", "⚠ 解码上传文件失败：{}".format(e))
             return
+        # try/finally：upload 抛异常（大文件 push 超过 120s 超时、adb 中途消失）时
+        # 旧实现会跳过 os.remove，每次失败都在 %TEMP% 留下一个多 MB 的孤儿文件。
         try:
             ok, err = self.file_svc.upload(serial, tmp, remote)
         finally:
@@ -444,9 +470,12 @@ class FileMixin:
             self._push_status("ok", "✓ 上传完成: {}".format(remote))
         else:
             self._push_status("err", "⚠ 上传失败 {}: {}".format(remote, err))
+        # 合并刷新：多选上传时 N 个文件只刷一次目录（见 _schedule_file_refresh）
         self._schedule_file_refresh(serial, remote)
 
     def file_download(self, serial, remote, local_dir):
+        # 每个文件一个独立 worker key（含序列号），保证同一设备批量「下载选中」
+        # 时所有文件各自成线程并行 pull，不会被 "fileop_<serial>" 去重吞掉。
         return self._file_op(
             serial, self._do_file_download, remote,
             local_dir or self._default_save_dir(),
@@ -460,6 +489,8 @@ class FileMixin:
             self._push_status("err", "⚠ 下载失败 {}: {}".format(remote, err))
 
     def file_view(self, serial, path):
+        # 查看同样用唯一 key：连续点开两个文件的「查看」时，固定 key 会让第二个
+        # 请求被去重静默丢弃（用户看到的是上一个文件的内容 / 什么都没发生）。
         return self._file_op(serial, self._do_file_view, path,
                              key="fileview_%s_%d" % (serial,
                                                      next(self._file_seq)))
@@ -471,12 +502,14 @@ class FileMixin:
         避免把明显非法的输入透传给系统打开机制。
         """
         try:
+            # 长路径安全：这里只做「存在性校验」，真正的打开交给系统
+            # （os.startfile 不认 \\?\ 前缀，所以路径原样传）。
             if not path or not path_isfile(path):
                 why = "文件不存在或已被清理"
                 self._push_status("err", "⚠ 无法打开文件：{}".format(why))
                 return {"ok": False, "reason": why}
             if os.name == "nt":
-                os.startfile(path)
+                os.startfile(path)                    # Windows：文件关联程序
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", path])
             else:

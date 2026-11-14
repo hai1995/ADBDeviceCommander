@@ -261,9 +261,9 @@ def ensure_deps(required, auto_install: bool) -> None:
         if _installed(dist_name):
             continue
         if not auto_install:
-            sys.exit("[错误] 缺少依赖 %s（%s）。请先 pip install %s，"
-                     "或去掉 --no-deps 让脚本自动安装。" % (dist_name, why, dist_name))
-        print("[1/4] 安装 %s（%s）…" % (dist_name, why))
+            sys.exit("[错误] 缺少依赖 {}（{}）。请先 pip install {}，"
+                     "或去掉 --no-deps 让脚本自动安装。".format(dist_name, why, dist_name))
+        print("[1/4] 安装 {}（{}）…".format(dist_name, why))
         subprocess.check_call([sys.executable, "-m", "pip", "install", dist_name])
 
 
@@ -285,7 +285,7 @@ def pyinstaller_args(args) -> list:
     # 注意：PyInstaller 会把相对路径按「spec 所在目录」解析，而 spec 落在 build/ 下，
     # 所以这里一律传绝对路径，避免把工程根的文件找成 build/ 下的同名文件。
     for src, dst in BUNDLED_DATA:
-        out += ["--add-data", "%s%s%s" % (ROOT / src, os.pathsep, dst)]
+        out += ["--add-data", "{}{}{}".format(ROOT / src, os.pathsep, dst)]
     for mod in EXCLUDE_MODULES:
         out += ["--exclude-module", mod]
     # numpy 默认不进包（见 OPTIONAL_EXCLUDE_MODULES 的说明）：
@@ -366,7 +366,7 @@ def make_source_zip(root: Path = ROOT, dest_dir: Path = None) -> Path:
     """
     dest_dir = Path(dest_dir or root / "dist")
     dest_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = dest_dir / ("ADBDeviceCommander_v%s.zip" % app_version(root))
+    zip_path = dest_dir / ("ADBDeviceCommander_v{}.zip".format(app_version(root)))
     # 顶层目录名 = zip 文件名去扩展名，解压后一眼看出是哪个版本
     top = zip_path.stem
     # 排除规则按「目录名」匹配，只能挡住名为 dist 的那个默认目录；
@@ -408,7 +408,7 @@ def win_package_name(root: Path = ROOT) -> str:
     出「该给 Windows 用户下哪一个」，改名会让更新检查退化成「随便挑一个 zip」。
     tests/test_build.py 有断言盯着这两个常量一致。
     """
-    return "ADBDeviceCommander_v%s_win64.zip" % app_version(root)
+    return "ADBDeviceCommander_v{}_win64.zip".format(app_version(root))
 
 
 def make_win_package(target: Path, dist_dir: Path = None,
@@ -473,7 +473,7 @@ def make_win_package(target: Path, dist_dir: Path = None,
                     for fn in sorted(filenames):
                         _add(zf, Path(dirpath) / fn, target)
     if missing:
-        print("[警告] 分发件里缺少 %s（产物目录里没有）" % "、".join(missing),
+        print("[警告] 分发件里缺少 {}（产物目录里没有）".format("、".join(missing)),
               file=sys.stderr)
     print("分发件：%s（%d 个文件，%.1f MB，顶层目录 %s/）"
           % (zip_path, count, zip_path.stat().st_size / 1024 / 1024, top))
@@ -543,13 +543,11 @@ def diagnose_build_failure(log: str, staged_exe: Path) -> tuple:
         if size_mb >= _MIN_EXE_MB:
             return "tolerable", (
                 "PyInstaller 收尾时给 exe 打构建时间戳失败（文件被杀毒软件 / "
-                "网盘同步瞬时占用），但 exe 本体已完整写出（%.1f MB）。"
-                % size_mb)
+                "网盘同步瞬时占用），但 exe 本体已完整写出（{:.1f} MB）。".format(size_mb))
         return "locked", (
             "构建输出被占用且未生成完整产物。请先在任务管理器退出正在运行的 "
             "「ADB设备指令台.exe」（确认无残留进程），并把工程目录加入杀毒软件 "
-            "排除项（或临时关闭实时保护）后重跑；暂存目录 %s 下的旧文件也可先删掉。"
-            % staged_exe.parent)
+            "排除项（或临时关闭实时保护）后重跑；暂存目录 {} 下的旧文件也可先删掉。".format(staged_exe.parent))
     return "fatal", ""
 
 
@@ -591,20 +589,20 @@ def verify_dist(target, mode, exe):
     """
     problems = []
     if not exe.exists():
-        problems.append("主程序缺失：%s" % exe)
+        problems.append("主程序缺失：{}".format(exe))
     else:
         try:
             mb = exe.stat().st_size / 1024 / 1024
         except OSError:
             mb = 0.0
         if mb < _MIN_EXE_MB:
-            problems.append("主程序体积异常（%.2f MB，疑似未完整生成）：%s" % (mb, exe))
+            problems.append("主程序体积异常（{:.2f} MB，疑似未完整生成）：{}".format(mb, exe))
     if mode == "onedir" and target.is_dir():
         # PyInstaller 6 起依赖收在 _internal/；更早版本直接平铺在 exe 同目录。
         # 两种情况都要求「exe 之外还有东西」，否则就是只拷了 exe 的残包。
         others = [p for p in target.iterdir() if p.name != exe.name]
         if not others:
-            problems.append("目录模式缺少运行时依赖（_internal / DLL）：%s" % target)
+            problems.append("目录模式缺少运行时依赖（_internal / DLL）：{}".format(target))
     return problems
 
 def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
@@ -616,7 +614,7 @@ def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
     """
     src_exe = src_dir / exe.name
     if not src_exe.exists():
-        print("[错误] 未找到产物 %s" % src_exe, file=sys.stderr)
+        print("[错误] 未找到产物 {}".format(src_exe), file=sys.stderr)
         return None
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -631,7 +629,7 @@ def publish_from_stage(src_dir: Path, target: Path, exe: Path, mode: str):
         if isinstance(e, PermissionError) or "being used by another process" in str(e):
             hint = ("（目标文件被占用：请先退出正在运行的「ADB设备指令台.exe」"
                     "——任务管理器里确认无残留进程——或把 dist/ 加入杀毒排除项）")
-        print("[错误] 拷入 dist 失败：%s%s" % (e, hint), file=sys.stderr)
+        print("[错误] 拷入 dist 失败：{}{}".format(e, hint), file=sys.stderr)
         return None
     return exe
 
@@ -683,9 +681,8 @@ def main(argv=None) -> int:
     args.work_dir = Path(args.work_dir).resolve()
 
     print("=" * 64)
-    print("ADB 设备指令台 · PyInstaller 打包（%s / %s）"
-          % (args.mode, "console" if args.console else "windowed"))
-    print("工程目录：%s" % ROOT)
+    print("ADB 设备指令台 · PyInstaller 打包（{} / {}）".format(args.mode, "console" if args.console else "windowed"))
+    print("工程目录：{}".format(ROOT))
     print("=" * 64)
 
     # 1) 依赖
@@ -701,14 +698,14 @@ def main(argv=None) -> int:
     # 2) 资源自检（缺 frontend 会导致打包后窗口空白，必须拦住）
     missing = check_sources()
     if missing:
-        print("[错误] 以下打包所需文件缺失：%s" % "、".join(missing), file=sys.stderr)
+        print("[错误] 以下打包所需文件缺失：{}".format("、".join(missing)), file=sys.stderr)
         return 2
     print("[2/4] 资源自检通过（入口 + %d 项数据文件齐全）" % len(BUNDLED_DATA))
 
     # --zip-only：只打源码分发包，不进 PyInstaller
     if args.zip_only:
         zp = make_source_zip(ROOT, args.dist_dir)
-        print("\n源码分发包完成：%s" % zp)
+        print("\n源码分发包完成：{}".format(zp))
         return 0
 
     # 清理构建缓存（__pycache__ / .pytest_cache）：删了会自动再生，
@@ -727,10 +724,10 @@ def main(argv=None) -> int:
             # 典型触发：main.py 里又出现了硬编码 VERSION 副本（bump_version.py
             # 检出即退出 2），或 core/constants.py 的版本号格式不合规。旧实现直接把
             # CalledProcessError 抛出去，用户看到的是一段英文 traceback 而不是原因。
-            print("[错误] 版本号递增失败（退出码 %s）。请检查 core/constants.py 里的 "
+            print("[错误] 版本号递增失败（退出码 {}）。请检查 core/constants.py 里的 "
                   "VERSION 格式是否为 YYYY.MMDD.HHMM、main.py 里有没有残留的 "
                   "VERSION 副本（那是唯一真源之外的重复），或省掉 --bump "
-                  "用现有版本号打包。" % e.returncode, file=sys.stderr)
+                  "用现有版本号打包。".format(e.returncode), file=sys.stderr)
             return 4
 
     # 4) 打包前预检：暂存区旧 exe 若被占用（上次的产物还在跑 / 被杀毒锁着），
@@ -740,11 +737,10 @@ def main(argv=None) -> int:
     staged_exe = (exe_dir(stage_dir(args.work_dir), args.mode)
                   / (APP_NAME + (".exe" if os.name == "nt" else "")))
     if not args.dry_run and _file_locked(staged_exe):
-        print("[错误] 构建暂存文件被占用：%s\n"
+        print("[错误] 构建暂存文件被占用：{}\n"
               "        常见原因：上一次打好的 exe 还在运行（请先在任务管理器\n"
               "        退出，确认无残留进程），或杀毒软件 / 网盘同步正在扫描它。\n"
-              "        处理后再重跑即可（也可先删掉整个 build/ 目录）。"
-              % staged_exe, file=sys.stderr)
+              "        处理后再重跑即可（也可先删掉整个 build/ 目录）。".format(staged_exe), file=sys.stderr)
         return 5
 
     # 5) 打包（输出到 build/ 下的暂存区，随后再拷进 dist/）
@@ -754,7 +750,7 @@ def main(argv=None) -> int:
         if verdict == "tolerable":
             # exe 已完整落盘，只差一个装饰性时间戳——按构建成功继续，
             # 否则用户要为「面子字段」重打一遍（还得再赌一次杀毒不扫描）。
-            print("[警告] %s" % why)
+            print("[警告] {}".format(why))
             print("        exe 本体完整可用，仅嵌入的构建时间戳缺失（不影响运行），"
                   "按「构建成功」继续发布。")
         else:
@@ -765,7 +761,7 @@ def main(argv=None) -> int:
     target = exe_dir(args.dist_dir, args.mode)
     exe = target / (APP_NAME + (".exe" if os.name == "nt" else ""))
     if args.dry_run:
-        print("\n目标产物：%s" % exe)
+        print("\n目标产物：{}".format(exe))
         return 0
 
     exe = publish_from_stage(exe_dir(stage_dir(args.work_dir), args.mode),
@@ -774,7 +770,7 @@ def main(argv=None) -> int:
         return 3
 
     copied = copy_side_files(target)
-    print("[4/4] 已拷贝同目录文件：%s" % "、".join(copied))
+    print("[4/4] 已拷贝同目录文件：{}".format("、".join(copied)))
 
     # 6) 产物完整性自检（仅告警）：确认 exe 与「可编辑同目录文件」都确实落盘。
     # 核对 exe 本体是否落盘，避免发出缺文件的残包。
@@ -783,20 +779,18 @@ def main(argv=None) -> int:
     if problems:
         print("[警告] 产物完整性自检发现 %d 项问题：" % len(problems))
         for _p in problems:
-            print("        - %s" % _p)
+            print("        - {}".format(_p))
 
     if args.zip:
         make_source_zip(ROOT, args.dist_dir)
     if args.package:
         make_win_package(target, args.dist_dir, mode=args.mode)
 
-    print("\n打包完成：%s（%.1f MB）" % (exe, exe.stat().st_size / 1024 / 1024))
+    print("\n打包完成：{}（{:.1f} MB）".format(exe, exe.stat().st_size / 1024 / 1024))
     if args.mode == "onedir":
-        print("把整个 %s 目录一起拷给同事（exe 只是启动器，_internal/ 缺一不可）。"
-              % target)
+        print("把整个 {} 目录一起拷给同事（exe 只是启动器，_internal/ 缺一不可）。".format(target))
     else:
-        print("把整个 %s 目录一起拷给同事（dist 仅含 exe 本体；使用说明见程序内「关于 → 使用说明」）。"
-              % target)
+        print("把整个 {} 目录一起拷给同事（dist 仅含 exe 本体；使用说明见程序内「关于 → 使用说明」）。".format(target))
     print("提示：同事机器若报「WebView2 Runtime 未安装 / 过旧」，到 "
           "https://developer.microsoft.com/microsoft-edge/webview2/ 装运行库即可。")
     return 0

@@ -817,7 +817,7 @@ class SnapMirror:
                     break
             wait = self.interval - (time.time() - t0)
             if wait > 0:
-                self._stop.wait(wait)     # stop() 会提前唤醒
+                self._stop.wait(wait)      # stop() 会提前唤醒
             if self._stop.is_set():
                 break
         # 主动停止不是中断：不再回调 on_status，避免刚提示「已停止投屏」

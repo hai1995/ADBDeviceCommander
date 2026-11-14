@@ -86,7 +86,7 @@ def _write_marker(f, text):
     返回是否写成功（调用方据此决定要不要把 gap 标记算数）。
     """
     try:
-        f.write("\n--------- [logcat] %s ---------\n" % text)
+        f.write("\n--------- [logcat] {} ---------\n".format(text))
         f.flush()
         return True
     except Exception:
@@ -264,7 +264,7 @@ class LogcatMonitor:
             args=(serial, list(buffers or ["main"]),
                   levels, (keyword or "").lower(),
                   bool(only_exc), stop_ev),
-            daemon=True, name="logcat-mon-%s" % serial).start()
+            daemon=True, name="logcat-mon-{}".format(serial)).start()
         return True
 
     def stop(self, serial):
@@ -312,7 +312,7 @@ class LogcatMonitor:
                 self._stopreq.discard(serial)
             self.bus.push("logcat",
                           {"serial": serial, "status": "error",
-                           "text": "启动 logcat 失败：%s" % e})
+                           "text": "启动 logcat 失败：{}".format(e)})
             return
         with self._lock:
             self._procs[serial] = proc
@@ -368,7 +368,7 @@ class LogcatMonitor:
             q = queue.Queue(maxsize=_QUEUE_MAX)
             threading.Thread(
                 target=self._pump, args=(proc, q),
-                daemon=True, name="logcat-pump-%s" % serial).start()
+                daemon=True, name="logcat-pump-{}".format(serial)).start()
 
             def _flush_batch(now):
                 nonlocal batch, last
@@ -707,7 +707,7 @@ class LogcatCapture:
         threading.Thread(
             target=self._worker,
             args=(serial, path, list(buffers or ["main"]), levels),
-            daemon=True, name="logcat-cap-%s" % serial).start()
+            daemon=True, name="logcat-cap-{}".format(serial)).start()
         return True
 
     def stop(self, serial, zip_on_stop=True):
@@ -868,7 +868,7 @@ class LogcatCapture:
                         **adb_popen_kwargs())
                 except Exception as e:
                     err_reported = True
-                    write_error = "启动抓取失败：%s" % e
+                    write_error = "启动抓取失败：{}".format(e)
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "error",
                                    "text": write_error})
@@ -919,7 +919,7 @@ class LogcatCapture:
                                  buffering=1)
                     except Exception as e:
                         err_reported = True
-                        write_error = "抓取异常：%s" % e
+                        write_error = "抓取异常：{}".format(e)
                         self.bus.push("logcat_capture",
                                       {"serial": serial, "status": "error",
                                        "text": write_error})
@@ -992,9 +992,8 @@ class LogcatCapture:
                                 # 产生**的 —— 原样接收并重置基准，一行都不丢。
                                 if not rollback_marked:
                                     _write_marker(
-                                        f, "设备重启后时间回退（%s → %s），已停止"
-                                           "按时间戳去重、按实际顺序继续记录"
-                                        % (last_log_ts, ts))
+                                        f, "设备重启后时间回退（{} → {}），已停止"
+                                           "按时间戳去重、按实际顺序继续记录".format(last_log_ts, ts))
                                     rollback_marked = True
                                     gap_written = True
                                 skipped = 0
@@ -1008,9 +1007,8 @@ class LogcatCapture:
                                 # 是设备时钟整体回退（校时 / 换电池 / 时区）。
                                 # 继续跳过等于把之后的日志全扔掉，故接受并标记。
                                 _write_marker(
-                                    f, "设备时间发生回退（%s → %s），已停止按"
-                                       "时间戳去重、按实际顺序继续记录"
-                                       % (last_log_ts, ts))
+                                    f, "设备时间发生回退（{} → {}），已停止按"
+                                       "时间戳去重、按实际顺序继续记录".format(last_log_ts, ts))
                                 gap_written = True
                                 skipped = 0
                                 last_log_ts = ""
@@ -1042,7 +1040,7 @@ class LogcatCapture:
                         # 这里不再做「攒够多少行再 flush」，否则尾部落盘不及时。
                 except Exception as e:
                     err_reported = True
-                    write_error = "抓取异常：%s" % e
+                    write_error = "抓取异常：{}".format(e)
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "error",
                                    "text": write_error})
@@ -1079,13 +1077,11 @@ class LogcatCapture:
                         # 这是收尾判断「日志有没有覆盖录制时段」的真实依据之一。
                         self._fact(serial, compat=True)
                         if bad_opt:
-                            text = ("logcat 抓取：设备 %s 不支持 -T（从当前时刻起抓），"
-                                    "已改用兼容命令重新开始（本次会先带出缓冲区里的历史日志）"
-                                    % serial)
+                            text = ("logcat 抓取：设备 {} 不支持 -T（从当前时刻起抓），"
+                                    "已改用兼容命令重新开始（本次会先带出缓冲区里的历史日志）".format(serial))
                         else:
-                            text = ("logcat 抓取：设备 %s 本会话未产出日志（%s），"
-                                    "已用兼容命令重试一次"
-                                    % (serial, (err_lines[0] if err_lines else "无输出")))
+                            text = ("logcat 抓取：设备 {} 本会话未产出日志（{}），"
+                                    "已用兼容命令重试一次".format(serial, (err_lines[0] if err_lines else "无输出")))
                         self.bus.push("status", {"type": "info", "text": text})
                         continue
                     # 此前这行被原样写进 txt，紧接着推 stopped —— 前端弹「✓ 抓取完毕：
@@ -1108,8 +1104,7 @@ class LogcatCapture:
                     data_gap = True
                     drop_ts = time.strftime("%Y-%m-%d %H:%M:%S")
                     try:
-                        f.write("\n--------- [logcat] 设备于 %s 断开连接，等待重连 ---------\n"
-                                % drop_ts)
+                        f.write("\n--------- [logcat] 设备于 {} 断开连接，等待重连 ---------\n".format(drop_ts))
                         f.flush()
                     except Exception:
                         pass
@@ -1141,15 +1136,13 @@ class LogcatCapture:
                     # 重连成功：写恢复标记，继续外层循环往同一文件续写。
                     resume_ts = time.strftime("%Y-%m-%d %H:%M:%S")
                     try:
-                        f.write("--------- [logcat] 设备于 %s 恢复连接，继续抓取 ---------\n"
-                                % resume_ts)
+                        f.write("--------- [logcat] 设备于 {} 恢复连接，继续抓取 ---------\n".format(resume_ts))
                         f.flush()
                     except Exception:
                         pass
                     self.bus.push("status",
                                   {"type": "info",
-                                   "text": "logcat 抓取：设备 %s 已重连，继续写入 %s"
-                                           % (serial, path)
+                                   "text": "logcat 抓取：设备 {} 已重连，继续写入 {}".format(serial, path)
                                            + ("（已跳过重放的 %d 行）" % skipped
                                               if skipped else "")})
                     skipped = 0
@@ -1289,7 +1282,7 @@ class LogcatCapture:
                 self.bus.push("logcat_capture",
                               {"serial": serial, "status": "zipped",
                                "path": zpath, "src": path,
-                               "text": "已打包：%s" % zpath})
+                               "text": "已打包：{}".format(zpath)})
             # size 语义：打了包就报 zip 的大小（源 txt 已清理），否则报 txt 大小
             if zpath and path_exists(zpath):
                 size_out = path_getsize(zpath)
@@ -1325,8 +1318,8 @@ class LogcatCapture:
                     # 比「设备掉线」更隐蔽的一档：设备明明还在，抓取却停了。
                     # 前端见到 error 就不再弹「✓ 抓取完毕」，改为告警呈现。
                     payload["error"] = (
-                        "adb logcat 在设备仍在线时意外退出（%s），文件在此处截断，" 
-                        "之后的日志没有抓到" % eof_ts)
+                        "adb logcat 在设备仍在线时意外退出（{}），文件在此处截断，" 
+                        "之后的日志没有抓到".format(eof_ts))
                 if gap_written:
                     # 文件里有缺口标记：即便用户主动停止，也要把「期间掉过线 /
                     # 中断过」说清楚，否则分析师对照视频流找日志时会误以为

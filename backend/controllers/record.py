@@ -141,7 +141,7 @@ class RecordMixin:
                 # 是刚建的那份（守卫保证进入前它一定为空），撤销它不会误伤他人。
                 self._cancel_half_started_rec()
                 self._push_toast(
-                    "err", "⚠ 录屏启动出现异常：%s（已自动撤销，可重试）" % ex)
+                    "err", "⚠ 录屏启动出现异常：{}（已自动撤销，可重试）".format(ex))
                 return {"ok": False, "reason": "start_error", "error": str(ex)}
 
     def _screen_record_start_locked(self, serial=None,
@@ -202,9 +202,9 @@ class RecordMixin:
                 # 这两句直接告诉人该去哪里改。
                 self._push_toast(
                     "warn",
-                    "⚠ 电脑麦克风启动失败：%s（请检查系统「隐私和安全性 → 麦克风」"
+                    "⚠ 电脑麦克风启动失败：{}（请检查系统「隐私和安全性 → 麦克风」"
                     "是否允许桌面应用访问，以及麦克风是否被其它程序占用；"
-                    "本次录屏将继续，但没有麦克风声音）" % p)
+                    "本次录屏将继续，但没有麦克风声音）".format(p))
         ok_any = False
 
         def _spawn(s):
@@ -223,7 +223,7 @@ class RecordMixin:
                 da_tried = True
                 # safe_name：无线序列号含冒号，设备端路径同样需要净化，
                 # 保证 adb shell 命令与后续 pull 的路径完全一致。
-                remote = "/data/local/tmp/adb_rec_%s_%s_audio.wav" % (
+                remote = "/data/local/tmp/adb_rec_{}_{}_audio.wav".format(
                     safe_name(s), sess_ts)
                 # 带原因版本：tinycap 在多数机型上需要 root，会立刻退出。只说
                 # 「启动失败」用户不知道该 adb root 还是换台设备，最后只能放弃。
@@ -292,9 +292,8 @@ class RecordMixin:
                 self._rec_session["devaudio"][s] = r["remote"]
             elif r["da_tried"]:
                 self._push_toast(
-                    "warn", "⚠ 设备 %s 音频采集未启动：%s"
-                            "（本次录屏不含设备声音）"
-                            % (s, r["da_err"] or "未知原因"))
+                    "warn", "⚠ 设备 {} 音频采集未启动：{}"
+                            "（本次录屏不含设备声音）".format(s, r["da_err"] or "未知原因"))
             ok, local = r["ok"], r["local"]
             if ok:
                 ok_any = True
@@ -307,16 +306,16 @@ class RecordMixin:
                 if show_touches:
                     self._enable_overlay(s, KEY_SHOW_TOUCHES, "show_touches_prev")
                 self._push_status(
-                    "info", "录屏: %s%s" % (s, "（含设备音频）" if da else ""))
+                    "info", "录屏: {}{}".format(s, "（含设备音频）" if da else ""))
             else:
-                self._push_status("err", "⚠ 录屏启动失败 %s: %s" % (s, local))
+                self._push_status("err", "⚠ 录屏启动失败 {}: {}".format(s, local))
         # 同步抓取 logcat（走落盘抓取路径，避免占用实时监控渲染管线）
         if with_logcat:
             started_caps = 0
             for s in serials:
                 # safe_name：无线序列号含冒号，Windows 下文件名非法
                 lp = os.path.join(
-                    save_dir, "logcat_%s_%s.txt" % (safe_name(s), sess_ts))
+                    save_dir, "logcat_{}_{}.txt".format(safe_name(s), sess_ts))
                 # 只有「本次录屏真的启动了这条抓取」才登记进会话。
                 # 用户若已手动开着同一台设备的 Logcat 抓取，start() 会返回 False
                 # （落在另一个文件上）；旧实现无视返回值照样登记，停止录屏时又把
@@ -334,7 +333,7 @@ class RecordMixin:
                     started_caps += 1
                 else:
                     self._push_status(
-                        "warn", "⚠ %s 已有 logcat 抓取在进行，本次录屏未重复抓取" % s)
+                        "warn", "⚠ {} 已有 logcat 抓取在进行，本次录屏未重复抓取".format(s))
             # 只在**真的**起来了至少一条时才播报。原来无条件推「已同步开始
             # logcat 抓取」：设备上已有抓取在跑时一条都没起，用户却被告知
             # 日志已在抓，直到停止录屏、打开产物包才发现里面没有 txt ——
@@ -416,9 +415,8 @@ class RecordMixin:
         ok, err = self._set_device_setting(serial, key, "1")
         if not ok:
             self._push_status(
-                "warn", "⚠ %s 未能开启「%s」%s，本次录屏不会出现该标记"
-                        % (serial, self._OVERLAY_LABELS.get(key, key),
-                           "（%s）" % err if err else ""))
+                "warn", "⚠ {} 未能开启「{}」{}，本次录屏不会出现该标记".format(serial, self._OVERLAY_LABELS.get(key, key),
+                           "（{}）".format(err) if err else ""))
 
     def _set_device_setting(self, serial, key, value):
         """写设备 Settings.System，返回 (是否成功, 失败原因)。
@@ -475,9 +473,8 @@ class RecordMixin:
         for s, key, ok, err in results:
             if not ok:
                 self._push_status(
-                    "warn", "⚠ %s 的「%s」未能恢复原值%s，请在设备系统设置里手动关闭"
-                            % (s, self._OVERLAY_LABELS.get(key, key),
-                               "（%s）" % err if err else ""))
+                    "warn", "⚠ {} 的「{}」未能恢复原值{}，请在设备系统设置里手动关闭".format(s, self._OVERLAY_LABELS.get(key, key),
+                               "（{}）".format(err) if err else ""))
 
     def screen_record_stop(self):
         """停止录屏：收尾合成 / 打包 / 清理会话（与 start / shutdown 串行）。"""
@@ -523,7 +520,7 @@ class RecordMixin:
                 seg_tip = ""
             if zpath:
                 self._push_toast(
-                    "ok", "✓ 录屏已完成%s，产物已打包: %s" % (seg_tip, zpath))
+                    "ok", "✓ 录屏已完成{}，产物已打包: {}".format(seg_tip, zpath))
             elif files:
                 self._push_toast(
                     "ok", "✓ 录屏已完成%s：%d 个文件已保存到 %s"
@@ -531,7 +528,7 @@ class RecordMixin:
             self._push_logcat_notes(sess)
             return {"ok": True}
         except Exception as ex:
-            self._push_toast("err", "⚠ 录屏收尾出现异常：%s" % ex)
+            self._push_toast("err", "⚠ 录屏收尾出现异常：{}".format(ex))
             return {"ok": False, "reason": "stop_error", "error": str(ex)}
         finally:
             self._rec_session = {}
@@ -551,7 +548,7 @@ class RecordMixin:
             try:
                 return self._screen_record_cancel_locked()
             except Exception as ex:
-                self._push_toast("err", "⚠ 取消录屏出现异常：%s" % ex)
+                self._push_toast("err", "⚠ 取消录屏出现异常：{}".format(ex))
                 return {"ok": False, "reason": "cancel_error", "error": str(ex)}
             finally:
                 self._rec_session = {}
@@ -627,16 +624,15 @@ class RecordMixin:
                 # 「该设备未在录制」是正常情况（它已经自己收尾过了），不报警
                 if not ok and err and err != "该设备未在录制":
                     self._push_status(
-                        "warn", "⚠ %s 取消时未能正常停止录屏（%s）；设备端可能还会"
-                                "录到 3 分钟上限才自行结束，该段不会保存"
-                                % (s, err))
+                        "warn", "⚠ {} 取消时未能正常停止录屏（{}）；设备端可能还会"
+                                "录到 3 分钟上限才自行结束，该段不会保存".format(s, err))
             if s in devaudio_map:
                 try:
                     local_a = self.device_audio.stop(s)
                 except Exception as ex:
                     local_a = None
                     self._push_status(
-                        "warn", "⚠ %s 取消时设备音频收尾失败：%s" % (s, ex))
+                        "warn", "⚠ {} 取消时设备音频收尾失败：{}".format(s, ex))
                 if local_a:
                     candidates.append(local_a)
         # 3) 电脑麦克风：stop() 会返回落盘路径，一并删。
@@ -792,19 +788,18 @@ class RecordMixin:
                         ".mp4") else (vlocal + ".final.mp4")
                     merged = ffmpeg_mux(vlocal, audios, final)
                     if merged:
-                        self._push_status("ok", "✓ 已合成音视频: %s" % merged)
+                        self._push_status("ok", "✓ 已合成音视频: {}".format(merged))
                         rec_files.append(merged)
                     else:
                         # 合成失败/产出不可播放时**保留原视频**，并说清原因：
                         # 「未安装 ffmpeg」只是其中一种，音频为空、ffmpeg 过旧同样会走到这里。
                         why = "" if _have_ffmpeg() else "（未检测到 ffmpeg）"
                         self._push_toast(
-                            "warn", "⚠ 合成音视频失败%s，原始视频已保存（无音轨）: %s"
-                            % (why, vlocal))
+                            "warn", "⚠ 合成音视频失败{}，原始视频已保存（无音轨）: {}".format(why, vlocal))
                         if path_exists(vlocal):
                             rec_files.append(vlocal)
                 else:
-                    self._push_status("ok", "✓ 录屏已保存: %s" % vlocal)
+                    self._push_status("ok", "✓ 录屏已保存: {}".format(vlocal))
                     if path_exists(vlocal):
                         rec_files.append(vlocal)
         if mic_lost:
@@ -843,8 +838,8 @@ class RecordMixin:
                 # 宁可不打包，保留原 txt 并说清位置。
                 self._push_toast(
                     "warn",
-                    "⚠ %s 的 logcat 日志仍在收尾，未放入本次压缩包，"
-                    "原文件已保留：%s" % (s, p))
+                    "⚠ {} 的 logcat 日志仍在收尾，未放入本次压缩包，"
+                    "原文件已保留：{}".format(s, p))
                 continue
             if path_exists(p):
                 rec_files.append(p)
@@ -856,17 +851,16 @@ class RecordMixin:
         # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
         zpath = None
         if sess.get("with_zip") and rec_files:
-            z = os.path.join(sess["dir"], "rec_%s.zip" % sess["ts"])
+            z = os.path.join(sess["dir"], "rec_{}.zip".format(sess["ts"]))
             if self._zip_paths(rec_files, z):
                 zpath = z
-                self._push_status("ok", "✓ 录制产物已打包: %s" % zpath)
+                self._push_status("ok", "✓ 录制产物已打包: {}".format(zpath))
             else:
                 # 勾了「结束后打包」却没打成（磁盘满 / 目录被删 / 被占用）：
                 # 用户会照着按钮的勾选状态去目录里找 zip。必须说清「没有 zip」，
                 # 否则他会以为打包还在进行、或者以为程序把文件弄丢了。
                 self._push_toast(
-                    "warn", "⚠ 录制产物打包失败（文件已单独保存，可直接使用）：%s"
-                            % sess.get("dir"))
+                    "warn", "⚠ 录制产物打包失败（文件已单独保存，可直接使用）：{}".format(sess.get("dir")))
         return rec_files, zpath
 
     def _logcat_coverage_notes(self, sess, cap_map):
@@ -901,13 +895,13 @@ class RecordMixin:
                 if not path_isfile(p):
                     # 文件不在了（保存目录被删 / 同名文件被移走）：说明本次日志
                     # 根本没落盘，别让用户以为包里那份是完整的。
-                    return [("warn", "⚠ %s 的配套 logcat 文件不存在（%s），"
-                                      "本次录制产物里没有该设备的日志" % (s, p))]
+                    return [("warn", "⚠ {} 的配套 logcat 文件不存在（{}），"
+                                      "本次录制产物里没有该设备的日志".format(s, p))]
                 _first, last = read_time_bounds(p)
                 if not last:
-                    return [("warn", "⚠ %s 的配套 logcat 文件里没有任何日志行"
+                    return [("warn", "⚠ {} 的配套 logcat 文件里没有任何日志行"
                                       "（抓取可能一开始就被中断），"
-                                      "本次日志不可用" % s)]
+                                      "本次日志不可用".format(s))]
                 try:
                     facts = self.logcat_capture.capture_facts(s) or {}
                 except Exception:
@@ -922,22 +916,22 @@ class RecordMixin:
                     if late >= LOGCAT_COVERAGE_WARN_S:
                         out.append((
                             "warn",
-                            "⚠ %s 的配套 logcat 比录制开始晚约 %s 才启动，"
-                            "录制开头这一段没有日志" % (s, _fmt_span(late))))
+                            "⚠ {} 的配套 logcat 比录制开始晚约 {} 才启动，"
+                            "录制开头这一段没有日志".format(s, _fmt_span(late))))
                 # ② 设备不认 -T、走兼容模式：起点可能早于录制，开头可能是历史缓冲。
                 # 这只是事实说明，不代表一定缺录制期间的日志（兼容模式也会继续跟流）。
                 if facts.get("compat"):
                     out.append((
                         "info",
-                        "ℹ %s 的 logcat 不支持从当前时刻起抓（无 -T），已回落兼容"
-                        "模式：日志开头可能包含录制前的历史缓冲" % s))
+                        "ℹ {} 的 logcat 不支持从当前时刻起抓（无 -T），已回落兼容"
+                        "模式：日志开头可能包含录制前的历史缓冲".format(s)))
                 # ③ 真的断过（掉线 / 意外退出 / 重连耗尽）：这是唯一能确证的缺口。
                 if facts.get("data_gap"):
                     out.append((
                         "warn",
-                        "⚠ %s 的配套 logcat 在录制期间中断过（设备掉线 / logcat "
+                        "⚠ {} 的配套 logcat 在录制期间中断过（设备掉线 / logcat "
                         "意外退出），文件里 [logcat] 标记处存在时间缺口"
-                        "（中断原因见状态信息）" % s))
+                        "（中断原因见状态信息）".format(s)))
                 # 设备时钟偏差：只影响「视频文件名（本机时间）」与「日志时间戳
                 # （设备时间）」的对照，与日志是否完整无关，故只做 info。
                 dev = device_clock(self.state.adb_path, s, timeout=3)
@@ -947,8 +941,8 @@ class RecordMixin:
                     if abs(skew) >= LOGCAT_COVERAGE_WARN_S:
                         out.append((
                             "info",
-                            "ℹ %s 的设备时钟与本机相差 %s（%s），视频与日志对照时"
-                            "请统一按设备时间看" % (
+                            "ℹ {} 的设备时钟与本机相差 {}（{}），视频与日志对照时"
+                            "请统一按设备时间看".format(
                                 s, _fmt_span(abs(skew)),
                                 "设备偏快" if skew > 0 else "设备偏慢")))
             except Exception:
@@ -1055,8 +1049,7 @@ class RecordMixin:
                 # 改不成名（目标被播放器占着等）不是失败：成片已经在 out 上，
                 # 只是名字带 `_full`。说清楚它到底叫什么，别让用户以为没合。
                 self._push_status(
-                    "warn", "⚠ %s 已合并但未能改名为 %s（%s），成片仍是 %s"
-                            % (serial, os.path.basename(want), e,
+                    "warn", "⚠ {} 已合并但未能改名为 {}（{}），成片仍是 {}".format(serial, os.path.basename(want), e,
                                os.path.basename(final)))
         if len(used) > 1:
             self._push_status(
@@ -1067,8 +1060,7 @@ class RecordMixin:
             # 多段里只有 1 段正常收尾（其余缺 moov）：它就是成片本身，
             # 说「合并了 1 段」会让人以为拼过。
             self._push_status(
-                "ok", "✓ %s 只有 1 段正常收尾，已作为成片保留: %s"
-                      % (serial, os.path.basename(final)))
+                "ok", "✓ {} 只有 1 段正常收尾，已作为成片保留: {}".format(serial, os.path.basename(final)))
         if skipped:
             self._push_toast(
                 "warn", "⚠ %s 有 %d 段视频没正常收尾（缺 moov 头），未并入成片，"
@@ -1094,7 +1086,7 @@ class RecordMixin:
         if ok:
             return True, ([lp] if lp else []), err
         if lp:
-            return False, [], "%s（残片：%s）" % (err or "收尾失败", lp)
+            return False, [], "{}（残片：{}）".format(err or "收尾失败", lp)
         return False, [], err
 
     def _teardown_devices(self, serials, dead, videos_map, devaudio_map,
@@ -1126,7 +1118,7 @@ class RecordMixin:
                             # 录了 8 分钟，包里只有 5 分钟，缺的那 3 分钟他会以为
                             # 是「本来就没发生」。
                             self._push_toast(
-                                "warn", "⚠ %s 部分分段未取回：%s" % (s, err))
+                                "warn", "⚠ {} 部分分段未取回：{}".format(s, err))
                     else:
                         # paths 里全是**已正常收尾**的段（残片只在 err 里说明），
                         # 必须整体保留：只报一句「收尾失败」会让用户把前面几段
@@ -1143,14 +1135,12 @@ class RecordMixin:
                             # 「视频不完整」，与普通收尾失败区分开。
                             self._push_toast(
                                 "warn",
-                                "⚠ %s 录屏被意外中断，这一段视频不完整（%s）。"
-                                "%s%s未合成音频。"
-                                % (s, err or "设备端进程已提前退出",
+                                "⚠ {} 录屏被意外中断，这一段视频不完整（{}）。"
+                                "{}{}未合成音频。".format(s, err or "设备端进程已提前退出",
                                    where or "残片已保留在保存目录，", kept))
                         else:
                             self._push_toast(
-                                "warn", "⚠ 录屏收尾失败 %s：%s%s%s"
-                                        % (s, err or "未知原因", where, kept))
+                                "warn", "⚠ 录屏收尾失败 {}：{}{}{}".format(s, err or "未知原因", where, kept))
                 else:
                     # 会话已被其他路径收尾弹出（stop_all / 异常清理 / 设备被移除后
                     # 强停）时，这里再用 stop() 只会得到「该设备未在录制」。必须用
@@ -1168,7 +1158,7 @@ class RecordMixin:
                 except Exception as e:
                     # 音频收尾失败不能连累视频落盘，也不能让整轮收尾中断
                     self._push_status(
-                        "warn", "⚠ %s 设备音频收尾失败：%s" % (s, e))
+                        "warn", "⚠ {} 设备音频收尾失败：{}".format(s, e))
                     local_a = None
             return s, (local_vs, local_a)
 
@@ -1274,17 +1264,17 @@ class RecordMixin:
         try:
             res = self._scrcpy.launch(serials, exe)
         except Exception as ex:
-            self._push_toast("err", "⚠ 投屏启动出现异常：%s" % ex)
+            self._push_toast("err", "⚠ 投屏启动出现异常：{}".format(ex))
             return {"ok": False, "reason": "start_error", "error": str(ex)}
         started = res["started"]
         skipped = res["skipped"]
         failed = res["failed"]
         if started:
-            self._push_status("ok", "✓ 已开启投屏：%s" % "、".join(started))
+            self._push_status("ok", "✓ 已开启投屏：{}".format("、".join(started)))
         if skipped:
-            self._push_status("info", "ℹ 已在投屏中：%s" % "、".join(skipped))
+            self._push_status("info", "ℹ 已在投屏中：{}".format("、".join(skipped)))
         for s, reason in failed:
-            self._push_status("err", "⚠ %s 投屏失败：%s" % (s, reason))
+            self._push_status("err", "⚠ {} 投屏失败：{}".format(s, reason))
         return {
             "ok": bool(started or skipped),
             "path": exe,
@@ -1324,7 +1314,7 @@ class RecordMixin:
         按钮会因为「已在投屏」被跳过，永远开不起来。
         """
         if error:
-            self._push_status("err", "⚠ %s 投屏已中断：%s" % (serial, error))
+            self._push_status("err", "⚠ {} 投屏已中断：{}".format(serial, error))
         self._mirror_pipes.pop(serial, None)
         self._mirror_snaps.pop(serial, None)
 
@@ -1442,12 +1432,12 @@ class RecordMixin:
                  "snap": "低帧率预览（screencap 轮询）"}
         if started:
             self._push_status("ok", "✓ 已开启投屏：" + "、".join(
-                "%s（%s）" % (x["serial"], label.get(x["mode"], x["mode"]))
+                "{}（{}）".format(x["serial"], label.get(x["mode"], x["mode"]))
                 for x in started))
         for x in failed:
-            self._push_status("err", "⚠ %s 投屏失败：%s" % (x["serial"], x["reason"]))
+            self._push_status("err", "⚠ {} 投屏失败：{}".format(x["serial"], x["reason"]))
         if skipped:
-            self._push_status("info", "ℹ 已在投屏中：%s" % "、".join(skipped))
+            self._push_status("info", "ℹ 已在投屏中：{}".format("、".join(skipped)))
         return {"ok": bool(started or skipped), "started": started,
                 "skipped": skipped, "failed": failed}
 
@@ -1474,7 +1464,7 @@ class RecordMixin:
             self._mirror_snaps.pop(s, None)
             stopped.append(s)
         if stopped:
-            self._push_status("info", "ℹ 已停止投屏：%s" % "、".join(stopped))
+            self._push_status("info", "ℹ 已停止投屏：{}".format("、".join(stopped)))
         return {"ok": True, "stopped": stopped}
 
     def mirror_status(self):

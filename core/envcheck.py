@@ -46,7 +46,7 @@ WEBVIEW2_PV_SUBKEYS = (
 def parse_version(s: str | None):
     """把形如 '100.0.1185.36' 的版本串解析为 int 元组 (major, minor, build, patch)。
 
-    非字符串 / None / 含非数字场 / 为空 -> 返回 None（视为无法解析）。
+    非字符串 / None / 含非数字段 / 为空 -> 返回 None（视为无法解析）。
     解析只取开头连续的数字点分，忽略 'v' 前缀之类脏字符前后。
     """
     if s is None:
