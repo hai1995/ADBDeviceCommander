@@ -162,7 +162,7 @@ def find_player(pref_path=""):
         exe = _as_exe(pref_path, names)
         if exe:
             return (kind or "ffplay"), exe, "来自配置的路径"
-        note_prefix = "配置的播放器路径无效（%s），已改用自动探测；" % pref_path
+        note_prefix = "配置的播放器路径无效（{}），已改用自动探测；".format(pref_path)
     else:
         note_prefix = ""
 
@@ -176,7 +176,7 @@ def find_player(pref_path=""):
         for kind in PLAYER_ORDER:
             exe = _as_exe(d, PLAYER_EXE_NAMES[kind])
             if exe:
-                return kind, exe, note_prefix + "来自常见安装目录 %s" % d
+                return kind, exe, note_prefix + "来自常见安装目录 {}".format(d)
 
     # 找不到时 exe 返回 None（与 find_scrcpy 一致），调用方一律用 `if exe:` 判断
     return "", None, (note_prefix +
@@ -321,26 +321,26 @@ class PipeMirror:
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, creationflags=no_window_flags())
         except Exception as e:
-            return False, "播放器启动失败：%s" % e
+            return False, "播放器启动失败：{}".format(e)
         # 必须有人把 stderr 读走：管道容量只有 64KB，mpv / vlc 这类会持续
         # 打日志的播放器写满之后就会**阻塞在写日志上**，随之不再消费 stdin，
         # 画面卡死而原因完全看不出来。读走的同时留末尾一段，秒退时能报真因。
         threading.Thread(target=self._drain_player_err,
                          args=(self._player.stderr,), daemon=True,
-                         name="mirror-player-%s" % self.serial).start()
+                         name="mirror-player-{}".format(self.serial)).start()
         ok, err = self._spawn_adb()
         if not ok:
             self._kill_player()
             return False, err
         self._thread = threading.Thread(
             target=self._feed_loop, daemon=True,
-            name="mirror-pipe-%s" % self.serial)
+            name="mirror-pipe-{}".format(self.serial))
         self._thread.start()
         self._done.wait(FIRST_DATA_TIMEOUT)
         if self._first_data.is_set():
             return True, ""
         # 超时 / 秒退：收掉这一轮，把设备端原因交给调用方
-        reason = self.error or "设备端 screenrecord 未在 %.0fs 内输出画面" % FIRST_DATA_TIMEOUT
+        reason = self.error or "设备端 screenrecord 未在 {:.0f}s 内输出画面".format(FIRST_DATA_TIMEOUT)
         self.stop()
         return False, reason
 
@@ -350,13 +350,13 @@ class PipeMirror:
                 self._adb_cmd(), stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, creationflags=no_window_flags())
         except Exception as e:
-            return False, "screenrecord 启动失败：%s" % e
+            return False, "screenrecord 启动失败：{}".format(e)
         # adb stderr 可能输出设备掉线 / 权限不足等报错：管道 64KB 写满后 adb
         # 会阻塞在 write 上（stdout 的视频流也会停止、player 收不到新帧），
         # 必须开个线程把 stderr 读走。每次重连都是新的 adb proc，各自一条。
         threading.Thread(target=self._drain_adb_err,
                          args=(self._adb_proc.stderr,), daemon=True,
-                         name="mirror-adb-err-%s" % self.serial).start()
+                         name="mirror-adb-err-{}".format(self.serial)).start()
         return True, ""
 
     def _drain_adb_err(self, stream):
@@ -454,7 +454,7 @@ class PipeMirror:
                             self._first_data.set()
                             self._done.set()     # 放行 start() 的同步等待
                 except Exception as e:
-                    self.error = "转发中断：%s" % e
+                    self.error = "转发中断：{}".format(e)
                 try:
                     if proc.stdout: proc.stdout.close()
                 except Exception:
@@ -481,7 +481,7 @@ class PipeMirror:
                 # 设备端编码器被反复占用，报出来的却只有一句「转发中断」。
                 tail = (self._player_err or "").strip()
                 self.error = ("播放器窗口已关闭，投屏停止"
-                              + ("（%s）" % tail[-200:] if tail else ""))
+                              + ("（{}）".format(tail[-200:]) if tail else ""))
                 break
             if not got:
                 # 一个字节都没收到就退出 = 设备端命令不可用（ROM 移除 /
@@ -491,7 +491,7 @@ class PipeMirror:
                 tail = self._adb_err or ""
                 self.error = self.error or (
                     "设备端 screenrecord 未输出画面%s"
-                    % ("（%s）" % tail if tail else ""))
+                    % ("（{}）".format(tail) if tail else ""))
                 self._done.set()
                 self._emit()
                 return
@@ -746,7 +746,7 @@ class SnapMirror:
         self.server.set_frame(self.serial, data)
         self.frames += 1
         self._thread = threading.Thread(
-            target=self._loop, daemon=True, name="mirror-snap-%s" % self.serial)
+            target=self._loop, daemon=True, name="mirror-snap-{}".format(self.serial))
         self._thread.start()
         return True, ""
 
@@ -775,7 +775,7 @@ class SnapMirror:
             # 见 core.imgbytes）。
             data, _, note = imgbytes.normalize(data)
             if not data:
-                return None, "设备返回的画面无法识别（%s）" % note
+                return None, "设备返回的画面无法识别（{}）".format(note)
             return data, None
         except Exception as e:
             # 超时时 communicate 只抛错、不终止子进程：卡住的 adb 会变孤儿
@@ -817,7 +817,7 @@ class SnapMirror:
                     break
             wait = self.interval - (time.time() - t0)
             if wait > 0:
-                self._stop.wait(wait)      # stop() 会提前唤醒
+                self._stop.wait(wait)     # stop() 会提前唤醒
             if self._stop.is_set():
                 break
         # 主动停止不是中断：不再回调 on_status，避免刚提示「已停止投屏」
