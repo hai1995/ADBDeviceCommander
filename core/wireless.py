@@ -75,8 +75,7 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
     if text is None:
         return "", "请输入设备 IP（或 IP:端口）"
     if not isinstance(text, str):
-        return "", "地址格式不正确：应为文本形式的 IP 或 IP:端口（收到 %s）" % (
-            type(text).__name__)
+        return "", "地址格式不正确：应为文本形式的 IP 或 IP:端口（收到 {}）".format(type(text).__name__)
     raw = text.strip()
     if not raw:
         return "", "请输入设备 IP（或 IP:端口）"
@@ -293,7 +292,7 @@ def parse_connect_output(text):
     m = re.search(r"already connected to ([^\s,]+)", t, re.I)
     if m:
         return {"ok": True, "address": m.group(1), "message": "已连接（无需重复连接）"}
-    m = re.search(r"(?<!already )connected to ([^\s,]+)", t, re.I)
+    m = re.search(r"(?<!"already ")"connected to ([^\s,]+)", t, re.I)
     if m:
         return {"ok": True, "address": m.group(1), "message": "连接成功"}
     return {"ok": False, "address": "", "message": explain_connect_failure(t)}
@@ -309,7 +308,7 @@ def parse_tcpip_output(text):
     m = re.search(r"restarting in tcp mode port:?\s*(\d+)", low)
     if m:
         return {"ok": True, "port": int(m.group(1)),
-                "message": "已切换为无线模式（端口 %s）" % m.group(1)}
+                "message": "已切换为无线模式（端口 {}）".format(m.group(1))}
     if "no devices" in low or "device not found" in low or "not found" in low:
         return {"ok": False, "port": 0,
                 "message": "设备已断开：先插好 USB 线（首次开启无线调试必须走 USB）"}
