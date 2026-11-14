@@ -26,13 +26,13 @@ MARK_UP = "@@UP"
 # `wm size` 在有「强制分辨率」的机器上会打出 Physical / Override 两行，都留着；
 # `df /data` 取的是数据分区（截图 / 录屏 / 日志都落在 /data 的 sdcard 链接下）。
 SCRIPT = (
-    "echo %s; getprop; "
-    "echo %s; wm size; wm density; "
-    "echo %s; dumpsys battery; "
-    "echo %s; df /data; "
-    "echo %s; cat /proc/meminfo; "
-    "echo %s; cat /proc/uptime"
-) % (MARK_PROP, MARK_WM, MARK_BATT, MARK_DF, MARK_MEM, MARK_UP)
+    "echo {}; getprop; "
+    "echo {}; wm size; wm density; "
+    "echo {}; dumpsys battery; "
+    "echo {}; df /data; "
+    "echo {}; cat /proc/meminfo; "
+    "echo {}; cat /proc/uptime"
+).format(MARK_PROP, MARK_WM, MARK_BATT, MARK_DF, MARK_MEM, MARK_UP)
 
 # 展示顺序与标签（顺序即弹窗里的行序：先「是哪台」，再「跑得怎么样」）
 _PROP_ROWS = (
@@ -221,7 +221,7 @@ def _size(kb):
         return "%.1f GB" % (n / 1024.0 / 1024.0)
     if n >= 1024:
         return "%.0f MB" % (n / 1024.0)
-    return "%.0f KB" % n
+    return "{:.0f} KB".format(n)
 
 
 def fmt_uptime(seconds):
@@ -256,20 +256,20 @@ def rows(info):
     res = (info.get("resolution") or "").strip()
     over = (info.get("resolution_override") or "").strip()
     if res:
-        out.append(("分辨率", res + ("（当前覆盖为 %s）" % over if over and over != res else "")))
+        out.append(("分辨率", res + ("（当前覆盖为 {}）".format(over) if over and over != res else "")))
     den = (info.get("density") or "").strip()
     if den:
-        out.append(("屏幕密度", "%s dpi" % den))
+        out.append(("屏幕密度", "{} dpi".format(den)))
 
     level = (info.get("battery_level") or "").strip()
     temp = (info.get("battery_temp") or "").strip()
     status = BATTERY_STATUS.get((info.get("battery_status") or "").strip(), "")
     if level:
-        line = "%s%%" % level
+        line = "{}%".format(level)
         if status:
-            line += "（%s）" % status
+            line += "（{}）".format(status)
         if temp:
-            line += " · %s℃" % temp
+            line += " · {}℃".format(temp)
         out.append(("电量", line))
 
     st_total = info.get("storage_total_kb") or 0
@@ -285,8 +285,7 @@ def rows(info):
     if mem_total:
         avail = info.get("mem_avail_kb") or 0
         used = max(0, mem_total - avail)
-        out.append(("内存", "%s / %s 已用，可用 %s"
-                    % (_size(used), _size(mem_total), _size(avail))))
+        out.append(("内存", "{} / {} 已用，可用 {}".format(_size(used), _size(mem_total), _size(avail))))
 
     up = fmt_uptime(info.get("uptime_s"))
     if up:
@@ -296,4 +295,4 @@ def rows(info):
 
 def as_text(info):
     """纯文本版（「复制」按钮用）：`标签: 值` 每行一条。"""
-    return "\n".join("%s: %s" % (k, v) for k, v in rows(info))
+    return "\n".join("{}: {}".format(k, v) for k, v in rows(info))
