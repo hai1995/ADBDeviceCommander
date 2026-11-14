@@ -26,7 +26,7 @@ class DeviceInfoMixin:
         except subprocess.TimeoutExpired:
             return {"ok": False, "reason": "读取设备信息超时（设备可能无响应）"}
         except Exception as e:
-            return {"ok": False, "reason": "读取设备信息失败：%s" % e}
+            return {"ok": False, "reason": "读取设备信息失败：{}".format(e)}
         info = devinfo.parse_info(r.stdout or "")
         # adb shell 会把设备端的报错并进 **stdout**（`error: closed`、
         # `sh: xxx: not found` 都在这一路），所以不能拿「stdout 是否为空」判断
@@ -36,7 +36,7 @@ class DeviceInfoMixin:
         if r.returncode != 0 and not any(v for _k, v in devinfo.rows(info)):
             detail = ((r.stderr or "").strip() or (r.stdout or "").strip()
                       or "设备未返回内容")[:160]
-            return {"ok": False, "reason": "读取设备信息失败：%s" % detail}
+            return {"ok": False, "reason": "读取设备信息失败：{}".format(detail)}
         rows = devinfo.rows(info)
         return {"ok": True, "serial": s, "info": info,
                 "rows": [[k, v] for k, v in rows],
@@ -104,7 +104,7 @@ class DeviceInfoMixin:
             with self._diag_lock:
                 self._diag_running = False
             self.bus.push("diag_state", {"running": False})
-            self._push_toast("err", "⚠ 无法启动诊断包收集：%s" % e)
+            self._push_toast("err", "⚠ 无法启动诊断包收集：{}".format(e))
             return {"ok": False, "reason": "spawn_error", "error": str(e)}
         return {"ok": True, "devices": serials}
 
@@ -120,11 +120,10 @@ class DeviceInfoMixin:
                         self._adb_argv(), s, save_dir,
                         with_logcat=with_logcat, logcat_lines=lines)
                 except Exception as e:      # 兜底：诊断包异常不能拖垮整批
-                    path, manifest, err = None, None, "内部错误：%s" % e
+                    path, manifest, err = None, None, "内部错误：{}".format(e)
                 if err or not path:
-                    failed.append("%s：%s" % (s, err or "未知原因"))
-                    self._push_status("err", "⚠ 诊断包失败 %s：%s"
-                                      % (s, err or "未知原因"))
+                    failed.append("{}：{}".format(s, err or "未知原因"))
+                    self._push_status("err", "⚠ 诊断包失败 {}：{}".format(s, err or "未知原因"))
                     continue
                 ok_count += 1
                 paths.append(path)
@@ -143,4 +142,4 @@ class DeviceInfoMixin:
                 "warn", "⚠ 诊断包：%d 成功 / %d 失败（%s）"
                         % (ok_count, len(failed), "；".join(failed)[:120]))
         elif failed:
-            self._push_toast("err", "⚠ 诊断包收集失败：%s" % "；".join(failed)[:160])
+            self._push_toast("err", "⚠ 诊断包收集失败：{}".format("；".join(failed)[:160]))
