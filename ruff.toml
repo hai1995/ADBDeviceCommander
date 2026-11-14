@@ -99,4 +99,4 @@ select = [
 #   就会把这套编排打散、纯风格 churn，故整文件豁免 I001。
 [lint.per-file-ignores]
 "tools/package.py" = ["E402"]
-"backend/controller.py" = ["I001"]\n
+"backend/controller.py" = ["I001"]
