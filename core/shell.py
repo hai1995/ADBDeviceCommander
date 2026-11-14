@@ -55,7 +55,7 @@ class ShellSession:
         提成方法是为了单测能换成 sh 的写法：Linux 上没有 powershell，但
         「裸子 shell 抢 stdin」的机制完全一样，可以真实复现卡死。
         """
-        return 'Write-Output ("%s|" + (Get-Location).Path)' % tag
+        return 'Write-Output ("{}|" + (Get-Location).Path)'.format(tag)
 
     @staticmethod
     def _cd_stmt(path):
@@ -63,7 +63,7 @@ class ShellSession:
 
         打包态下，Python 进程的 cwd 可能是快捷方式的「起始位置」（常见为
         `C:\\Users\\...`），与 exe 所在目录不一致 —— 用户对着指令台执行
-        相对路径命令（`ls` / `.\adb.exe`）时会被绕晕。这里让 shell 主动
+        相对路径命令（`ls` / `.\\adb.exe`）时会被绕晕。这里让 shell 主动
         cd 到 start_dir（通常是程序根目录），让 prompt 显示的路径与用户
         直觉一致。子类（测试里用的 sh）按需 override。
         """
@@ -127,7 +127,7 @@ class ShellSession:
         # 必须放在 _start 而不是每次 run 的 payload 前缀，否则 `adb shell` 进入
         # 交互后，PowerShell 会把 init 喂给 adb shell 报 command not found。
         init_script = self._init_script()
-        init_tag = "__INIT_DONE_%s__" % uuid.uuid4().hex
+        init_tag = "__INIT_DONE_{}__".format(uuid.uuid4().hex)
         init_ev = threading.Event()
         self._pending.append((init_tag, init_ev))
         try:
@@ -148,7 +148,7 @@ class ShellSession:
         # 路径。靠 sentinel 回传路径，current_dir 与 prompt 同步更新。
         sd = self._start_dir
         if sd:
-            cd_tag = "__CD_DONE_%s__" % uuid.uuid4().hex
+            cd_tag = "__CD_DONE_{}__".format(uuid.uuid4().hex)
             cd_ev = threading.Event()
             self._pending.append((cd_tag, cd_ev))
             try:
@@ -248,13 +248,13 @@ class ShellSession:
                     self.proc.stdin.write(script + "\n")
                     self.proc.stdin.flush()
                 except Exception as ex:
-                    self.last_error = "写入命令失败: %s" % ex
+                    self.last_error = "写入命令失败: {}".format(ex)
                     self._emit("✗ " + self.last_error, "err")
                     return False
             return True
 
         # ---- 非交互式：带 sentinel 结束标记 ----
-        sentinel = "__DONE_%s__" % uuid.uuid4().hex
+        sentinel = "__DONE_{}__".format(uuid.uuid4().hex)
         done = threading.Event()
         # 阶段 1：写命令（持锁，避免 stdin 交错）
         with self._lock:
@@ -274,15 +274,15 @@ class ShellSession:
                     self._pending.remove((sentinel, done))
                 except ValueError:
                     pass
-                self.last_error = "写入命令失败: %s" % ex
+                self.last_error = "写入命令失败: {}".format(ex)
                 self._emit("✗ " + self.last_error, "err")
                 return False
         # 阶段 2：等 sentinel（不持锁，允许其他 run 接着写）
         deadline = time.time() + timeout if timeout else None
         while not (done.is_set() or self._abort.is_set() or self._eof.is_set()):
             if deadline and time.time() > deadline:
-                self.last_error = "命令执行超过 %s 秒，已自动终止" % timeout
-                self._emit("⏱ %s。" % self.last_error, "err")
+                self.last_error = "命令执行超过 {} 秒，已自动终止".format(timeout)
+                self._emit("⏱ {}。".format(self.last_error), "err")
                 # timeout 到了：温和中止当前命令，不 kill 整个会话。
                 # 发 Ctrl-C 尝试终止 PowerShell 里的当前脚本，会话本身继续存活——
                 # 后续命令不需要重新拉起 PowerShell。
