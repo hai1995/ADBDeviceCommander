@@ -185,7 +185,7 @@ def ensure_unique_ids(cmds, warnings=None):
         used.add(cid)
         renamed.append((base, c.get("name") or "", cid))
     if renamed and warnings is not None:
-        head = "；".join("「%s」→「%s」" % (name or base, new)
+        head = "；".join("「{}」→「{}」".format(name or base, new)
                          for base, name, new in renamed[:3])
         more = "" if len(renamed) <= 3 else "，等 %d 条" % len(renamed)
         warnings.append(
@@ -214,18 +214,18 @@ def discover_commands(directory=None):
         try:
             raw = _read_json(p)
         except Exception as ex:
-            warnings.append("命令文件读取失败：%s（%s）" % (base, ex))
+            warnings.append("命令文件读取失败：{}（{}）".format(base, ex))
             continue
         if not isinstance(raw, (list, dict)):
-            warnings.append("命令文件 %s 顶层既不是数组也不是对象，已忽略" % base)
+            warnings.append("命令文件 {} 顶层既不是数组也不是对象，已忽略".format(base))
             continue
         try:
             cmds, w = normalize_commands(raw)
         except Exception as ex:
-            warnings.append("命令文件 %s 解析异常：%s" % (base, ex))
+            warnings.append("命令文件 {} 解析异常：{}".format(base, ex))
             continue
         for msg in w:
-            warnings.append("%s：%s" % (base, msg))
+            warnings.append("{}：{}".format(base, msg))
         per_file.append((p, cmds))
 
     if not per_file:
@@ -238,14 +238,12 @@ def discover_commands(directory=None):
         starter, _ = normalize_commands(DEMO_COMMANDS)
         if _write_json_atomic(target, DEMO_COMMANDS):
             warnings.append(
-                "未检测到有效的命令合集文件，已在运行目录生成 %s（可直接编辑其中命令）"
-                % PRIMARY_COMMAND_FILE)
+                "未检测到有效的命令合集文件，已在运行目录生成 {}（可直接编辑其中命令）".format(PRIMARY_COMMAND_FILE))
         else:
             warnings.append(
-                "未检测到有效的命令合集文件，且无法在运行目录生成 %s"
+                "未检测到有效的命令合集文件，且无法在运行目录生成 {}"
                 "（目录只读 / 磁盘空间不足？）——本次先用内置示例命令，"
-                "重启后不会保留。请把程序放到可写目录，或自行放一份命令合集 json"
-                % PRIMARY_COMMAND_FILE)
+                "重启后不会保留。请把程序放到可写目录，或自行放一份命令合集 json".format(PRIMARY_COMMAND_FILE))
         per_file = [(target, starter)]
 
     merged = []
@@ -275,7 +273,6 @@ def primary_command_path(directory=None):
     return p_primary
 
 
-
 def normalize_commands(raw):
     """把各种 electerm 快捷命令导出格式归一化为程序内部格式：
         [{"id": str, "name": str, "labels": [str],
@@ -301,8 +298,7 @@ def normalize_commands(raw):
     if isinstance(raw, dict):
         items = list(raw.values())
     elif not isinstance(raw, list):
-        warnings.append("快捷命令顶层结构既不是数组也不是对象（实际：%s），已全部忽略"
-                        % type(raw).__name__)
+        warnings.append("快捷命令顶层结构既不是数组也不是对象（实际：{}），已全部忽略".format(type(raw).__name__))
         return [], warnings
 
     out = []
@@ -382,7 +378,7 @@ def normalize_commands(raw):
         # raw_cmds 为 None / 其他类型时不报错，交给下方"空命令"判断
 
         if not entries:
-            warnings.append("命令「%s」未解析到任何可执行命令，已跳过" % name)
+            warnings.append("命令「{}」未解析到任何可执行命令，已跳过".format(name))
             continue
 
         try:
@@ -450,7 +446,7 @@ def _as_color(v) -> str:
 def _as_text(v) -> str:
     """把可选的备注 / 描述类字段归一化为字符串（否则返回 ""）。
 
-    备注支持多行：前端 textarea 里的 \\n 原样保留、落盘 JSON 后下次启动
+    备注支持多行：前端 textarea 里的 \n 原样保留、落盘 JSON 后下次启动
     仍能完整回填。类型不对（dict / list / None / bool）一律空串 ——
     用户手写 json 的笔误不该让整条命令加载失败。数字、布尔则转字符串，
     毕竟用户不太可能真的想把 "note": 123 当备注展示。
@@ -532,7 +528,7 @@ def _write_json_atomic(path, data):
     可能同时落盘，固定 <path>.tmp 会让两个写入流互相截断 —— os.replace 之后
     文件里可能是「半份 A + 半份 B」的坏 JSON，下次启动整份命令库丢失。
     """
-    tmp = "%s.%s.tmp" % (path, uuid.uuid4().hex[:8])
+    tmp = "{}.{}.tmp".format(path, uuid.uuid4().hex[:8])
     ltmp, lpath = long_path(tmp), long_path(path)
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
@@ -594,7 +590,7 @@ def load_commands(directory=None):
         cmds, warnings, _files = discover_commands(directory or command_scan_dir())
     except Exception as ex:
         return merge_builtins([]), [
-            "快捷命令加载出现异常：%s（已回退到内置默认）" % ex]
+            "快捷命令加载出现异常：{}（已回退到内置默认）".format(ex)]
     if not cmds:
         return merge_builtins([]), warnings + [
             "未解析到任何用户命令，已回退到内置默认"]
@@ -619,4 +615,4 @@ def save_user_commands(commands):
     p = primary_command_path()
     if _write_json_atomic(p, commands or []):
         return True, None
-    return False, "无法写入 %s（目录只读 / 磁盘空间不足 / 文件被占用？）" % p
+    return False, "无法写入 {}（目录只读 / 磁盘空间不足 / 文件被占用？）".format(p)
