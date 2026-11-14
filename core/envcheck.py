@@ -46,7 +46,7 @@ WEBVIEW2_PV_SUBKEYS = (
 def parse_version(s: str | None):
     """把形如 '100.0.1185.36' 的版本串解析为 int 元组 (major, minor, build, patch)。
 
-    非字符串 / None / 含非数字段 / 为空 -> 返回 None（视为无法解析）。
+    非字符串 / None / 含非数字场 / 为空 -> 返回 None（视为无法解析）。
     解析只取开头连续的数字点分，忽略 'v' 前缀之类脏字符前后。
     """
     if s is None:
@@ -114,7 +114,7 @@ class DepProblem(NamedTuple):
 
     def message(self) -> str:
         """展示用多行文案（弹窗/日志共用）。"""
-        return "%s\n  现状：%s\n  处理：%s" % (self.name, self.detail, self.fix)
+        return "{}\n  现状：{}\n  处理：{}".format(self.name, self.detail, self.fix)
 
 
 def _best_pv(get_pv):
@@ -188,7 +188,7 @@ def check_pywebview(version=None) -> DepProblem | None:
         return None
     return DepProblem(
         name="pywebview 版本过旧",
-        detail="当前版本 %s，低于所需 %s 及以上。" % (
+        detail="当前版本 {}，低于所需 {} 及以上。".format(
             version,
             ".".join(str(x) for x in MIN_PYWEBVIEW)),
         fix="请执行：pip install -U pywebview，然后重新启动本程序。",
