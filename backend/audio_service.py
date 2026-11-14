@@ -59,8 +59,7 @@ def _check_mmresult(mr, what):
     """
     if not mr:
         return
-    raise RuntimeError("%s 失败，错误码 %s（%s）"
-                       % (what, mr, _MM_ERROR_TEXT.get(mr, "未知错误")))
+    raise RuntimeError("{} 失败，错误码 {}（{}）".format(what, mr, _MM_ERROR_TEXT.get(mr, "未知错误")))
 
 
 def _have_ffmpeg():
@@ -394,7 +393,7 @@ class DeviceAudioCapture:
                 stdin=subprocess.DEVNULL,
                 **adb_popen_kwargs())
         except Exception as e:
-            return False, "无法启动 tinycap：%s" % e
+            return False, "无法启动 tinycap：{}".format(e)
         # 探测 tinycap 是否真的跑起来了：很多 ROM 上 tinycap 需要 root，会立刻退出，
         # 而 supported() 只查了 `command -v tinycap`。不做这一步，start() 会对一个
         # 已经死掉进程返回 True —— 状态栏照样显示「（含设备音频）」，停止时 pull
@@ -407,9 +406,8 @@ class DeviceAudioCapture:
         except Exception:
             pass
         if rc is not None:
-            return False, ("tinycap 启动后立即退出（退出码 %s）："
-                           "多数机型需要 root 才能录设备端声音，可先执行 adb root 再试"
-                           % rc)
+            return False, ("tinycap 启动后立即退出（退出码 {}）："
+                           "多数机型需要 root 才能录设备端声音，可先执行 adb root 再试".format(rc))
         with self._lock:
             self._procs[serial] = (proc, remote_wav)
         return True, ""
@@ -447,7 +445,7 @@ class DeviceAudioCapture:
         tmp = os.path.join(
             tempfile.gettempdir(),
             # safe_name：无线序列号含冒号，Windows 临时文件名会非法
-            "adb_devaudio_%s_%s.wav" % (safe_name(serial), time.strftime("%H%M%S")))
+            "adb_devaudio_{}_{}.wav".format(safe_name(serial), time.strftime("%H%M%S")))
         # pull 带重试（容忍收尾/落盘延迟）；并校验 wav 头，损坏则丢弃，避免污染合成视频
         for attempt in range(5):
             try:
@@ -636,10 +634,10 @@ class MicRecorder:
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
-            return False, "无法创建目录：%s" % e
+            return False, "无法创建目录：{}".format(e)
         ts = time.strftime("%Y%m%d_%H%M%S")
         # 同一秒内「停止 → 再录」不能把上一段录音覆盖掉（时间戳只到秒）
-        self._path = unique_path(os.path.join(save_dir, "mic_%s.wav" % ts))
+        self._path = unique_path(os.path.join(save_dir, "mic_{}.wav".format(ts)))
         self._chunks = []
         self._collected = set()
         self._stop.clear()
