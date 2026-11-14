@@ -92,8 +92,7 @@ def _resolve_index_url():
     # os.path.exists 对超长路径返回 False → 这里会误报「未找到 index.html，
     # 窗口可能显示空白」，而文件其实好好地在那儿。
     if not path_isfile(index):
-        print("[main] 警告：未找到 %s，窗口可能显示空白（前端尚未就绪）。"
-              % index, file=sys.stderr)
+        print("[main] 警告：未找到 {}，窗口可能显示空白（前端尚未就绪）。".format(index), file=sys.stderr)
     return Path(index).resolve().as_uri()
 
 
@@ -259,7 +258,7 @@ def _show_native_error(title, lines, url=None):
         except Exception:
             shown = False
     if not shown:
-        print("\n[环境检查未通过] %s\n%s\n" % (title, text), file=sys.stderr)
+        print("\n[环境检查未通过] {}\n{}\n".format(title, text), file=sys.stderr)
     return shown
 
 
@@ -278,13 +277,12 @@ def _write_crash_log(title, exc_type, exc, tb):
         traceback.print_exception(exc_type, exc, tb, file=buf)
         body = buf.getvalue().rstrip()
     except Exception:
-        body = "%s: %s" % (getattr(exc_type, "__name__", exc_type), exc)
+        body = "{}: {}".format(getattr(exc_type, "__name__", exc_type), exc)
     text = "\n".join([
         "=" * 64,
         "ADB 设备指令台 崩溃日志",
         "时间  : " + time.strftime("%Y-%m-%d %H:%M:%S"),
-        "平台  : %s / Python %s / 打包态: %s"
-        % (sys.platform, sys.version.split()[0], getattr(sys, "frozen", False)),
+        "平台  : {} / Python {} / 打包态: {}".format(sys.platform, sys.version.split()[0], getattr(sys, "frozen", False)),
         "原因  : " + title,
         "-" * 64,
         body,
@@ -305,7 +303,7 @@ def _write_crash_log(title, exc_type, exc, tb):
             stamp = time.strftime("%Y%m%d_%H%M%S")
             # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
             # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
-            path = unique_path(os.path.join(d, "crash_%s.log" % stamp))
+            path = unique_path(os.path.join(d, "crash_{}.log".format(stamp)))
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             return path
@@ -321,13 +319,13 @@ def _notify_crash(log_path):
         MB_SYSTEMMODAL = 0x1000
         lines = "程序发生未预期的错误，即将退出。"
         if log_path:
-            lines += "\n\n崩溃详情已写入：\n%s\n\n请把该日志文件发给维护者以定位问题。" % log_path
+            lines += "\n\n崩溃详情已写入：\n{}\n\n请把该日志文件发给维护者以定位问题。".format(log_path)
         _user32, _shell32, _k32b = _win32()
         _user32.MessageBoxW(
             None, lines, "ADB 设备指令台 · 崩溃提示",
             MB_ICONERROR | MB_SYSTEMMODAL)
     except Exception:
-        print("[崩溃] %s" % log_path, file=sys.stderr)
+        print("[崩溃] {}".format(log_path), file=sys.stderr)
 
 
 def _install_crash_hooks():
@@ -342,11 +340,11 @@ def _install_crash_hooks():
 
     def _thread_hook(args):
         log = _write_crash_log(
-            "后台线程异常（%s）" % getattr(args.thread, "name", "?"),
+            "后台线程异常（{}）".format(getattr(args.thread, "name", "?")),
             args.exc_type, args.exc_value, args.exc_traceback)
         if log:
             try:
-                print("[崩溃日志] %s" % log, file=sys.stderr)
+                print("[崩溃日志] {}".format(log), file=sys.stderr)
             except Exception:
                 pass
 
@@ -375,7 +373,7 @@ def _preflight():
         return
     lines = ["检测到以下问题，请处理后重新运行本程序："]
     for p in problems:
-        lines.append("• %s\n  %s\n  → %s" % (p.name, p.detail, p.fix))
+        lines.append("• {}\n  {}\n  → {}".format(p.name, p.detail, p.fix))
     # 如果问题涉及 WebView2，给弹窗附带可点击跳转的下载链接。
     url = None
     for p in problems:
@@ -396,7 +394,7 @@ def _reset_boot_timing_log():
     """每次启动重新起一份耗时日志：反馈「这次启动慢」时只看得到本次分段。"""
     try:
         with open(long_path(_boot_timing_path()), "w", encoding="utf-8") as f:
-            f.write("=== %s 启动 ===\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            f.write("=== {} 启动 ===\n".format(time.strftime("%Y-%m-%d %H:%M:%S")))
     except Exception:
         pass
 
@@ -405,7 +403,7 @@ def _make_boot_mark(t0):
     """返回启动分段打点函数：同一行既写 stderr（源码跑可见）也追加到日志
     文件——--windowed 打包的 exe 没有控制台，用户只能从文件里读这份分段。"""
     def mark(tag):
-        line = "[boot %5.2fs] %s" % (time.perf_counter() - t0, tag)
+        line = "[boot {:5.2f}s] {}".format(time.perf_counter() - t0, tag)
         try:
             print(line, file=sys.stderr, flush=True)
         except Exception:
@@ -629,8 +627,8 @@ def _strip_mark_of_the_web():
 
 def _gui_failure_lines(exc):
     """GUI 初始化失败的中文提示行：pythonnet/MOTW 场景给可自救的步骤。"""
-    msg = "%s: %s" % (type(exc).__name__, exc)
-    lines = ["窗口启动失败：%s" % msg, ""]
+    msg = "{}: {}".format(type(exc).__name__, exc)
+    lines = ["窗口启动失败：{}".format(msg), ""]
     if ("Python.Runtime" in msg or "pythonnet" in msg.lower()
             or "Loader.Initialize" in msg or "CLR" in msg):
         lines += [
@@ -660,10 +658,10 @@ def _report_gui_init_failure(exc):
     except Exception:
         log = None
     if log:
-        lines += ["", "崩溃详情已写入：%s" % log]
+        lines += ["", "崩溃详情已写入：{}".format(log)]
     try:
         with open(long_path(_boot_timing_path()), "a", encoding="utf-8") as f:
-            f.write("[启动失败] %s: %s\n" % (type(exc).__name__, exc))
+            f.write("[启动失败] {}: {}\n".format(type(exc).__name__, exc))
     except Exception:
         pass
     try:
@@ -683,7 +681,7 @@ def main():
     # 任何一段 Python 计时里，却往往是「启动二十秒」的全部。
     age = _process_age_seconds()
     if age is not None:
-        _MARK("process_age %.2fs（进程创建 → Python 代码，含 onefile 解压）" % age)
+        _MARK("process_age {:.2f}s（进程创建 → Python 代码，含 onefile 解压）".format(age))
 
     # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
@@ -812,7 +810,7 @@ def _launch(args, api, url, _T0=None):
         try:
             api.shutdown()
         except Exception as ex:
-            print("[main] 退出清理异常：%s" % ex, file=sys.stderr)
+            print("[main] 退出清理异常：{}".format(ex), file=sys.stderr)
     return window
 
 
