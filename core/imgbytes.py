@@ -196,7 +196,7 @@ def _trim_jpg(data):
 
 
 def _head_hex(data, n=8):
-    return " ".join("%02x" % b for b in data[:n])
+    return " ".join("{:02x}".format(b) for b in data[:n])
 
 
 def normalize(data):
