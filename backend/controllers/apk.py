@@ -1,6 +1,4 @@
-"""
-backend.controllers.apk —— APK 选择 / 安装
-"""
+"""backend.controllers.apk —— APK 选择 / 安装"""
 
 from backend.controller import (
     adb_kwargs,
@@ -89,7 +87,7 @@ class ApkMixin:
             % (os.path.basename(path), len(targets),
                "、".join(["覆盖" if replace else "全新",
                           "允许降级" if downgrade else "",
-                          "授予权限" if grant else ""]).replace("、"、", "、").strip("、")),
+                          "授予权限" if grant else ""]).replace("、、", "、").strip("、")),
             toast=False)
         return {"ok": True, "count": len(targets)}
 
