@@ -33,8 +33,7 @@ _DEVICE_STATES = (
     "unknown", "detached",
 )
 _DEVICE_LINE_RE = re.compile(
-    r"^(?P<serial>.+?)\s+(?P<state>%s)\b(?P<rest>.*)$"
-    % "|".join(re.escape(s) for s in _DEVICE_STATES),
+    r"^(?P<serial>.+?)\s+(?P<state>{})(?P<rest>.*)$".format("|".join(re.escape(s) for s in _DEVICE_STATES)),
 )
 
 
