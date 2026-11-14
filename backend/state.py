@@ -25,23 +25,16 @@ class AppState:
 
     def __init__(self, adb_path: str = "adb"):
         self._lock = threading.Lock()
-        # ---- 生命周期 ----
         self.booted = False
         self.shutting_down = False
-        # ---- 配置 ----
         self.adb_path = adb_path
         self.version = VERSION
-        # ---- 启动加载内容（boot 时写入）----
         self.commands = []
         self.cmd_warnings = []
-        # ---- 运行态 ----
-        self._running = 0        # 正在执行的后台命令数（>=0）
-        self._interactive = False  # 是否处于 adb shell 交互式直通
-        self._busy = False       # 对外公布的 busy 快照（stop 按钮态）
+        self._running = 0
+        self._interactive = False
+        self._busy = False
 
-    # ------------------------------------------------------------------
-    # 生命周期
-    # ------------------------------------------------------------------
     def mark_booted(self, commands, warnings, adb_path=None, version=None):
         """boot 完成：写入命令列表/警告与配置，并返回 booted 事件载荷。"""
         with self._lock:
@@ -56,8 +49,6 @@ class AppState:
                 "warnings": list(self.cmd_warnings),
                 "adb": self.adb_path,
                 "version": self.version,
-                # 前端渲染所需的「后端单一数据源」下发：
-                # 设备状态的中文说明 + logcat 缓冲区选项（label -> 缓冲区名列表）
                 "state_labels": dict(STATE_LABEL),
                 "lc_buffers": {k: list(v) for k, v in LOGCAT_BUFFERS.items()},
                 "commands": [
@@ -65,28 +56,13 @@ class AppState:
                         "id": c.get("id", ""),
                         "name": c.get("name", ""),
                         "labels": list(c.get("labels", [])),
-                        # 含命令文本，供前端指令台按「命令内容」检索（applyCmdFilter）
                         "commands": [
                             {"command": e.get("command", ""), "delay": e.get("delay", 0)}
                             for e in (c.get("commands") or [])
                         ],
-                        # 使用频次（前端 renderCommands 按它排「常用在前」）
                         "clickCount": c.get("clickCount", 0),
-                        # electerm「仅输入」标记：True 时前端点击该命令只把
-                        # 命令文本填进指令输入框、不直接执行（用户确认后再手动
-                        # 「执行」）。缺失按 False（老文件 / 手写 payload 不受影响）。
                         "inputOnly": bool(c.get("inputOnly")),
-                        # 内置默认命令标记：前端据它加角标 + 提示（见 app.js
-                        # renderCmdGroups 的 cmd-chip--builtin）。**必须随命令一起
-                        # 下发**——漏掉它前端拿到的一律是 undefined，内置命令与
-                        # 用户自定义命令在界面上再无区别（角标/提示永不出现）。
                         "builtin": bool(c.get("builtin")),
-                        # 内置命令的两根分类轴（用户命令没有，下发空串）：
-                        #   section —— 「内置」组内的二级分组（按用途，可折叠）；
-                        #   scope   —— 适用设备（通用 / 车机 / 手机），卡片角标 + 组内筛选。
-                        # 缺了任一字段，前端拿到的恒为 undefined：分组全部落到
-                        # 「其他」、角标永远不出现，而界面本身不会报错——正是最
-                        # 难发现的那种「功能做了但没生效」。
                         "section": c.get("section", ""),
                         "scope": c.get("scope", ""),
                     }
@@ -99,9 +75,6 @@ class AppState:
         with self._lock:
             self.shutting_down = True
 
-    # ------------------------------------------------------------------
-    # 运行态
-    # ------------------------------------------------------------------
     def begin_run(self):
         """一条后台命令开始执行。返回 (busy, changed)。"""
         with self._lock:
@@ -127,9 +100,6 @@ class AppState:
             self._busy = busy
         return busy, changed
 
-    # ------------------------------------------------------------------
-    # 只读查询
-    # ------------------------------------------------------------------
     def is_busy(self):
         with self._lock:
             return self._busy
