@@ -44,20 +44,8 @@ from core.constants import (
 )
 from core.devices import parse_devices, plan_devices
 
-# 手动刷新撞上「已经有一轮在跑」时，最多等这么久（秒）。
-#
-# 为什么要有这个等待：自动轮询每 5 秒调一次 refresh，本身很快；但 adb 卡住时
-# _poll_devices 会重试 4 次（每次 DEVICE_POLL_TIMEOUT 超时 + 间隔），`_busy`
-# 可能被占住几十秒 —— 而这恰恰是用户会去点「刷新」的时刻。旧实现在 _busy 为真时
-# 直接 return False，连 verbose=True 的「刷新完成」提示都不会发：用户点了按钮，
-# 界面上**什么也没发生**，只能反复点。
-# 上限取 12s：比一轮正常轮询长得多，又不至于让用户对着按钮干等半分钟。
 BUSY_WAIT_S = 12.0
 
-# _busy 强制释放阈值（秒）。正常刷新最多 ~21s（2 次重试 × (10s timeout + 0.6s gap)），
-# 若 _busy 持续超过此值，要么是 adb 完全僵尸、要么 refresh 线程在某个异常分支
-# 没走到 finally（理论上不可能，但防一手）——此时强制释放，让下一次刷新能跑起来，
-# 而不是让「刷新正在进行中」这个假信号永远堵着所有手动刷新请求。
 BUSY_FORCE_RELEASE_S = 60.0
 
 
@@ -73,36 +61,26 @@ class DeviceManager:
     def __init__(self, bus=None):
         self.bus = bus
         self._lock = threading.RLock()
-        self.device_checked = {}   # serial -> bool（勾选保留，粘性）
-        self.device_state = {}     # serial -> adb state（仅含在列表中的设备）
-        self.device_model = {}     # serial -> model（含宽限内设备的最后已知型号）
-        self._absent = {}          # serial -> int（宽限内「消失」的连续缺失计数）
-        self._busy = False         # 刷新互斥（adb 卡顿时不叠加刷新线程）
-        self._busy_since = 0.0     # _busy 被占用的时间戳（强制释放用）
-        self._busy_owner = 0       # 持有 _busy 的 refresh 实例 id（防止僵死线程回来误释放）
-        self._next_owner = 1       # 下一次分配的 owner id
-        # 与 _busy 配对：一轮刷新结束（finally）时 set，等待方据此立刻醒来，
-        # 不必轮询 _busy 状态（轮询会引入 50ms 级别的最小延迟与额外 CPU）。
+        self.device_checked = {}
+        self.device_state = {}
+        self.device_model = {}
+        self._absent = {}
+        self._busy = False
+        self._busy_since = 0.0
+        self._busy_owner = 0
+        self._next_owner = 1
         self._idle = threading.Event()
         self._idle.set()
-        # ---- 防误报断连的运行态 ----
-        self._had_devices = False  # 上一次成功轮询是否解析出过设备
-        self._polled_once = False  # 是否已成功轮询过至少一次（见 refresh 里的 first_load）
-        self._fail_streak = 0      # 连续刷新失败次数（驱动 start-server 自愈）
-        self._heal_pending = False # 本次连续失败是否已尝试过自愈（只试一次）
-        self._last_fail_notice = 0.0   # 上次失败播报时间戳（限频用）
-        # 长连接会话守卫：返回 True 表示此刻有录屏 / 落盘抓取等长连接在跑，
-        # 不允许自动重启 adb server（见 _poll_devices）。默认无守卫。
+        self._had_devices = False
+        self._polled_once = False
+        self._fail_streak = 0
+        self._heal_pending = False
+        self._last_fail_notice = 0.0
         self.inflight_guard = None
 
-    # ------------------------------------------------------------------
-    # 内部
-    # ------------------------------------------------------------------
     def _update_snapshot(self, plan):
         self.device_state = dict(plan["states"])
         models = dict(plan["models"])
-        # 宽限内消失的设备不在 plan["models"]（只含在列表设备）里，从上一轮
-        # 快照继承型号，保证 UI 置灰卡片仍显示型号而不是 "unknown model"。
         for s in plan["absent_streak"]:
             if s not in models and s in self.device_model:
                 models[s] = self.device_model[s]
@@ -110,9 +88,6 @@ class DeviceManager:
         self.device_checked = dict(plan["checked"])
         self._absent = dict(plan["absent_streak"])
 
-    # ------------------------------------------------------------------
-    # 刷新
-    # ------------------------------------------------------------------
     def refresh(self, adb="adb", verbose=False, wait=False):
         """执行 `adb devices -l` 并广播结果。
 
@@ -128,60 +103,45 @@ class DeviceManager:
         **不清空快照**：界面继续展示上一次的设备列表，防止 adb 偶发抖动被
         用户当成「程序自动断连」。
         """
-        # owner 必须用 _acquire **返回**的那个 id，不能回头读 self._busy_owner：
-        # 两者之间若有别的线程强制释放了 _busy 并接管（僵死刷新被解锁、新持有者
-        # 上位），读到的就是**别人的** id，finally 里「owner 匹配才释放」的判断
-        # 于是成立 —— 本轮把新持有者的刷新互斥锁给释放了，两轮 adb devices 并发。
         owner = self._acquire(wait, verbose)
         if not owner:
             return False
         try:
-            # adb 的 I/O 放在锁外：即便 adb 卡满 10s，用户勾选设备也不被阻塞
             raw = self._poll_devices(adb, verbose)
             if raw is None:
-                return False        # 失败：保留上一轮快照，不广播、不清空
+                return False
             devices = parse_devices(raw)
-            # 读旧快照 + 规划 + 写新快照 + 广播必须原子化，与 toggle 等互斥
             with self._lock:
                 self._had_devices = bool(devices)
                 plan = plan_devices(
                     self.device_checked, self.device_state,
                     self.device_model, devices, prev_absent=self._absent)
-                # 「首次加载」只在**第一次成功轮询**时成立。
-                # core.devices.plan_devices 判定 first_load 的依据是「勾选 / 状态 /
-                # 消失记忆全为空」—— 一台设备都没有时这三者永远为空，于是每一轮
-                # 轮询都会被当成首次加载，`changed` 恒为 True：程序开着但还没插设备
-                # （最常见的空闲状态）每 5 秒就广播一次 devices，前端跟着整表重建，
-                # 与 verbose=False「无变化完全静默」的承诺、以及注释里
-                # 「一打开程序不冒提示」都相矛盾。
                 first_load = plan["first_load"] and not self._polled_once
                 self._polled_once = True
                 changed = bool(plan["changed"] or first_load)
                 self._update_snapshot(plan)
                 if self.bus:
-                    # 差异播报：首次加载不播“新增”（一打开程序不冒提示）
                     if not first_load:
                         for s in plan["recovered"]:
                             self.bus.push("status", {
-                                "type": "info", "text": "✓ 设备已重连：%s" % s})
+                                "type": "info", "text": "✓ 设备已重连：{}".format(s)})
                         for s in plan["newly_absent"]:
                             self.bus.push("status", {
                                 "type": "warn",
-                                "text": "⚠ 设备短暂失联：%s（保留勾选，重连后自动恢复）" % s})
+                                "text": "⚠ 设备短暂失联：{}（保留勾选，重连后自动恢复）".format(s)})
                         for s in plan["gone"]:
                             self.bus.push("status", {
                                 "type": "warn",
-                                "text": "⚠ 设备已断开：%s（已移除）" % s})
+                                "text": "⚠ 设备已断开：{}（已移除）".format(s)})
                         for s in plan["added"]:
                             if s in plan["recovered"]:
                                 continue
                             self.bus.push("status", {
-                                "type": "info", "text": "✓ 检测到新设备：%s" % s})
+                                "type": "info", "text": "✓ 检测到新设备：{}".format(s)})
                         for s in plan["state_changed"]:
                             self.bus.push("status", {
                                 "type": "warn",
-                                "text": "⚠ 设备 %s 状态变为「%s」"
-                                        % (s, state_label(plan["states"].get(s, "")))})
+                                "text": "⚠ 设备 {} 状态变为「{}」".format(s, state_label(plan["states"].get(s, "")))})
                     if changed:
                         self.bus.push("devices", {
                             "items": plan["items"],
@@ -200,16 +160,11 @@ class DeviceManager:
                 return changed
         finally:
             with self._lock:
-                # 只释放自己持有的那次；若已被强制释放 + 新持有者接管，
-                # 绝不能把新一轮刷新的 _busy 清掉
                 if self._busy_owner == owner:
                     self._busy = False
                     self._busy_since = 0.0
             self._idle.set()
 
-    # ------------------------------------------------------------------
-    # 刷新互斥
-    # ------------------------------------------------------------------
     def _acquire(self, wait, verbose):
         """尝试占用刷新互斥；占用成功返回 owner id（>0），失败返回 0。
 
@@ -236,7 +191,6 @@ class DeviceManager:
                     self._busy_owner = owner
                     self._idle.clear()
                     return owner
-                # 强制释放：_busy 持续超阈值
                 if now - self._busy_since > BUSY_FORCE_RELEASE_S:
                     if self.bus:
                         self.bus.push("status", {
@@ -253,7 +207,6 @@ class DeviceManager:
             remain = deadline - time.time()
             if remain <= 0:
                 break
-            # Event 已 set（上一轮刚结束）时立即返回，下一圈重新抢锁
             self._idle.wait(remain)
         if verbose and self.bus:
             self.bus.push("status", {
@@ -262,31 +215,15 @@ class DeviceManager:
                         "请稍后再点一次「刷新」。"})
         return 0
 
-    # ------------------------------------------------------------------
-    # 防误报断连：轮询 + 重试 + 自愈（I/O 均在锁外执行）
-    # ------------------------------------------------------------------
     def _poll_devices(self, adb, verbose):
         """执行 `adb devices -l`，带可疑结果重试与 server 自愈。
 
         返回原始输出文本；返回 None 表示本轮刷新失败（调用方应保留快照）。
         """
-        # 连续失败达到阈值：先尝试拉起 adb server 再轮询。server 被其他工具
-        # 杀掉后，不自愈则之后每次调用都会立刻失败，只能等用户手动干预。
-        # _heal_pending 保证一段连续失败里只自愈一次（start-server 在 server
-        # 存活时虽便宜，也没必要每 5s 调一次）。
         with self._lock:
             heal_now = (self._fail_streak >= DEVICE_SERVER_HEAL_AFTER
                         and not self._heal_pending)
         if heal_now and self._inflight_blocks_heal():
-            # 有录屏 / 落盘抓取在跑时**绝不**自动重启 adb server。
-            # `adb start-server` 在 server 活着但忙得不应答时会先把它 kill 再拉起
-            # （客户端那句 "adb server didn't ACK; killing"），所有在途的
-            # `adb shell` 连接随之断开 —— 设备明明好好的，我们的自愈却把正在录的
-            # screenrecord 掐死了，用户只会看到「录屏意外中断」。
-            # 这类连续失败多半只是 USB 带宽被满缓冲 logcat 占满导致的超时，等它
-            # 过去即可；若 server 真死了，录屏客户端本来也会一起退出并走收尾，
-            # 那时会话已结束，下一轮失败就能正常自愈。
-            # 注意这里不置 _heal_pending：等会话结束后仍要允许补上这次自愈。
             heal_now = False
         if heal_now:
             with self._lock:
@@ -309,25 +246,17 @@ class DeviceManager:
                 raw, err = None, str(ex) or ex.__class__.__name__
             if raw is not None:
                 if parse_devices(raw) or not had:
-                    # 正常结果：解析出设备，或本来就没有设备（首刷 / 确实全拔了）
                     with self._lock:
                         self._fail_streak = 0
                         self._heal_pending = False
                     return raw
-                # 可疑：上一轮还有设备，这次一个都没有——adb server 重启 /
-                # USB 重枚举的典型瞬间表现。落到重试逻辑。
                 err = "empty"
             last_raw, last_err = raw, err
         if last_raw is not None:
-            # 拿到了文本、但重试后仍为空：接受「设备确实都不在了」的事实，
-            # 交由 plan_devices 走宽限流程（置灰保留勾选，超宽限才遗忘），
-            # 与「真拔线」同路径，不误报为刷新失败。
             with self._lock:
                 self._fail_streak = 0
                 self._heal_pending = False
             return last_raw
-        # 全部尝试均为超时 / 异常：保留上一轮快照（不清空、不播 gone），
-        # 按限频提示。
         with self._lock:
             self._fail_streak += 1
             due = verbose or (
@@ -343,7 +272,6 @@ class DeviceManager:
     def _fail_text(err, had_devices):
         """刷新失败的提示文案（区分超时 / 空结果 / 其它异常）。"""
         if not had_devices:
-            # 本来就没有设备（或已全部拔掉）：失败只是「没刷到」，不断连误报
             return "设备刷新未完成（%s）。" % (
                 "adb 无响应" if err == "timeout" else err or "未知原因")
         return ("设备刷新超时（adb 无响应），已保留上次的设备列表。"
@@ -375,9 +303,6 @@ class DeviceManager:
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # 勾选操作（全部加锁，与自动轮询的 refresh 并发安全）
-    # ------------------------------------------------------------------
     def toggle(self, serial, on):
         """勾选/取消一台设备；不可操作设备一律忽略。返回是否生效。"""
         with self._lock:
@@ -415,9 +340,6 @@ class DeviceManager:
                 and is_usable(self.device_state.get(s, ""))
             ]
 
-    # ------------------------------------------------------------------
-    # 快照
-    # ------------------------------------------------------------------
     def get_items(self):
         """序列化当前设备快照（前端 / 事件共用）。
 
