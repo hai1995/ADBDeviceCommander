@@ -39,7 +39,7 @@ class PerfMixin:
         serial = str(serial or "")
         model = (info or {}).get("model") or ""
         tail = serial[-4:] if len(serial) > 10 else serial
-        return ("%s · %s" % (model, tail)) if model else (tail or "device")
+        return ("{} · {}".format(model, tail)) if model else (tail or "device")
 
     def _perf_interval(self, interval_ms):
         """采样间隔：前端可能传空 / 字符串 / 越界值，一律夹到安全区间。
@@ -125,13 +125,13 @@ class PerfMixin:
             # 全部失败：把**每台**的原因都说出来。只报第一台时，用户按那句
             # 「设备离线」去查，而真正卡住的是另一台的「包名不存在」。
             if len(failed) > 1:
-                reason = "；".join("%s（%s）" % (k, v) for k, v in failed.items())
+                reason = "；".join("{}（{}）".format(k, v) for k, v in failed.items())
                 self._push_status(
                     "err", "⚠ 性能监控启动失败（%d 台）：%s"
                     % (len(failed), reason))
             else:
                 reason = next(iter(failed.values()), "启动失败")
-                self._push_status("err", "⚠ 性能监控启动失败：%s" % reason)
+                self._push_status("err", "⚠ 性能监控启动失败：{}".format(reason))
             return {"ok": False, "reason": "start_failed", "error": reason,
                     "failed": failed}
         # 新会话就位后再关旧会话：启动失败时旧数据还在，用户不会白丢一段曲线。
@@ -142,8 +142,7 @@ class PerfMixin:
         info = infos[primary]
         if len(started) == 1:
             self._push_status(
-                "ok", "✓ 已开始性能监控：%s（%s · 每 %.1f 秒采样一次）"
-                % (info.get("model") or primary, perf_pkg_display(info), interval))
+                "ok", "✓ 已开始性能监控：{}（{} · 每 {:.1f} 秒采样一次）".format(info.get("model") or primary, perf_pkg_display(info), interval))
         else:
             self._push_status(
                 "ok", "✓ 已开始性能监控：%d 台设备（%s · 每 %.1f 秒采样一次）"
@@ -155,7 +154,7 @@ class PerfMixin:
             self._push_status(
                 "warn", "⚠ 有 %d 台设备未能开始性能监控：%s"
                 % (len(failed),
-                   "；".join("%s（%s）" % (k, v) for k, v in failed.items())))
+                   "；".join("{}（{}）".format(k, v) for k, v in failed.items())))
         return {"ok": True, "serial": primary, "info": info,
                 "interval": interval, "sessions": infos, "failed": failed}
 
@@ -276,8 +275,8 @@ class PerfMixin:
         payload = self._perf_threshold_payload()
         payload["ok"] = True
         if th:
-            self._push_status("ok", "✓ 告警阈值已更新：%s" % " · ".join(
-                perf_rule_text(k, v) for k, v in th.items()), toast=True)
+            self._push_status("ok", "✓ 告警阈值已更新：{}".format(" · ".join(
+                perf_rule_text(k, v) for k, v in th.items())), toast=True)
         else:
             self._push_status("info", "告警阈值已全部关闭（不再标红 / 不再告警）",
                               toast=True)
@@ -336,7 +335,7 @@ class PerfMixin:
             total_samples += len(samples)
         if not saved:
             why = next(iter(errors.values()), "没有采样数据")
-            self._push_status("err", "⚠ 报告生成失败：%s" % why)
+            self._push_status("err", "⚠ 报告生成失败：{}".format(why))
             return {"ok": False, "reason": why, "errors": errors}
         # 多设备时再出一份「横向对比」报告：三份独立报告摊在桌上自己对照，
         # 是导出这件事里最费劲的一步，合并成一份能省掉全部来回翻页。
@@ -363,7 +362,7 @@ class PerfMixin:
             self._push_status(
                 "warn", "⚠ 有 %d 份报告未生成：%s" % (
                     len(errors),
-                    "；".join("%s（%s）" % (k, v) for k, v in errors.items())))
+                    "；".join("{}（{}）".format(k, v) for k, v in errors.items())))
         return {"ok": True, "files": saved, "html": saved[0]["html"],
                 "csv": saved[0]["csv"], "rows": total_rows,
                 "samples": total_samples, "sessions": len(saved),

@@ -84,11 +84,11 @@ class ScreenshotMixin:
                 failed.append(s)
                 if batch:
                     self._shot_batch_done(
-                        ok=False, serial=s, err="无法启动截图线程：%s" % e,
+                        ok=False, serial=s, err="无法启动截图线程：{}".format(e),
                         bstate=bstate)
                 else:
                     self._push_status(
-                        "err", "⚠ 无法启动截图线程 %s：%s" % (s, e))
+                        "err", "⚠ 无法启动截图线程 {}：{}".format(s, e))
         if failed and len(failed) == len(serials):
             # 一台都没跑起来：明确告诉调用方失败，前端据此立刻恢复按钮
             # （没有 worker 就没有 shot_state 事件，等不到那次「已完成」）。
@@ -138,7 +138,7 @@ class ScreenshotMixin:
                 b["ok"] += 1
             else:
                 b["fail"] += 1
-                b["errs"].append("%s：%s" % (serial, err or "未知原因"))
+                b["errs"].append("{}：{}".format(serial, err or "未知原因"))
             done = b["ok"] + b["fail"]
             if done < b["total"]:
                 return
@@ -147,13 +147,13 @@ class ScreenshotMixin:
                 self._shot_batch = None         # 先摘计数器，避免与下一批交叉
         saved = b.get("saved", True)
         if b["fail"]:
-            where = ("保存目录 %s" % b["dir"]) if saved else "（未保存到目录）"
+            where = ("保存目录 {}".format(b["dir"])) if saved else "（未保存到目录）"
             self._push_toast(
                 "warn",
                 "⚠ 批量截图完成：%d 成功，%d 失败（%s）——%s"
                 % (b["ok"], b["fail"], "；".join(b["errs"])[:120], where))
         else:
-            where = ("保存目录 %s" % b["dir"]) if saved else "（未保存到目录）"
+            where = ("保存目录 {}".format(b["dir"])) if saved else "（未保存到目录）"
             self._push_toast(
                 "ok", "✓ 已完成 %d 台设备的截图，%s"
                 % (b["ok"], where))
@@ -201,7 +201,7 @@ class ScreenshotMixin:
         path, err = ScreenCapturer.screenshot(
             self.state.adb_path, serial, save_dir, save_file)
         if err:
-            self._push_status("err", "⚠ 截图失败 %s: %s" % (serial, err))
+            self._push_status("err", "⚠ 截图失败 {}: {}".format(serial, err))
             if batch:
                 self._shot_batch_done(ok=False, serial=serial, err=err,
                                       bstate=bstate)
@@ -214,7 +214,7 @@ class ScreenshotMixin:
         # save_file=False 时不落盘到保存目录（只到临时目录供预览/剪贴板用），
         # 措辞改「截图完成（未保存到目录）」避免用户去保存目录找一份不存在的图。
         if save_file:
-            saved_msg = "✓ 已保存截图: %s" % path
+            saved_msg = "✓ 已保存截图: {}".format(path)
         else:
             saved_msg = "✓ 截图完成（未保存到目录）"
         if batch:
@@ -232,8 +232,7 @@ class ScreenshotMixin:
                 payload["clipboard"] = True
             else:
                 self._push_status(
-                    "warn", "⚠ 已保存截图: %s（复制到粘贴板失败：%s）"
-                            % (path, clip_err or "未知原因"))
+                    "warn", "⚠ 已保存截图: {}（复制到粘贴板失败：{}）".format(path, clip_err or "未知原因"))
                 payload["clipboard"] = False
         if batch:
             self._shot_batch_done(ok=True, serial=serial, bstate=bstate)

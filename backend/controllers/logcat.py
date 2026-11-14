@@ -1,6 +1,4 @@
-"""
-backend.controllers.logcat —— logcat 监控与抓取
-"""
+"""backend.controllers.logcat —— logcat 监控与抓取"""
 
 from backend.controller import (
     adb_kwargs,
@@ -118,7 +116,7 @@ class LogcatMixin:
             self._push_status(
                 "warn", "⚠ 设备 {} 已有 logcat 抓取在进行，请先停止再开始".format(serial))
             return {"ok": False, "reason": "already_running"}
-        self._push_status("info", "开始抓取 logcat: {}{}".format(serial, path, self._level_filter_desc(level_filter)))
+        self._push_status("info", "开始抓取 logcat: {} -> {}{}".format(serial, path, self._level_filter_desc(level_filter)))
         return {"ok": True, "path": path}
 
     @staticmethod

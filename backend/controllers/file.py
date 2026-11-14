@@ -176,11 +176,11 @@ def _pick_folder(initial=None):
             try:
                 res = win.create_file_dialog(webview.FOLDER_DIALOG)
             except Exception as e:
-                return None, "error:%s" % e
+                return None, "error:{}".format(e)
         except Exception as e:
-            return None, "error:%s" % e
+            return None, "error:{}".format(e)
     except Exception as e:
-        return None, "error:%s" % e
+        return None, "error:{}".format(e)
     if not res:
         return None, "cancelled"
     path = res[0] if isinstance(res, (list, tuple)) else str(res)
@@ -215,7 +215,7 @@ class FileMixin:
             mkdir_err = str(e)
         if not os.path.isdir(long_path(d)):
             why = mkdir_err or "路径不存在"
-            self._push_status("err", "⚠ 无法创建 / 打开目录 %s：%s" % (d, why))
+            self._push_status("err", "⚠ 无法创建 / 打开目录 {}：{}".format(d, why))
             return {"ok": False, "text": why}
         try:
             if sys.platform.startswith("win"):
@@ -224,10 +224,10 @@ class FileMixin:
                 subprocess.Popen(["open", d])
             else:
                 subprocess.Popen(["xdg-open", d])
-            self._push_status("info", "📂 已打开目录：%s" % d)
+            self._push_status("info", "📂 已打开目录：{}".format(d))
             return {"ok": True}
         except Exception as e:
-            self._push_status("err", "⚠ 无法打开目录 %s: %s" % (d, e))
+            self._push_status("err", "⚠ 无法打开目录 {}: {}".format(d, e))
             return {"ok": False, "text": str(e)}
 
     def select_save_dir(self, current=None):
@@ -250,7 +250,7 @@ class FileMixin:
         if why.startswith("error:"):
             msg = why[len("error:"):]
             self._push_status(
-                "err", "⚠ 打开「选择文件夹」失败：%s（可直接手动输入路径）" % msg)
+                "err", "⚠ 打开「选择文件夹」失败：{}（可直接手动输入路径）".format(msg))
             return {"ok": False, "reason": "error", "text": msg}
         return {"ok": False, "reason": why or "unsupported"}
 
@@ -286,7 +286,7 @@ class FileMixin:
         if seq is not None and self._file_req.get(serial) != seq:
             return          # 已有更新的一次列目录请求，丢弃这次迟到的结果
         if err:
-            self._push_status("err", "⚠ 列出目录失败 %s: %s" % (path, err))
+            self._push_status("err", "⚠ 列出目录失败 {}: {}".format(path, err))
             self.bus.push("file", {"serial": serial, "path": path,
                                    "error": err})
         else:
@@ -336,7 +336,7 @@ class FileMixin:
         try:
             self.file_list(serial, target)
         except Exception as ex:
-            self._push_status("err", "⚠ 刷新目录失败 %s：%s" % (target, ex))
+            self._push_status("err", "⚠ 刷新目录失败 {}：{}".format(target, ex))
 
     def _file_op(self, serial, do_fn, *args, key=None):
         """文件操作公共入口：无设备兜底 + 后台线程派发 + 立即返回。
@@ -351,7 +351,7 @@ class FileMixin:
         """
         if not serial:
             return {"ok": False, "reason": "no_device"}
-        k = key or ("fileop_%s" % serial)
+        k = key or ("fileop_{}".format(serial))
         if self.workers.is_running(k):
             self._push_status("warn", "⚠ 上一项文件操作尚未完成，请稍候再试。")
             return {"ok": False, "reason": "busy"}
@@ -371,7 +371,7 @@ class FileMixin:
         except Exception as ex:
             label = self._FILE_OP_LABELS.get(
                 getattr(do_fn, "__name__", ""), "文件操作")
-            self._push_status("err", "⚠ %s失败 %s：%s" % (label, serial, ex))
+            self._push_status("err", "⚠ {}失败 {}：{}".format(label, serial, ex))
 
     def file_mkdir(self, serial, path):
         return self._file_op(serial, self._do_file_mkdir, path)
@@ -379,9 +379,9 @@ class FileMixin:
     def _do_file_mkdir(self, serial, path):
         ok, err = self.file_svc.make_dir(serial, path)
         if ok:
-            self._push_status("ok", "✓ 已创建目录: %s" % path)
+            self._push_status("ok", "✓ 已创建目录: {}".format(path))
         else:
-            self._push_status("err", "⚠ 创建目录失败 %s: %s" % (path, err))
+            self._push_status("err", "⚠ 创建目录失败 {}: {}".format(path, err))
         self._file_refresh(serial, path)
 
     def file_touch(self, serial, path):
@@ -390,9 +390,9 @@ class FileMixin:
     def _do_file_touch(self, serial, path):
         ok, err = self.file_svc.touch(serial, path)
         if ok:
-            self._push_status("ok", "✓ 已创建文件: %s" % path)
+            self._push_status("ok", "✓ 已创建文件: {}".format(path))
         else:
-            self._push_status("err", "⚠ 创建文件失败 %s: %s" % (path, err))
+            self._push_status("err", "⚠ 创建文件失败 {}: {}".format(path, err))
         self._file_refresh(serial, path)
 
     def file_remove(self, serial, paths):
@@ -407,7 +407,7 @@ class FileMixin:
         if ok:
             self._push_status("ok", "✓ 已删除 %d 个项" % len(paths))
         else:
-            self._push_status("err", "⚠ 删除失败: %s" % err)
+            self._push_status("err", "⚠ 删除失败: {}".format(err))
         if paths:
             self._file_refresh(serial, paths[0])
 
@@ -417,9 +417,9 @@ class FileMixin:
     def _do_file_rename(self, serial, old, new):
         ok, err = self.file_svc.rename(serial, old, new)
         if ok:
-            self._push_status("ok", "✓ 重命名: %s -> %s" % (old, new))
+            self._push_status("ok", "✓ 重命名: {} -> {}".format(old, new))
         else:
-            self._push_status("err", "⚠ 重命名失败: %s" % err)
+            self._push_status("err", "⚠ 重命名失败: {}".format(err))
         self._file_refresh(serial, old)
 
     def file_upload_data(self, serial, name, b64, remote):
@@ -449,13 +449,13 @@ class FileMixin:
             return
         tmp = os.path.join(
             tempfile.gettempdir(),
-            "adb_up_%s_%s" % (uuid.uuid4().hex[:8],
+            "adb_up_{}_{}".format(uuid.uuid4().hex[:8],
                               safe_name(os.path.basename(name or ""))))
         try:
             with open(long_path(tmp), "wb") as f:
                 f.write(base64.b64decode(b64 or ""))
         except Exception as e:
-            self._push_status("err", "⚠ 解码上传文件失败：%s" % e)
+            self._push_status("err", "⚠ 解码上传文件失败：{}".format(e))
             return
         # try/finally：upload 抛异常（大文件 push 超过 120s 超时、adb 中途消失）时
         # 旧实现会跳过 os.remove，每次失败都在 %TEMP% 留下一个多 MB 的孤儿文件。
@@ -467,9 +467,9 @@ class FileMixin:
             except Exception:
                 pass
         if ok:
-            self._push_status("ok", "✓ 上传完成: %s" % remote)
+            self._push_status("ok", "✓ 上传完成: {}".format(remote))
         else:
-            self._push_status("err", "⚠ 上传失败 %s: %s" % (remote, err))
+            self._push_status("err", "⚠ 上传失败 {}: {}".format(remote, err))
         # 合并刷新：多选上传时 N 个文件只刷一次目录（见 _schedule_file_refresh）
         self._schedule_file_refresh(serial, remote)
 
@@ -484,9 +484,9 @@ class FileMixin:
     def _do_file_download(self, serial, remote, local_dir):
         path, err = self.file_svc.download(serial, remote, local_dir)
         if path:
-            self._push_status("ok", "✓ 已下载: %s" % path)
+            self._push_status("ok", "✓ 已下载: {}".format(path))
         else:
-            self._push_status("err", "⚠ 下载失败 %s: %s" % (remote, err))
+            self._push_status("err", "⚠ 下载失败 {}: {}".format(remote, err))
 
     def file_view(self, serial, path):
         # 查看同样用唯一 key：连续点开两个文件的「查看」时，固定 key 会让第二个
@@ -506,7 +506,7 @@ class FileMixin:
             # （os.startfile 不认 \\?\ 前缀，所以路径原样传）。
             if not path or not path_isfile(path):
                 why = "文件不存在或已被清理"
-                self._push_status("err", "⚠ 无法打开文件：%s" % why)
+                self._push_status("err", "⚠ 无法打开文件：{}".format(why))
                 return {"ok": False, "reason": why}
             if os.name == "nt":
                 os.startfile(path)                    # Windows：文件关联程序
@@ -517,13 +517,13 @@ class FileMixin:
             return {"ok": True}
         except Exception as e:
             why = str(e)
-            self._push_status("err", "⚠ 打开文件失败：%s" % why)
+            self._push_status("err", "⚠ 打开文件失败：{}".format(why))
             return {"ok": False, "reason": why}
 
     def _do_file_view(self, serial, path):
         res, err = self.file_svc.view(serial, path)
         if err:
-            self._push_status("err", "⚠ 查看失败 %s: %s" % (path, err))
+            self._push_status("err", "⚠ 查看失败 {}: {}".format(path, err))
             return
         self.bus.push("file_view", {
             "serial": serial, "path": path,
