@@ -303,9 +303,8 @@ def _check_one(current: str, feed: str, opener, timeout: int) -> dict:
     try:
         code, body = opener(feed, timeout)
     except Exception as e:                      # 任何网络异常都要翻译成人话
-        out["error"] = ("检查更新失败：连不上 %s（%s）。若这台机器在内网，"
-                        "可在 config.json 里把 update_feed 改成内网可访问的版本地址。"
-                        % (_host(feed), e))
+        out["error"] = ("检查更新失败：连不上 {}（{}）。若这台机器在内网，"
+                        "可在 config.json 里把 update_feed 改成内网可访问的版本地址。".format(_host(feed), e))
         return out
 
     if code == 404:
@@ -313,13 +312,13 @@ def _check_one(current: str, feed: str, opener, timeout: int) -> dict:
                         "首次发版后这里就能查到版本了。")
         return out
     if code in (403, 429):
-        out["error"] = ("更新源暂时拒绝访问（HTTP %s，通常是接口调用次数用尽 —— "
+        out["error"] = ("更新源暂时拒绝访问（HTTP {}，通常是接口调用次数用尽 —— "
                         "GitHub 匿名接口是 60 次/小时/IP，同一个公司出口 IP 下"
                         "多人共用会更快用完）。稍后再试，或把 update_feed 换成"
-                        "内网自建地址。" % code)
+                        "内网自建地址。".format(code))
         return out
     if code != 200:
-        out["error"] = "更新源返回异常状态 HTTP %s。" % code
+        out["error"] = "更新源返回异常状态 HTTP {}。".format(code)
         return out
 
     try:
@@ -352,11 +351,11 @@ def summary(res: dict) -> str:
         return ""
     st = res.get("status")
     if st == "update":
-        return "发现新版本 %s（当前 %s）" % (res.get("version"), res.get("current"))
+        return "发现新版本 {}（当前 {}）".format(res.get("version"), res.get("current"))
     if st == "latest":
-        return "已是最新版本（%s）" % res.get("current")
+        return "已是最新版本（{}）".format(res.get("current"))
     if st == "ahead":
-        return "本机版本 %s 比发布版 %s 更新（开发版）" % (res.get("current"),
+        return "本机版本 {} 比发布版 {} 更新（开发版）".format(res.get("current"),
                                                           res.get("version"))
     return res.get("error") or "检查更新未完成"
 
