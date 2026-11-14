@@ -85,8 +85,8 @@ class AutoRefreshMixin:
         for s in (resume_fn() if resume_fn else []) or []:
             self._push_status(
                 "info",
-                "▶ %s 已恢复连接，已自动继续录制（重启前那一段已保留，"
-                "停止时会一并合并）" % s)
+                "▶ {} 已恢复连接，已自动继续录制（重启前那一段已保留，"
+                "停止时会一并合并）".format(s))
         # 上一轮「死亡收尾」还在跑（停止设备端 / 拉段 / 合并 / 打包，秒级）时
         # 先不取标记：died_serials() / limit_serials() 取完即清，而 Workers.spawn
         # 对同名存活线程会直接丢弃新参数 —— 标记被消耗、收尾却没收到，那台
@@ -182,17 +182,17 @@ class AutoRefreshMixin:
         for s in dead:
             why = (notes or {}).get(s)
             if why:
-                seg_txt += ("；%s 的分段续录中断：%s（此前已录好的部分完整保留，"
-                            "收尾时会合并成一个视频，见保存目录）" % (s, why))
+                seg_txt += ("；{} 的分段续录中断：{}（此前已录好的部分完整保留，"
+                            "收尾时会合并成一个视频，见保存目录）".format(s, why))
         if gone:
-            return ("⚠ 检测到录屏中断（%s）：设备连接已断开（USB 掉线 / adb 失去连接），"
+            return ("⚠ 检测到录屏中断（{}）：设备连接已断开（USB 掉线 / adb 失去连接），"
                     "已保留已录片段。常见诱因是 USB 接触不良、系统 USB 省电"
                     "（选择性暂停），或在录屏同时叠加满缓冲全级别 logcat 拉满 USB 带宽"
                     "——可换后置 USB 口 / 短线缆 / 关闭 USB 选择性暂停，"
-                    "或只抓需要的 logcat 缓冲区。%s" % (names, seg_txt))
-        return ("⚠ 检测到录屏进程意外结束（%s）：设备仍在连接，screenrecord 自身异常终止，"
+                    "或只抓需要的 logcat 缓冲区。{}".format(names, seg_txt))
+        return ("⚠ 检测到录屏进程意外结束（{}）：设备仍在连接，screenrecord 自身异常终止，"
                 "已保留已录片段。若你曾在录屏时执行 adb root / 切无线调试，"
-                "adbd 重启也会触发此情况。%s" % (names, seg_txt))
+                "adbd 重启也会触发此情况。{}".format(names, seg_txt))
 
     def _reap_gone_tools(self):
         """设备被移除（gone）后，收拾它正在进行的 logcat 监控 / 抓取，以及录屏会话里

@@ -1,4 +1,6 @@
-"""backend.controllers —— WebApi 的各领域 Mixin 集合。"""
+"""
+backend.controllers —— WebApi 的各领域 Mixin 集合。
+"""
 
 from .apk import ApkMixin
 from .autorefresh import AutoRefreshMixin

@@ -1,4 +1,6 @@
-"""backend.controllers.logcat —— logcat 监控与抓取"""
+"""
+backend.controllers.logcat —— logcat 监控与抓取
+"""
 
 from backend.controller import (
     adb_kwargs,
@@ -30,9 +32,9 @@ class LogcatMixin:
             # 用户点「开始监控」看到的就是彻底的静默 —— 分不清是设备在忙、
             # 还是按钮没点上。
             self._push_status(
-                "warn", "⚠ 设备 %s 已在 logcat 监控中，不用重复开始" % serial)
+                "warn", "⚠ 设备 {} 已在 logcat 监控中，不用重复开始".format(serial))
             return {"ok": False, "reason": "already_running"}
-        self._push_status("info", "开始监控 logcat: %s" % serial)
+        self._push_status("info", "开始监控 logcat: {}".format(serial))
         return {"ok": True}
 
     def logcat_stop(self, serial):
@@ -103,22 +105,20 @@ class LogcatMixin:
             # 同上：返回前端也不看。保存目录不可写（只读盘 / 盘符不存在 /
             # 路径被同名文件占位）时，用户点「开始抓取」后什么都不发生。
             self._push_status(
-                "err", "⚠ 无法创建保存目录 %s：%s" % (save_dir, e))
+                "err", "⚠ 无法创建保存目录 {}：{}".format(save_dir, e))
             return {"ok": False, "reason": "mkdir", "text": str(e)}
         ts = time.strftime("%Y%m%d_%H%M%S")
         # safe_name：无线 ADB 序列号（IP:端口）含冒号，Windows 下文件名非法
         path = unique_path(
-            os.path.join(save_dir, "logcat_%s_%s.txt" % (safe_name(serial), ts)),
+            os.path.join(save_dir, "logcat_{}_{}.txt".format(safe_name(serial), ts)),
             suffixes=(".zip",))
         ok = self.logcat_capture.start(serial, path, buffers,
                                        level_filter=level_filter)
         if not ok:
             self._push_status(
-                "warn", "⚠ 设备 %s 已有 logcat 抓取在进行，请先停止再开始"
-                        % serial)
+                "warn", "⚠ 设备 {} 已有 logcat 抓取在进行，请先停止再开始".format(serial))
             return {"ok": False, "reason": "already_running"}
-        self._push_status("info", "开始抓取 logcat: %s -> %s%s"
-                          % (serial, path, self._level_filter_desc(level_filter)))
+        self._push_status("info", "开始抓取 logcat: {}{}".format(serial, path, self._level_filter_desc(level_filter)))
         return {"ok": True, "path": path}
 
     @staticmethod
@@ -132,7 +132,7 @@ class LogcatMixin:
             return ""
         if not picked:
             return "（级别: 无 — 不会写入任何日志行）"
-        return "（级别: %s）" % "/".join(picked)
+        return "（级别: {}）".format("/".join(picked))
 
     def logcat_capture_stop(self, serial, zip_on_stop=True):
         if not serial:
@@ -141,7 +141,7 @@ class LogcatMixin:
             # 没在抓取（设备刚被移除 / 上一轮已经停了）：说一句，而不是让用户
             # 对着一个"点了没反应"的按钮反复点。
             self._push_status(
-                "info", "ℹ 设备 %s 当前没有进行中的 logcat 抓取" % serial)
+                "info", "ℹ 设备 {} 当前没有进行中的 logcat 抓取".format(serial))
             return {"ok": False, "reason": "not_running"}
         return {"ok": True}
 

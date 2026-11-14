@@ -1,4 +1,6 @@
-"""backend.controllers.apk —— APK 选择 / 安装"""
+"""
+backend.controllers.apk —— APK 选择 / 安装
+"""
 
 from backend.controller import (
     adb_kwargs,
@@ -27,7 +29,7 @@ class ApkMixin:
             # 真实原因（路径太长）一个字都没提。
             size = path_getsize(path)
         except OSError as e:
-            return {"ok": False, "reason": "读取安装包失败：%s" % e}
+            return {"ok": False, "reason": "读取安装包失败：{}".format(e)}
         self._apk_path = path
         return {"ok": True, "path": path, "name": os.path.basename(path),
                 "size": size, "size_text": apkinfo.format_size(size)}
@@ -81,13 +83,13 @@ class ApkMixin:
                 # 每次「安装」都被上面那句「上一批安装还没结束」挡回去，
                 # apk_state 也停在 running —— 安装功能彻底锁死，只能重启程序。
                 self._apk_batch_done(
-                    s, {"ok": False, "message": "无法启动安装线程：%s" % e}, path)
+                    s, {"ok": False, "message": "无法启动安装线程：{}".format(e)}, path)
         self._push_status(
             "info", "开始安装 %s → %d 台设备（%s）"
             % (os.path.basename(path), len(targets),
                "、".join(["覆盖" if replace else "全新",
                           "允许降级" if downgrade else "",
-                          "授予权限" if grant else ""]).replace("、、", "、").strip("、")),
+                          "授予权限" if grant else ""]).replace("、"、", "、").strip("、")),
             toast=False)
         return {"ok": True, "count": len(targets)}
 
@@ -109,7 +111,7 @@ class ApkMixin:
             # 加 -t 重试一次——比让用户自己看错误码再去查参数强得多。
             if (not res["ok"] and res.get("code") == "INSTALL_FAILED_TEST_ONLY"):
                 self._push_status(
-                    "warn", "… %s 是 testOnly 包，改用 -t 重试" % serial)
+                    "warn", "… {} 是 testOnly 包，改用 -t 重试".format(serial))
                 args2 = args + ["-t"]
                 r2 = subprocess.run(
                     [self._adb_argv(), "-s", serial] + args2 + [path],
@@ -117,20 +119,16 @@ class ApkMixin:
                 res = apkinfo.parse_install_output(
                     (r2.stdout or "") + "\n" + (r2.stderr or ""))
             if res["ok"]:
-                self._push_status("ok", "✓ 安装成功：%s ← %s"
-                                  % (serial, os.path.basename(path)))
+                self._push_status("ok", "✓ 安装成功：{} ← {}".format(serial, os.path.basename(path)))
             else:
-                self._push_status("err", "✗ 安装失败：%s — %s"
-                                  % (serial, res["message"]), toast=True)
+                self._push_status("err", "✗ 安装失败：{} — {}".format(serial, res["message"]), toast=True)
         except subprocess.TimeoutExpired:
             res = {"ok": False, "code": "",
                    "message": "安装超时（5 分钟）：包太大或设备 IO 卡住，可重试"}
-            self._push_status("err", "✗ 安装失败：%s — %s"
-                              % (serial, res["message"]), toast=True)
+            self._push_status("err", "✗ 安装失败：{} — {}".format(serial, res["message"]), toast=True)
         except Exception as e:
-            res = {"ok": False, "code": "", "message": "安装异常：%s" % e}
-            self._push_status("err", "✗ 安装失败：%s — %s"
-                              % (serial, res["message"]), toast=True)
+            res = {"ok": False, "code": "", "message": "安装异常：{}".format(e)}
+            self._push_status("err", "✗ 安装失败：{} — {}".format(serial, res["message"]), toast=True)
         finally:
             self._apk_batch_done(serial, res, path)
 
@@ -163,7 +161,7 @@ class ApkMixin:
             self._push_status(
                 "warn", "%s 安装完成：%d 成功 / %d 失败（%s）"
                 % (name, ok_count, len(failed),
-                   "；".join("%s：%s" % (s, m) for s, m in failed[:3])),
+                   "；".join("{}：{}".format(s, m) for s, m in failed[:3])),
                 toast=True)
         else:
             self._push_status("ok", "✓ %s 已安装到 %d 台设备" % (name, ok_count),
