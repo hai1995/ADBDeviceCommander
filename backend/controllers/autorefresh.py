@@ -1,5 +1,7 @@
 """backend.controllers.autorefresh —— 自动轮询与孤儿回收"""
 
+import contextlib
+
 from backend.controller import (
     AUTO_REFRESH_MS,
     REC_DEATH_CHECK_S,
@@ -35,22 +37,16 @@ class AutoRefreshMixin:
             now = time.time()
             if now >= next_death_check:
                 next_death_check = now + REC_DEATH_CHECK_S
-                try:
+                with contextlib.suppress(Exception):
                     self._reap_dead_recordings()
-                except Exception:
-                    pass
             if now < next_run:
                 continue
             next_run = now + interval
-            try:
+            with contextlib.suppress(Exception):
                 self.devices.refresh(self.state.adb_path, verbose=False)
-            except Exception:
-                pass
             # 设备被移除后，停掉它遗留的 logcat 监控 / 抓取（详见 _reap_gone_tools）
-            try:
+            with contextlib.suppress(Exception):
                 self._reap_gone_tools()
-            except Exception:
-                pass
 
     def _reap_dead_recordings(self):
         """发现「无人停止却退出」的录屏进程即派后台 worker 自动收尾。
@@ -69,18 +65,14 @@ class AutoRefreshMixin:
         roll_fn = getattr(self.video, "rolled_serials", None)
         for s, n in (roll_fn() if roll_fn else []) or []:
             self._push_status(
-                "info", "⏱ %s 已录满一段，已自动接着录第 %d 段（无需操作）"
-                        % (s, n))
+                "info", f"⏱ {s} 已录满一段，已自动接着录第 {n:d} 段（无需操作）")
         # 设备掉线（典型是车机重启）→ 等待窗口内自动续录。进入等待和恢复
         # 各有一次性标记，只在翻转的当口播报，不重复刷状态栏。
         wait_fn = getattr(self.video, "reboot_wait_notes", None)
         for s in (wait_fn() if wait_fn else []) or []:
             self._push_status(
                 "warn",
-                "⏸ %s 连接中断（可能是设备重启），正在等待恢复（最长 %d 秒）："
-                "设备回来后会自动继续录制，重启前已录的片段不会丢失；"
-                "不想等可直接点「停止」，已录内容照样保存"
-                % (s, REC_REBOOT_WAIT_S))
+                f"⏸ {s} 连接中断（可能是设备重启），正在等待恢复（最长 {REC_REBOOT_WAIT_S:d} 秒）：设备回来后会自动继续录制，重启前已录的片段不会丢失；不想等可直接点「停止」，已录内容照样保存")
         resume_fn = getattr(self.video, "resumed_serials", None)
         for s in (resume_fn() if resume_fn else []) or []:
             self._push_status(
@@ -135,11 +127,7 @@ class AutoRefreshMixin:
             # 以为视频坏了白录一场；而实际上它完整可用，只是录到头了。
             self._push_status(
                 "info",
-                "⏱ %s 已达到自动分段上限（共 %d 段，约 %d 分钟），录屏已正常"
-                "收尾、视频完整（收尾时合并为一个完整 mp4，无需手动拼接）；"
-                "需要更长时间请停止后重新开始录制"
-                % ("、".join(sorted(limited)), REC_MAX_SEGMENTS,
-                   REC_MAX_SEGMENTS * REC_SEGMENT_S // 60))
+                f"⏱ {'、'.join(sorted(limited))} 已达到自动分段上限（共 {REC_MAX_SEGMENTS:d} 段，约 {REC_MAX_SEGMENTS * REC_SEGMENT_S // 60:d} 分钟），录屏已正常收尾、视频完整（收尾时合并为一个完整 mp4，无需手动拼接）；需要更长时间请停止后重新开始录制")
         if dead:
             # 续段失败的原因（第 N 段起不来 / 起来就退）只有录屏服务知道，
             # 不带出来就只剩一句笼统的「被意外中断」，用户会把已经录好的
@@ -263,7 +251,7 @@ class AutoRefreshMixin:
         DeviceAudioCapture 本就没有 is_recording 方法。
         """
         for s in gone_set:
-            try:
+            with contextlib.suppress(Exception):
                 # 用 stop_ex 取回**全部段**并记进会话：设备虽然掉了，掉之前录完的
                 # 那几段已经拉回本地，收尾时必须一并进包。只调 stop() 的话它们
                 # 就留在目录里、既不合成也不打包，用户以为没录上。
@@ -273,12 +261,8 @@ class AutoRefreshMixin:
                         sess = self._rec_session
                         if sess:
                             sess.setdefault("video_segs", {})[s] = paths
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 self.device_audio.stop(s)
-            except Exception:
-                pass
 
     def clear_output(self, ws=None):
         """清空**指定工作区**的指令输出。

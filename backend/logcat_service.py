@@ -17,6 +17,7 @@ backend.logcat_service —— Logcat 实时监控 + 抓取服务（与 UI 无关
                 zipped = 用户勾选「结束后打包 zip」，停止时把整份 txt 打包
                 packaged（仅 stopped）= 本次已打包，前端不再重复弹完成 toast
 """
+import contextlib
 import os
 import queue
 import subprocess
@@ -52,17 +53,13 @@ def _terminate(proc):
     terminate 只发信号，不 wait 会留下僵尸进程句柄；这里的 wait 有超时，
     超时再 kill，保证收尾路径（停止 / 关闭窗口）不会被卡住。
     """
-    try:
+    with contextlib.suppress(Exception):
         proc.terminate()
-    except Exception:
-        pass
     try:
         proc.wait(timeout=2)
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             proc.kill()
-        except Exception:
-            pass
 
 
 _BATCH_MAX = 400          # 单次 append 事件最多携带行数
@@ -86,7 +83,7 @@ def _write_marker(f, text):
     返回是否写成功（调用方据此决定要不要把 gap 标记算数）。
     """
     try:
-        f.write("\n--------- [logcat] {} ---------\n".format(text))
+        f.write(f"\n--------- [logcat] {text} ---------\n")
         f.flush()
         return True
     except Exception:
@@ -137,15 +134,13 @@ def pkg_pids_of(adb, serial, package, timeout=6):
     pkg = (package or "").strip()
     if not pkg:
         return set()
-    try:
+    with contextlib.suppress(Exception):
         r = subprocess.run(
             [adb, "-s", serial, "shell", "pidof", pkg],
             **adb_kwargs(timeout))
         out = (r.stdout or "").strip()
         if r.returncode == 0 and out:
             return set(out.split())
-    except Exception:
-        pass
     # 回落 ps：老系统 / pidof 被裁剪。ps 的输出格式随版本差异极大（toybox
     # 是 `USER PID PPID ... NAME`，busybox 可能首列就是 PID），所以不假设
     # 固定列位——取「最后一个字段 == 包名」的行，再取该行里第一个纯数字字段
@@ -264,7 +259,7 @@ class LogcatMonitor:
             args=(serial, list(buffers or ["main"]),
                   levels, (keyword or "").lower(),
                   bool(only_exc), stop_ev),
-            daemon=True, name="logcat-mon-{}".format(serial)).start()
+            daemon=True, name=f"logcat-mon-{serial}").start()
         return True
 
     def stop(self, serial):
@@ -312,7 +307,7 @@ class LogcatMonitor:
                 self._stopreq.discard(serial)
             self.bus.push("logcat",
                           {"serial": serial, "status": "error",
-                           "text": "启动 logcat 失败：{}".format(e)})
+                           "text": f"启动 logcat 失败：{e}"})
             return
         with self._lock:
             self._procs[serial] = proc
@@ -368,7 +363,7 @@ class LogcatMonitor:
             q = queue.Queue(maxsize=_QUEUE_MAX)
             threading.Thread(
                 target=self._pump, args=(proc, q),
-                daemon=True, name="logcat-pump-{}".format(serial)).start()
+                daemon=True, name=f"logcat-pump-{serial}").start()
 
             def _flush_batch(now):
                 nonlocal batch, last
@@ -390,8 +385,7 @@ class LogcatMonitor:
                     self.bus.push(
                         "status",
                         {"type": "info",
-                         "text": "已跳过 %d 行历史日志（仅保留最近 %d 行）"
-                                 % (boot_dropped, BOOT_KEEP_LINES)})
+                         "text": f"已跳过 {boot_dropped:d} 行历史日志（仅保留最近 {BOOT_KEEP_LINES:d} 行）"})
                 batch, last = [], now
 
             while True:
@@ -459,10 +453,7 @@ class LogcatMonitor:
                         self.bus.push(
                             "status",
                             {"type": "warn",
-                             "text": "日志流量过高：已丢弃约 %d 行"
-                                     "（实时监控限速 %d 行/秒，保证界面流畅；"
-                                     "需要全量请用「抓取」落盘）"
-                                     % (dropped, LOGCAT_DISPLAY_MAX_LPS)})
+                             "text": f"日志流量过高：已丢弃约 {dropped:d} 行（实时监控限速 {LOGCAT_DISPLAY_MAX_LPS:d} 行/秒，保证界面流畅；需要全量请用「抓取」落盘）"})
                     continue
                 win_pushed += 1
 
@@ -483,9 +474,7 @@ class LogcatMonitor:
                 self.bus.push(
                     "status",
                     {"type": "warn",
-                     "text": "监控结束：本次限速丢弃约 %d 行"
-                             "（实时监控限速 %d 行/秒）"
-                             % (dropped - noticed, LOGCAT_DISPLAY_MAX_LPS)})
+                     "text": f"监控结束：本次限速丢弃约 {dropped - noticed:d} 行（实时监控限速 {LOGCAT_DISPLAY_MAX_LPS:d} 行/秒）"})
             _terminate(proc)
             # 把队列里没消费完的行丢掉，解开可能阻塞在满队列 put 上的读线程，
             # 让它读到 EOF 自行退出（否则每次停止都可能遗留一个卡住的 pump 线程）。
@@ -509,9 +498,7 @@ class LogcatMonitor:
                 self.bus.push("logcat",
                               {"serial": serial, "status": "error",
                                "total": total, "exc": exc,
-                               "text": "logcat 没有输出任何日志就退出了%s。"
-                                       "设备可能已断开 / 离线，或 logd 未运行"
-                                       % ("：" + detail if detail else "")})
+                               "text": f"logcat 没有输出任何日志就退出了{'：' + detail if detail else ''}。设备可能已断开 / 离线，或 logd 未运行"})
             else:
                 self.bus.push("logcat",
                               {"serial": serial, "status": "stopped",
@@ -531,22 +518,19 @@ class LogcatMonitor:
         adb 进程已退出（消费者也走了）时直接返回，避免线程永远卡在 put 上。
         """
         try:
-            for raw in proc.stdout:
-                while True:
-                    try:
-                        q.put(raw, timeout=0.5)
-                        break
-                    except queue.Full:
-                        if proc.poll() is not None:
-                            return
-        except Exception:
-            pass
+            with contextlib.suppress(Exception):
+                for raw in proc.stdout:
+                    while True:
+                        try:
+                            q.put(raw, timeout=0.5)
+                            break
+                        except queue.Full:
+                            if proc.poll() is not None:
+                                return
         finally:
             # 收尾哨兵也可能撞上满队列：限时投递，投不进去说明消费者已经不在了。
-            try:
+            with contextlib.suppress(Exception):
                 q.put(_LOGCAT_EOF, timeout=0.5)
-            except Exception:
-                pass
 
     def _resolve_pkg_pids(self, serial, keyword):
         """把过滤表达式里的 pkg:xxx 解析成 {包名小写: {pid,...}}。
@@ -707,7 +691,7 @@ class LogcatCapture:
         threading.Thread(
             target=self._worker,
             args=(serial, path, list(buffers or ["main"]), levels),
-            daemon=True, name="logcat-cap-{}".format(serial)).start()
+            daemon=True, name=f"logcat-cap-{serial}").start()
         return True
 
     def stop(self, serial, zip_on_stop=True):
@@ -776,11 +760,9 @@ class LogcatCapture:
                     return "stopped"
             # device_present 异常（adb 缺失/无响应）一律视为「还没回来」，继续等；
             # 它只做 get-state 探测，不会外抛。
-            try:
+            with contextlib.suppress(Exception):
                 if device_present(self.adb_path, serial):
                     return "ok"
-            except Exception:
-                pass
             if time.time() >= deadline:
                 return "timeout"
             # 用 Event 而不是 sleep：stop() 会立刻 set，停抓取不必等满一个轮询间隔。
@@ -868,7 +850,7 @@ class LogcatCapture:
                         **adb_popen_kwargs())
                 except Exception as e:
                     err_reported = True
-                    write_error = "启动抓取失败：{}".format(e)
+                    write_error = f"启动抓取失败：{e}"
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "error",
                                    "text": write_error})
@@ -919,7 +901,7 @@ class LogcatCapture:
                                  buffering=1)
                     except Exception as e:
                         err_reported = True
-                        write_error = "抓取异常：{}".format(e)
+                        write_error = f"抓取异常：{e}"
                         self.bus.push("logcat_capture",
                                       {"serial": serial, "status": "error",
                                        "text": write_error})
@@ -1025,9 +1007,7 @@ class LogcatCapture:
                             if (prev is not None and cur is not None
                                     and cur - prev > LOGCAT_CAP_HOLE_WARN_S):
                                 _write_marker(
-                                    f, "日志缺失：%s ~ %s 之间（约 %d 秒）的日志"
-                                       "未能取回（中断期间产生的日志已滚出设备"
-                                       "缓冲区）" % (last_log_ts, ts, cur - prev))
+                                    f, f"日志缺失：{last_log_ts} ~ {ts} 之间（约 {cur - prev:d} 秒）的日志未能取回（中断期间产生的日志已滚出设备缓冲区）")
                                 gap_written = True
                                 data_gap = True
                         f.write(raw)
@@ -1040,7 +1020,7 @@ class LogcatCapture:
                         # 这里不再做「攒够多少行再 flush」，否则尾部落盘不及时。
                 except Exception as e:
                     err_reported = True
-                    write_error = "抓取异常：{}".format(e)
+                    write_error = f"抓取异常：{e}"
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "error",
                                    "text": write_error})
@@ -1103,17 +1083,13 @@ class LogcatCapture:
                     gap_written = True
                     data_gap = True
                     drop_ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                    try:
-                        f.write("\n--------- [logcat] 设备于 {} 断开连接，等待重连 ---------\n".format(drop_ts))
+                    with contextlib.suppress(Exception):
+                        f.write(f"\n--------- [logcat] 设备于 {drop_ts} 断开连接，等待重连 ---------\n")
                         f.flush()
-                    except Exception:
-                        pass
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "reconnecting",
                                    "path": path,
-                                   "text": "设备 %s 掉线，logcat 抓取等待重连"
-                                           "（最长 %d 秒，期间已抓到的日志不会丢）"
-                                           % (serial, LOGCAT_CAP_RECONNECT_MAX_S)})
+                                   "text": f"设备 {serial} 掉线，logcat 抓取等待重连（最长 {LOGCAT_CAP_RECONNECT_MAX_S:d} 秒，期间已抓到的日志不会丢）"})
                     with self._lock:
                         self._reconnecting.add(serial)
                     verdict = self._wait_reconnect(serial)
@@ -1128,22 +1104,17 @@ class LogcatCapture:
                         # 重连窗口耗尽：抓取就此结束，但文件里留有缺口标记，绝不把缺口
                         # 藏成一次「成功抓取」。不另推 error 事件——下面的 stopped(gap)
                         # 已携带缺口说明，避免界面叠出两条告警。
-                        outcome_error = ("设备在重连窗口（%d 秒）内未恢复，logcat 抓取已结束。"
-                                         "文件存在时间缺口：从 %s 起的日志缺失"
-                                         "（设备断连期间产生的日志已无法从该缓冲区取回）。"
-                                         % (LOGCAT_CAP_RECONNECT_MAX_S, drop_ts))
+                        outcome_error = (f"设备在重连窗口（{LOGCAT_CAP_RECONNECT_MAX_S:d} 秒）内未恢复，logcat 抓取已结束。文件存在时间缺口：从 {drop_ts} 起的日志缺失（设备断连期间产生的日志已无法从该缓冲区取回）。")
                         break
                     # 重连成功：写恢复标记，继续外层循环往同一文件续写。
                     resume_ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                    try:
-                        f.write("--------- [logcat] 设备于 {} 恢复连接，继续抓取 ---------\n".format(resume_ts))
+                    with contextlib.suppress(Exception):
+                        f.write(f"--------- [logcat] 设备于 {resume_ts} 恢复连接，继续抓取 ---------\n")
                         f.flush()
-                    except Exception:
-                        pass
                     self.bus.push("status",
                                   {"type": "info",
-                                   "text": "logcat 抓取：设备 {} 已重连，继续写入 {}".format(serial, path)
-                                           + ("（已跳过重放的 %d 行）" % skipped
+                                   "text": f"logcat 抓取：设备 {serial} 已重连，继续写入 {path}"
+                                           + (f"（已跳过重放的 {skipped:d} 行）"
                                               if skipped else "")})
                     skipped = 0
                     continue
@@ -1163,11 +1134,7 @@ class LogcatCapture:
                     break
                 if restarts >= LOGCAT_CAP_RESTART_MAX:
                     outcome_error = (
-                        "logcat 抓取累计 %d 次被意外中断（设备仍在线），已停止"
-                        "自动重启。文件存在时间缺口：最后一次日志停在 %s。"
-                        "常见诱因是 USB 带宽被占满（录屏 + 满缓冲全级别日志同时"
-                        "运行）、设备 logd 重启或其它工具重启了 adb server。"
-                        % (restarts, last_log_ts or "未知"))
+                        f"logcat 抓取累计 {restarts:d} 次被意外中断（设备仍在线），已停止自动重启。文件存在时间缺口：最后一次日志停在 {last_log_ts or '未知'}。常见诱因是 USB 带宽被占满（录屏 + 满缓冲全级别日志同时运行）、设备 logd 重启或其它工具重启了 adb server。")
                     break
                 if lines <= lines_at_restart:
                     no_progress += 1
@@ -1183,23 +1150,16 @@ class LogcatCapture:
                 restarts += 1
                 restart_ts = time.strftime("%Y-%m-%d %H:%M:%S")
                 _write_marker(
-                    f, "抓取进程于 %s 意外中断（设备仍在线），第 %d 次自动重连…"
-                       % (restart_ts, restarts))
+                    f, f"抓取进程于 {restart_ts} 意外中断（设备仍在线），第 {restarts:d} 次自动重连…")
                 gap_written = True
                 data_gap = True
                 self.bus.push("logcat_capture",
                               {"serial": serial, "status": "reconnecting",
                                "path": path,
-                               "text": "设备 %s 的 logcat 抓取被意外中断"
-                                       "（设备仍在线），正在第 %d 次自动重连，"
-                                       "已抓到的日志不会丢"
-                                       % (serial, restarts)})
+                               "text": f"设备 {serial} 的 logcat 抓取被意外中断（设备仍在线），正在第 {restarts:d} 次自动重连，已抓到的日志不会丢"})
                 self.bus.push("status",
                               {"type": "warn",
-                               "text": "⚠ %s 的 logcat 抓取被意外中断（设备仍在"
-                                       "线），正在自动重连（第 %d/%d 次）"
-                                       % (serial, restarts,
-                                          LOGCAT_CAP_RESTART_MAX)})
+                               "text": f"⚠ {serial} 的 logcat 抓取被意外中断（设备仍在线），正在自动重连（第 {restarts:d}/{LOGCAT_CAP_RESTART_MAX:d} 次）"})
                 # 退避：立刻重连往往撞上同一个诱因（USB 带宽尖峰），退一步再拉起。
                 # 等待必须能被打断 —— 用 Event + 200ms 小步轮询，而不是一次
                 # sleep 满整个退避：用户点「停止」要立刻生效，不能让录屏收尾干等
@@ -1225,10 +1185,8 @@ class LogcatCapture:
         finally:
             # 关文件句柄（之后才打包/量大小）：Windows 上开着的句柄会让 zip 失败。
             if f is not None:
-                try:
+                with contextlib.suppress(Exception):
                     f.close()
-                except Exception:
-                    pass
             with self._lock:
                 self._procs.pop(serial, None)
                 self._starting.discard(serial)
@@ -1282,7 +1240,7 @@ class LogcatCapture:
                 self.bus.push("logcat_capture",
                               {"serial": serial, "status": "zipped",
                                "path": zpath, "src": path,
-                               "text": "已打包：{}".format(zpath)})
+                               "text": f"已打包：{zpath}"})
             # size 语义：打了包就报 zip 的大小（源 txt 已清理），否则报 txt 大小
             if zpath and path_exists(zpath):
                 size_out = path_getsize(zpath)
@@ -1299,9 +1257,7 @@ class LogcatCapture:
                 self.bus.push("logcat_capture",
                               {"serial": serial, "status": "error",
                                "path": path, "lines": 0, "size": size_out,
-                               "text": "抓取没有收到任何日志就结束了%s。"
-                                       "设备可能已断开 / 离线，或 logd 未运行"
-                                       % ("：" + detail if detail else "")})
+                               "text": f"抓取没有收到任何日志就结束了{'：' + detail if detail else ''}。设备可能已断开 / 离线，或 logd 未运行"})
             else:
                 payload = {"serial": serial, "status": "stopped",
                            "path": path, "lines": lines, "size": size_out,
@@ -1346,16 +1302,12 @@ class LogcatCapture:
             with zipfile.ZipFile(lzpath, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(long_path(path), os.path.basename(path))
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 if os.path.exists(lzpath):
                     os.remove(lzpath)
-            except Exception:
-                pass
             return None
         # 长路径安全：源 txt 的清理也必须走前缀，否则超过 260 字符时删除
         # 静默失败 —— 用户目录里会同时留着 txt 和 zip（体积白占一倍）。
-        try:
+        with contextlib.suppress(Exception):
             os.remove(long_path(path))
-        except Exception:
-            pass
         return zpath

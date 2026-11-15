@@ -8,6 +8,7 @@ backend.audio_service —— 音频采集（电脑麦克风 / 设备端）+ ffmp
 所有函数不依赖 UI；通过 controller 的 bus 推送 tool 状态。非 Windows 平台 MicRecorder
 会在 start() 抛出可读错误，由调用方提示「仅 Windows 支持电脑麦克风」。
 """
+import contextlib
 import ctypes
 import os
 import subprocess
@@ -159,15 +160,13 @@ def _mp4_playable(path):
         # 正常 1 帧视频都远大于 4KB；低于此值基本可判定为空壳
         if size < 4096:
             return False
-        try:
+        with contextlib.suppress(Exception):
             r = subprocess.run(
                 ["ffprobe", "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
                 **adb_kwargs(20))
             if r.returncode == 0:
                 return "video" in (r.stdout or "")
-        except Exception:
-            pass
         # 没有 ffprobe 时退化为「体积 + moov 头」兜底判断
         with open(long_path(path), "rb") as f:
             return b"moov" in f.read(min(size, 4 * 1024 * 1024))
@@ -250,7 +249,7 @@ def _mp4_duration(path):
                     else:
                         duration = int.from_bytes(f.read(4), "big")
                     if timescale > 0 and duration > 0:
-                        return "%.3f" % (duration / float(timescale))
+                        return f"{duration / float(timescale):.3f}"
                     return None
                 pos += bsize
         return None
@@ -304,7 +303,7 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
     #      output stream fed from a complex filtergraph"），用 -map 0:v:0 直接引用原流。
     #   b) apad 也**不能**用独立的 -af（与复杂滤镜图同时作用于同一流会报
     #      "Simple and complex filtering cannot be used together"），必须写进滤镜图里。
-    mix = "amix=inputs=%d:duration=longest:dropout_transition=0,apad[a]" % len(audios)
+    mix = f"amix=inputs={len(audios):d}:duration=longest:dropout_transition=0,apad[a]"
     cmd += ["-filter_complex", mix,
             "-map", "0:v:0", "-map", "[a]",
             "-c:v", "copy",
@@ -327,24 +326,20 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
 
 def _media_duration(path):
     """用 ffprobe 取媒体时长（秒，字符串）；取不到返回 None。"""
-    try:
+    with contextlib.suppress(Exception):
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", path], **adb_kwargs(20))
         if r.returncode == 0:
             v = (r.stdout or "").strip().rstrip(",")
             return v if v and v != "N/A" else None
-    except Exception:
-        pass
     return None
 
 
 def _silent_remove(path):
-    try:
+    with contextlib.suppress(Exception):
         if path and os.path.exists(long_path(path)):
             os.remove(long_path(path))
-    except Exception:
-        pass
 
 
 class DeviceAudioCapture:
@@ -393,18 +388,16 @@ class DeviceAudioCapture:
                 stdin=subprocess.DEVNULL,
                 **adb_popen_kwargs())
         except Exception as e:
-            return False, "无法启动 tinycap：{}".format(e)
+            return False, f"无法启动 tinycap：{e}"
         # 探测 tinycap 是否真的跑起来了：很多 ROM 上 tinycap 需要 root，会立刻退出，
         # 而 supported() 只查了 `command -v tinycap`。不做这一步，start() 会对一个
         # 已经死掉进程返回 True —— 状态栏照样显示「（含设备音频）」，停止时 pull
         # 必然失败，用户最终拿到一段没有声音的视频且不知道原因。
         rc = None
-        try:
+        with contextlib.suppress(Exception):
             if proc.poll() is None:
                 time.sleep(1.0)
             rc = proc.poll()
-        except Exception:
-            pass
         if rc is not None:
             return False, ("tinycap 启动后立即退出（退出码 {}）："
                            "多数机型需要 root 才能录设备端声音，可先执行 adb root 再试".format(rc))
@@ -419,17 +412,13 @@ class DeviceAudioCapture:
         if item is None:
             return None
         proc, remote_wav = item
-        try:
+        with contextlib.suppress(Exception):
             proc.terminate()
-        except Exception:
-            pass
         try:
             proc.wait(timeout=5)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
         # 与录屏同理：tinycap 只在 SIGINT（Ctrl-C）下优雅收尾并写回 wav 头。
         # 本地 adb 退出不代表设备端 tinycap 也退了，故显式收尾，避免孤儿进程占用音频输入。
         # 收尾顺序统一走 backend.device_proc（按 PID `kill -INT` → **等它写完 RIFF 头**
@@ -448,30 +437,24 @@ class DeviceAudioCapture:
             "adb_devaudio_{}_{}.wav".format(safe_name(serial), time.strftime("%H%M%S")))
         # pull 带重试（容忍收尾/落盘延迟）；并校验 wav 头，损坏则丢弃，避免污染合成视频
         for attempt in range(5):
-            try:
+            with contextlib.suppress(Exception):
                 r = subprocess.run(
                     [self.adb, "-s", serial, "pull", remote_wav, tmp],
                     **adb_kwargs(60))
                 if r.returncode == 0 and _wav_ok(tmp):
                     local = tmp
                     break
-            except Exception:
-                pass
             time.sleep(0.5 * (attempt + 1))
         if local is None:
             # 五轮都没拿到可用的 wav（pull 失败 / 文件头不完整 / 设备端还没写完）：
             # 把已经落盘的残片删掉。它不会被合成，留在 TEMP 里既白占空间，
             # 又让人看到 adb_devaudio_*.wav 误以为这次录音是好的。
-            try:
+            with contextlib.suppress(Exception):
                 if os.path.exists(long_path(tmp)):
                     os.remove(long_path(tmp))
-            except Exception:
-                pass
-        try:
+        with contextlib.suppress(Exception):
             subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", remote_wav],
                            **adb_kwargs(10))
-        except Exception:
-            pass
         return local
 
 
@@ -568,12 +551,10 @@ class MicRecorder:
                     # 标记这块已收集：stop() 排空缓冲区时据此跳过，避免重复叠加（重影）
                     self._collected.add(int(hdr.lpData or 0))
             if not self._stop.is_set():
-                try:
+                with contextlib.suppress(Exception):
                     winmm.waveInAddBuffer(
                         hwi, ctypes.cast(dwParam1, ctypes.POINTER(_WAVEHDR)),
                         ctypes.sizeof(_WAVEHDR))
-                except Exception:
-                    pass
 
         self._callback = WAVE_CALLBACK(_cb)
         # 逐个格式尝试打开（见 _MIC_FORMATS）：只有 32（格式不支持）才换下一种；
@@ -634,10 +615,10 @@ class MicRecorder:
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
-            return False, "无法创建目录：{}".format(e)
+            return False, f"无法创建目录：{e}"
         ts = time.strftime("%Y%m%d_%H%M%S")
         # 同一秒内「停止 → 再录」不能把上一段录音覆盖掉（时间戳只到秒）
-        self._path = unique_path(os.path.join(save_dir, "mic_{}.wav".format(ts)))
+        self._path = unique_path(os.path.join(save_dir, f"mic_{ts}.wav"))
         self._chunks = []
         self._collected = set()
         self._stop.clear()
@@ -662,15 +643,11 @@ class MicRecorder:
         # 先 waveInStop 停止采集，**再把各缓冲区里已录到的残余数据取走**。
         # 早前直接 waveInReset 会丢弃「正填充中、尚未触发 WIM_DATA 回调」的那块数据
         # —— 录屏刚开始就停止时，整段录音可能全丢，写出 44 字节的空 WAV，播放不了。
-        try:
+        with contextlib.suppress(Exception):
             winmm.waveInStop(self._wavein)
-        except Exception:
-            pass
         self._drain_buffers()
-        try:
+        with contextlib.suppress(Exception):
             winmm.waveInReset(self._wavein)
-        except Exception:
-            pass
         self._running = False
         self._release_device()
         self._write_wav()
@@ -695,16 +672,12 @@ class MicRecorder:
             return
         # 这两步各自兜底：unprepare 失败也绝不能跳过 close，否则麦克风设备会一直
         # 被本进程占用（其它录音程序随之失效）。
-        try:
+        with contextlib.suppress(Exception):
             for hdr, _buf in getattr(self, "_hdrs", []):
                 winmm.waveInUnprepareHeader(
                     hwi, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             winmm.waveInClose(hwi)
-        except Exception:
-            pass
         self._wavein = None
 
     def _drain_buffers(self):

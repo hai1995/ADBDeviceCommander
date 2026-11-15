@@ -37,6 +37,7 @@ backend.perf_service —— 设备性能实时采样（CPU / 内存 / FPS / 电�
   （perf_poll），不把样本塞进事件总线：1Hz × 多指标走 JSON 事件桥会白白占用
   日志/状态的队列预算，而监控数据本来就是「拉」比「推」更合适的形态。
 """
+import contextlib
 import csv
 import datetime
 import itertools
@@ -780,20 +781,14 @@ def stop_monitors(monitors, timeout=3.0):
         else:
             single.append(m)
     for m in two_phase:
-        try:
+        with contextlib.suppress(Exception):
             m.request_stop()
-        except Exception:
-            pass
     for m in two_phase:
-        try:
+        with contextlib.suppress(Exception):
             m.join_stop(timeout)
-        except Exception:
-            pass
     for m in single:
-        try:
+        with contextlib.suppress(Exception):
             m.stop()
-        except Exception:
-            pass
 
 
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,7 @@
 """backend.controllers.base —— 共享状态 / 生命周期 / 事件桥 / 点击计数 / 手册"""
 
+import contextlib
+
 from backend.controller import (
     AppState,
     BackendBus,
@@ -166,20 +168,16 @@ class WebApiBase:
         """
         video = getattr(self, "video", None)
         if video is not None:
-            try:
+            with contextlib.suppress(Exception):
                 if video.any_recording():
                     return True
-            except Exception:
-                pass
         for name in ("logcat_capture", "logcat_monitor"):
             svc = getattr(self, name, None)
             if svc is None:
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 if svc.running_serials():
                     return True
-            except Exception:
-                pass
         return False
 
     def boot(self):
@@ -280,10 +278,8 @@ class WebApiBase:
         self._flush_clicks()   # 关闭前把未落盘的点击计数写回
         sess, self.session = self.session, None
         if sess is not None:
-            try:
+            with contextlib.suppress(Exception):
                 sess.kill()
-            except Exception:
-                pass
         # 多工作区的会话同样要收：每个背后都是一条常驻的 powershell / adb 子进程，
         # 漏掉就会在关窗后残留，用户下次开会看到一堆来路不明的进程。
         with self._ws_guard:
@@ -294,43 +290,31 @@ class WebApiBase:
             self._ws_stop_flag.clear()
             self._ws_names.clear()
         for s in extra:
-            try:
+            with contextlib.suppress(Exception):
                 s.kill()
-            except Exception:
-                pass
         # 工具类后台任务一并收尾
-        try:
+        with contextlib.suppress(Exception):
             self.logcat_monitor.stop_all()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self.logcat_capture.stop_all(zip_on_stop=False)
-        except Exception:
-            pass
         # 与 screen_record_stop 共享同一把锁：避免关闭瞬间用户恰好点「停止」，
         # 两处同时遍历 videos / devaudio / 停麦导致状态互相踩踏。
         # 注意 video.stop_all() 也必须在锁内：它和 _screen_record_stop_locked 会处理
         # 同一台设备（前者走 stop_all 的旧路径、后者走会话记录路径），并发时会各自
         # pull / 合成同一个文件，出现重复合成甚至互相覆盖的半截 zip。
         with self._rec_lock:
-            try:
+            with contextlib.suppress(Exception):
                 self.video.stop_all()
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 # 注意：序列号在 _rec_session["devaudio"] 里，_rec_session 本身是
                 # 会话字段字典（ts/dir/videos/...）。早期实现直接遍历 _rec_session
                 # 的键，拿到的是字段名而非序列号，导致设备端 tinycap 从未被停止。
                 for s in list(self._rec_session.get("devaudio", {}).keys()):
                     self.device_audio.stop(s)
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 if self._mic is not None:
                     self._mic.stop()
                     self._mic = None
-            except Exception:
-                pass
             # 收尾完毕即清空会话：否则关闭过程中用户再点一次「停止录屏」，
             # _screen_record_stop_locked 会拿残留的 videos 路径再合成/打包一遍。
             self._rec_session = {}
@@ -340,33 +324,23 @@ class WebApiBase:
             pending = list(self._file_refresh_timers.values())
             self._file_refresh_timers.clear()
         for t in pending:
-            try:
+            with contextlib.suppress(Exception):
                 t.cancel()
-            except Exception:
-                pass
         self.workers.shutdown(timeout=2.0)
         # 投屏窗口由本程序拉起，关闭时一并收掉（用户早已自己关掉的不会受影响）
-        try:
+        with contextlib.suppress(Exception):
             self._scrcpy.close_all()
-        except Exception:
-            pass
         # 备用投屏：管道投屏要在设备端留下 screenrecord，不收尾会一直占着编码器
         for m in list(self._mirror_pipes.values()):
-            try:
+            with contextlib.suppress(Exception):
                 m.stop()
-            except Exception:
-                pass
         for m in list(self._mirror_snaps.values()):
-            try:
+            with contextlib.suppress(Exception):
                 m.stop()
-            except Exception:
-                pass
         self._mirror_pipes.clear()
         self._mirror_snaps.clear()
-        try:
+        with contextlib.suppress(Exception):
             self._frame_server.stop()
-        except Exception:
-            pass
         # 性能监控线程：不主动停的话它会一直每隔 N 秒调一次 adb，并且在窗口
         # 关闭后继续向已销毁的 webview 推事件（pywebview 侧会报 evaluate_js 失败）。
         #   批量停：先统一置停止信号再等，否则每台都要等满 join 超时（采样线程
@@ -515,7 +489,7 @@ class WebApiBase:
         if wid == self.WS_DEFAULT:
             return {"ok": True, "ws": wid, "name": self._ws_names.get(wid, "")}
         if wid not in self._ws_names and len(self._ws_names) >= self.WS_MAX:
-            return {"ok": False, "reason": "工作区数量已达上限（%d 个）" % self.WS_MAX}
+            return {"ok": False, "reason": f"工作区数量已达上限（{self.WS_MAX:d} 个）"}
         nm = str(name or "").strip()[:24]
         if nm:
             self._ws_names[wid] = nm
@@ -540,10 +514,8 @@ class WebApiBase:
                       self._ws_names):
                 d.pop(wid, None)
         if sess is not None:
-            try:
+            with contextlib.suppress(Exception):
                 sess.kill()
-            except Exception:
-                pass
         return {"ok": True}
 
     def _on_session_output(self, text, ws=None):
@@ -608,7 +580,7 @@ class WebApiBase:
         状态没有归属工作区，照旧走 _push_status。
         """
         tag = self._ws_label(self._ws_cur())
-        self._push_status(type_, ("[{}] {}".format(tag, text)) if tag else text, toast)
+        self._push_status(type_, (f"[{tag}] {text}") if tag else text, toast)
 
     def _ws_toast(self, type_, text):
         self._ws_status(type_, text, toast=True)
@@ -658,10 +630,8 @@ class WebApiBase:
                 return
             bumps, self._click_bumps = self._click_bumps, {}
             self._click_timer = None
-        try:
+        with contextlib.suppress(Exception):
             save_click_deltas(bumps)
-        except Exception:
-            pass
 
     def get_state(self):
         """调试 / 对账用：一次性取后端状态快照。"""
@@ -681,5 +651,5 @@ class WebApiBase:
             path = resource_path("使用说明.txt")
             text = Path(path).read_text(encoding="utf-8", errors="replace")
         except Exception as ex:  # 兜底给前端一个可读错误，不抛异常卡住桥接
-            return {"ok": False, "reason": "使用说明读取失败：{}".format(ex)}
+            return {"ok": False, "reason": f"使用说明读取失败：{ex}"}
         return {"ok": True, "text": text}

@@ -29,6 +29,7 @@ core.diag —— 「一键诊断包」：把一次问题的现场证据收齐，
 * **纯函数 + runner 注入**：本模块不直接依赖 subprocess，单测可用假 runner
   复现各种 ROM 的怪异输出（无 ps -o、logcat 不支持 -t、无 /data/anr 权限）。
 """
+import contextlib
 import datetime
 import json
 import os
@@ -711,11 +712,9 @@ def collect(adb, serial, out_dir, with_logcat=True,
                     if path_exists(p):
                         z.write(long_path(p), fn)
         except Exception as e:
-            try:
+            with contextlib.suppress(Exception):
                 if os.path.exists(lzip):
                     os.remove(lzip)
-            except Exception:
-                pass
             return None, manifest, f"打包失败：{e}"
         return zip_path, manifest, None
     finally:

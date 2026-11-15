@@ -11,6 +11,7 @@ backend.screen_service —— 截图 + 录屏（视频，不含音频合成）�
 （路径 / 错误原因），不自行 push 事件——否则同一件事会被 controller 与
 本模块各报一次，状态栏出现两行一模一样的内容。
 """
+import contextlib
 import itertools
 import os
 import subprocess
@@ -186,7 +187,7 @@ def _shell_blocked_text(state, detail, serial):
     """
     # 折叠空白：adb 的报错常带换行，塞进状态栏会把整行撑乱
     detail = " ".join((detail or "").split())
-    tail = ("（adb 原话：{}）".format(detail[:160])) if detail else ""
+    tail = (f"（adb 原话：{detail[:160]}）") if detail else ""
     if state == "password":
         return ("车机的 adb shell 需要先输入授权密码才能执行命令 —— 在系统命令行里"
                 "手工执行 adb -s {} shell echo hi 会停在 Password: 等待输入，"
@@ -206,7 +207,7 @@ def _shell_blocked_text(state, detail, serial):
         return ("这台设备的 USB 调试尚未授权：请在车机弹出的「允许 USB 调试吗」"
                 "对话框里点允许（建议勾选「一律允许」）后重试。{}".format(tail))
     if state == "gone":
-        return ("设备当前不可用{}。请检查数据线 / 无线 ADB 连接后重试。".format(tail))
+        return (f"设备当前不可用{tail}。请检查数据线 / 无线 ADB 连接后重试。")
     return ("adb shell 无法执行命令，且 adb 没有给出明确原因{}。截图依赖 shell "
             "通道，请先用系统命令行执行 adb -s {} shell echo hi 确认这台车机是否"
             "允许 shell 执行（若停在 Password: 则是需要授权密码）。".format(tail, serial))
@@ -244,20 +245,18 @@ class ScreenCapturer:
             try:
                 os.makedirs(long_path(save_dir), exist_ok=True)
             except Exception as e:
-                return None, "无法创建保存目录 {}: {}".format(save_dir, e)
+                return None, f"无法创建保存目录 {save_dir}: {e}"
         ts = time.strftime("%Y%m%d_%H%M%S")
         # safe_name：无线 ADB 序列号形如 192.168.1.5:5555，冒号是 Windows
         # 文件名非法字符，不净化会让 open() 直接失败（截图静默丢失）。
         # 落盘目标按 save_file 分流：保存目录 vs 系统临时目录。
         if save_file:
             out_dir = save_dir
-            out_name = "screenshot_%s_%s_%d.png" % (
-                safe_name(serial), ts, next(ScreenCapturer._seq))
+            out_name = f"screenshot_{safe_name(serial)}_{ts}_{next(ScreenCapturer._seq):d}.png"
         else:
             out_dir = tempfile.gettempdir()
             # 临时目录里同样用 safe_name 净化序列号，避免冒号等字符污染文件名
-            out_name = "adc_shot_%s_%s_%d.png" % (
-                safe_name(serial), ts, next(ScreenCapturer._seq))
+            out_name = f"adc_shot_{safe_name(serial)}_{ts}_{next(ScreenCapturer._seq):d}.png"
         out = os.path.join(out_dir, out_name)
 
         data, why = ScreenCapturer._exec_out(adb, serial)
@@ -304,22 +303,20 @@ class ScreenCapturer:
             text = both.decode("utf-8", "ignore").strip()[:200]
             rc = proc.returncode if proc is not None else "?"
             if text:
-                return b"", "exec-out 退出码 {}：{}".format(rc, text)
+                return b"", f"exec-out 退出码 {rc}：{text}"
             # 连 stderr/stdout 都空 —— 设备没有任何原因就把 exec-out 掐了。
             # 这大多是车机 ROM / kiosk mode 禁了 screencap（系统策略层面直接
             # 拒绝，不给任何提示），把 returncode 带出去至少能让后续 pull 路径
             # 或 shell probe 给出更有用的线索。
-            return b"", "设备未返回图像（exec-out 退出码 {}，没有任何 stderr/stdout）".format(rc)
+            return b"", f"设备未返回图像（exec-out 退出码 {rc}，没有任何 stderr/stdout）"
         except Exception as e:
             # 超时（设备无响应 / 被别的 adb 客户端抢锁）时 communicate() 只是抛错、
             # **不会**终止子进程：卡住的 adb exec-out 会变成孤儿进程一直挂着，
             # 且它占着 stdout 管道。这里必须显式回收（kill + 收尾读取）。
             if proc is not None:
-                try:
+                with contextlib.suppress(Exception):
                     proc.kill()
                     proc.communicate(timeout=5)
-                except Exception:
-                    pass
             return b"", str(e)
 
     @staticmethod
@@ -382,8 +379,7 @@ class ScreenCapturer:
         screencap」，而不是只看到最后一条的错误。
         """
         remote_seq = next(ScreenCapturer._seq)
-        remote_base = "adbdc_shot_%s_%d.png" % (
-            safe_name(serial), remote_seq)
+        remote_base = f"adbdc_shot_{safe_name(serial)}_{remote_seq:d}.png"
         # 两条候选路径，按优先级排序；第二条 /data/local/tmp 是 adb shell
         # 用户写权限的铁保证，几乎所有车机 / 定制 ROM 都能写。
         remote_candidates = [
@@ -397,18 +393,17 @@ class ScreenCapturer:
                     [adb, "-s", serial, "shell", "screencap", "-p", remote],
                     stdin=subprocess.DEVNULL, **adb_kwargs(30))
             except subprocess.TimeoutExpired:
-                errs.append("{} 超时（30s）".format(remote))
+                errs.append(f"{remote} 超时（30s）")
                 continue
             except Exception as e:
-                errs.append("{} 异常：{}".format(remote, e))
+                errs.append(f"{remote} 异常：{e}")
                 continue
             text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
             if r.returncode != 0:
                 # screencap 命令可能根本不存在（某些极简车机 ROM 把它裁掉了），
                 # 这种情况下两条路径都会挂，所以把 exit code + stderr 原样
                 # 带出去让用户判断是「路径问题」还是「命令不存在」。
-                errs.append("%s：screencap 退出码 %d：%s"
-                            % (remote, r.returncode, text[:200] or "无 stderr"))
+                errs.append(f"{remote}：screencap 退出码 {r.returncode:d}：{text[:200] or '无 stderr'}")
                 continue
             # screencap 退出码 0 但文件实际为空（SELinux 策略强制 exit 0 但禁写）
             # 的情况留给 pull 自己判断 —— pull 有 returncode + os.path.exists
@@ -422,46 +417,35 @@ class ScreenCapturer:
                     stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
                 text2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
                 if r2.returncode != 0 or not os.path.exists(long_path(part)):
-                    errs.append("%s：adb pull 没取回（exit %d：%s）"
-                                % (remote, r2.returncode, text2[-200:] or "无 stderr"))
-                    try:
+                    errs.append(f"{remote}：adb pull 没取回（exit {r2.returncode:d}：{text2[-200:] or '无 stderr'}）")
+                    with contextlib.suppress(Exception):
                         if os.path.exists(long_path(part)):
                             os.remove(long_path(part))
-                    except Exception:
-                        pass
                     continue
                 with open(long_path(part), "rb") as f:
                     data = f.read()
                 # 本地 .part 中间文件必须清掉 —— 成功 return 前就删掉，
                 # 不能等调用方 / 下一次循环处理（调用方拿不到 .part 路径，
                 # 循环下一轮可能因为 screencap 失败直接 continue，永远碰不到）。
-                try:
+                with contextlib.suppress(Exception):
                     os.remove(long_path(part))
-                except Exception:
-                    pass
                 # 成功了：清理远程文件（try/except 吞掉，别覆盖本次结果）
-                try:
+                with contextlib.suppress(Exception):
                     subprocess.run(
                         [adb, "-s", serial, "shell", "rm", "-f", remote],
                         stdin=subprocess.DEVNULL, **adb_kwargs(10))
-                except Exception:
-                    pass
                 return data, ""
             except subprocess.TimeoutExpired:
-                errs.append("%s：adb pull 超时（%ds）" % (remote, timeout))
-                try:
+                errs.append(f"{remote}：adb pull 超时（{timeout:d}s）")
+                with contextlib.suppress(Exception):
                     if os.path.exists(long_path(part)):
                         os.remove(long_path(part))
-                except Exception:
-                    pass
                 continue
             except Exception as e:
-                errs.append("{}：adb pull 异常：{}".format(remote, e))
-                try:
+                errs.append(f"{remote}：adb pull 异常：{e}")
+                with contextlib.suppress(Exception):
                     if os.path.exists(long_path(part)):
                         os.remove(long_path(part))
-                except Exception:
-                    pass
                 continue
         return b"", "；".join(errs) or "设备端 screencap 失败（所有候选路径都不通）"
 
@@ -474,18 +458,15 @@ class ScreenCapturer:
         # 段，保证磁盘上的文件就是一张能打开的图（详见 core.imgbytes）。
         clean, kind, note = imgbytes.normalize(data)
         if not clean:
-            return b"", None, "设备返回的图像无法识别（{}）".format(note)
+            return b"", None, f"设备返回的图像无法识别（{note}）"
         if kind == "png" and imgbytes.png_size(clean) is None:
             # 头部校验不过的 PNG 就算落盘也打不开 —— 看图软件只会说一句
             # 「分辨率 / 格式有问题」，用户完全不知道是传输环节出了事。
             return b"", None, (
-                "设备返回的 PNG 头已损坏（共 %d 字节，头部 %s）——"
-                "通常是 adb 传输把换行转换掉了或截图被截断"
-                % (len(clean), " ".join("{:02x}".format(b) for b in clean[:16])))
+                f"设备返回的 PNG 头已损坏（共 {len(clean):d} 字节，头部 {' '.join((f'{b:02x}' for b in clean[:16]))}）——通常是 adb 传输把换行转换掉了或截图被截断")
         if kind == "png" and not imgbytes.png_complete(clean):
             return b"", None, (
-                "设备返回的 PNG 不完整（共 %d 字节，缺少 IEND 块）——"
-                "通常是传输超时或中断，截图被截断" % len(clean))
+                f"设备返回的 PNG 不完整（共 {len(clean):d} 字节，缺少 IEND 块）——通常是传输超时或中断，截图被截断")
         return clean, kind, ""
 
     @staticmethod
@@ -537,8 +518,7 @@ class VideoRecorder:
         启动（它拒绝覆盖已存在文件），也让「按命令行特征精准结束某一进程」有
         唯一标识可用（见 _stop_device_screenrecord）。
         """
-        return "/data/local/tmp/adb_rec_%s_%s_%d.mp4" % (
-            safe_name(serial), ts, next(self._seq))
+        return f"/data/local/tmp/adb_rec_{safe_name(serial)}_{ts}_{next(self._seq):d}.mp4"
 
     @staticmethod
     def _seg_local(save_dir, serial, base, seg):
@@ -548,9 +528,9 @@ class VideoRecorder:
         哪一段接哪一段；第一段不带后缀，与历史产物、既有脚本保持一致。
         """
         if seg <= 1:
-            name = "record_{}_{}.mp4".format(safe_name(serial), base)
+            name = f"record_{safe_name(serial)}_{base}.mp4"
         else:
-            name = "record_%s_%s_p%d.mp4" % (safe_name(serial), base, seg)
+            name = f"record_{safe_name(serial)}_{base}_p{seg:d}.mp4"
         return os.path.join(save_dir, name)
 
     @staticmethod
@@ -631,7 +611,7 @@ class VideoRecorder:
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
         except Exception as e:
-            return False, "无法创建保存目录 {}: {}".format(save_dir, e)
+            return False, f"无法创建保存目录 {save_dir}: {e}"
         ts = time.strftime("%Y%m%d_%H%M%S")
         base = extra_name or ts
         # 远端文件名带时间戳 + 序号：避免上一次崩溃残留的同一文件
@@ -658,8 +638,7 @@ class VideoRecorder:
         if early_err is not None:
             # 设备端 screenrecord 在 1~2s 内提前退出：权限 / 目录 / 设备状态
             # 等问题原样上报（重试无意义，还会掩盖真实错误）。
-            return False, "录屏启动失败：screenrecord 提前退出%s" % (
-                "（{}）".format(early_err) if early_err.strip() else "")
+            return False, f"录屏启动失败：screenrecord 提前退出{f'（{early_err}）' if early_err.strip() else ''}"
         with self._lock:
             self._sessions[serial] = {
                 "serial": serial,
@@ -685,7 +664,7 @@ class VideoRecorder:
         # （见 WebApi._reap_dead_recordings 与使用说明「录屏被中断」条）。
         threading.Thread(
             target=self._watch_exit, args=(serial, proc),
-            daemon=True, name="rec-watch-{}".format(serial)).start()
+            daemon=True, name=f"rec-watch-{serial}").start()
         return True, local
 
     def _watch_exit(self, serial, proc):
@@ -700,10 +679,8 @@ class VideoRecorder:
 
         会话可能已被收尾弹掉（_pull_and_finish）—— 那种情况下无需标记。
         """
-        try:
+        with contextlib.suppress(Exception):
             proc.wait()
-        except Exception:
-            pass
         with self._lock:
             sess = self._sessions.get(serial)
             if sess is None or sess.get("proc") is not proc:
@@ -746,7 +723,7 @@ class VideoRecorder:
         if waiter:
             threading.Thread(
                 target=self._wait_reboot_and_resume, args=(serial, sess),
-                daemon=True, name="rec-reboot-{}".format(serial)).start()
+                daemon=True, name=f"rec-reboot-{serial}").start()
 
     def _device_online(self, serial):
         """这台设备现在是不是 state=device。
@@ -796,7 +773,7 @@ class VideoRecorder:
             if not ok:
                 sess["died"] = True
                 sess["seg_err"] = (
-                    "设备已断开，等待重启超时 %d 秒" % REC_REBOOT_WAIT_S)
+                    f"设备已断开，等待重启超时 {REC_REBOOT_WAIT_S:d} 秒")
                 return
             # 设备回来了：先收好重启前那一段，再接下一段。走的就是「录满自动
             # 分段」同一条路径 —— 段号继续累加（_p2 / _p3…），stop_ex 仍能
@@ -864,7 +841,7 @@ class VideoRecorder:
             self._pull_segment_bg(prev)
             sess["seg"] = seg_no
             sess["died"] = True
-            sess["seg_err"] = "第 %d 段未能启动（%s）" % (seg_no, e)
+            sess["seg_err"] = f"第 {seg_no:d} 段未能启动（{e}）"
             return
         sess.setdefault("segments", []).append(prev)
         # 旧段的 adb proc 通常已退出（它的 --time-limit 到了 / 设备端写完 moov），
@@ -880,11 +857,9 @@ class VideoRecorder:
         old_proc = sess.get("proc")
         if old_proc is not None:
             for s in ("stdin", "stdout", "stderr"):
-                try:
+                with contextlib.suppress(Exception):
                     f = getattr(old_proc, s, None)
                     if f is not None: f.close()
-                except Exception:
-                    pass
         sess["remote"] = remote
         sess["local"] = local
         sess["proc"] = proc
@@ -897,11 +872,11 @@ class VideoRecorder:
         self._pull_segment_bg(prev)
         threading.Thread(
             target=self._watch_exit, args=(serial, proc), daemon=True,
-            name="rec-watch-%s-%d" % (serial, seg_no)).start()
+            name=f"rec-watch-{serial}-{seg_no:d}").start()
         threading.Thread(
             target=self._confirm_segment, args=(serial, proc, seg_no),
             daemon=True,
-            name="rec-confirm-%s-%d" % (serial, seg_no)).start()
+            name=f"rec-confirm-{serial}-{seg_no:d}").start()
 
     def _confirm_segment(self, serial, proc, seg_no):
         """（后台）确认新起的这一段没有立刻退出。
@@ -943,8 +918,7 @@ class VideoRecorder:
             sess["died"] = True
             if not sess.get("seg_err"):
                 why = self._proc_err(proc)
-                sess["seg_err"] = "第 %d 段启动后立即退出%s" % (
-                    seg_no, "（{}）".format(why) if why else "")
+                sess["seg_err"] = f"第 {seg_no:d} 段启动后立即退出{f'（{why}）' if why else ''}"
 
     def _pull_segment_bg(self, seg):
         """（后台）把一段已录完的视频拉回本地，结果写回 seg。
@@ -1046,8 +1020,8 @@ class VideoRecorder:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
         except Exception as e:
-            return None, "启动录屏失败：{}".format(e)
-        try:
+            return None, f"启动录屏失败：{e}"
+        with contextlib.suppress(Exception):
             if proc.poll() is None:
                 time.sleep(1.5)
             if proc.poll() is not None:
@@ -1057,8 +1031,6 @@ class VideoRecorder:
                 # 自己的错误。只读 stderr 时这里恒为空，用户能看到的只有一句
                 # 「screenrecord 提前退出」——最需要原因的时候偏偏没有原因。
                 return proc, self._proc_err(proc)
-        except Exception:
-            pass
         return proc, None
 
     # ---- 设备系统设置（可视化 overlay：指针位置 / 触摸圆点）----
@@ -1128,7 +1100,7 @@ class VideoRecorder:
                 return False, " ".join(out.split())[:160]
         if r.returncode != 0:
             return False, (" ".join(out.split())[:160]
-                           or "settings 返回 %d" % r.returncode)
+                           or f"settings 返回 {r.returncode:d}")
         return True, ""
 
     @staticmethod
@@ -1154,18 +1126,14 @@ class VideoRecorder:
         stdin = getattr(proc, "stdin", None)
         if stdin is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             # POSIX PTY：写 Ctrl-C 让设备端转成 SIGINT；Windows ConPTY 不认
             if os.name != "nt":
                 stdin.write("\x03")
                 stdin.flush()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             # 关掉写端让 adb.exe 读到 EOF：这是**所有平台**都需要做的事
             stdin.close()
-        except Exception:
-            pass
 
     @staticmethod
     def _device_graceful_stop(adb, serial, remote):
@@ -1217,11 +1185,9 @@ class VideoRecorder:
         # 主机侧只有一次管道写入，避免被启发式杀软当成「信号注入」。
         self._graceful_stop_proc(proc)
         grace_seconds = 3  # 给 POSIX PTY Ctrl-C 和 Windows 上进程自然退留时间
-        try:
+        with contextlib.suppress(Exception):
             if proc is not None:
                 proc.wait(timeout=grace_seconds)
-        except Exception:
-            pass
         # 第 2 阶段：设备端兜底 kill -INT（跨平台共享）。
         # 触发条件：Windows ConPTY 不认 \x03 让进程还活着、或极少数 POSIX
         # 情况下 PTY 没把 \x03 转成 SIGINT（设备端 shell 配置异常）。
@@ -1230,29 +1196,21 @@ class VideoRecorder:
         # 掐断，用户眼前画面直接黑。
         if proc is not None and proc.poll() is None:
             self._device_graceful_stop(self.adb, serial, remote)
-            try:
+            with contextlib.suppress(Exception):
                 proc.wait(timeout=5)
-            except Exception:
-                pass
         # 第 3 阶段：还不退才强杀 —— 兜底而已，正常不该走到这里。
         if proc is not None and proc.poll() is None:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 proc.wait(timeout=3)
-            except Exception:
-                pass
         # 关 pipe：录屏期间 stdout / stderr 可能积累少量 adb 报错；
         # proc 死掉后父进程的 pipe 句柄靠 GC 才被回收，Windows 上累积
         # 多段会短暂触发句柄耗尽。主动关掉立即释放。
         for s in ("stdout", "stderr"):
-            try:
+            with contextlib.suppress(Exception):
                 f = getattr(proc, s, None)
                 if f is not None: f.close()
-            except Exception:
-                pass
         ok, local, err = self._pull_and_finish(serial)
         # 3) 已录完的段是**在后台并行拉取**的（见 _roll_segment_bg）：必须等它们
         #    各自落地。不等的话，打包会删掉源文件、而 pull 线程还在往同一个路径
@@ -1282,7 +1240,7 @@ class VideoRecorder:
             if ok:
                 paths.append(local)
             else:
-                notes.append("（当前段残片：{}）".format(local))
+                notes.append(f"（当前段残片：{local}）")
         msgs = ([err] if err else []) + notes
         return ok, paths, ("；".join(msgs) if msgs else None)
 
@@ -1315,33 +1273,25 @@ class VideoRecorder:
         # —— 与 stop_ex 同一套跨平台两阶段优雅停止 ——
         self._graceful_stop_proc(proc)
         stopped = True
-        try:
+        with contextlib.suppress(Exception):
             if proc is not None:
                 proc.wait(timeout=3)
-        except Exception:
-            pass
         if proc is not None and proc.poll() is None:
             self._device_graceful_stop(self.adb, serial, remote)
-            try:
+            with contextlib.suppress(Exception):
                 proc.wait(timeout=5)
-            except Exception:
-                pass
         if proc is not None and proc.poll() is None:
             stopped = False
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
         # 关 pipe：与 stop_ex 同一处理。取消录屏同样会结束一个 adb 进程，
         # 不主动关 stdout / stderr，句柄要等 GC 才回收；Windows 上反复
         # 「录制 → 取消」会累积句柄，最终触发句柄耗尽。
         for s in ("stdout", "stderr"):
-            try:
+            with contextlib.suppress(Exception):
                 f = getattr(proc, s, None)
                 if f is not None:
                     f.close()
-            except Exception:
-                pass
         with self._lock:
             self._sessions.pop(serial, None)
         # 2) 已录完的段正在后台并行拉取：等它们各自结束再交路径，否则 pull 线程
@@ -1357,11 +1307,9 @@ class VideoRecorder:
         # 3) 设备端残留（当前段 + 各历史段）：无论 pull 成功与否都 rm 一遍，幂等。
         remotes = [sess.get("remote")] + [x.get("remote") for x in segs]
         for r in [x for x in remotes if x]:
-            try:
+            with contextlib.suppress(Exception):
                 subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", r],
                                **adb_kwargs(10))
-            except Exception:
-                pass
         if not stopped:
             notes.append("设备端 screenrecord 未能确认退出")
         return stopped, paths, ("；".join(notes) if notes else None)
@@ -1449,21 +1397,17 @@ class VideoRecorder:
         next_poll = 0.0
         while time.time() < deadline:
             if should_abort is not None:
-                try:
+                with contextlib.suppress(Exception):
                     if should_abort():
                         return False
-                except Exception:
-                    pass
             now = time.time()
             if now >= next_poll:
-                try:
+                with contextlib.suppress(Exception):
                     r = subprocess.run(
                         [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
                     if r.returncode == 0 and (
                             r.stdout or "").strip() == "device":
                         return True
-                except Exception:
-                    pass
                 next_poll = now + max(0.5, interval_s)
             # 分小片睡，让 should_abort 能及时生效（否则最坏要等一个
             # interval 才能响应「用户已点停止」）
@@ -1519,22 +1463,20 @@ class VideoRecorder:
                 returned = self._wait_device_back(serial, max_wait_s=60)
                 if not returned:
                     return False, None, (
-                        "设备已断开，录屏文件无法取回（等待设备重启超时 60 秒）%s"
-                        % ("（{}）".format(why) if why else ""))
+                        f"设备已断开，录屏文件无法取回（等待设备重启超时 60 秒）{f'（{why}）' if why else ''}")
                 # 设备回来了！再 probe + pull 一次
                 ready, why, gone = self._remote_probe(self.adb, serial, remote)
                 if gone:
                     # 刚回来又掉了？那就真的没办法了
                     return False, None, (
-                        "设备重连后再次断开，录屏文件无法取回%s"
-                        % ("（{}）".format(why) if why else ""))
+                        f"设备重连后再次断开，录屏文件无法取回{f'（{why}）' if why else ''}")
                 # ready=False 但 gone=False：文件被系统清了（/data/local/tmp 重启后清空）
                 # 或 screenrecord 被杀时根本没来得及 flush 任何东西
                 if not ready:
                     return False, None, (
                         "设备已重启，但录屏临时文件已被系统清理或从未写入磁盘，"
                         "本次录制内容丢失"
-                        + ("（{}）".format(why) if why else ""))
+                        + (f"（{why}）" if why else ""))
                 # ready=True：文件还在！**不能 break**：break 会跳出整个重试循环，
                 # 连本轮的 pull 都跳过，最终只剩一句「pull 失败」——设备重启后
                 # 明明还能取回的视频就这么丢了。这里直接落到下面的 pull 分支。
@@ -1547,23 +1489,19 @@ class VideoRecorder:
                     if r.returncode == 0 and os.path.exists(long_path(local)):
                         # 校验 MP4 已收尾（含 moov 头）：否则没有时长、播放不了
                         if not VideoRecorder._mp4_has_moov(local):
-                            try:
+                            with contextlib.suppress(Exception):
                                 subprocess.run(
                                     [self.adb, "-s", serial, "shell", "rm", "-f", remote],
                                     **adb_kwargs(10))
-                            except Exception:
-                                pass
                             # 状态文案由 controller 统一下发（这里只回结果）：早期在此
                             # 自行 push 一条 warn，controller 又按返回值推一条，同一次
                             # 失败会在状态栏出现两行内容重叠的提示。
                             return False, local, "录屏文件疑似未正常收尾（MP4 缺 moov 头，无法播放）"
                         # 录像结束，清理设备端临时文件
-                        try:
+                        with contextlib.suppress(Exception):
                             subprocess.run(
                                 [self.adb, "-s", serial, "shell", "rm", "-f", remote],
                                 **adb_kwargs(10))
-                        except Exception:
-                            pass
                         # 同上：成功文案由 controller 按其上下文（是否合成音频 / 打包）
                         # 统一下发，这里再 push 一次会让状态栏出现两行相同的
                         # 「✓ 录屏已保存: <同一个路径>」。
@@ -1573,22 +1511,22 @@ class VideoRecorder:
                         low = err.lower()
                         if any(h in low for h in _FATAL_PULL_HINTS):
                             # 已经拿到 adb 的明确答复，且它不会因为再等一会儿而变好
-                            return False, None, "取回录屏文件失败：{}".format(last_err)
+                            return False, None, f"取回录屏文件失败：{last_err}"
                     else:
                         last_err = "pull 返回非零但无错误输出（可能设备端文件未就绪）"
                 except Exception as e:
                     last_err = str(e)[:200]
             else:
-                last_err = ("设备端未生成录屏文件 {}（screenrecord 可能未启动/提前退出）".format(remote))
+                last_err = (f"设备端未生成录屏文件 {remote}（screenrecord 可能未启动/提前退出）")
                 if why:
                     # 带上 adb 原话：`ls` 报的是「文件不存在」还是别的，只有它说得清
-                    last_err += "；{}".format(why)
+                    last_err += f"；{why}"
                 # `ls` 报权限不足 / 只读时，文件往往**是存在的**，只是读不到：
                 # 再退避 9 秒也还是同一句话，而且最终那句「未生成录屏文件
                 # （screenrecord 可能未启动/提前退出）」会把用户引向 screenrecord，
                 # 真正该处理的是保存路径的权限。
                 if why and any(h in why.lower() for h in _FATAL_PULL_HINTS):
-                    return False, None, "无法读取设备端录屏文件：{}".format(why)
+                    return False, None, f"无法读取设备端录屏文件：{why}"
             if attempt < 5:
                 time.sleep(0.6 * (attempt + 1))
         return False, None, last_err

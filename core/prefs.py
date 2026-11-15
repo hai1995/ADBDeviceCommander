@@ -67,6 +67,7 @@ dist/（与 exe 同目录），用户打开目录就能看到全部可配置项�
 设计约定：默认值集中在 PREFS_DEFAULTS 一处，前端 HTML 的默认勾选与之对齐
 （新增开关时两边同步改），避免「后端默认 False、界面默认勾选」的漂移。
 """
+import contextlib
 import os
 import sys
 import threading
@@ -373,12 +374,12 @@ def sanitize_prefs(raw):
         elif k in STR_KEYS:
             if not isinstance(v, str):
                 clean[k] = dv
-                warnings.append("{} 的值 {!r} 不是文本，已恢复为 {!r}".format(k, v, dv))
+                warnings.append(f"{k} 的值 {v!r} 不是文本，已恢复为 {dv!r}")
         elif k in LEVEL_LIST_KEYS:
             nv = _as_levels(v, dv)
             if nv != v:
                 clean[k] = nv
-                warnings.append("{} 的级别选择 {!r} 含无效项，已恢复为 {!r}".format(k, v, nv))
+                warnings.append(f"{k} 的级别选择 {v!r} 含无效项，已恢复为 {nv!r}")
         elif k in INT_KEYS:
             lo, hi = INT_RANGES.get(k, (0, 1 << 30))
             nv = _as_int(v, dv, lo, hi)
@@ -387,8 +388,7 @@ def sanitize_prefs(raw):
                 # 同上：'1000' 这种带引号的数字是合法输入（只是写法不同），
                 # 不该报「'1000' 不是 200~10000 的数字，已恢复为 1000」。
                 if _as_int(v, None, lo, hi) is None:
-                    warnings.append("%s 的值 %r 不是 %d~%d 的数字，已恢复为 %r"
-                                    % (k, v, lo, hi, nv))
+                    warnings.append(f"{k} 的值 {v:!r} 不是 {lo:d}~{hi:d} 的数字，已恢复为 {nv:!r}")
     return clean, warnings
 
 
@@ -443,11 +443,9 @@ def ensure_prefs_file() -> str:
             f.write(default_prefs_json())
         os.replace(ltmp, lp)
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             if os.path.exists(ltmp):
                 os.remove(ltmp)
-        except Exception:
-            pass
     return p
 
 
@@ -495,7 +493,7 @@ def _atomic_write(prefs: dict) -> bool:
     import json
     import uuid
     p = prefs_path()
-    tmp = "{}.{}.tmp".format(p, uuid.uuid4().hex[:8])
+    tmp = f"{p}.{uuid.uuid4().hex[:8]}.tmp"
     lp, ltmp = long_path(p), long_path(tmp)
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
@@ -509,11 +507,9 @@ def _atomic_write(prefs: dict) -> bool:
         os.replace(ltmp, lp)
         return True
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             if os.path.exists(ltmp):
                 os.remove(ltmp)
-        except Exception:
-            pass
         return False
 
 
@@ -576,11 +572,9 @@ def _migrate_legacy_file():
             json.dump(clean, f, ensure_ascii=False, indent=2)
         os.replace(ltmp, lp_new)
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             if os.path.exists(ltmp):
                 os.remove(ltmp)
-        except Exception:
-            pass
         return None
     return clean
 
@@ -670,8 +664,8 @@ def resolve_save_dir(prefs=None, default=None, ensure_dir=False):
     if os.path.isdir(lcfg):
         if os.access(lcfg, os.W_OK):
             return cfg, None
-        return default, ("配置里的保存目录不可写，已改用默认目录：{}".format(default))
-    return default, ("配置里的保存目录在本机不存在，已改用默认目录：{}{}".format(default, "（{}）".format(mkdir_err) if mkdir_err else ""))
+        return default, (f"配置里的保存目录不可写，已改用默认目录：{default}")
+    return default, ("配置里的保存目录在本机不存在，已改用默认目录：{}{}".format(default, f"（{mkdir_err}）" if mkdir_err else ""))
 
 
 def get_pref(key, default=None):

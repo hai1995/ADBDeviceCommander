@@ -33,6 +33,7 @@ Windows 10 1809+ 的 DWM 提供了改标题栏配色的属性：
 非 Windows 平台全程 no-op（找不到 dwmapi 直接返回 unsupported），
 Linux CI 上跑单测不会有任何副作用。
 """
+import contextlib
 import os
 import sys
 import time
@@ -129,7 +130,7 @@ def _dwm_setter():
             ctypes.byref(v), ctypes.sizeof(v))
         # 非 0 = 该系统版本不认识这个属性（老 Windows 上没有 34/35/36）
         if rc != 0:
-            raise OSError("DwmSetWindowAttribute(%d) 返回 %d" % (attr, rc))
+            raise OSError(f"DwmSetWindowAttribute({attr:d}) 返回 {rc:d}")
 
     return _set
 
@@ -155,12 +156,10 @@ def apply_to_hwnd(hwnd, mode="dark", bg=None, text=None, border=None,
             failed.append(attr)
         # 深色模式的新编号不被认识时补一次旧编号（1809~1903）
         if attr == DWMWA_USE_IMMERSIVE_DARK_MODE and attr in failed:
-            try:
+            with contextlib.suppress(Exception):
                 setter(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, val)
                 applied.append(DWMWA_USE_IMMERSIVE_DARK_MODE_OLD)
                 failed.remove(attr)
-            except Exception:
-                pass
     return {"ok": bool(applied), "applied": applied, "failed": failed,
             "reason": "" if applied else "dwm_rejected"}
 
@@ -223,7 +222,7 @@ def find_window(pid=None, title_hint=""):
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def _cb(hwnd, _lparam):
-        try:
+        with contextlib.suppress(Exception):
             if not user32.IsWindowVisible(hwnd):
                 return True
             owner = wintypes.DWORD()
@@ -234,8 +233,6 @@ def find_window(pid=None, title_hint=""):
             buf = ctypes.create_unicode_buffer(n + 1)
             user32.GetWindowTextW(hwnd, ctypes.cast(buf, wintypes.LPWSTR), n + 1)
             found.append((int(hwnd), buf.value or ""))
-        except Exception:
-            pass
         return True
 
     try:

@@ -25,6 +25,8 @@ import time
 # 发生在 main() 之前，原来的计时从 main() 起算会把这一段漏掉（实测 0.2s+）。
 _MODULE_T0 = time.perf_counter()
 
+import contextlib
+
 from backend.controller import WebApi
 from core.constants import PROJECT_ROOT, unique_path
 from core.envcheck import (
@@ -54,7 +56,7 @@ os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 
 def _refresh_system_path():
     """从注册表同步用户/系统 PATH 到当前进程（保证子进程能找到 adb / powershell）。"""
-    try:
+    with contextlib.suppress(Exception):
         import winreg
         keys = [
             (winreg.HKEY_CURRENT_USER, r"Environment"),
@@ -74,8 +76,6 @@ def _refresh_system_path():
         new = ";".join(filter(None, [os.environ.get("PATH", "")] + extra))
         if new:
             os.environ["PATH"] = new
-    except Exception:
-        pass
 
 
 def _resolve_index_url():
@@ -92,7 +92,7 @@ def _resolve_index_url():
     # os.path.exists 对超长路径返回 False → 这里会误报「未找到 index.html，
     # 窗口可能显示空白」，而文件其实好好地在那儿。
     if not path_isfile(index):
-        print("[main] 警告：未找到 {}，窗口可能显示空白（前端尚未就绪）。".format(index), file=sys.stderr)
+        print(f"[main] 警告：未找到 {index}，窗口可能显示空白（前端尚未就绪）。", file=sys.stderr)
     return Path(index).resolve().as_uri()
 
 
@@ -160,11 +160,9 @@ def _apply_user_adb_dir():
     阶段即生效，后续 preflight 的 adb 检测与所有子进程（adb/shell）都能找到；
     运行中在关于页改配置则走 WebApi.save_settings（同一条注入逻辑）。
     """
-    try:
+    with contextlib.suppress(Exception):
         from core.prefs import apply_adb_dir, load_prefs
         apply_adb_dir(load_prefs().get("adb_dir"))
-    except Exception:
-        pass
 
 
 def _ensure_config_file():
@@ -175,11 +173,9 @@ def _ensure_config_file():
     「每次启动都加载以往的设置」才有着落；写不进去（只读目录等）时静默跳过，
     行为与从前一致——首次改动设置时才由 save_prefs 尝试创建。
     """
-    try:
+    with contextlib.suppress(Exception):
         from core.prefs import ensure_prefs_file
         ensure_prefs_file()
-    except Exception:
-        pass
 
 
 def _win32():
@@ -251,14 +247,12 @@ def _show_native_error(title, lines, url=None):
             res = user32.MessageBoxW(None, text, title, flags)
             shown = True
             if url and res == IDOK:
-                try:
+                with contextlib.suppress(Exception):
                     shell32.ShellExecuteW(None, "open", url, None, None, 1)
-                except Exception:
-                    pass
         except Exception:
             shown = False
     if not shown:
-        print("\n[环境检查未通过] {}\n{}\n".format(title, text), file=sys.stderr)
+        print(f"\n[环境检查未通过] {title}\n{text}\n", file=sys.stderr)
     return shown
 
 
@@ -303,7 +297,7 @@ def _write_crash_log(title, exc_type, exc, tb):
             stamp = time.strftime("%Y%m%d_%H%M%S")
             # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
             # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
-            path = unique_path(os.path.join(d, "crash_{}.log".format(stamp)))
+            path = unique_path(os.path.join(d, f"crash_{stamp}.log"))
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             return path
@@ -319,13 +313,13 @@ def _notify_crash(log_path):
         MB_SYSTEMMODAL = 0x1000
         lines = "程序发生未预期的错误，即将退出。"
         if log_path:
-            lines += "\n\n崩溃详情已写入：\n{}\n\n请把该日志文件发给维护者以定位问题。".format(log_path)
+            lines += f"\n\n崩溃详情已写入：\n{log_path}\n\n请把该日志文件发给维护者以定位问题。"
         _user32, _shell32, _k32b = _win32()
         _user32.MessageBoxW(
             None, lines, "ADB 设备指令台 · 崩溃提示",
             MB_ICONERROR | MB_SYSTEMMODAL)
     except Exception:
-        print("[崩溃] {}".format(log_path), file=sys.stderr)
+        print(f"[崩溃] {log_path}", file=sys.stderr)
 
 
 def _install_crash_hooks():
@@ -343,10 +337,8 @@ def _install_crash_hooks():
             "后台线程异常（{}）".format(getattr(args.thread, "name", "?")),
             args.exc_type, args.exc_value, args.exc_traceback)
         if log:
-            try:
-                print("[崩溃日志] {}".format(log), file=sys.stderr)
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                print(f"[崩溃日志] {log}", file=sys.stderr)
 
     sys.excepthook = _sys_hook
     if hasattr(threading, "excepthook"):      # Python 3.8+
@@ -373,7 +365,7 @@ def _preflight():
         return
     lines = ["检测到以下问题，请处理后重新运行本程序："]
     for p in problems:
-        lines.append("• {}\n  {}\n  → {}".format(p.name, p.detail, p.fix))
+        lines.append(f"• {p.name}\n  {p.detail}\n  → {p.fix}")
     # 如果问题涉及 WebView2，给弹窗附带可点击跳转的下载链接。
     url = None
     for p in problems:
@@ -392,27 +384,21 @@ def _boot_timing_path():
 
 def _reset_boot_timing_log():
     """每次启动重新起一份耗时日志：反馈「这次启动慢」时只看得到本次分段。"""
-    try:
+    with contextlib.suppress(Exception):
         with open(long_path(_boot_timing_path()), "w", encoding="utf-8") as f:
             f.write("=== {} 启动 ===\n".format(time.strftime("%Y-%m-%d %H:%M:%S")))
-    except Exception:
-        pass
 
 
 def _make_boot_mark(t0):
     """返回启动分段打点函数：同一行既写 stderr（源码跑可见）也追加到日志
     文件——--windowed 打包的 exe 没有控制台，用户只能从文件里读这份分段。"""
     def mark(tag):
-        line = "[boot {:5.2f}s] {}".format(time.perf_counter() - t0, tag)
-        try:
+        line = f"[boot {time.perf_counter() - t0:5.2f}s] {tag}"
+        with contextlib.suppress(Exception):
             print(line, file=sys.stderr, flush=True)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             with open(long_path(_boot_timing_path()), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-        except Exception:
-            pass
     return mark
 
 
@@ -615,20 +601,18 @@ def _strip_mark_of_the_web():
     if not _motw_needed():
         return 0
     count = 0
-    try:
+    with contextlib.suppress(Exception):
         for root in _motw_cleanup_dirs():
             for path in _iter_motw_files(root):
                 _delete_zone_identifier(path + ":Zone.Identifier")
                 count += 1
-    except Exception:
-        pass
     return count
 
 
 def _gui_failure_lines(exc):
     """GUI 初始化失败的中文提示行：pythonnet/MOTW 场景给可自救的步骤。"""
-    msg = "{}: {}".format(type(exc).__name__, exc)
-    lines = ["窗口启动失败：{}".format(msg), ""]
+    msg = f"{type(exc).__name__}: {exc}"
+    lines = [f"窗口启动失败：{msg}", ""]
     if ("Python.Runtime" in msg or "pythonnet" in msg.lower()
             or "Loader.Initialize" in msg or "CLR" in msg):
         lines += [
@@ -658,16 +642,12 @@ def _report_gui_init_failure(exc):
     except Exception:
         log = None
     if log:
-        lines += ["", "崩溃详情已写入：{}".format(log)]
-    try:
+        lines += ["", f"崩溃详情已写入：{log}"]
+    with contextlib.suppress(Exception):
         with open(long_path(_boot_timing_path()), "a", encoding="utf-8") as f:
-            f.write("[启动失败] {}: {}\n".format(type(exc).__name__, exc))
-    except Exception:
-        pass
-    try:
+            f.write(f"[启动失败] {type(exc).__name__}: {exc}\n")
+    with contextlib.suppress(Exception):
         _show_native_error("ADB 设备指令台 · 启动失败", lines)
-    except Exception:
-        pass
 
 
 def main():
@@ -681,7 +661,7 @@ def main():
     # 任何一段 Python 计时里，却往往是「启动二十秒」的全部。
     age = _process_age_seconds()
     if age is not None:
-        _MARK("process_age {:.2f}s（进程创建 → Python 代码，含 onefile 解压）".format(age))
+        _MARK(f"process_age {age:.2f}s（进程创建 → Python 代码，含 onefile 解压）")
 
     # 崩溃兜底最先注册：保证后续任何阶段（含后台线程）的未捕获异常都有日志
     _install_crash_hooks()
@@ -693,7 +673,7 @@ def main():
     # 打点里能看到它有没有意外变成新的启动瓶颈。
     n_motw = _strip_mark_of_the_web()
     if n_motw:
-        _MARK("motw_cleared %d binaries" % n_motw)
+        _MARK(f"motw_cleared {n_motw:d} binaries")
 
     parser = argparse.ArgumentParser(description="ADB 设备指令台（Web 版）")
     parser.add_argument("--debug", action="store_true",
@@ -736,21 +716,17 @@ def _theme_window(window):
     设置页运行时切换主题走 WebApi.set_theme → win_theme.apply_for_mode（同一套
     上色逻辑，只是按 pid 回退找句柄），与这里的启动期上色共用底层实现。
     """
-    try:
+    with contextlib.suppress(Exception):
         from core import win_theme
         from core.prefs import load_prefs
         mode = "dark"
-        try:
+        with contextlib.suppress(Exception):
             m = load_prefs().get("theme")
             if m in ("dark", "light", "system"):
                 mode = m
-        except Exception:
-            pass
         # attach 会轮询等待窗口句柄就绪（start(func=) 的线程里窗口可能尚未建出），
         # 再按 mode 上色；非 Windows / 句柄拿不到都静默返回。
         win_theme.attach(getattr(window, "native", None), mode=mode)
-    except Exception:
-        pass                      # 配色是锦上添花，任何异常都不能挡住启动
 
 
 def _launch(args, api, url, _T0=None):
@@ -779,11 +755,9 @@ def _launch(args, api, url, _T0=None):
     # 窗口「真正显示」与「页面 DOM 就绪」两个时间点：启动慢时用来区分是
     # WebView2 运行时初始化慢（window_created → shown 很长），还是页面渲染慢
     # （shown → loaded）。没有这两点，日志停在 window_created，无法定位。
-    try:
+    with contextlib.suppress(Exception):
         window.events.shown += lambda: _MARK("window_shown")
         window.events.loaded += lambda: _MARK("dom_loaded")
-    except Exception:
-        pass                      # 事件挂不上只是少两行日志，绝不能挡住启动
 
     # 采用原生标题栏：启动即最大化（maximized=True），用户可随时用原生标题栏
     # 的「还原」按钮将窗口缩小为可自由调整的大小——不再需要自绘标题栏与
@@ -810,7 +784,7 @@ def _launch(args, api, url, _T0=None):
         try:
             api.shutdown()
         except Exception as ex:
-            print("[main] 退出清理异常：{}".format(ex), file=sys.stderr)
+            print(f"[main] 退出清理异常：{ex}", file=sys.stderr)
     return window
 
 

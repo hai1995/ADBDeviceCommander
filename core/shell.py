@@ -2,6 +2,7 @@
 core.shell —— 持久 PowerShell 会话（ShellSession）。
 与 旧 Tk 版（已移除） 中的 ShellSession 同源；不依赖任何 UI。
 """
+import contextlib
 import os
 import queue
 import subprocess
@@ -130,13 +131,11 @@ class ShellSession:
         init_tag = "__INIT_DONE_{}__".format(uuid.uuid4().hex)
         init_ev = threading.Event()
         self._pending.append((init_tag, init_ev))
-        try:
+        with contextlib.suppress(Exception):
             # sentinel 后面拼上当前路径，供 Python 侧维护 CMD 风格提示符
             self.proc.stdin.write(
                 init_script + '\n' + self._sentinel_stmt(init_tag) + '\n')
             self.proc.stdin.flush()
-        except Exception:
-            pass
         # 同步等 init 完成（最多 3s，避免卡住 GUI 启动）
         init_ev.wait(timeout=3.0)
         try:
@@ -151,13 +150,11 @@ class ShellSession:
             cd_tag = "__CD_DONE_{}__".format(uuid.uuid4().hex)
             cd_ev = threading.Event()
             self._pending.append((cd_tag, cd_ev))
-            try:
+            with contextlib.suppress(Exception):
                 self.proc.stdin.write(
                     self._cd_stmt(sd) + '\n'
                     + self._sentinel_stmt(cd_tag) + '\n')
                 self.proc.stdin.flush()
-            except Exception:
-                pass
             cd_ev.wait(timeout=3.0)
             try:
                 self._pending.remove((cd_tag, cd_ev))
@@ -173,11 +170,9 @@ class ShellSession:
         没有任何解释，用户只能反复重试。凡是要给人看的文本都必须走这里。
         """
         if self.output_callback:
-            try:
+            with contextlib.suppress(Exception):
                 self.output_callback(text)
                 return
-            except Exception:
-                pass                          # 回调自身出错则退回队列，不丢消息
         self.out_queue.put((kind, text))
 
     def _read_loop(self):
@@ -186,7 +181,7 @@ class ShellSession:
         # 无条件置 _eof，就会把**刚重建的新会话**误判成已结束——表现为「点了停止
         # 之后，下一条命令立刻返回 False」。故只有「仍是当前进程」才允许置 EOF。
         proc = self.proc
-        try:
+        with contextlib.suppress(Exception):
             for line in proc.stdout:
                 text = line.rstrip("\n")
                 t = text.strip()
@@ -203,24 +198,18 @@ class ShellSession:
                         if path and path != self.current_dir:
                             self.current_dir = path
                             if self.on_dir_change:
-                                try:
+                                with contextlib.suppress(Exception):
                                     self.on_dir_change(path)
-                                except Exception:
-                                    pass
                         break
                 if matched_ev is not None:
                     matched_ev.set()
                     continue   # sentinel 行不渲染
                 # 正常输出：有 callback 走 callback，否则入队
                 if self.output_callback:
-                    try:
+                    with contextlib.suppress(Exception):
                         self.output_callback(text)
-                    except Exception:
-                        pass
                 else:
                     self.out_queue.put(("out", text))
-        except Exception:
-            pass
         if self.proc is not proc:
             return          # 已被 kill 并重建：旧 reader 不得污染新会话状态
         self.out_queue.put(("eof", ""))
@@ -287,11 +276,9 @@ class ShellSession:
                 # 发 Ctrl-C 尝试终止 PowerShell 里的当前脚本，会话本身继续存活——
                 # 后续命令不需要重新拉起 PowerShell。
                 self._abort.set()
-                try:
+                with contextlib.suppress(Exception):
                     self.proc.stdin.write("\x03\n")
                     self.proc.stdin.flush()
-                except Exception:
-                    pass
                 break
             time.sleep(0.05)
         try:
@@ -343,26 +330,20 @@ class ShellSession:
         # 其它 run 的重启。
         with self._lock:
             proc = self.proc
-            try:
+            with contextlib.suppress(Exception):
                 proc.stdin.write("\x03\n")
                 proc.stdin.flush()
-            except Exception:
-                pass
         # 先按进程树杀（Windows）：交互式子 shell 的内层进程只 terminate 外层
         # 是收不掉的，它会继续持着 stdout 管道让读线程永远等不到 EOF。
         if not _kill_tree(proc):
-            try:
+            with contextlib.suppress(Exception):
                 proc.terminate()
-            except Exception:
-                pass
         # 同步等待退出，避免下次 run 写命令时进程还在关闭中（消除原 Timer 竞态）
         try:
             proc.wait(timeout=2.0)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
         # 进程已终止，主动关闭父侧 stdin：终止瞬间的写入（上面的 \x03）flush 失败
         # 被吞后，未发出的数据仍压在 TextIOWrapper 缓冲里；不显式 close 的话，要等
         # GC 回收这个文件对象时才再 flush 一次 —— 撞上半关闭的管道抛 BrokenPipeError，
@@ -371,8 +352,6 @@ class ShellSession:
         # stdout 刻意不关：reader 线程还在等旧管道真正 EOF（fd 若被新会话复用，
         # 提前关闭会让旧 reader 读到新会话的输出，见 _kill_tree 的说明）；stdin
         # 没有读方，关掉是安全的。
-        try:
+        with contextlib.suppress(Exception):
             if proc.stdin:
                 proc.stdin.close()
-        except Exception:
-            pass

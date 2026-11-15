@@ -16,6 +16,7 @@ scrcpy 是 Genymobile 的独立开源投屏工具（Windows/macOS/Linux 各自�
 进程管理刻意做得很轻：不接管 scrcpy 的生命周期（用户直接关窗口即可），
 只保留 Popen 句柄用于「同一台设备不要重复开窗」与关闭程序时的兜底清理。
 """
+import contextlib
 import os
 import shutil
 import subprocess
@@ -204,11 +205,9 @@ class ScrcpyLauncher:
         path = self._logs.pop(serial, None)
         if not path:
             return
-        try:
+        with contextlib.suppress(Exception):
             if os.path.exists(long_path(path)):
                 os.remove(long_path(path))
-        except Exception:
-            pass
 
     # ---- 启动 ----
     def launch(self, serials, exe):
@@ -268,10 +267,8 @@ class ScrcpyLauncher:
                 f.close()
                 # 刚建的日志文件是空的，Popen 都没起来就没人会用：顺手删掉，
                 # 免得每失败一次就在 TEMP 里留一个 0 字节文件。
-                try:
+                with contextlib.suppress(Exception):
                     os.remove(long_path(log_path))
-                except Exception:
-                    pass
             return False, "启动失败：{}".format(e)
         else:
             if f is not None:
@@ -282,10 +279,8 @@ class ScrcpyLauncher:
         rc = p.poll()
         if rc is not None:
             msg = _tail(log_path)
-            try:
+            with contextlib.suppress(Exception):
                 os.remove(long_path(log_path))
-            except Exception:
-                pass
             return False, ("scrcpy 立即退出（退出码 {}）{}".format(rc, ("：" + msg) if msg else ""))
         with self._lock:
             self._procs[serial] = p
@@ -301,15 +296,11 @@ class ScrcpyLauncher:
             self._procs.clear()
             self._logs.clear()
         for p in procs:
-            try:
+            with contextlib.suppress(Exception):
                 if p.poll() is None:
                     p.terminate()
-            except Exception:
-                pass
         # 日志文件可能还被刚刚 terminate 的进程短暂占用，留给系统临时目录清理
         for path in logs:
-            try:
+            with contextlib.suppress(Exception):
                 if os.path.exists(long_path(path)):
                     os.remove(long_path(path))
-            except Exception:
-                pass

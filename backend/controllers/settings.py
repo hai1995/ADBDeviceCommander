@@ -1,5 +1,7 @@
 """backend.controllers.settings —— 设置 / adb 状态 / Wi-Fi 无线调试"""
 
+import contextlib
+
 from backend.controller import (
     adb_kwargs,
     apply_adb_dir,
@@ -63,13 +65,13 @@ class SettingsMixin:
         结果便于排查，但「非 Windows 不支持」是预期内，不当作失败。
         """
         if mode not in ("dark", "light", "system"):
-            self._push_status("err", "⚠ 主题切换失败：未知的取值 {}".format(mode))
+            self._push_status("err", f"⚠ 主题切换失败：未知的取值 {mode}")
             return {"ok": False, "reason": "invalid_mode", "mode": mode}
         try:
             res = win_theme.apply_for_mode(mode, pid=os.getpid())
         except Exception as e:  # 标题栏配色是锦上添花，任何异常都不能影响切换
             self._push_status(
-                "err", "⚠ 原生标题栏配色未能应用（界面主题已切换）：{}".format(e))
+                "err", f"⚠ 原生标题栏配色未能应用（界面主题已切换）：{e}")
             return {"ok": False, "reason": "apply_failed", "mode": mode,
                     "error": str(e)}
         # 非 Windows 上 win_theme 恒返回 unsupported —— 那是预期内，不算失败。
@@ -107,7 +109,7 @@ class SettingsMixin:
     def _probe_adb(self):
         """探测当前 adb 是否可用，返回 {ok, path, version}。"""
         path = getattr(self.state, "adb_path", "") or "adb"
-        try:
+        with contextlib.suppress(Exception):
             r = subprocess.run([path, "version"], **adb_kwargs(8))
             if r.returncode == 0:
                 lines = [ln.strip() for ln in (r.stdout or "").splitlines()
@@ -116,8 +118,6 @@ class SettingsMixin:
                     (ln for ln in lines if ln.lower().startswith("version")),
                     lines[0] if lines else "adb version")
                 return {"ok": True, "path": path, "version": ver}
-        except Exception:
-            pass
         return {"ok": False, "path": path, "version": ""}
 
     def _adb_found(self):
@@ -145,28 +145,22 @@ class SettingsMixin:
         写进 prefs 缓存（下次启动的 boot 直接展示），并推 adb_info 事件让
         前端关于页把缓存版本 / 路径替换成真实版本。
         """
-        try:
+        with contextlib.suppress(Exception):
             subprocess.run(
                 [getattr(self.state, "adb_path", "") or "adb", "start-server"],
                 **adb_kwargs(10))
-        except Exception:
-            pass
         try:
             info = self._probe_adb()
         except Exception:
             return
         if info["ok"] and info["version"]:
-            try:
+            with contextlib.suppress(Exception):
                 if load_prefs().get("adb_version_cache", "") != info["version"]:
                     save_prefs_checked({"adb_version_cache": info["version"]})
-            except Exception:
-                pass
-        try:
+        with contextlib.suppress(Exception):
             self.bus.push("adb_info", {
                 "ok": info["ok"], "path": info["path"],
                 "version": info["version"]})
-        except Exception:
-            pass
 
     def _target_serials(self, serial):
         if serial:
@@ -205,7 +199,7 @@ class SettingsMixin:
             wrote = save_prefs_checked(patch)[1]
         except Exception as e:
             wrote = False
-            self._push_status("warn", "⚠ 已连接，但保存「最近连接」时出错：{}".format(e))
+            self._push_status("warn", f"⚠ 已连接，但保存「最近连接」时出错：{e}")
             return recent
         if not wrote:
             self._push_status(
@@ -252,8 +246,8 @@ class SettingsMixin:
                                **adb_kwargs(25))
         except Exception as e:
             self._push_status(
-                "err", "✗ 无线连接失败（{}）：执行 adb connect 失败：{}".format(addr, e), toast=True)
-            return {"ok": False, "reason": "执行 adb connect 失败：{}".format(e),
+                "err", f"✗ 无线连接失败（{addr}）：执行 adb connect 失败：{e}", toast=True)
+            return {"ok": False, "reason": f"执行 adb connect 失败：{e}",
                     "address": addr}
         res = wifi.parse_connect_output(
             (r.stdout or "") + "\n" + (r.stderr or ""))
@@ -287,7 +281,7 @@ class SettingsMixin:
     def _wifi_connect_ok(self, addr):
         """连接成功的统一收尾：记最近、推成功、刷设备列表。"""
         recent = self._wifi_remember(addr)
-        self._push_status("ok", "✓ 无线调试已连接：{}".format(addr), toast=True)
+        self._push_status("ok", f"✓ 无线调试已连接：{addr}", toast=True)
         # 连上不代表 `adb devices` 立刻可见（首次连接要等设备完成认证），但刷新一次
         # 能让已就绪的设备马上出现在左侧列表里。key 独立于常规刷新（refresh）：
         # 那个 key 被自动刷新循环与手动刷新共用，撞上就会「复用存活线程」而这次
@@ -330,13 +324,13 @@ class SettingsMixin:
             r = subprocess.run([self._adb_argv(), "disconnect", addr],
                                **adb_kwargs(20))
         except Exception as e:
-            return {"ok": False, "reason": "执行 adb disconnect 失败：{}".format(e)}
+            return {"ok": False, "reason": f"执行 adb disconnect 失败：{e}"}
         text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
         low = text.lower()
         if "error" in low or "no such device" in low:
-            self._push_status("err", "✗ 断开失败（{}）：{}".format(addr, text[:160]), toast=True)
+            self._push_status("err", f"✗ 断开失败（{addr}）：{text[:160]}", toast=True)
             return {"ok": False, "reason": text[:160] or "adb 拒绝断开"}
-        self._push_status("ok", "✓ 已断开无线设备：{}".format(addr), toast=True)
+        self._push_status("ok", f"✓ 已断开无线设备：{addr}", toast=True)
         self.workers.spawn("refresh_wifi", self.devices.refresh,
                            self._adb_argv(), True)
         return {"ok": True, "address": addr}
@@ -381,16 +375,14 @@ class SettingsMixin:
             except Exception as e:
                 out = str(e)
             res = wifi.parse_tcpip_output(out)
-            addr = "%s:%d" % (ip, p) if ip else ""
+            addr = f"{ip}:{p:d}" if ip else ""
             results.append({
                 "serial": s, "ip": ip, "iface": iface,
                 "address": addr, "ok": res["ok"], "message": res["message"],
             })
             if res["ok"]:
                 self._push_status(
-                    "ok", "✓ %s 已开启无线调试%s（端口 %d）"
-                    % (s, "：" + addr if addr else "，但没读到设备 IP，请手动填入",
-                       res["port"] or p))
+                    "ok", f"✓ {s} 已开启无线调试{'：' + addr if addr else '，但没读到设备 IP，请手动填入'}（端口 {res['port'] or p:d}）")
             else:
                 self._push_status("err", "✗ {} 开启无线调试失败：{}".format(s, res["message"]), toast=True)
         ok_any = any(x["ok"] for x in results)
@@ -402,11 +394,9 @@ class SettingsMixin:
                 wrote = save_prefs_checked({"wifi_port": p})[1]
             except Exception as e:
                 wrote = False
-                self._push_status("warn", "⚠ 无线调试已开启，但保存端口失败：{}".format(e))
+                self._push_status("warn", f"⚠ 无线调试已开启，但保存端口失败：{e}")
             if not wrote:
                 self._push_status(
-                    "warn", "⚠ 无线调试已开启（端口 %d），但端口没能写入 %s"
-                            "（目录只读 / 文件被占用？），下次会按默认端口处理。"
-                            % (p, prefs_path()))
+                    "warn", f"⚠ 无线调试已开启（端口 {p:d}），但端口没能写入 {prefs_path()}（目录只读 / 文件被占用？），下次会按默认端口处理。")
         return {"ok": ok_any, "port": p, "results": results,
                 "address": first_addr}

@@ -1,5 +1,7 @@
 """backend.controllers.commands —— 指令执行 / 保存 / 导入导出 / 自定义"""
 
+import contextlib
+
 from backend.controller import (
     _EXIT_RE,
     SHELL_INTERACTIVE_RE,
@@ -40,7 +42,7 @@ class CommandMixin:
         cmd_obj = next(
             (c for c in self.state.commands if c.get("id") == cmd_id), None)
         if cmd_obj is None:
-            self._push_status("err", "⚠ 未找到命令：{}".format(cmd_id))
+            self._push_status("err", f"⚠ 未找到命令：{cmd_id}")
             return {"ok": False}
         # 只判断「默认工作区的会话是否就绪」，不在这里**创建**会话：非默认工作区
         # 的会话是懒创建的，在本次调用里建会阻塞 UI 线程 0.5~1.5 秒（powershell
@@ -65,7 +67,7 @@ class CommandMixin:
             return {"ok": False, "reason": "shutting_down"}
         ok, err = save_user_commands(commands)
         if not ok:
-            self._push_status("err", "⚠ 保存命令失败：{}".format(err))
+            self._push_status("err", f"⚠ 保存命令失败：{err}")
             return {"ok": False, "reason": err}
         # 同步内存态：用户命令并入内置默认，保持与 boot 后一致，使后续
         # run_command / 点击计数基于最新列表（state.commands 是 run_command 的来源）。
@@ -79,7 +81,7 @@ class CommandMixin:
         # 用 user_cmds 的长度而不是 len(commands)：commands 为 None 时后者
         # 直接 TypeError —— 而此刻文件其实已经写成功了，用户看到的是一条
         # 「保存失败」似的异常，重试还是同样的结果。顺带也扣掉了非对象条目。
-        self._push_status("ok", "✓ 命令已保存（%d 条）" % len(user_cmds))
+        self._push_status("ok", f"✓ 命令已保存（{len(user_cmds):d} 条）")
         return {"ok": True}
 
     def export_commands(self):
@@ -125,7 +127,7 @@ class CommandMixin:
             return data
         text = json.dumps(data["commands"], ensure_ascii=False, indent=2)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        name = "commands_export_{}.json".format(ts)
+        name = f"commands_export_{ts}.json"
         primary = program_dir()
         # 先试程序目录，**真的写不进去才**退到系统临时目录。早前只判断
         # makedirs 有没有抛错：程序装在 Program Files 这类只读位置时目录本来
@@ -146,7 +148,7 @@ class CommandMixin:
                     "note": ("程序目录不可写，已改存到临时目录"
                              if os.path.normcase(out_dir)
                              != os.path.normcase(primary) else "")}
-        return {"ok": False, "reason": "写入失败：{}".format(last_err)}
+        return {"ok": False, "reason": f"写入失败：{last_err}"}
 
     def _dialog_types(self, pairs):
         """把 ((描述, 通配符), ...) 转成当前 pywebview 版本接受的 file_types。
@@ -166,7 +168,7 @@ class CommandMixin:
             from webview.util import parse_file_type
         except Exception:
             # 拿不到探测函数时，回退到兼容性最好的「字符串格式」
-            return tuple("{} ({})".format(desc, ext) for desc, ext in pairs)
+            return tuple(f"{desc} ({ext})" for desc, ext in pairs)
         # 探测新版字符串格式是否可用：能解析字符串就说明是新版
         try:
             parse_file_type("探测 (*.json)")
@@ -174,7 +176,7 @@ class CommandMixin:
             # 解析失败 -> 旧版，用元组格式
             return pairs
         # 新版：拼成 '描述 (*.ext)' 字符串
-        return tuple("{} ({})".format(desc, ext) for desc, ext in pairs)
+        return tuple(f"{desc} ({ext})" for desc, ext in pairs)
 
     def _open_dialog(self, pairs, label=""):
         """弹原生「打开文件」对话框，返回选中文件路径；取消 / 不可用返回空串。
@@ -185,7 +187,7 @@ class CommandMixin:
         try:
             import webview
         except Exception as e:
-            self._push_status("warn", "⚠ 当前环境不支持原生文件对话框：{}".format(e))
+            self._push_status("warn", f"⚠ 当前环境不支持原生文件对话框：{e}")
             return ""
         win = getattr(self, "window", None)
         try:
@@ -215,10 +217,10 @@ class CommandMixin:
                     files = win.create_file_dialog(
                         webview.OPEN_DIALOG, directory, False)
                 except Exception as e:
-                    self._push_status("warn", "⚠ 打开文件对话框失败：{}".format(e))
+                    self._push_status("warn", f"⚠ 打开文件对话框失败：{e}")
                     return ""
         except Exception as e:
-            self._push_status("warn", "⚠ 打开文件对话框失败：{}".format(e))
+            self._push_status("warn", f"⚠ 打开文件对话框失败：{e}")
             return ""
         if not files:
             return ""
@@ -248,7 +250,7 @@ class CommandMixin:
             with open(long_path(path), encoding="utf-8-sig") as f:
                 text = f.read()
         except Exception as e:
-            return {"ok": False, "reason": "读取文件失败：{}".format(e)}
+            return {"ok": False, "reason": f"读取文件失败：{e}"}
         return self.import_commands(text)
 
     def import_commands(self, payload):
@@ -267,7 +269,7 @@ class CommandMixin:
                 # json.loads 对 \ufeff 直接报 "Unexpected UTF-8 BOM"。
                 payload = json.loads(payload.lstrip("\ufeff"))
             except Exception as e:
-                return {"ok": False, "reason": "JSON 解析失败：{}".format(e)}
+                return {"ok": False, "reason": f"JSON 解析失败：{e}"}
         if isinstance(payload, dict) and "commands" in payload:
             incoming = payload.get("commands") or []
         elif isinstance(payload, list):
@@ -303,8 +305,7 @@ class CommandMixin:
             cc = dict(cc); cc.pop("builtin", None)
             user_cmds.append(cc)
         self.state.commands = merge_builtins(user_cmds)
-        self._push_status("ok", "✓ 已导入命令（新增 %d 条，共 %d 条用户命令）"
-                          % (added, len(merged)))
+        self._push_status("ok", f"✓ 已导入命令（新增 {added:d} 条，共 {len(merged):d} 条用户命令）")
         return {"ok": True, "added": added, "total": len(merged)}
 
     @staticmethod
@@ -367,10 +368,8 @@ class CommandMixin:
         sess = self._ws_session(wid, create=False)
         if sess is not None:
             self._ws_status("err", "⏹ 已发送停止信号，正在终止当前命令…")
-            try:
+            with contextlib.suppress(Exception):
                 sess.kill()
-            except Exception:
-                pass
         else:
             self._ws_status("warn", "当前没有正在运行的命令。")
         self._sync_stop_state(interactive=False, ws=wid)
@@ -409,16 +408,16 @@ class CommandMixin:
                                 self._ws_status("err", self._no_device_hint(name))
                                 return
                             for serial in serials:
-                                self._ws_status("info", "──── 设备: {} ────".format(serial))
+                                self._ws_status("info", f"──── 设备: {serial} ────")
                                 if not self._run_entries(entries, serial):
                                     break
                         else:
                             self._ws_status(
-                                "info", "──── 执行「{}」（无需指定设备）────".format(name))
+                                "info", f"──── 执行「{name}」（无需指定设备）────")
                             self._run_entries(entries, None)
                     except Exception as ex:
                         self._ws_status(
-                            "err", "⚠ 命令执行出现异常：{}".format(ex))
+                            "err", f"⚠ 命令执行出现异常：{ex}")
                 finally:
                     # 交互式 adb shell（`adb shell` 直通）结束后会话仍是交互态：此时
                     # 「停止」按钮必须继续亮着，用户才能把这条交互会话 kill 掉。
@@ -446,10 +445,8 @@ class CommandMixin:
         except Exception:
             checked = []
         if checked:
-            return ("⚠ 命令「%s」需要设备，但已勾选的 %d 台当前都不可用"
-                    "（离线 / 未授权 / 正在重连）：%s"
-                    % (name, len(checked), "、".join(sorted(checked))))
-        return "⚠ 命令「{}」需要指定设备，请先在左侧勾选设备。".format(name)
+            return (f"⚠ 命令「{name}」需要设备，但已勾选的 {len(checked):d} 台当前都不可用（离线 / 未授权 / 正在重连）：{'、'.join(sorted(checked))}")
+        return f"⚠ 命令「{name}」需要指定设备，请先在左侧勾选设备。"
 
     def _run_entries(self, entries, serial):
         """逐条下发命令；adb shell 交互 / 合并 / delay 与 legacy 语义一致。
@@ -519,7 +516,7 @@ class CommandMixin:
                 # 带上会话给的失败原因：只写「执行中断」时，用户分不清是自己点了
                 # 停止、命令超时，还是 powershell 会话被安全软件干掉后静默重建了。
                 reason = (getattr(sess, "last_error", "") or "").strip()
-                self._ws_status("info", "✗ 执行中断" + ("：{}".format(reason) if reason else ""))
+                self._ws_status("info", "✗ 执行中断" + (f"：{reason}" if reason else ""))
                 return False
             delay = 0
             if not interactive and 0 <= end_idx < len(entries):
@@ -598,7 +595,7 @@ class CommandMixin:
     def _device_busy_tasks(self, serial):
         """该设备当前进行中、且会随 adbd 重启而中断的任务（中文名列表）。"""
         tasks = []
-        try:
+        with contextlib.suppress(Exception):
             if self.video.is_recording(serial):
                 tasks.append("录屏")
             if self.device_audio.is_recording(serial):
@@ -607,8 +604,6 @@ class CommandMixin:
                 tasks.append("logcat 监控")
             if self.logcat_capture.is_running(serial):
                 tasks.append("logcat 抓取")
-        except Exception:
-            pass
         return tasks
 
     def _interruptible_sleep(self, seconds):

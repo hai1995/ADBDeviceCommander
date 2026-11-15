@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 
@@ -243,10 +244,8 @@ def _http_get(url: str, timeout: int):
             return r.getcode(), r.read(6 * 1024 * 1024).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         body = ""
-        try:
+        with contextlib.suppress(Exception):
             body = e.read(64 * 1024).decode("utf-8", "replace")
-        except Exception:
-            pass
         return e.code, body
 
 

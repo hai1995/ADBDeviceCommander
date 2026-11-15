@@ -32,6 +32,7 @@ Windows 的 MAX_PATH 是 260 个字符（含结尾 NUL），普通 Win32 调用�
 """
 from __future__ import annotations
 
+import contextlib
 import ntpath
 import os
 
@@ -59,7 +60,7 @@ def _absolute(path: str) -> str:
     （在 Windows 上运行时就是 Windows 规则）。
     """
     s = str(path)
-    try:
+    with contextlib.suppress(Exception):
         if os.name == "nt":
             # Windows 上用本机规则（走 Win32 的 GetFullPathName，盘符相对路径
             # ``C:foo`` 才会按「该盘符的当前目录」解析，而不是进程 cwd）
@@ -68,8 +69,6 @@ def _absolute(path: str) -> str:
             # 非 Windows 上按 **Windows 语义** 处理绝对路径：这样这个纯逻辑
             # 函数在 Linux CI 上也能给出与 Windows 一致的答案（可单测）。
             return ntpath.abspath(s)
-    except Exception:
-        pass
     try:
         return os.path.abspath(s)
     except Exception:
@@ -200,6 +199,4 @@ def path_remove(path: str) -> bool:
 
 def explain_long_path(path: str) -> str:
     """路径过长时的中文说明（可直接拼进错误提示）。"""
-    return ("目标路径 %d 个字符，超过 Windows 单条路径 260 字符的上限；"
-            "请把「保存目录」改短一些（不要放在多层归档目录里），"
-            "或先在资源管理器里建好目录再下载到那里。" % len(str(path or "")))
+    return (f"目标路径 {len(str(path or '')):d} 个字符，超过 Windows 单条路径 260 字符的上限；请把「保存目录」改短一些（不要放在多层归档目录里），或先在资源管理器里建好目录再下载到那里。")

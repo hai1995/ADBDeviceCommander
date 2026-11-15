@@ -27,6 +27,7 @@ USB 设备也会周期性重枚举，`adb devices -l` 偶发返回空列表或�
     留在快照里（见 core.devices.plan_devices），卡片置灰、保留勾选，重连后
     自动恢复，不再「瞬间消失又出现」。
 """
+import contextlib
 import subprocess
 import threading
 import time
@@ -163,20 +164,20 @@ class DeviceManager:
                     if not first_load:
                         for s in plan["recovered"]:
                             self.bus.push("status", {
-                                "type": "info", "text": "✓ 设备已重连：{}".format(s)})
+                                "type": "info", "text": f"✓ 设备已重连：{s}"})
                         for s in plan["newly_absent"]:
                             self.bus.push("status", {
                                 "type": "warn",
-                                "text": "⚠ 设备短暂失联：{}（保留勾选，重连后自动恢复）".format(s)})
+                                "text": f"⚠ 设备短暂失联：{s}（保留勾选，重连后自动恢复）"})
                         for s in plan["gone"]:
                             self.bus.push("status", {
                                 "type": "warn",
-                                "text": "⚠ 设备已断开：{}（已移除）".format(s)})
+                                "text": f"⚠ 设备已断开：{s}（已移除）"})
                         for s in plan["added"]:
                             if s in plan["recovered"]:
                                 continue
                             self.bus.push("status", {
-                                "type": "info", "text": "✓ 检测到新设备：{}".format(s)})
+                                "type": "info", "text": f"✓ 检测到新设备：{s}"})
                         for s in plan["state_changed"]:
                             self.bus.push("status", {
                                 "type": "warn",
@@ -195,7 +196,7 @@ class DeviceManager:
                     if verbose:
                         self.bus.push("status", {
                             "type": "info",
-                            "text": "刷新完成：当前 %d 台设备" % len(devices)})
+                            "text": f"刷新完成：当前 {len(devices):d} 台设备"})
                 return changed
         finally:
             with self._lock:
@@ -240,9 +241,7 @@ class DeviceManager:
                     if self.bus:
                         self.bus.push("status", {
                             "type": "warn",
-                            "text": "⚠ 上一轮设备刷新已超时卡死（%.0fs），"
-                                    "已强制解锁，本轮将重新执行刷新。"
-                                    % (now - self._busy_since)})
+                            "text": f"⚠ 上一轮设备刷新已超时卡死（{now - self._busy_since:.0f}s），已强制解锁，本轮将重新执行刷新。"})
                     owner = self._next_owner
                     self._next_owner += 1
                     self._busy_since = now
@@ -343,21 +342,18 @@ class DeviceManager:
         """刷新失败的提示文案（区分超时 / 空结果 / 其它异常）。"""
         if not had_devices:
             # 本来就没有设备（或已全部拔掉）：失败只是「没刷到」，不断连误报
-            return "设备刷新未完成（%s）。" % (
-                "adb 无响应" if err == "timeout" else err or "未知原因")
+            return f"设备刷新未完成（{'adb 无响应' if err == 'timeout' else err or '未知原因'}）。"
         return ("设备刷新超时（adb 无响应），已保留上次的设备列表。"
                 if err == "timeout" else
                 "设备刷新未返回列表（adb 可能正被其他程序占用），已保留上次的设备列表。"
                 if err == "empty" else
-                "设备刷新失败：%s（已保留上次的设备列表）。" % (err or "未知原因"))
+                f"设备刷新失败：{err or '未知原因'}（已保留上次的设备列表）。")
 
     @staticmethod
     def _start_server(adb):
         """尝试拉起 adb server（自愈）；失败静默（下次轮询会再次尝试）。"""
-        try:
+        with contextlib.suppress(Exception):
             subprocess.run([adb, "start-server"], **adb_kwargs(8))
-        except Exception:
-            pass
 
     def _inflight_blocks_heal(self):
         """是否有长连接会话在跑，从而必须暂缓 adb server 自愈。

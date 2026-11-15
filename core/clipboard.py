@@ -48,6 +48,7 @@ Average / Paeth 是行内逐字节递推，没有 C 层原语可向量化，仍�
     上换成替身即可验证分派 / PNG 解码 / 失败语义（见 tests/test_core_clipboard.py）。
 """
 import base64
+import contextlib
 import os
 import struct
 import subprocess
@@ -113,7 +114,7 @@ def supported():
     """当前平台是否能把图片写进剪贴板。返回 (bool, 说明)。"""
     impl = PLATFORM_IMPL.get(sys.platform)
     if impl is None:
-        return False, "当前平台（{}）暂不支持自动写入剪贴板".format(sys.platform)
+        return False, f"当前平台（{sys.platform}）暂不支持自动写入剪贴板"
     return True, ""
 
 
@@ -126,24 +127,24 @@ def copy_image(path):
         # 长路径安全：截图落在用户的保存目录里，路径可以超长。超长路径下
         # os.path.isfile 返回 False → 明明截图就在那儿，却被报成「图片不存在」。
         if not path or not path_isfile(path):
-            return False, "图片不存在: %s" % (path or "<空>")
+            return False, f"图片不存在: {path or '<空>'}"
         with open(long_path(path), "rb") as f:
             raw = f.read()
         if not raw:
-            return False, "图片为空: {}".format(path)
+            return False, f"图片为空: {path}"
     except Exception as e:                                  # 连读盘也永不冒泡
-        return False, "读取图片失败: {}".format(e)
+        return False, f"读取图片失败: {e}"
 
     impl = PLATFORM_IMPL.get(sys.platform)
     if impl is None:
-        return False, "当前平台（{}）暂不支持自动写入剪贴板".format(sys.platform)
+        return False, f"当前平台（{sys.platform}）暂不支持自动写入剪贴板"
 
     # 先归一化字节：某些车机 / 定制 ROM 的 screencap 会在 PNG 前吐几行自己的
     # 东西，文件因此「开头不是 PNG」——ctypes 那条只投 CF_PNG/CF_DIB 的分支会被
     # 整段跳过，退到 GDI+ 时报一句与真相无关的「参数无效」。
     data, kind, note = imgbytes.normalize(raw)
     if not data:
-        return False, "图片格式无法识别（{}）".format(note)
+        return False, f"图片格式无法识别（{note}）"
 
     # 只有 PNG 才需要解码成像素（其它格式交给平台自身的图片 API）
     png = data if kind == "png" else b""
@@ -151,7 +152,7 @@ def copy_image(path):
     try:
         ok, reason = impl(data, png, pix, path)
     except Exception as e:
-        return False, "写入剪贴板异常: {}".format(e)
+        return False, f"写入剪贴板异常: {e}"
     return bool(ok), reason
 
 
@@ -243,10 +244,8 @@ def _unfilter(raw, h, stride, bpp):
     两者内容逐字节一致（见 _unfilter_np / _unfilter_py 与对拍测试）。
     """
     if _numpy() is not None:
-        try:
+        with contextlib.suppress(Exception):
             return _unfilter_np(raw, h, stride, bpp)
-        except Exception:
-            pass                       # 任何意外都回落纯 Python，绝不中断解码
     return _unfilter_py(raw, h, stride, bpp)
 
 
@@ -285,7 +284,7 @@ def _unfilter_np(raw, h, stride, bpp):
                 _filter_row_avg_paeth(line.tobytes(), prev.tobytes(), bpp, filt),
                 dtype=np.uint8)
         else:
-            raise ValueError("未知 PNG filter %d" % filt)
+            raise ValueError(f"未知 PNG filter {filt:d}")
         prev = out[y]
     return out
 
@@ -350,7 +349,7 @@ def _unfilter_py(raw, h, stride, bpp):
                 pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
                 line[i] = (line[i] + pr) & 0xFF
         elif filt != 0:
-            raise ValueError("未知 PNG filter %d" % filt)
+            raise ValueError(f"未知 PNG filter {filt:d}")
         out[off:off + stride] = line
         off += stride
         prev = bytes(line)
@@ -365,10 +364,8 @@ def _bgra_bottom_up(topdown, w, h, bpp, stride):
     """
     np = _numpy()
     if np is not None and isinstance(topdown, np.ndarray):
-        try:
+        with contextlib.suppress(Exception):
             return _bgra_bottom_up_np(topdown, w, h, bpp, stride)
-        except Exception:
-            pass                       # 任何意外回落纯 Python，绝不中断解码
     return _bgra_bottom_up_py(topdown, w, h, bpp, stride)
 
 
@@ -381,7 +378,7 @@ def _bgra_bottom_up_np(topdown, w, h, bpp, stride):
     np = _numpy()
     dstride = w * 4
     if dstride * h > _MAX_DIB_BYTES:
-        raise ValueError("位图过大 %dx%d" % (w, h))
+        raise ValueError(f"位图过大 {w:d}x{h:d}")
     arr = topdown.reshape(h, w, bpp)[::-1]          # 自下而上行序
     d = np.empty((h, w, 4), dtype=np.uint8)
     d[..., 0] = arr[..., 2]                          # B
@@ -402,7 +399,7 @@ def _bgra_bottom_up_py(topdown, w, h, bpp, stride):
     """
     dstride = w * 4
     if dstride * h > _MAX_DIB_BYTES:
-        raise ValueError("位图过大 %dx%d" % (w, h))
+        raise ValueError(f"位图过大 {w:d}x{h:d}")
     dib = bytearray(dstride * h)
     for y in range(h):
         s0 = (h - 1 - y) * stride                            # 自下而上取源行
@@ -441,7 +438,7 @@ def copy_windows(raw, png, pix, path):
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     except Exception as e:
-        return False, "无法访问 Windows 剪贴板 API: {}".format(e)
+        return False, f"无法访问 Windows 剪贴板 API: {e}"
 
     _bind_win(user32, kernel32)
     last_reason = ""
@@ -460,7 +457,7 @@ def copy_windows(raw, png, pix, path):
         return True, ""
     parts = []
     if last_reason:
-        parts.append("直接写入：{}".format(last_reason))
+        parts.append(f"直接写入：{last_reason}")
     if ps_reason:
         parts.append(ps_reason)
     detail = "；".join(parts) or "没有可写入剪贴板的图片数据"
@@ -585,8 +582,7 @@ def _win_write_powershell(path, raw=None):
             err = _ps_text(r.stderr).strip()[:200]
             # 带上字节数：GDI+ 的「参数无效」既可能是数据被截断，也可能是格式
             # 根本不认，有长度才分得清（下次报障时不用再猜）。
-            last_reason = "PowerShell 兜底失败（%d 字节）：%s" % (
-                len(raw or b""), err or "返回非零")
+            last_reason = f"PowerShell 兜底失败（{len(raw or b''):d} 字节）：{err or '返回非零'}"
         if attempt + 1 < _WIN_PS_ATTEMPTS:
             time.sleep(_WIN_PS_RETRY_SLEEP)
     return False, last_reason
@@ -645,7 +641,7 @@ def copy_macos(raw, png, pix, path):
     """macOS：交给 AppleScript 读文件进剪贴板（连 PNG 都不必自己解）。"""
     klass = "PNGf" if str(path).lower().endswith(".png") else "JPEG"
     quoted = str(path).replace("\\", "\\\\").replace('"', '\\"')
-    script = ('set the clipboard to (read (POSIX file "{}") as «class {}»)'.format(quoted, klass))
+    script = (f'set the clipboard to (read (POSIX file "{quoted}") as «class {klass}»)')
     try:
         r = subprocess.run(["osascript", "-e", script], timeout=20,
                            capture_output=True)
@@ -655,7 +651,7 @@ def copy_macos(raw, png, pix, path):
         return False, "写入剪贴板超时"
     if r.returncode != 0:
         err = (r.stderr or b"").decode(errors="ignore")[:150]
-        return False, "写入剪贴板失败：%s" % (err.strip() or "osascript 返回非零")
+        return False, f"写入剪贴板失败：{err.strip() or 'osascript 返回非零'}"
     return True, ""
 
 
@@ -678,7 +674,7 @@ def copy_linux(raw, png, pix, path):
         except FileNotFoundError:
             continue
         except subprocess.TimeoutExpired:
-            tried.append("{} 超时".format(tool))
+            tried.append(f"{tool} 超时")
             continue
         if r.returncode == 0:
             return True, ""

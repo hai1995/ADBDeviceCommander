@@ -1,5 +1,7 @@
 """backend.controllers.perf —— 性能监控"""
 
+import contextlib
+
 from backend.controller import (
     DEFAULT_INTERVAL,
     PERF_CRIT_RATIO,
@@ -39,7 +41,7 @@ class PerfMixin:
         serial = str(serial or "")
         model = (info or {}).get("model") or ""
         tail = serial[-4:] if len(serial) > 10 else serial
-        return ("{} · {}".format(model, tail)) if model else (tail or "device")
+        return (f"{model} · {tail}") if model else (tail or "device")
 
     def _perf_interval(self, interval_ms):
         """采样间隔：前端可能传空 / 字符串 / 越界值，一律夹到安全区间。
@@ -103,8 +105,7 @@ class PerfMixin:
             skipped = serials[PERF_MAX_DEVICES:]
             serials = serials[:PERF_MAX_DEVICES]
             self._push_status(
-                "warn", "⚠ 性能监控最多同时监控 %d 台设备，已忽略：%s"
-                % (PERF_MAX_DEVICES, "、".join(skipped)))
+                "warn", f"⚠ 性能监控最多同时监控 {PERF_MAX_DEVICES:d} 台设备，已忽略：{'、'.join(skipped)}")
         interval = self._perf_interval(interval_ms)
         pkg = (pkg or "").strip()
         started, infos, failed = {}, {}, {}
@@ -113,10 +114,8 @@ class PerfMixin:
                               on_status=self._push_status)
             ok, err = mon.start()
             if not ok:
-                try:
+                with contextlib.suppress(Exception):
                     mon.stop()
-                except Exception:
-                    pass
                 failed[s] = err
                 continue
             started[s] = mon
@@ -125,13 +124,12 @@ class PerfMixin:
             # 全部失败：把**每台**的原因都说出来。只报第一台时，用户按那句
             # 「设备离线」去查，而真正卡住的是另一台的「包名不存在」。
             if len(failed) > 1:
-                reason = "；".join("{}（{}）".format(k, v) for k, v in failed.items())
+                reason = "；".join(f"{k}（{v}）" for k, v in failed.items())
                 self._push_status(
-                    "err", "⚠ 性能监控启动失败（%d 台）：%s"
-                    % (len(failed), reason))
+                    "err", f"⚠ 性能监控启动失败（{len(failed):d} 台）：{reason}")
             else:
                 reason = next(iter(failed.values()), "启动失败")
-                self._push_status("err", "⚠ 性能监控启动失败：{}".format(reason))
+                self._push_status("err", f"⚠ 性能监控启动失败：{reason}")
             return {"ok": False, "reason": "start_failed", "error": reason,
                     "failed": failed}
         # 新会话就位后再关旧会话：启动失败时旧数据还在，用户不会白丢一段曲线。
@@ -145,16 +143,13 @@ class PerfMixin:
                 "ok", "✓ 已开始性能监控：{}（{} · 每 {:.1f} 秒采样一次）".format(info.get("model") or primary, perf_pkg_display(info), interval))
         else:
             self._push_status(
-                "ok", "✓ 已开始性能监控：%d 台设备（%s · 每 %.1f 秒采样一次）"
-                % (len(started), perf_pkg_display(info), interval))
+                "ok", f"✓ 已开始性能监控：{len(started):d} 台设备（{perf_pkg_display(info)} · 每 {interval:.1f} 秒采样一次）")
         if failed:
             # 部分成功：失败的那几台**必须**单独说清楚。旧实现只把 failed 塞进
             # 返回值，而前端从不读它 —— 勾了 3 台、实际只监控 2 台，界面上没有
             # 任何提示，导出对比报告时才发现少了一台，也查不到原因。
             self._push_status(
-                "warn", "⚠ 有 %d 台设备未能开始性能监控：%s"
-                % (len(failed),
-                   "；".join("{}（{}）".format(k, v) for k, v in failed.items())))
+                "warn", f"⚠ 有 {len(failed):d} 台设备未能开始性能监控：{'；'.join((f'{k}（{v}）' for k, v in failed.items()))}")
         return {"ok": True, "serial": primary, "info": info,
                 "interval": interval, "sessions": infos, "failed": failed}
 
@@ -177,10 +172,9 @@ class PerfMixin:
             per[s] = mon.count()
             total += per[s]
         if len(per) == 1:
-            self._push_status("info", "⏹ 已停止性能监控（本次共 %d 个采样点）" % total)
+            self._push_status("info", f"⏹ 已停止性能监控（本次共 {total:d} 个采样点）")
         else:
-            self._push_status("info", "⏹ 已停止 %d 台设备的性能监控（共 %d 个采样点）"
-                              % (len(per), total))
+            self._push_status("info", f"⏹ 已停止 {len(per):d} 台设备的性能监控（共 {total:d} 个采样点）")
         return {"ok": True, "samples": total, "sessions": per}
 
     def perf_poll(self, since=0):
@@ -335,7 +329,7 @@ class PerfMixin:
             total_samples += len(samples)
         if not saved:
             why = next(iter(errors.values()), "没有采样数据")
-            self._push_status("err", "⚠ 报告生成失败：{}".format(why))
+            self._push_status("err", f"⚠ 报告生成失败：{why}")
             return {"ok": False, "reason": why, "errors": errors}
         # 多设备时再出一份「横向对比」报告：三份独立报告摊在桌上自己对照，
         # 是导出这件事里最费劲的一步，合并成一份能省掉全部来回翻页。
@@ -347,22 +341,17 @@ class PerfMixin:
             except Exception as ex:
                 errors["compare"] = str(ex)
         if len(saved) == 1:
-            msg = "✓ 性能报告已生成：%s（%d 个采样点）" % (
-                saved[0]["html"], total_rows)
+            msg = f"✓ 性能报告已生成：{saved[0]['html']}（{total_rows:d} 个采样点）"
         elif compare:
-            msg = "✓ 已生成 %d 份设备报告 + 1 份对比报告（共 %d 个采样点）：%s" % (
-                len(saved), total_rows, os.path.dirname(compare) or ".")
+            msg = f"✓ 已生成 {len(saved):d} 份设备报告 + 1 份对比报告（共 {total_rows:d} 个采样点）：{os.path.dirname(compare) or '.'}"
         else:
-            msg = "✓ 已生成 %d 份性能报告（共 %d 个采样点）：%s" % (
-                len(saved), total_rows, os.path.dirname(saved[0]["html"]) or ".")
+            msg = f"✓ 已生成 {len(saved):d} 份性能报告（共 {total_rows:d} 个采样点）：{os.path.dirname(saved[0]['html']) or '.'}"
         self._push_status("ok", msg, toast=True)
         if errors:
             # 只报「✓ 已生成 N 份」会让用户以为全都导出了：对比报告正是拿这批
             # 文件拼的，少一台等于结论缺一半。失败的设备单独说清楚。
             self._push_status(
-                "warn", "⚠ 有 %d 份报告未生成：%s" % (
-                    len(errors),
-                    "；".join("{}（{}）".format(k, v) for k, v in errors.items())))
+                "warn", f"⚠ 有 {len(errors):d} 份报告未生成：{'；'.join((f'{k}（{v}）' for k, v in errors.items()))}")
         return {"ok": True, "files": saved, "html": saved[0]["html"],
                 "csv": saved[0]["csv"], "rows": total_rows,
                 "samples": total_samples, "sessions": len(saved),

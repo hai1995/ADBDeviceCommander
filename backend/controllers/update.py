@@ -1,5 +1,7 @@
 """backend.controllers.update —— 版本更新检查 / 下载 / 跳过"""
 
+import contextlib
+
 from backend.controller import (
     VERSION,
     _host_allowed,
@@ -58,11 +60,9 @@ class UpdateMixin:
             return {"ok": False, "reason": "shutting_down"}
         force = bool(force)
         if not force:
-            try:
+            with contextlib.suppress(Exception):
                 if not bool(get_pref("update_check", True)):
                     return {"ok": True, "status": "disabled"}
-            except Exception:
-                pass
             if not updater.due(self._update_last_ts):
                 return {"ok": True, "status": "skipped"}
         with self._update_lock:
@@ -219,10 +219,8 @@ class UpdateMixin:
         """后台定期检查更新：首查延迟 8 秒，之后按 CHECK_INTERVAL_S 复查。"""
         self._update_sleep(8.0)
         while not self.state.shutting_down:
-            try:
+            with contextlib.suppress(Exception):
                 self.update_check(False)
-            except Exception:
-                pass        # 检查更新出任何问题都不能拖垮这条后台线
             # 睡到「due() 认为该查了」为止，而不是死睡一个间隔：查失败时
             # _do_update_check 把时间戳回拨到 1 小时后，死睡 12 小时会让那条
             # 重试逻辑形同虚设。剩余时间取不到正数（首次启动 / 本次被开关或

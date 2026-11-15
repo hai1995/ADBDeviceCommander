@@ -1,5 +1,6 @@
 """backend.controllers.record —— 录屏 / 投屏 / 麦克风"""
 
+import contextlib
 from typing import ClassVar
 
 from backend.controller import (
@@ -81,10 +82,8 @@ class RecordMixin:
         try:
             ok, p = self._mic.start(save_dir)
         except Exception as e:
-            try:
+            with contextlib.suppress(Exception):
                 self._mic.stop()
-            except Exception:
-                pass
             self._mic = None
             return False, str(e)
         if not ok:
@@ -373,26 +372,18 @@ class RecordMixin:
         """
         sess = self._rec_session or {}
         for s in list(sess.get("videos", {}).keys()):
-            try:
+            with contextlib.suppress(Exception):
                 self.video.stop(s)
-            except Exception:
-                pass
         for s in list(sess.get("devaudio", {}).keys()):
-            try:
+            with contextlib.suppress(Exception):
                 self.device_audio.stop(s)
-            except Exception:
-                pass
         if self._mic is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._mic.stop()
-            except Exception:
-                pass
             self._mic = None
         for s in list(sess.get("logcat_captures", {}).keys()):
-            try:
+            with contextlib.suppress(Exception):
                 self.logcat_capture.stop(s, zip_on_stop=False)
-            except Exception:
-                pass
         self._restore_overlays(sess)
         self._rec_session = {}
 
@@ -591,10 +582,8 @@ class RecordMixin:
         #    写完。逐台「停一台等一台」会把 N 台的等待串起来，而取消本该越快越好。
         caps = dict(sess.get("logcat_captures") or {})
         for s in list(caps.keys()):
-            try:
+            with contextlib.suppress(Exception):
                 self.logcat_capture.stop(s, zip_on_stop=False)
-            except Exception:
-                pass
         candidates.extend(p for p in caps.values() if p)
         # 2) 设备侧：停止录制并丢弃（不拉当前段），已拉回的段交给下面一起删。
         videos_map = sess.get("videos", {}) or {}
@@ -703,10 +692,8 @@ class RecordMixin:
         # 它拉完再停，就会比视频多跑这几秒 —— 事后按时间轴对照视频找日志时，
         # 两边差出的正是案发现场那一段。
         for s in list(sess.get("logcat_captures", {}).keys()):
-            try:
+            with contextlib.suppress(Exception):
                 self.logcat_capture.stop(s, zip_on_stop=False)
-            except Exception:
-                pass
         videos_map = sess.get("videos", {}) or {}
         devaudio_map = sess.get("devaudio", {}) or {}
         dead = sess.get("dead") or set()
@@ -803,11 +790,9 @@ class RecordMixin:
         # 喂给 ffmpeg 合成；合成结束后这些文件已无用，必须清理，否则每次录屏都会在
         # TEMP 留下孤儿文件，长期累积会悄悄占满系统盘。
         for lp in local_devaudio.values():
-            try:
+            with contextlib.suppress(Exception):
                 if lp and os.path.exists(long_path(lp)):
                     os.remove(long_path(lp))
-            except Exception:
-                pass
         # 同步 logcat 抓取收尾：**录屏结束，日志必须同时结束**。
         # 日志的用途是事后按时间轴对照视频找问题，录像停了日志还在往下写、
         # 或者日志比视频多跑一大截，两边就对不齐了。所以这里不做任何例外：
@@ -1025,10 +1010,8 @@ class RecordMixin:
                 if p and p != merged:
                     # 长路径安全：中间段删除失败会被静默吞掉 → 目录里留着
                     # 「3 个分段 + 1 个成片」，用户第一反应是「哪几个是最终版」。
-                    try:
+                    with contextlib.suppress(Exception):
                         os.remove(long_path(p))
-                    except Exception:
-                        pass
             want = stem + ".mp4"
             try:
                 os.replace(long_path(merged), long_path(want))
@@ -1197,17 +1180,13 @@ class RecordMixin:
                 return None
         except Exception:
             # 打包中途失败：清掉可能残留的半成品 zip，源文件一律保留
-            try:
+            with contextlib.suppress(Exception):
                 if os.path.exists(lzip):
                     os.remove(lzip)
-            except Exception:
-                pass
             return None
         for p in written:
-            try:
+            with contextlib.suppress(Exception):
                 os.remove(long_path(p))
-            except Exception:
-                pass
         return zip_path
 
     def _scrcpy_pref_path(self):
@@ -1428,19 +1407,15 @@ class RecordMixin:
         for s, m in list(self._mirror_pipes.items()):
             if targets and s not in targets:
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 m.stop()
-            except Exception:
-                pass
             self._mirror_pipes.pop(s, None)
             stopped.append(s)
         for s, m in list(self._mirror_snaps.items()):
             if targets and s not in targets:
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 m.stop()
-            except Exception:
-                pass
             self._mirror_snaps.pop(s, None)
             stopped.append(s)
         if stopped:

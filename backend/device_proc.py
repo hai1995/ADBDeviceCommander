@@ -14,6 +14,7 @@ backend.device_proc —— 设备端后台进程的收尾（录屏 screenrecord 
 另外：本地 adb 客户端退出不代表设备端进程也退了，必须显式收尾，否则孤儿进程会继续
 录写 /sdcard、占用音频输入（麦克风）并耗电。
 """
+import contextlib
 import subprocess
 import time
 
@@ -22,10 +23,8 @@ from core.constants import adb_kwargs
 
 def _run(cmd, timeout=10):
     """执行一条 adb 命令，失败静默——收尾动作要尽力而为，不能反过来打断主流程。"""
-    try:
+    with contextlib.suppress(Exception):
         subprocess.run(cmd, **adb_kwargs(timeout))
-    except Exception:
-        pass
 
 
 def _pick_pid(line):
@@ -56,7 +55,7 @@ def device_pid(adb, serial, name, match=None):
     的那一条，绝不按名字取第一个。
     """
     if match is None:
-        try:
+        with contextlib.suppress(Exception):
             r = subprocess.run([adb, "-s", serial, "shell", "pidof", name],
                                **adb_kwargs(10))
             # 只认纯数字：adb shell 会把设备端的报错并进 **stdout**
@@ -67,8 +66,6 @@ def device_pid(adb, serial, name, match=None):
             pids = [t for t in (r.stdout or "").split() if t.isdigit()]
             if pids:
                 return pids[0]
-        except Exception:
-            pass
     # 给了命令行特征时，先要「带完整命令行」的 ps：默认的 `ps -A` 只打印
     # 进程名（comm），两条 screenrecord（录屏那条 + 投屏那条）在 NAME 列里
     # 长得一模一样，据此区分不了谁是谁 —— 按它挑 PID 等于随机杀一个。

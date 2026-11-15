@@ -6,6 +6,7 @@ json（commands.json / quick_commands.json / 其它顶层为数组或对象的 *
 多份则合并去重后使用；一份都没有时在该目录生成 commands.json。
 逻辑与旧 Tk 版同源，Web 版统一引用此处。
 """
+import contextlib
 import json
 import os
 import re
@@ -532,11 +533,9 @@ def _write_json_atomic(path, data):
         os.replace(ltmp, lpath)
         return True
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             if path_exists(ltmp):
                 os.remove(ltmp)
-        except Exception:
-            pass
         return False
 
 

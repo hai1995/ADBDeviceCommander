@@ -6,6 +6,7 @@ backend.file_service —— 设备文件系统管理（基于 adb shell + pull/p
 
 调用方负责把结果经 bus 推送为 file 事件。本模块只做命令执行与解析。
 """
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -94,8 +95,7 @@ class FileService:
             # 输出被截断）。宁可报一句原因，也不要让用户以为文件没了。
             if not items and not _ls_says_empty(r2.stdout):
                 lines = [ln for ln in (r2.stdout or "").splitlines() if ln.strip()]
-                return None, ("无法解析目录输出（共 %d 行），未列出任何条目；"
-                              "该设备的 ls 格式可能与预期不同" % len(lines))
+                return None, (f"无法解析目录输出（共 {len(lines):d} 行），未列出任何条目；该设备的 ls 格式可能与预期不同")
         # 排掉 . 和 ..
         items = [i for i in items if i["name"] not in (".", "..")]
         self._mark_link_dirs(serial, path, items)
@@ -116,7 +116,7 @@ class FileService:
         if not links:
             return
         names = " ".join(shq(i["name"]) for i in links)
-        script = ('cd {} && for f in {}; do [ -d "$f" ] && echo D || echo F; done'.format(shq(path), names))
+        script = (f'cd {shq(path)} && for f in {names}; do [ -d "$f" ] && echo D || echo F; done')
         try:
             r = self._shell(serial, [script], timeout=20)
         except Exception:
@@ -166,7 +166,7 @@ class FileService:
         try:
             os.makedirs(long_path(local_dir), exist_ok=True)
         except Exception as e:
-            return None, "无法创建保存目录 {}：{}".format(local_dir, e)
+            return None, f"无法创建保存目录 {local_dir}：{e}"
         r = subprocess.run(
             [self.adb, "-s", serial, "pull", remote, local_dir],
             **adb_kwargs(120))
@@ -191,7 +191,7 @@ class FileService:
                     pass          # 改不了名（占用 / 权限）就把真实路径回给用户
             return raw_local, None
         # pull 返回 0 却找不到文件：目录被外部清掉 / adb 把内容放进了子目录
-        return None, "adb 报告成功但本地没有落文件（目标目录：{}）".format(local_dir)
+        return None, f"adb 报告成功但本地没有落文件（目标目录：{local_dir}）"
 
     def view(self, serial, path, max_inline_bytes=1024 * 1024):
         """小文件直接 cat 内容返回；大文件 pull 到临时目录返回本地路径标记。
@@ -242,13 +242,11 @@ class FileService:
                     with open(long_path(tmp), encoding="utf-8",
                               errors="replace") as f:
                         txt = f.read()
-                    try:
+                    with contextlib.suppress(Exception):
                         os.remove(long_path(tmp))
-                    except Exception:
-                        pass
                     return {"text": txt, "local": None}, None
                 return {"text": None, "local": tmp,
-                        "note": "文件较大(%d 字节)，已拉取到本地临时文件" % sz}, None
+                        "note": f"文件较大({sz:d} 字节)，已拉取到本地临时文件"}, None
         except Exception as e:
             return None, str(e)
         # pull 也没成：必须给一句**非空**原因。这里不能直接用
