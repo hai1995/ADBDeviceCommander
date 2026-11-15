@@ -65,7 +65,7 @@ def _check_mmresult(mr, what):
 
 def _have_ffmpeg():
     try:
-        r = subprocess.run(["ffmpeg", "-version"], **adb_kwargs(10))
+        r = subprocess.run(["ffmpeg", "-version"], **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
         return r.returncode == 0
     except Exception:
         return False
@@ -161,7 +161,7 @@ def _mp4_playable(path):
         if size < 4096:
             return False
         with contextlib.suppress(Exception):
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 ["ffprobe", "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
                 **adb_kwargs(20))
@@ -311,7 +311,7 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
             "-t", duration,
             out_path]
     try:
-        r = subprocess.run(cmd, **adb_kwargs(300))
+        r = subprocess.run(cmd, **adb_kwargs(300))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
         if r.returncode == 0 and path_exists(out_path):
             # 复核：ffmpeg 成功也可能产出空壳（音频为空/过短时）
             if _mp4_playable(out_path):
@@ -327,7 +327,7 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
 def _media_duration(path):
     """用 ffprobe 取媒体时长（秒，字符串）；取不到返回 None。"""
     with contextlib.suppress(Exception):
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", path], **adb_kwargs(20))
         if r.returncode == 0:
@@ -348,7 +348,7 @@ class DeviceAudioCapture:
     @staticmethod
     def supported(adb, serial):
         try:
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [adb, "-s", serial, "shell", "command", "-v", "tinycap"],
                 **adb_kwargs(10))
             return r.returncode == 0 and "tinycap" in (r.stdout or "")
@@ -438,7 +438,7 @@ class DeviceAudioCapture:
         # pull 带重试（容忍收尾/落盘延迟）；并校验 wav 头，损坏则丢弃，避免污染合成视频
         for attempt in range(5):
             with contextlib.suppress(Exception):
-                r = subprocess.run(
+                r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                     [self.adb, "-s", serial, "pull", remote_wav, tmp],
                     **adb_kwargs(60))
                 if r.returncode == 0 and _wav_ok(tmp):
@@ -453,7 +453,7 @@ class DeviceAudioCapture:
                 if os.path.exists(long_path(tmp)):
                     os.remove(long_path(tmp))
         with contextlib.suppress(Exception):
-            subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", remote_wav],
+            subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", remote_wav],  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                            **adb_kwargs(10))
         return local
 

@@ -23,7 +23,7 @@ def _kill_tree(proc):
     if not pid or not sys.platform.startswith("win"):
         return False
     try:
-        subprocess.run(
+        subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             ["taskkill", "/T", "/F", "/PID", str(pid)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=5,

@@ -193,7 +193,7 @@ def probe_player(pref_path=""):
         return {"ok": False, "kind": "", "path": "", "version": "", "note": note}
     version = ""
     try:
-        r = subprocess.run([exe, "--version"], timeout=6, capture_output=True,
+        r = subprocess.run([exe, "--version"], timeout=6, capture_output=True,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                            text=True, encoding="utf-8", errors="replace",
                            creationflags=no_window_flags())
         out = (r.stdout or "").strip() or (r.stderr or "").strip()
@@ -211,7 +211,7 @@ def device_size(adb, serial):
     会在投屏结束后把用户的覆盖设置固化进命令参数里）。
     """
     with contextlib.suppress(Exception):
-        r = subprocess.run([adb, "-s", serial, "shell", "wm", "size"],
+        r = subprocess.run([adb, "-s", serial, "shell", "wm", "size"],  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10,
                            creationflags=no_window_flags())

@@ -162,7 +162,7 @@ def join_segments(paths, out_path, timeout=None):
                "-f", "concat", "-safe", "0", "-i", list_path,
                "-c", "copy", temp]
         try:
-            r = subprocess.run(cmd, **adb_kwargs(timeout or MERGE_TIMEOUT_S))
+            r = subprocess.run(cmd, **adb_kwargs(timeout or MERGE_TIMEOUT_S))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
         except Exception as e:
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,

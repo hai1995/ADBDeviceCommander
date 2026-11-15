@@ -24,7 +24,7 @@ from core.constants import adb_kwargs
 def _run(cmd, timeout=10):
     """执行一条 adb 命令，失败静默——收尾动作要尽力而为，不能反过来打断主流程。"""
     with contextlib.suppress(Exception):
-        subprocess.run(cmd, **adb_kwargs(timeout))
+        subprocess.run(cmd, **adb_kwargs(timeout))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
 
 
 def _pick_pid(line):
@@ -56,7 +56,7 @@ def device_pid(adb, serial, name, match=None):
     """
     if match is None:
         with contextlib.suppress(Exception):
-            r = subprocess.run([adb, "-s", serial, "shell", "pidof", name],
+            r = subprocess.run([adb, "-s", serial, "shell", "pidof", name],  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                **adb_kwargs(10))
             # 只认纯数字：adb shell 会把设备端的报错并进 **stdout**
             # （`/system/bin/sh: pidof: not found`），按空白切分后第一个 token 是
@@ -75,7 +75,7 @@ def device_pid(adb, serial, name, match=None):
         else (["-A"],)
     for extra in variants:
         try:
-            r = subprocess.run([adb, "-s", serial, "shell", "ps"] + extra,
+            r = subprocess.run([adb, "-s", serial, "shell", "ps"] + extra,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                **adb_kwargs(10))
         except Exception:
             continue

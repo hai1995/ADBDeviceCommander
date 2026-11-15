@@ -61,7 +61,7 @@ def root_state(adb, serial, timeout=8):
     """
     for args in (["id", "-u"], ["whoami"]):
         try:
-            r = subprocess.run([adb, "-s", serial, "shell"] + args,
+            r = subprocess.run([adb, "-s", serial, "shell"] + args,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                **adb_kwargs(timeout))
         except Exception:
             return None

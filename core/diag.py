@@ -470,7 +470,7 @@ def summarize_packages(text3, text_all=""):
 # ---------------------------------------------------------------------------
 def _default_runner(adb, serial, args, timeout):
     """真实执行 `adb -s <serial> <args>`，返回 (rc, stdout, stderr)。"""
-    r = subprocess.run([adb, "-s", serial] + list(args), **adb_kwargs(timeout))
+    r = subprocess.run([adb, "-s", serial] + list(args), **adb_kwargs(timeout))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
     return r.returncode, (r.stdout or ""), (r.stderr or "")
 
 

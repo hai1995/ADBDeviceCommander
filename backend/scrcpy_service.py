@@ -146,7 +146,7 @@ def probe(pref_path=""):
         return {"ok": False, "path": "", "version": "", "note": note}
     version = ""
     try:
-        r = subprocess.run([exe, "--version"], timeout=6, capture_output=True,
+        r = subprocess.run([exe, "--version"], timeout=6, capture_output=True,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                            text=True, encoding="utf-8", errors="replace",
                            creationflags=no_window_flags())
         out = (r.stdout or "").strip() or (r.stderr or "").strip()

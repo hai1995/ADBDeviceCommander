@@ -403,7 +403,7 @@ def list_packages(adb="adb", serial="", timeout=12):
         args += ["-s", serial]
     args += ["shell", script]
     try:
-        r = subprocess.run(args, **adb_kwargs(timeout))
+        r = subprocess.run(args, **adb_kwargs(timeout))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
     except Exception as ex:
         return {"ok": False, "reason": f"adb 调用失败：{ex}"}
     if getattr(r, "returncode", 0) != 0:
@@ -524,7 +524,7 @@ class PerfMonitor:
 
     # ---------------- 采集 ----------------
     def _run(self, args, timeout=8):
-        return subprocess.run([self.adb, "-s", self.serial] + args,
+        return subprocess.run([self.adb, "-s", self.serial] + args,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                               **adb_kwargs(timeout))
 
     def _script(self):

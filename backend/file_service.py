@@ -70,7 +70,7 @@ class FileService:
     def _shell(self, serial, args, timeout=30):
         # adb 输出固定 UTF-8（中文文件名/内容），必须显式指定 encoding：
         # 中文 Windows 的默认编码是 cp936，不指定就会把 UTF-8 字节解成乱码。
-        return subprocess.run(
+        return subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [self.adb, "-s", serial, "shell"] + args, **adb_kwargs(timeout))
 
     def list_dir(self, serial, path):
@@ -148,7 +148,7 @@ class FileService:
         return r.returncode == 0, _err_text(r)
 
     def upload(self, serial, local, remote):
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [self.adb, "-s", serial, "push", local, remote],
             **adb_kwargs(120))
         return r.returncode == 0, _err_text(r)
@@ -167,7 +167,7 @@ class FileService:
             os.makedirs(long_path(local_dir), exist_ok=True)
         except Exception as e:
             return None, f"无法创建保存目录 {local_dir}：{e}"
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [self.adb, "-s", serial, "pull", remote, local_dir],
             **adb_kwargs(120))
         if r.returncode != 0:
@@ -230,7 +230,7 @@ class FileService:
                 tempfile.gettempdir(),
                 "adb_view_{}_{}".format(uuid.uuid4().hex[:8],
                                     safe_name(os.path.basename(path))))
-            pr = subprocess.run(
+            pr = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [self.adb, "-s", serial, "pull", path, tmp], **adb_kwargs(120))
             # 用 isfile 而非 exists：对目录执行查看时 cat 会失败、pull 会把整个
             # 目录拉下来，exists 命中后 getsize 直接抛 IsADirectoryError，用户看到

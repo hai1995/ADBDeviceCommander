@@ -85,7 +85,7 @@ def device_present(adb, serial, timeout=5):
         # 函数**恒定返回 None**：logcat 抓取的掉线判定（`is False`）永远不成立，
         # 设备真掉线也走不成「等重连续写」；重连轮询又把 None 当「没回来」，
         # 只能一路等到窗口耗尽。录屏配套日志丢一大段，根子就在这里。
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "get-state"], **adb_kwargs(timeout))
     except Exception:
         # adb 本身不可达（缺失 / 超时 / 异常）：无法判定设备状态，返回 None（未知）
@@ -119,7 +119,7 @@ def device_clock(adb, serial, timeout=5):
     """
     try:
         # 一次 shell 取两段：+%s%z 输出形如 "1793850520+0800"，无空格好解析
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "shell", "date", "+%s%z"],
             **adb_kwargs(timeout))
     except Exception:
@@ -332,7 +332,7 @@ class ScreenCapturer:
         """
         marker = "__ADB_SHELL_OK__"
         try:
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [adb, "-s", serial, "shell", "echo", marker],
                 stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
         except subprocess.TimeoutExpired:
@@ -389,7 +389,7 @@ class ScreenCapturer:
         errs = []  # 收集每条路径的失败原因，成功时整体返回空串
         for remote in remote_candidates:
             try:
-                r = subprocess.run(
+                r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                     [adb, "-s", serial, "shell", "screencap", "-p", remote],
                     stdin=subprocess.DEVNULL, **adb_kwargs(30))
             except subprocess.TimeoutExpired:
@@ -412,7 +412,7 @@ class ScreenCapturer:
 
             part = local_hint + ".part"
             try:
-                r2 = subprocess.run(
+                r2 = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                     [adb, "-s", serial, "pull", remote, part],
                     stdin=subprocess.DEVNULL, **adb_kwargs(timeout))
                 text2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
@@ -431,7 +431,7 @@ class ScreenCapturer:
                     os.remove(long_path(part))
                 # 成功了：清理远程文件（try/except 吞掉，别覆盖本次结果）
                 with contextlib.suppress(Exception):
-                    subprocess.run(
+                    subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                         [adb, "-s", serial, "shell", "rm", "-f", remote],
                         stdin=subprocess.DEVNULL, **adb_kwargs(10))
                 return data, ""
@@ -733,7 +733,7 @@ class VideoRecorder:
         在 False 时才该进入「等待重启」，None 时按老行为直接判死。
         """
         try:
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
         except Exception:
             return None
@@ -1046,7 +1046,7 @@ class VideoRecorder:
         （adb 不可用等），调用方应按「无法恢复」处理（不恢复优于乱恢复）。
         """
         try:
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [adb, "-s", serial, "shell", "settings", "get", "system",
                  key], **adb_kwargs(10))
             if r.returncode != 0:
@@ -1090,7 +1090,7 @@ class VideoRecorder:
             else:
                 cmd = [adb, "-s", serial, "shell", "settings", "put",
                        "system", key, str(value)]
-            r = subprocess.run(cmd, **adb_kwargs(10))
+            r = subprocess.run(cmd, **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
         except Exception as e:
             return False, str(e)[:160]
         out = "{}\n{}".format(r.stdout or "", r.stderr or "")
@@ -1308,7 +1308,7 @@ class VideoRecorder:
         remotes = [sess.get("remote")] + [x.get("remote") for x in segs]
         for r in [x for x in remotes if x]:
             with contextlib.suppress(Exception):
-                subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", r],
+                subprocess.run([self.adb, "-s", serial, "shell", "rm", "-f", r],  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                **adb_kwargs(10))
         if not stopped:
             notes.append("设备端 screenrecord 未能确认退出")
@@ -1347,7 +1347,7 @@ class VideoRecorder:
         在 stdout），两路都要采集，否则这句说明永远是空的。
         """
         try:
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [adb, "-s", serial, "shell", "ls", remote], **adb_kwargs(15))
         except Exception as e:
             return False, str(e)[:200], False
@@ -1403,7 +1403,7 @@ class VideoRecorder:
             now = time.time()
             if now >= next_poll:
                 with contextlib.suppress(Exception):
-                    r = subprocess.run(
+                    r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                         [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
                     if r.returncode == 0 and (
                             r.stdout or "").strip() == "device":
@@ -1482,7 +1482,7 @@ class VideoRecorder:
                 # 明明还能取回的视频就这么丢了。这里直接落到下面的 pull 分支。
             if ready:
                 try:
-                    r = subprocess.run(
+                    r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                         [self.adb, "-s", serial, "pull", remote, local],
                         **adb_kwargs(120))
                     err = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
@@ -1490,7 +1490,7 @@ class VideoRecorder:
                         # 校验 MP4 已收尾（含 moov 头）：否则没有时长、播放不了
                         if not VideoRecorder._mp4_has_moov(local):
                             with contextlib.suppress(Exception):
-                                subprocess.run(
+                                subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                     [self.adb, "-s", serial, "shell", "rm", "-f", remote],
                                     **adb_kwargs(10))
                             # 状态文案由 controller 统一下发（这里只回结果）：早期在此
@@ -1499,7 +1499,7 @@ class VideoRecorder:
                             return False, local, "录屏文件疑似未正常收尾（MP4 缺 moov 头，无法播放）"
                         # 录像结束，清理设备端临时文件
                         with contextlib.suppress(Exception):
-                            subprocess.run(
+                            subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                 [self.adb, "-s", serial, "shell", "rm", "-f", remote],
                                 **adb_kwargs(10))
                         # 同上：成功文案由 controller 按其上下文（是否合成音频 / 打包）

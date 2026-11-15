@@ -98,7 +98,7 @@ def _device_uptime(adb, serial):
     logcat 缓冲区已清空，重连时不存在「缓冲区重放」，时间戳倒退只能是时钟问题。
     """
     try:
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "shell", "cat", "/proc/uptime"],
             **adb_kwargs(5))
     except Exception:
@@ -135,7 +135,7 @@ def pkg_pids_of(adb, serial, package, timeout=6):
     if not pkg:
         return set()
     with contextlib.suppress(Exception):
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "shell", "pidof", pkg],
             **adb_kwargs(timeout))
         out = (r.stdout or "").strip()
@@ -146,7 +146,7 @@ def pkg_pids_of(adb, serial, package, timeout=6):
     # 固定列位——取「最后一个字段 == 包名」的行，再取该行里第一个纯数字字段
     # 当 PID（跳过用户名/状态列，pid 一定是数字）。
     try:
-        r = subprocess.run(
+        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "shell", "ps"],
             **adb_kwargs(timeout))
         if r.returncode != 0:

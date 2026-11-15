@@ -298,7 +298,7 @@ class DeviceManager:
             if attempt:
                 time.sleep(DEVICE_RETRY_GAP_S)
             try:
-                out = subprocess.run(
+                out = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                     [adb, "devices", "-l"], **adb_kwargs(DEVICE_POLL_TIMEOUT))
                 raw, err = out.stdout or "", ""
             except subprocess.TimeoutExpired:
@@ -353,7 +353,7 @@ class DeviceManager:
     def _start_server(adb):
         """尝试拉起 adb server（自愈）；失败静默（下次轮询会再次尝试）。"""
         with contextlib.suppress(Exception):
-            subprocess.run([adb, "start-server"], **adb_kwargs(8))
+            subprocess.run([adb, "start-server"], **adb_kwargs(8))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
 
     def _inflight_blocks_heal(self):
         """是否有长连接会话在跑，从而必须暂缓 adb server 自愈。

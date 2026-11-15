@@ -66,12 +66,12 @@ def _out(text=""):
 def _run(args, timeout=180, check=False):
     """跑一条命令，返回 (returncode, 合并后的输出)。不抛异常。"""
     try:
-        p = subprocess.run(args, cwd=str(ROOT), capture_output=True,
+        p = subprocess.run(args, cwd=str(ROOT), capture_output=True,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                            timeout=timeout)
     except FileNotFoundError:
-        return 127, "找不到命令：{}（Git 是否已安装并加入 PATH？）".format(args[0])
+        return 127, f"找不到命令：{args[0]}（Git 是否已安装并加入 PATH？）"
     except subprocess.TimeoutExpired:
-        return 124, "命令超时（%ds）：%s" % (timeout, " ".join(args[:3]))
+        return 124, f"命令超时（{timeout:d}s）：{' '.join(args[:3])}"
     txt = (p.stdout or b"").decode("utf-8", "replace") + \
           (p.stderr or b"").decode("utf-8", "replace")
     if check and p.returncode != 0:
@@ -93,7 +93,7 @@ def _mask(tok):
         return "(空)"
     if len(tok) <= 12:
         return tok[:2] + "*" * (len(tok) - 2)
-    return "%s…%s（%d 位）" % (tok[:10], tok[-4:], len(tok))
+    return f"{tok[:10]}…{tok[-4:]}（{len(tok):d} 位）"
 
 
 def _mask_url(url):
@@ -112,10 +112,10 @@ def _mask_url(url):
     cred = m.group(2)
     if ":" in cred:
         user, _pw = cred.split(":", 1)
-        cred = "{}:***".format(user)
+        cred = f"{user}:***"
     else:
         cred = "***"
-    return "{}{}@{}".format(m.group(1), cred, m.group(3))
+    return f"{m.group(1)}{cred}@{m.group(3)}"
 
 
 # --------------------------------------------------------------------------- #
@@ -128,12 +128,12 @@ def load_token(explicit=""):
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         v = os.environ.get(name, "").strip()
         if v:
-            return v, "环境变量 {}".format(name), ""
+            return v, f"环境变量 {name}", ""
     if CRED_FILE.is_file():
         try:
             raw = CRED_FILE.read_text(encoding="utf-8").strip()
         except OSError as e:
-            return "", "", "读不了 .git-credential：{}".format(e)
+            return "", "", f"读不了 .git-credential：{e}"
         tok = ""
         if raw.startswith("{"):
             try:
@@ -160,8 +160,8 @@ def save_token(tok):
 
 def _auth_header(tok):
     """GitHub 的 git-over-https 走 Basic 认证：用户名任意，token 当密码。"""
-    pair = ("x-access-token:{}".format(tok)).encode("utf-8")
-    return "http.extraHeader=Authorization: Basic {}".format(base64.b64encode(pair).decode())
+    pair = (f"x-access-token:{tok}").encode("utf-8")
+    return f"http.extraHeader=Authorization: Basic {base64.b64encode(pair).decode()}"
 
 
 # --------------------------------------------------------------------------- #
@@ -202,12 +202,12 @@ def remote_url():
 def _ensure_remote(url):
     cur = remote_url()
     if cur == url:
-        return True, "远端已是 {}".format(_mask_url(url))
+        return True, f"远端已是 {_mask_url(url)}"
     if cur:
         _git("remote", "set-url", "origin", url)
-        return True, "远端改指 {}（原 {}）".format(_mask_url(url), _mask_url(cur))
+        return True, f"远端改指 {_mask_url(url)}（原 {_mask_url(cur)}）"
     _git("remote", "add", "origin", url)
-    return True, "已添加远端 {}".format(_mask_url(url))
+    return True, f"已添加远端 {_mask_url(url)}"
 
 
 def _ensure_identity():
@@ -291,7 +291,7 @@ def _auto_message(items):
         if a not in seen:
             seen.append(a)
     head = "、".join(seen) if seen else "杂项"
-    return "更新 %s（%d 个文件）" % (head, n)
+    return f"更新 {head}（{n:d} 个文件）"
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +307,7 @@ def do_init(url):
         if rc != 0:                     # 老版本 git 不认 -b
             _git("init")
             _git("checkout", "-b", BRANCH)
-        logs.append("已初始化仓库（分支 {}）".format(BRANCH))
+        logs.append(f"已初始化仓库（分支 {BRANCH}）")
     ident = _ensure_identity()
     if ident:
         logs.append(ident)
@@ -322,8 +322,8 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-m", "--message", default="", help="提交说明；留空则按改动文件自动生成")
     ap.add_argument("--init", action="store_true", help="首次初始化仓库并关联远端")
-    ap.add_argument("--remote", default=DEFAULT_REMOTE, help="远端地址（默认 {}）".format(DEFAULT_REMOTE))
-    ap.add_argument("--branch", default=BRANCH, help="分支名（默认 {}）".format(BRANCH))
+    ap.add_argument("--remote", default=DEFAULT_REMOTE, help=f"远端地址（默认 {DEFAULT_REMOTE}）")
+    ap.add_argument("--branch", default=BRANCH, help=f"分支名（默认 {BRANCH}）")
     ap.add_argument("--status", action="store_true", help="只打印状态，不做任何改动")
     ap.add_argument("--dry-run", action="store_true", help="打印将要执行的步骤，不真正提交/推送")
     ap.add_argument("--token", default="", help="直接给 token（会出现在 shell 历史里，不推荐）")
@@ -331,7 +331,7 @@ def main(argv=None):
                     help="把读到的 token 写入 .git-credential（已 gitignore），下次免填")
     args = ap.parse_args(argv)
 
-    _out("工程目录：{}".format(ROOT))
+    _out(f"工程目录：{ROOT}")
 
     # ---- --status：只看状态，连 token 都不需要 ----
     if args.status:
@@ -339,26 +339,26 @@ def main(argv=None):
             _out("状态：尚未初始化（用 --init）")
             return 0
         branch, items = repo_state()
-        _out("分支：%s" % (branch or "(未知)"))
+        _out(f"分支：{branch or '(未知)'}")
         _out("远端：{}".format(_mask_url(remote_url() or "(未设置)")))
         if not items:
             _out("工作区：干净，没有待提交的改动")
         else:
-            _out("工作区：%d 个文件有改动" % len(items))
+            _out(f"工作区：{len(items):d} 个文件有改动")
             for code, path in items[:30]:
-                _out("  {} {}".format(code, path))
+                _out(f"  {code} {path}")
             if len(items) > 30:
-                _out("  … 另 %d 个" % (len(items) - 30))
+                _out(f"  … 另 {len(items) - 30:d} 个")
         return 0
 
     tok, src, err = load_token(args.token)
     if not tok:
-        _out("✗ {}".format(err))
+        _out(f"✗ {err}")
         return 1
-    _out("凭证来源：{}，token {}".format(src, _mask(tok)))
+    _out(f"凭证来源：{src}，token {_mask(tok)}")
     if args.save_token and src != ".git-credential":
         save_token(tok)
-        _out("已写入 {}（该文件已被 .gitignore 排除）".format(CRED_FILE.name))
+        _out(f"已写入 {CRED_FILE.name}（该文件已被 .gitignore 排除）")
 
     steps = []
     # ---- 初始化 ----
@@ -385,7 +385,7 @@ def main(argv=None):
     ok_stale, why = check_not_stale()
     if not ok_stale:
         _out("✗ 本地是落后的克隆，已中止推送。")
-        _out("  {}".format(why))
+        _out(f"  {why}")
         return 1
     if why:
         steps.append(why)
@@ -396,11 +396,11 @@ def main(argv=None):
     if items:
         msg = args.message or _auto_message(items)
         if args.dry_run:
-            steps.append("将提交 %d 个文件：%s" % (len(items), msg))
+            steps.append(f"将提交 {len(items):d} 个文件：{msg}")
         else:
             rc, out = _git("add", "-A")
             if rc != 0:
-                _out("✗ git add 失败：{}".format(out.strip()[:300]))
+                _out(f"✗ git add 失败：{out.strip()[:300]}")
                 return 1
             rc, out = _git("commit", "-m", msg)
             if rc != 0:
@@ -408,10 +408,10 @@ def main(argv=None):
                 if "nothing to commit" in low or "无文件要提交" in out:
                     steps.append("改动都被忽略规则过滤了，无需提交")
                 else:
-                    _out("✗ git commit 失败：{}".format(out.strip()[:400]))
+                    _out(f"✗ git commit 失败：{out.strip()[:400]}")
                     return 1
             else:
-                steps.append("已提交 %d 个文件：%s" % (len(items), msg))
+                steps.append(f"已提交 {len(items):d} 个文件：{msg}")
                 committed = True
     else:
         steps.append("工作区干净，无需提交")
@@ -419,15 +419,15 @@ def main(argv=None):
     # ---- 推送 ----
     push_args = ["-c", _auth_header(tok), "push", "-u", "origin", args.branch]
     if args.dry_run:
-        steps.append("将执行：git push -u origin {}（认证头仅本次有效）".format(args.branch))
+        steps.append(f"将执行：git push -u origin {args.branch}（认证头仅本次有效）")
         for s in steps:
-            _out("· {}".format(s))
+            _out(f"· {s}")
         return 0
 
     rc, out = _git(*push_args, timeout=300)
     if rc != 0:
-        _out("\n".join("· {}".format(s) for s in steps))
-        _out("✗ 推送失败（退出码 %d）" % rc)
+        _out("\n".join(f"· {s}" for s in steps))
+        _out(f"✗ 推送失败（退出码 {rc:d}）")
         _explain_push_failure(out, tok)
         return 1
 
@@ -436,11 +436,11 @@ def main(argv=None):
     if rc2 == 0:
         _rc3, s = _git("log", "-1", "--pretty=%s")
         subject = s.strip()
-    steps.append("已推送 {} → {}（{}）".format(hash_.strip(), args.branch, _mask_url(remote_url())))
+    steps.append(f"已推送 {hash_.strip()} → {args.branch}（{_mask_url(remote_url())}）")
     for s in steps:
-        _out("· {}".format(s))
+        _out(f"· {s}")
     if committed and subject:
-        _out("最近提交：{}".format(subject))
+        _out(f"最近提交：{subject}")
     _out("✓ 完成")
     return 0
 
@@ -464,7 +464,7 @@ def _explain_push_failure(out, tok):
         hints.append("网络问题：连不上 github.com。检查代理 / 防火墙，"
                      "或在能上网的机器上再推一次。")
     elif "non-fast-forward" in low or "rejected" in low or "fetch first" in low:
-        hints.append("远端有本地没有的提交。先 `git pull --rebase origin {}` 再推。".format(BRANCH))
+        hints.append(f"远端有本地没有的提交。先 `git pull --rebase origin {BRANCH}` 再推。")
     elif "src refspec" in low or "does not match any" in low:
         hints.append("本地还没有任何提交。先确认有改动被提交（`--status` 看一下）。")
     else:
@@ -476,9 +476,9 @@ def _explain_push_failure(out, tok):
     if lines:
         _out("  git 原始输出：")
         for ln in lines[-8:]:
-            _out("    {}".format(ln))
+            _out(f"    {ln}")
     for h in hints:
-        _out("  → {}".format(h))
+        _out(f"  → {h}")
 
 
 if __name__ == "__main__":

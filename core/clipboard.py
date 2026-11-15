@@ -569,7 +569,7 @@ def _win_write_powershell(path, raw=None):
     last_reason = ""
     for attempt in range(_WIN_PS_ATTEMPTS):
         try:
-            r = sp.run(["powershell", "-NoProfile", "-STA", "-Command", script],
+            r = sp.run(["powershell", "-NoProfile", "-STA", "-Command", script],  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                        input=b64.encode("ascii"), timeout=25,
                        capture_output=True, creationflags=flags)
         except FileNotFoundError:
@@ -643,7 +643,7 @@ def copy_macos(raw, png, pix, path):
     quoted = str(path).replace("\\", "\\\\").replace('"', '\\"')
     script = (f'set the clipboard to (read (POSIX file "{quoted}") as «class {klass}»)')
     try:
-        r = subprocess.run(["osascript", "-e", script], timeout=20,
+        r = subprocess.run(["osascript", "-e", script], timeout=20,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                            capture_output=True)
     except FileNotFoundError:
         return False, "未找到 osascript（非 macOS 环境）"
@@ -669,7 +669,7 @@ def copy_linux(raw, png, pix, path):
                if tool == "xclip" else ["wl-copy", "-t", "image/png"])
         try:
             with open(long_path(path), "rb") as f:
-                r = subprocess.run(cmd, stdin=f, timeout=20,
+                r = subprocess.run(cmd, stdin=f, timeout=20,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                    capture_output=True)
         except FileNotFoundError:
             continue
