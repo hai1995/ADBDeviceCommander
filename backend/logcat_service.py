@@ -1007,7 +1007,7 @@ class LogcatCapture:
                             if (prev is not None and cur is not None
                                     and cur - prev > LOGCAT_CAP_HOLE_WARN_S):
                                 _write_marker(
-                                    f, f"日志缺失：{last_log_ts} ~ {ts} 之间（约 {cur - prev:d} 秒）的日志未能取回（中断期间产生的日志已滚出设备缓冲区）")
+                                    f, f"日志缺失：{last_log_ts} ~ {ts} 之间（约 {int(cur - prev):d} 秒）的日志未能取回（中断期间产生的日志已滚出设备缓冲区）")
                                 gap_written = True
                                 data_gap = True
                         f.write(raw)
@@ -1089,7 +1089,7 @@ class LogcatCapture:
                     self.bus.push("logcat_capture",
                                   {"serial": serial, "status": "reconnecting",
                                    "path": path,
-                                   "text": f"设备 {serial} 掉线，logcat 抓取等待重连（最长 {LOGCAT_CAP_RECONNECT_MAX_S:d} 秒，期间已抓到的日志不会丢）"})
+                                   "text": f"设备 {serial} 掉线，logcat 抓取等待重连（最长 {LOGCAT_CAP_RECONNECT_MAX_S:g} 秒，期间已抓到的日志不会丢）"})
                     with self._lock:
                         self._reconnecting.add(serial)
                     verdict = self._wait_reconnect(serial)
@@ -1104,7 +1104,7 @@ class LogcatCapture:
                         # 重连窗口耗尽：抓取就此结束，但文件里留有缺口标记，绝不把缺口
                         # 藏成一次「成功抓取」。不另推 error 事件——下面的 stopped(gap)
                         # 已携带缺口说明，避免界面叠出两条告警。
-                        outcome_error = (f"设备在重连窗口（{LOGCAT_CAP_RECONNECT_MAX_S:d} 秒）内未恢复，logcat 抓取已结束。文件存在时间缺口：从 {drop_ts} 起的日志缺失（设备断连期间产生的日志已无法从该缓冲区取回）。")
+                        outcome_error = (f"设备在重连窗口（{LOGCAT_CAP_RECONNECT_MAX_S:g} 秒）内未恢复，logcat 抓取已结束。文件存在时间缺口：从 {drop_ts} 起的日志缺失（设备断连期间产生的日志已无法从该缓冲区取回）。")
                         break
                     # 重连成功：写恢复标记，继续外层循环往同一文件续写。
                     resume_ts = time.strftime("%Y-%m-%d %H:%M:%S")

@@ -388,7 +388,7 @@ def sanitize_prefs(raw):
                 # 同上：'1000' 这种带引号的数字是合法输入（只是写法不同），
                 # 不该报「'1000' 不是 200~10000 的数字，已恢复为 1000」。
                 if _as_int(v, None, lo, hi) is None:
-                    warnings.append(f"{k} 的值 {v:!r} 不是 {lo:d}~{hi:d} 的数字，已恢复为 {nv:!r}")
+                    warnings.append(f"{k} 的值 {v!r} 不是 {lo:d}~{hi:d} 的数字，已恢复为 {nv!r}")
     return clean, warnings
 
 
