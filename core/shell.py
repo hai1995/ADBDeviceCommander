@@ -30,7 +30,7 @@ def _kill_tree(proc):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -236,7 +236,7 @@ class ShellSession:
                 try:
                     self.proc.stdin.write(script + "\n")
                     self.proc.stdin.flush()
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     self.last_error = "写入命令失败: {}".format(ex)
                     self._emit("✗ " + self.last_error, "err")
                     return False
@@ -258,7 +258,7 @@ class ShellSession:
             try:
                 self.proc.stdin.write(payload)
                 self.proc.stdin.flush()
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 try:
                     self._pending.remove((sentinel, done))
                 except ValueError:
@@ -341,7 +341,7 @@ class ShellSession:
         # 同步等待退出，避免下次 run 写命令时进程还在关闭中（消除原 Timer 竞态）
         try:
             proc.wait(timeout=2.0)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 proc.kill()
         # 进程已终止，主动关闭父侧 stdin：终止瞬间的写入（上面的 \x03）flush 失败

@@ -77,7 +77,7 @@ def _win_select_folder(title):
     try:
         import ctypes
         from ctypes import wintypes
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
     try:
         bi, _display = _build_browse_info(title)
@@ -103,7 +103,7 @@ def _win_select_folder(title):
         user32.GetForegroundWindow.restype = wintypes.HWND
         try:
             bi.hwndOwner = user32.GetForegroundWindow()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             bi.hwndOwner = None
 
         ole32.CoInitialize(None)
@@ -122,7 +122,7 @@ def _win_select_folder(title):
                     pidl, ctypes.cast(buf, ctypes.c_wchar_p)):
                 try:
                     need = int(shell32.SHGetPathFromIDListW(pidl, None) or 0)
-                except Exception:
+                except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     need = 0
                 if need <= 0:
                     return None
@@ -138,7 +138,7 @@ def _win_select_folder(title):
                 if pidl:
                     ole32.CoTaskMemFree(pidl)
             ole32.CoUninitialize()
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -154,13 +154,13 @@ def _pick_folder(initial=None):
     """
     try:
         import webview
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None, "unsupported"
     win = None
     try:
         if hasattr(webview, "active_window"):
             win = webview.active_window()
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         win = None
     if win is None or not hasattr(win, "create_file_dialog"):
         return None, "unsupported"
@@ -174,11 +174,11 @@ def _pick_folder(initial=None):
         except TypeError:
             try:
                 res = win.create_file_dialog(webview.FOLDER_DIALOG)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 return None, f"error:{e}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return None, f"error:{e}"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None, f"error:{e}"
     if not res:
         return None, "cancelled"
@@ -225,7 +225,7 @@ class FileMixin:
                 subprocess.Popen(["xdg-open", d])
             self._push_status("info", f"📂 已打开目录：{d}")
             return {"ok": True}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("err", f"⚠ 无法打开目录 {d}: {e}")
             return {"ok": False, "text": str(e)}
 
@@ -334,7 +334,7 @@ class FileMixin:
             return
         try:
             self.file_list(serial, target)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("err", f"⚠ 刷新目录失败 {target}：{ex}")
 
     def _file_op(self, serial, do_fn, *args, key=None):
@@ -367,7 +367,7 @@ class FileMixin:
         """
         try:
             do_fn(serial, *args)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             label = self._FILE_OP_LABELS.get(
                 getattr(do_fn, "__name__", ""), "文件操作")
             self._push_status("err", f"⚠ {label}失败 {serial}：{ex}")
@@ -452,7 +452,7 @@ class FileMixin:
         try:
             with open(long_path(tmp), "wb") as f:
                 f.write(base64.b64decode(b64 or ""))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("err", f"⚠ 解码上传文件失败：{e}")
             return
         # try/finally：upload 抛异常（大文件 push 超过 120s 超时、adb 中途消失）时
@@ -510,7 +510,7 @@ class FileMixin:
             else:
                 subprocess.Popen(["xdg-open", path])
             return {"ok": True}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             why = str(e)
             self._push_status("err", f"⚠ 打开文件失败：{why}")
             return {"ok": False, "reason": why}

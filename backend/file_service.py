@@ -119,7 +119,7 @@ class FileService:
         script = (f'cd {shq(path)} && for f in {names}; do [ -d "$f" ] && echo D || echo F; done')
         try:
             r = self._shell(serial, [script], timeout=20)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return
         if getattr(r, "returncode", 0) != 0:
             return
@@ -165,7 +165,7 @@ class FileService:
         # 静默抛异常，前端只会看到「没有任何反应」。
         try:
             os.makedirs(long_path(local_dir), exist_ok=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return None, f"无法创建保存目录 {local_dir}：{e}"
         r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [self.adb, "-s", serial, "pull", remote, local_dir],
@@ -213,7 +213,7 @@ class FileService:
                             timeout=20)
             if r.returncode != 0:
                 r = self._shell(serial, ["cat", shq(path)], timeout=20)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return None, str(e)
         out = r.stdout or ""
         # 按**字节**算而不是字符数：head 是按字节裁的，中文一个字符占 3 字节，
@@ -247,7 +247,7 @@ class FileService:
                     return {"text": txt, "local": None}, None
                 return {"text": None, "local": tmp,
                         "note": f"文件较大({sz:d} 字节)，已拉取到本地临时文件"}, None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return None, str(e)
         # pull 也没成：必须给一句**非空**原因。这里不能直接用
         # `_err_text(r, ...)` —— r 是上一次成功（rc==0）的 head，而 _err_text 的

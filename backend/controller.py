@@ -95,7 +95,7 @@ def _host_allowed(url: str, extra=()) -> bool:
     from urllib.parse import urlparse
     try:
         p = urlparse(url or "")
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
     if p.scheme not in ("http", "https"):
         return False

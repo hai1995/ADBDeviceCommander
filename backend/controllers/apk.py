@@ -27,7 +27,7 @@ class ApkMixin:
             # 真实原因（路径太长）一个字都没提。
             size = path_getsize(path)
         except OSError as e:
-            return {"ok": False, "reason": "读取安装包失败：{}".format(e)}
+            return {"ok": False, "reason": f"读取安装包失败：{e}"}
         self._apk_path = path
         return {"ok": True, "path": path, "name": os.path.basename(path),
                 "size": size, "size_text": apkinfo.format_size(size)}
@@ -75,19 +75,15 @@ class ApkMixin:
                 self.workers.spawn("apk_install_" + s, self._do_apk_install, s,
                                    path, bool(replace), bool(downgrade),
                                    bool(grant))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 # 线程起不来（进程线程数耗尽 / 内存告急）时把这台直接记成失败，
                 # 让批次账能走到 done == total。否则 _apk_batch 永远挂着：之后
                 # 每次「安装」都被上面那句「上一批安装还没结束」挡回去，
                 # apk_state 也停在 running —— 安装功能彻底锁死，只能重启程序。
                 self._apk_batch_done(
-                    s, {"ok": False, "message": "无法启动安装线程：{}".format(e)}, path)
+                    s, {"ok": False, "message": f"无法启动安装线程：{e}"}, path)
         self._push_status(
-            "info", "开始安装 %s → %d 台设备（%s）"
-            % (os.path.basename(path), len(targets),
-               "、".join(["覆盖" if replace else "全新",
-                          "允许降级" if downgrade else "",
-                          "授予权限" if grant else ""]).replace("、、", "、").strip("、")),
+            "info", f"开始安装 {os.path.basename(path)} → {len(targets):d} 台设备（{'、'.join(['覆盖' if replace else '全新', '允许降级' if downgrade else '', '授予权限' if grant else '']).replace('、、', '、').strip('、')}）",
             toast=False)
         return {"ok": True, "count": len(targets)}
 
@@ -109,7 +105,7 @@ class ApkMixin:
             # 加 -t 重试一次——比让用户自己看错误码再去查参数强得多。
             if (not res["ok"] and res.get("code") == "INSTALL_FAILED_TEST_ONLY"):
                 self._push_status(
-                    "warn", "… {} 是 testOnly 包，改用 -t 重试".format(serial))
+                    "warn", f"… {serial} 是 testOnly 包，改用 -t 重试")
                 args2 = args + ["-t"]
                 r2 = subprocess.run(
                     [self._adb_argv(), "-s", serial] + args2 + [path],
@@ -117,15 +113,15 @@ class ApkMixin:
                 res = apkinfo.parse_install_output(
                     (r2.stdout or "") + "\n" + (r2.stderr or ""))
             if res["ok"]:
-                self._push_status("ok", "✓ 安装成功：{} ← {}".format(serial, os.path.basename(path)))
+                self._push_status("ok", f"✓ 安装成功：{serial} ← {os.path.basename(path)}")
             else:
                 self._push_status("err", "✗ 安装失败：{} — {}".format(serial, res["message"]), toast=True)
         except subprocess.TimeoutExpired:
             res = {"ok": False, "code": "",
                    "message": "安装超时（5 分钟）：包太大或设备 IO 卡住，可重试"}
             self._push_status("err", "✗ 安装失败：{} — {}".format(serial, res["message"]), toast=True)
-        except Exception as e:
-            res = {"ok": False, "code": "", "message": "安装异常：{}".format(e)}
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
+            res = {"ok": False, "code": "", "message": f"安装异常：{e}"}
             self._push_status("err", "✗ 安装失败：{} — {}".format(serial, res["message"]), toast=True)
         finally:
             self._apk_batch_done(serial, res, path)
@@ -157,10 +153,8 @@ class ApkMixin:
         self.bus.push("apk_state", {"running": False})
         if failed:
             self._push_status(
-                "warn", "%s 安装完成：%d 成功 / %d 失败（%s）"
-                % (name, ok_count, len(failed),
-                   "；".join("{}：{}".format(s, m) for s, m in failed[:3])),
+                "warn", f"{name} 安装完成：{ok_count:d} 成功 / {len(failed):d} 失败（{'；'.join((f'{s}：{m}' for s, m in failed[:3]))}）",
                 toast=True)
         else:
-            self._push_status("ok", "✓ %s 已安装到 %d 台设备" % (name, ok_count),
+            self._push_status("ok", f"✓ {name} 已安装到 {ok_count:d} 台设备",
                               toast=True)

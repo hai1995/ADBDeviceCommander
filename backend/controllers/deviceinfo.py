@@ -25,7 +25,7 @@ class DeviceInfoMixin:
                 **adb_kwargs(20))
         except subprocess.TimeoutExpired:
             return {"ok": False, "reason": "读取设备信息超时（设备可能无响应）"}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return {"ok": False, "reason": f"读取设备信息失败：{e}"}
         info = devinfo.parse_info(r.stdout or "")
         # adb shell 会把设备端的报错并进 **stdout**（`error: closed`、
@@ -47,7 +47,7 @@ class DeviceInfoMixin:
         try:
             lines = get_pref("diag_logcat_lines", diag.DEFAULT_LOGCAT_LINES)
             with_log = bool(get_pref("diag_with_logcat", True))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             lines, with_log = diag.DEFAULT_LOGCAT_LINES, True
         return {"ok": True,
                 "with_logcat": with_log,
@@ -94,7 +94,7 @@ class DeviceInfoMixin:
                 "info", f"开始收集诊断包：{len(serials):d} 台设备（{f'含 logcat 尾部 {lines:d} 行' if with_logcat else '不含 logcat'}）")
             self.workers.spawn("diag", self._do_diag, serials, save_dir,
                                bool(with_logcat), lines)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 线程起不来（线程数耗尽 / 内存告急）：状态位已置、running=true 已
             # 广播，不在这里回滚就是上面说的「永久锁死」。apk 安装早已有这层
             # 保护，诊断包当时漏了。
@@ -116,7 +116,7 @@ class DeviceInfoMixin:
                     path, manifest, err = diag.collect(
                         self._adb_argv(), s, save_dir,
                         with_logcat=with_logcat, logcat_lines=lines)
-                except Exception as e:      # 兜底：诊断包异常不能拖垮整批
+                except Exception as e:      # 兜底：诊断包异常不能拖垮整批  # noqa: BLE001
                     path, manifest, err = None, None, f"内部错误：{e}"
                 if err or not path:
                     failed.append("{}：{}".format(s, err or "未知原因"))

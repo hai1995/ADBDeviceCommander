@@ -301,7 +301,7 @@ def _check_one(current: str, feed: str, opener, timeout: int) -> dict:
 
     try:
         code, body = opener(feed, timeout)
-    except Exception as e:                      # 任何网络异常都要翻译成人话
+    except Exception as e:                      # 任何网络异常都要翻译成人话  # noqa: BLE001
         out["error"] = ("检查更新失败：连不上 {}（{}）。若这台机器在内网，"
                         "可在 config.json 里把 update_feed 改成内网可访问的版本地址。".format(_host(feed), e))
         return out

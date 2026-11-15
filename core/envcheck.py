@@ -128,7 +128,7 @@ def _best_pv(get_pv):
     best = None
     try:
         raw = list(get_pv() or [])
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         raw = []
     for s in raw:
         t = parse_version(s)

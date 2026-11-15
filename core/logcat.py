@@ -273,7 +273,7 @@ def _ts_of_bytes(raw: bytes) -> str:
     """从一行原始字节里取时间戳（容错：非法字节替换，不抛异常）。"""
     try:
         text = raw.decode("utf-8", "replace")
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return ""
     return ts_prefix(text)
 

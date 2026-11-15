@@ -442,7 +442,7 @@ def ensure_prefs_file() -> str:
         with open(ltmp, "w", encoding="utf-8") as f:
             f.write(default_prefs_json())
         os.replace(ltmp, lp)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):
             if os.path.exists(ltmp):
                 os.remove(ltmp)
@@ -506,7 +506,7 @@ def _atomic_write(prefs: dict) -> bool:
             os.fsync(f.fileno())
         os.replace(ltmp, lp)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):
             if os.path.exists(ltmp):
                 os.remove(ltmp)
@@ -540,7 +540,7 @@ def _read_json_file(path):
             import json
             data = json.load(f)
         return data if isinstance(data, dict) else None
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -571,7 +571,7 @@ def _migrate_legacy_file():
         with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
         os.replace(ltmp, lp_new)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):
             if os.path.exists(ltmp):
                 os.remove(ltmp)
@@ -602,7 +602,7 @@ def load_prefs_checked():
                 json.load(f)
         except FileNotFoundError:
             return {}, []
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return {}, []
         return {}, ["config.json 顶层不是对象，已全部恢复默认"]
     clean, warnings = sanitize_prefs(_migrate_keys(data))

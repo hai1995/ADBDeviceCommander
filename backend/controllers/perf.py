@@ -217,7 +217,7 @@ class PerfMixin:
         """
         try:
             expr = (load_prefs() or {}).get("perf_thresholds")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             expr = ""
         th, errs = perf_parse_thresholds(expr)
         return th, errs, (expr or "").strip() if isinstance(expr, str) else ""
@@ -319,7 +319,7 @@ class PerfMixin:
             })
             try:
                 res = perf_write_report(samples, info, self._default_save_dir(), th)
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 errors[s] = str(ex)
                 continue
             res["serial"] = s
@@ -338,7 +338,7 @@ class PerfMixin:
             try:
                 res = perf_write_compare(compare_entries, self._default_save_dir(), th)
                 compare = res.get("html") or ""
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 errors["compare"] = str(ex)
         if len(saved) == 1:
             msg = f"✓ 性能报告已生成：{saved[0]['html']}（{total_rows:d} 个采样点）"

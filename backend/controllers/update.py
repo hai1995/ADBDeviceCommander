@@ -24,18 +24,18 @@ class UpdateMixin:
         """
         try:
             return (get_pref("update_feed", "") or "").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return ""
 
     def update_info(self):
         """「关于」页要的版本信息：当前版本 / 是否自动检查 / 上次结果（不发请求）。"""
         try:
             enabled = bool(get_pref("update_check", True))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             enabled = True
         try:
             skipped = str(get_pref("update_skipped_version", "") or "").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             skipped = ""
         last = self._update_last
         return {"ok": True,
@@ -76,7 +76,7 @@ class UpdateMixin:
         try:
             self.workers.spawn("update", self._do_update_check,
                                self._update_feed(), force)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 线程起不来（线程数耗尽 / 内存告急）：_update_busy 已置位、
             # update_state 已广播 running=true，不回滚的话「检查更新」按钮永久
             # 转圈，之后的每一次点击都被上面的 busy 判断挡回「正在检查」——
@@ -94,7 +94,7 @@ class UpdateMixin:
         try:
             # feed 为空串 = 用 core.update.FEEDS（静态 → API 依次尝试）
             res = updater.check(VERSION, feed or None)
-        except Exception as e:      # 兜底：这条线程不能带着 _update_busy=True 死掉，
+        except Exception as e:      # 兜底：这条线程不能带着 _update_busy=True 死掉，  # noqa: BLE001
             res = {"status": "error", "current": VERSION, "feed": feed,   # 否则按钮永久转圈
                    "version": "", "notes": "", "url": "", "asset": {},
                    "error": "检查更新时发生内部错误：{}".format(e)}
@@ -115,7 +115,7 @@ class UpdateMixin:
         skipped = ""
         try:
             skipped = str(get_pref("update_skipped_version", "") or "").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             skipped = ""
         if (res.get("status") == "update" and not manual and skipped
                 and updater.parse_version(skipped) == updater.parse_version(
@@ -143,7 +143,7 @@ class UpdateMixin:
             from urllib.parse import urlparse
             h = urlparse(self._update_feed()).hostname
             extra = (h,) if h else ()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             extra = ()
         if not _host_allowed(target, extra):
             why = ("拒绝打开这个地址：{}（只允许 GitHub 域名，"
@@ -155,7 +155,7 @@ class UpdateMixin:
         try:
             import webbrowser
             opened = webbrowser.open(target)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             why = "打开浏览器失败：{}".format(e)
             self._push_status("err", "⚠ " + why)
             return {"ok": False, "reason": why}

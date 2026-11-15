@@ -151,7 +151,7 @@ def probe(pref_path=""):
                            creationflags=no_window_flags())
         out = (r.stdout or "").strip() or (r.stderr or "").strip()
         version = out.splitlines()[0].strip() if out else ""
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         version = ""      # 取不到版本不影响可用性（老版本 scrcpy 也支持 -s）
     return {"ok": True, "path": exe, "version": version, "note": note}
 
@@ -166,7 +166,7 @@ def _tail(path, limit=400):
             text = f.read().decode("utf-8", "replace").strip()
         lines = [ln for ln in text.splitlines() if ln.strip()]
         return lines[-1].strip() if lines else ""
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return ""
 
 
@@ -252,7 +252,7 @@ class ScrcpyLauncher:
                                 "adc_scrcpy_{}.log".format(safe_name(serial)))
         try:
             f = open(long_path(log_path), "wb")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             f = None
         try:
             if f is not None:
@@ -262,7 +262,7 @@ class ScrcpyLauncher:
             else:
                 p = subprocess.Popen([exe, "-s", serial],
                                      creationflags=no_window_flags())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             if f is not None:
                 f.close()
                 # 刚建的日志文件是空的，Popen 都没起来就没人会用：顺手删掉，

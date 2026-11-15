@@ -87,7 +87,7 @@ def device_present(adb, serial, timeout=5):
         # 只能一路等到窗口耗尽。录屏配套日志丢一大段，根子就在这里。
         r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "get-state"], **adb_kwargs(timeout))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         # adb 本身不可达（缺失 / 超时 / 异常）：无法判定设备状态，返回 None（未知）
         # 而非 False（确认掉线）。这样调用方（logcat 重连等待）才不会把「adb 暂
         # 时查不到」误判成「设备已掉线」而拉起无意义的重连轮询；同时 None 在
@@ -122,7 +122,7 @@ def device_clock(adb, serial, timeout=5):
         r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "shell", "date", "+%s%z"],
             **adb_kwargs(timeout))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
     if r.returncode != 0:
         return None
@@ -244,7 +244,7 @@ class ScreenCapturer:
         if save_file:
             try:
                 os.makedirs(long_path(save_dir), exist_ok=True)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 return None, f"无法创建保存目录 {save_dir}: {e}"
         ts = time.strftime("%Y%m%d_%H%M%S")
         # safe_name：无线 ADB 序列号形如 192.168.1.5:5555，冒号是 Windows
@@ -309,7 +309,7 @@ class ScreenCapturer:
             # 拒绝，不给任何提示），把 returncode 带出去至少能让后续 pull 路径
             # 或 shell probe 给出更有用的线索。
             return b"", f"设备未返回图像（exec-out 退出码 {rc}，没有任何 stderr/stdout）"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 超时（设备无响应 / 被别的 adb 客户端抢锁）时 communicate() 只是抛错、
             # **不会**终止子进程：卡住的 adb exec-out 会变成孤儿进程一直挂着，
             # 且它占着 stdout 管道。这里必须显式回收（kill + 收尾读取）。
@@ -339,7 +339,7 @@ class ScreenCapturer:
             # 需要密码时 adbd 会停在 Password: 等输入；本工具没有终端，
             # 子进程就一直等到超时 —— 这正是要分辨出来的那一类。
             return "timeout", ""
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return "error", str(e)
         text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
         if marker in (r.stdout or ""):
@@ -395,7 +395,7 @@ class ScreenCapturer:
             except subprocess.TimeoutExpired:
                 errs.append(f"{remote} 超时（30s）")
                 continue
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 errs.append(f"{remote} 异常：{e}")
                 continue
             text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
@@ -441,7 +441,7 @@ class ScreenCapturer:
                     if os.path.exists(long_path(part)):
                         os.remove(long_path(part))
                 continue
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 errs.append(f"{remote}：adb pull 异常：{e}")
                 with contextlib.suppress(Exception):
                     if os.path.exists(long_path(part)):
@@ -585,7 +585,7 @@ class VideoRecorder:
                 continue
             try:
                 text = (f.read() or "").strip()
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 continue
             if text:
                 return text[:300]
@@ -610,7 +610,7 @@ class VideoRecorder:
                 return False, "该设备已在录制"
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, f"无法创建保存目录 {save_dir}: {e}"
         ts = time.strftime("%Y%m%d_%H%M%S")
         base = extra_name or ts
@@ -735,7 +735,7 @@ class VideoRecorder:
         try:
             r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [self.adb, "-s", serial, "get-state"], **adb_kwargs(5))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return None
         out = (r.stdout or "").strip()
         if r.returncode == 0 and out == "device":
@@ -834,7 +834,7 @@ class VideoRecorder:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 接不上下一段：录制到此为止。但**上一段是完好的**，必须照样收进
             # 产物里 —— 什么都不做的话它既不会被拉回、也不会进包，用户白录。
             sess.setdefault("segments", []).append(prev)
@@ -889,7 +889,7 @@ class VideoRecorder:
         try:
             if proc.poll() is None:
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return
         # 与 _watch_exit 做同一次探测：设备明确不在线时，秒退是「设备掉了」造成
         # 的，交给 watcher 转入等待重启。watcher 的探测是一次 adb 往返、掉线时要
@@ -929,7 +929,7 @@ class VideoRecorder:
         def run():
             try:
                 ok, local, err = self._pull_one(seg)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 ok, local, err = False, None, str(e)[:200]
             seg["ok"] = ok
             seg["err"] = err
@@ -1019,7 +1019,7 @@ class VideoRecorder:
                 cmd, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 **adb_popen_kwargs())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return None, f"启动录屏失败：{e}"
         with contextlib.suppress(Exception):
             if proc.poll() is None:
@@ -1054,7 +1054,7 @@ class VideoRecorder:
             val = (r.stdout or "").strip()
             # 老版本 settings 读不存在键时返回空串而非 "null"
             return True, (val or "null")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, None
 
     @staticmethod
@@ -1091,7 +1091,7 @@ class VideoRecorder:
                 cmd = [adb, "-s", serial, "shell", "settings", "put",
                        "system", key, str(value)]
             r = subprocess.run(cmd, **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, str(e)[:160]
         out = "{}\n{}".format(r.stdout or "", r.stderr or "")
         low = out.lower()
@@ -1327,7 +1327,7 @@ class VideoRecorder:
         for s in serials:
             try:
                 self.stop(s)
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 continue
 
     @staticmethod
@@ -1349,7 +1349,7 @@ class VideoRecorder:
         try:
             r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                 [adb, "-s", serial, "shell", "ls", remote], **adb_kwargs(15))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, str(e)[:200], False
         out = "{}\n{}".format(r.stdout or "", r.stderr or "")
         if r.returncode == 0 and (r.stdout or "").strip():
@@ -1379,7 +1379,7 @@ class VideoRecorder:
                     return True
                 f.seek(max(0, size - 4 * 1024 * 1024))
                 return b"moov" in f.read()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False
 
     def _wait_device_back(self, serial, max_wait_s=60, interval_s=3,
@@ -1439,7 +1439,7 @@ class VideoRecorder:
         # stop_all 的循环中断、后面的设备统统不再收尾。转成一条明确的失败返回。
         try:
             os.makedirs(long_path(sess["dir"]), exist_ok=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, local, "无法创建保存目录 {}：{}".format(sess["dir"], e)
         # adb pull 由 adb.exe 落盘，它**不认** \\?\ 前缀（见 core/longpath）：
         # 目标路径超过 Windows 的 260 字符上限时，adb 只会甩一句含糊的
@@ -1514,7 +1514,7 @@ class VideoRecorder:
                             return False, None, f"取回录屏文件失败：{last_err}"
                     else:
                         last_err = "pull 返回非零但无错误输出（可能设备端文件未就绪）"
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     last_err = str(e)[:200]
             else:
                 last_err = (f"设备端未生成录屏文件 {remote}（screenrecord 可能未启动/提前退出）")

@@ -137,7 +137,7 @@ class AutoRefreshMixin:
             if note_fn is not None:
                 try:
                     notes = note_fn() or {}
-                except Exception:
+                except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     notes = {}
             self._push_toast(
                 "warn", self._build_death_message(sorted(dead), notes=notes))
@@ -201,7 +201,7 @@ class AutoRefreshMixin:
         """
         try:
             known = {d["serial"] for d in self.devices.get_items()}
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return
         for s in self.logcat_monitor.running_serials():
             if s not in known:
@@ -233,7 +233,7 @@ class AutoRefreshMixin:
         # 录制提前结束，正是「重启后视频和日志都丢」的老毛病。
         try:
             waiting = set(self.video.reboot_wait_serials())
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             waiting = set()
         rec_gone = [s for s in candidates if s not in waiting]
         if rec_gone:

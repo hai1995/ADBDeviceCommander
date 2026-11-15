@@ -69,7 +69,7 @@ class SettingsMixin:
             return {"ok": False, "reason": "invalid_mode", "mode": mode}
         try:
             res = win_theme.apply_for_mode(mode, pid=os.getpid())
-        except Exception as e:  # 标题栏配色是锦上添花，任何异常都不能影响切换
+        except Exception as e:  # 标题栏配色是锦上添花，任何异常都不能影响切换  # noqa: BLE001
             self._push_status(
                 "err", f"⚠ 原生标题栏配色未能应用（界面主题已切换）：{e}")
             return {"ok": False, "reason": "apply_failed", "mode": mode,
@@ -131,7 +131,7 @@ class SettingsMixin:
         path = getattr(self.state, "adb_path", "") or "adb"
         try:
             return bool(shutil.which(path))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False
 
     def _prewarm_adb_server(self):
@@ -151,7 +151,7 @@ class SettingsMixin:
                 **adb_kwargs(10))
         try:
             info = self._probe_adb()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return
         if info["ok"] and info["version"]:
             with contextlib.suppress(Exception):
@@ -174,13 +174,13 @@ class SettingsMixin:
     def _wifi_default_port(self):
         try:
             return int(load_prefs().get("wifi_port", wifi.DEFAULT_PORT))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return wifi.DEFAULT_PORT
 
     def _wifi_recent(self):
         try:
             raw = load_prefs().get("wifi_recent", "")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             raw = ""
         return wifi.recent_from_pref(raw)
 
@@ -197,7 +197,7 @@ class SettingsMixin:
         # 「最近连接」里，下次进来却发现是空的 —— 用户会以为程序没记住，只能重敲。
         try:
             wrote = save_prefs_checked(patch)[1]
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             wrote = False
             self._push_status("warn", f"⚠ 已连接，但保存「最近连接」时出错：{e}")
             return recent
@@ -244,7 +244,7 @@ class SettingsMixin:
         try:
             r = subprocess.run([self._adb_argv(), "connect", addr],
                                **adb_kwargs(25))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status(
                 "err", f"✗ 无线连接失败（{addr}）：执行 adb connect 失败：{e}", toast=True)
             return {"ok": False, "reason": f"执行 adb connect 失败：{e}",
@@ -299,7 +299,7 @@ class SettingsMixin:
         """
         try:
             r = subprocess.run([self._adb_argv(), "devices"], **adb_kwargs(10))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return ""
         text = ((r.stdout or "") + "\n" + (r.stderr or ""))
         for serial, state, _ in parse_devices(text):
@@ -323,7 +323,7 @@ class SettingsMixin:
         try:
             r = subprocess.run([self._adb_argv(), "disconnect", addr],
                                **adb_kwargs(20))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return {"ok": False, "reason": f"执行 adb disconnect 失败：{e}"}
         text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
         low = text.lower()
@@ -342,7 +342,7 @@ class SettingsMixin:
             r = subprocess.run(
                 [self._adb_argv(), "-s", serial, "shell", script],
                 **adb_kwargs(15))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return "", ""
         return wifi.parse_device_ip(r.stdout or "")
 
@@ -372,7 +372,7 @@ class SettingsMixin:
                     [self._adb_argv(), "-s", s, "tcpip", str(p)],
                     **adb_kwargs(20))
                 out = ((r.stdout or "") + "\n" + (r.stderr or ""))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 out = str(e)
             res = wifi.parse_tcpip_output(out)
             addr = f"{ip}:{p:d}" if ip else ""
@@ -392,7 +392,7 @@ class SettingsMixin:
             # 是按用户填的端口开的，之后连不上没有任何线索。宁可提示一句。
             try:
                 wrote = save_prefs_checked({"wifi_port": p})[1]
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 wrote = False
                 self._push_status("warn", f"⚠ 无线调试已开启，但保存端口失败：{e}")
             if not wrote:

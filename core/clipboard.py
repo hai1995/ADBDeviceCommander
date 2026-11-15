@@ -86,7 +86,7 @@ def _numpy():
     if _np is _NP_UNSET:
         try:
             import numpy as _mod
-        except Exception:       # 没装 / 装坏 / 打包时被裁掉：一律回退
+        except Exception:       # 没装 / 装坏 / 打包时被裁掉：一律回退  # noqa: BLE001
             _mod = None
         _np = _mod
     return _np
@@ -132,7 +132,7 @@ def copy_image(path):
             raw = f.read()
         if not raw:
             return False, f"图片为空: {path}"
-    except Exception as e:                                  # 连读盘也永不冒泡
+    except Exception as e:                                  # 连读盘也永不冒泡  # noqa: BLE001
         return False, f"读取图片失败: {e}"
 
     impl = PLATFORM_IMPL.get(sys.platform)
@@ -151,7 +151,7 @@ def copy_image(path):
     pix = decode_png(data) if png else None
     try:
         ok, reason = impl(data, png, pix, path)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False, f"写入剪贴板异常: {e}"
     return bool(ok), reason
 
@@ -206,7 +206,7 @@ def decode_png(data):
         if ct == 6:
             try:
                 topdown = _pillow_rgba(data)
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 topdown = None
         if topdown is not None:
             # Pillow 已还原为自上而下 RGBA 字节流；包成 ndarray，让 BGR 换位
@@ -220,7 +220,7 @@ def decode_png(data):
             # 两条路径输出逐字节一致（tests/test_core_clipboard.py 有对拍）。
             topdown = _unfilter(raw, h, stride, bpp)
         return _bgra_bottom_up(topdown, w, h, bpp, stride)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -437,7 +437,7 @@ def copy_windows(raw, png, pix, path):
     try:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False, f"无法访问 Windows 剪贴板 API: {e}"
 
     _bind_win(user32, kernel32)

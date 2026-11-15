@@ -67,7 +67,7 @@ def _have_ffmpeg():
     try:
         r = subprocess.run(["ffmpeg", "-version"], **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
         return r.returncode == 0
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -114,7 +114,7 @@ def _wav_duration(path):
                 else:
                     f.seek(csize + (csize & 1), os.SEEK_CUR)
             return None
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -140,7 +140,7 @@ def _wav_ok(path):
             return False
         n = _wav_duration(path)
         return n is not None and n > 0
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -170,7 +170,7 @@ def _mp4_playable(path):
         # 没有 ffprobe 时退化为「体积 + moov 头」兜底判断
         with open(long_path(path), "rb") as f:
             return b"moov" in f.read(min(size, 4 * 1024 * 1024))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -253,7 +253,7 @@ def _mp4_duration(path):
                     return None
                 pos += bsize
         return None
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -319,7 +319,7 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
             _silent_remove(out_path)
         else:
             _silent_remove(out_path)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         _silent_remove(out_path)
     return None
 
@@ -352,7 +352,7 @@ class DeviceAudioCapture:
                 [adb, "-s", serial, "shell", "command", "-v", "tinycap"],
                 **adb_kwargs(10))
             return r.returncode == 0 and "tinycap" in (r.stdout or "")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False
 
     def __init__(self, adb="adb"):
@@ -387,7 +387,7 @@ class DeviceAudioCapture:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 **adb_popen_kwargs())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, f"无法启动 tinycap：{e}"
         # 探测 tinycap 是否真的跑起来了：很多 ROM 上 tinycap 需要 root，会立刻退出，
         # 而 supported() 只查了 `command -v tinycap`。不做这一步，start() 会对一个
@@ -416,7 +416,7 @@ class DeviceAudioCapture:
             proc.terminate()
         try:
             proc.wait(timeout=5)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 proc.kill()
         # 与录屏同理：tinycap 只在 SIGINT（Ctrl-C）下优雅收尾并写回 wav 头。
@@ -614,7 +614,7 @@ class MicRecorder:
             return False, "已在录音"
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, f"无法创建目录：{e}"
         ts = time.strftime("%Y%m%d_%H%M%S")
         # 同一秒内「停止 → 再录」不能把上一段录音覆盖掉（时间戳只到秒）
@@ -699,7 +699,7 @@ class MicRecorder:
                     with self._lock:
                         self._chunks.append(ctypes.string_at(hdr.lpData, n))
                         collected.add(int(hdr.lpData or 0))
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 continue
 
     def _write_wav(self):

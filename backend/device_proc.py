@@ -77,7 +77,7 @@ def device_pid(adb, serial, name, match=None):
         try:
             r = subprocess.run([adb, "-s", serial, "shell", "ps"] + extra,  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
                                **adb_kwargs(10))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             continue
         for line in (r.stdout or "").splitlines():
             if name not in line:

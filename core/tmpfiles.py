@@ -47,7 +47,7 @@ def _candidates(directory, prefixes):
     out = []
     try:
         names = os.listdir(directory)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return out
     for name in names:
         if not any(name.startswith(p) for p in prefixes if p):

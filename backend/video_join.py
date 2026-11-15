@@ -63,7 +63,7 @@ def _has_moov(path, scan=4 * 1024 * 1024):
                 return True
             f.seek(max(0, size - scan))
             return b"moov" in f.read()
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -103,7 +103,7 @@ def _err_text(proc):
     for attr in ("stderr", "stdout"):
         try:
             text = (getattr(proc, attr, "") or "").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             continue
         if text:
             # ffmpeg 的报错可能有很多行，只留最后几行（最后一行通常才是原因）
@@ -154,7 +154,7 @@ def join_segments(paths, out_path, timeout=None):
             with open(long_path(list_path), "w", encoding="utf-8") as f:
                 for p in used:
                     f.write("file '{}'\n".format(_concat_quote(p)))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped,
                     "reason": "无法写入合并清单：{}".format(e)}
@@ -163,7 +163,7 @@ def join_segments(paths, out_path, timeout=None):
                "-c", "copy", temp]
         try:
             r = subprocess.run(cmd, **adb_kwargs(timeout or MERGE_TIMEOUT_S))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped, "reason": "ffmpeg 合并失败：{}".format(e)}
@@ -194,7 +194,7 @@ def join_segments(paths, out_path, timeout=None):
                                   "拼接结果不可信".format(got, want)}
         try:
             os.replace(long_path(temp), long_path(out_path))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             _silent_remove(temp)
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped,

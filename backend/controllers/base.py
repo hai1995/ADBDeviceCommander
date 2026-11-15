@@ -650,6 +650,6 @@ class WebApiBase:
         try:
             path = resource_path("使用说明.txt")
             text = Path(path).read_text(encoding="utf-8", errors="replace")
-        except Exception as ex:  # 兜底给前端一个可读错误，不抛异常卡住桥接
+        except Exception as ex:  # 兜底给前端一个可读错误，不抛异常卡住桥接  # noqa: BLE001
             return {"ok": False, "reason": f"使用说明读取失败：{ex}"}
         return {"ok": True, "text": text}

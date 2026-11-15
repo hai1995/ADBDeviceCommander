@@ -71,7 +71,7 @@ def _absolute(path: str) -> str:
             return ntpath.abspath(s)
     try:
         return os.path.abspath(s)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return s
 
 

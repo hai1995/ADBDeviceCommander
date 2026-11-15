@@ -62,7 +62,7 @@ class LogcatMixin:
                 r = subprocess.run(
                     [adb, "-s", serial, "shell", "pm", "list", "packages"] + extra,
                     **adb_kwargs(12))
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 return []
             if r.returncode != 0:
                 return []
@@ -99,7 +99,7 @@ class LogcatMixin:
         save_dir = save_dir or self._default_save_dir()
         try:
             os.makedirs(long_path(save_dir), exist_ok=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 同上：返回前端也不看。保存目录不可写（只读盘 / 盘符不存在 /
             # 路径被同名文件占位）时，用户点「开始抓取」后什么都不发生。
             self._push_status(

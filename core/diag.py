@@ -487,7 +487,7 @@ class _Ctx:
     def run(self, args, timeout=TIMEOUT):
         try:
             return self.runner(list(args), timeout)
-        except Exception as e:      # 超时 / adb 不存在 / 设备拔掉
+        except Exception as e:      # 超时 / adb 不存在 / 设备拔掉  # noqa: BLE001
             return 1, "", str(e)
 
     def record(self, name, ok, size=0, source="", error=""):
@@ -549,7 +549,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
     serial_s = str(serial or "")
     try:
         os.makedirs(long_path(out_dir), exist_ok=True)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None, None, f"无法创建保存目录 {out_dir}：{e}"
 
     ctx = _Ctx(adb, serial_s, runner)
@@ -711,7 +711,7 @@ def collect(adb, serial, out_dir, with_logcat=True,
                     p = os.path.join(work, fn)
                     if path_exists(p):
                         z.write(long_path(p), fn)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 if os.path.exists(lzip):
                     os.remove(lzip)

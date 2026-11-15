@@ -166,13 +166,13 @@ class CommandMixin:
         pairs = tuple(pairs)
         try:
             from webview.util import parse_file_type
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 拿不到探测函数时，回退到兼容性最好的「字符串格式」
             return tuple(f"{desc} ({ext})" for desc, ext in pairs)
         # 探测新版字符串格式是否可用：能解析字符串就说明是新版
         try:
             parse_file_type("探测 (*.json)")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 解析失败 -> 旧版，用元组格式
             return pairs
         # 新版：拼成 '描述 (*.ext)' 字符串
@@ -186,14 +186,14 @@ class CommandMixin:
         """
         try:
             import webview
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("warn", f"⚠ 当前环境不支持原生文件对话框：{e}")
             return ""
         win = getattr(self, "window", None)
         try:
             if win is None and hasattr(webview, "active_window"):
                 win = webview.active_window()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             win = None
         if win is None or not hasattr(win, "create_file_dialog"):
             self._push_status("warn", "⚠ 当前环境不支持原生文件对话框")
@@ -216,10 +216,10 @@ class CommandMixin:
                 try:
                     files = win.create_file_dialog(
                         webview.OPEN_DIALOG, directory, False)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     self._push_status("warn", f"⚠ 打开文件对话框失败：{e}")
                     return ""
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("warn", f"⚠ 打开文件对话框失败：{e}")
             return ""
         if not files:
@@ -249,7 +249,7 @@ class CommandMixin:
             # 兼容无 BOM 的普通 UTF-8（与 config.json / 命令库的读法一致）。
             with open(long_path(path), encoding="utf-8-sig") as f:
                 text = f.read()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return {"ok": False, "reason": f"读取文件失败：{e}"}
         return self.import_commands(text)
 
@@ -268,7 +268,7 @@ class CommandMixin:
                 # 前端 / 第三方工具传进来的字符串可能带 BOM（记事本另存为 UTF-8），
                 # json.loads 对 \ufeff 直接报 "Unexpected UTF-8 BOM"。
                 payload = json.loads(payload.lstrip("\ufeff"))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 return {"ok": False, "reason": f"JSON 解析失败：{e}"}
         if isinstance(payload, dict) and "commands" in payload:
             incoming = payload.get("commands") or []
@@ -415,7 +415,7 @@ class CommandMixin:
                             self._ws_status(
                                 "info", f"──── 执行「{name}」（无需指定设备）────")
                             self._run_entries(entries, None)
-                    except Exception as ex:
+                    except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                         self._ws_status(
                             "err", f"⚠ 命令执行出现异常：{ex}")
                 finally:
@@ -442,7 +442,7 @@ class CommandMixin:
         try:
             checked = [s for s, on in (self.devices.device_checked or {}).items()
                        if on]
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             checked = []
         if checked:
             return (f"⚠ 命令「{name}」需要设备，但已勾选的 {len(checked):d} 台当前都不可用（离线 / 未授权 / 正在重连）：{'、'.join(sorted(checked))}")
@@ -562,7 +562,7 @@ class CommandMixin:
         adb = self.state.adb_path or "adb"
         try:
             rooted = root_state(adb, serial)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             rooted = None
         # 无法确认（adb 瞬断 / 设备忙 / 该 ROM 没有 id 与 whoami）时**不能猜**：
         # 猜成「未 root」会让 `adb unroot` 被判成「已在目标状态」直接跳过 ——

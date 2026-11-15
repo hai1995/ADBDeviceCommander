@@ -57,7 +57,7 @@ def _terminate(proc):
         proc.terminate()
     try:
         proc.wait(timeout=2)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):
             proc.kill()
 
@@ -86,7 +86,7 @@ def _write_marker(f, text):
         f.write(f"\n--------- [logcat] {text} ---------\n")
         f.flush()
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -101,13 +101,13 @@ def _device_uptime(adb, serial):
         r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [adb, "-s", serial, "shell", "cat", "/proc/uptime"],
             **adb_kwargs(5))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
     if r.returncode != 0:
         return None
     try:
         return float((r.stdout or "").split()[0])
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -161,7 +161,7 @@ def pkg_pids_of(adb, serial, package, timeout=6):
                     pids.add(tok)
                     break
         return pids
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return set()
 
 
@@ -300,7 +300,7 @@ class LogcatMonitor:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 **adb_popen_kwargs())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with self._lock:
                 self._running.pop(serial, None)
                 self._stops.pop(serial, None)
@@ -848,7 +848,7 @@ class LogcatCapture:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         **adb_popen_kwargs())
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     err_reported = True
                     write_error = f"启动抓取失败：{e}"
                     self.bus.push("logcat_capture",
@@ -899,7 +899,7 @@ class LogcatCapture:
                         f = open(long_path(path), "w", encoding="utf-8",
                                  errors="replace",
                                  buffering=1)
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                         err_reported = True
                         write_error = f"抓取异常：{e}"
                         self.bus.push("logcat_capture",
@@ -1018,7 +1018,7 @@ class LogcatCapture:
                             last_log_epoch = None
                         # 落盘由文件对象的行缓冲负责（见上面的 buffering=1）：
                         # 这里不再做「攒够多少行再 flush」，否则尾部落盘不及时。
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     err_reported = True
                     write_error = f"抓取异常：{e}"
                     self.bus.push("logcat_capture",
@@ -1301,7 +1301,7 @@ class LogcatCapture:
                 os.remove(lzpath)
             with zipfile.ZipFile(lzpath, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(long_path(path), os.path.basename(path))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 if os.path.exists(lzpath):
                     os.remove(lzpath)

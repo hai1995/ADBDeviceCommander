@@ -114,7 +114,7 @@ def _dwm_setter():
     try:
         import ctypes
         dwmapi = ctypes.windll.dwmapi
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
     # 显式声明原型：HWND 是 64 位指针，不声明时按 C int（32 位）传会被截断，
     # DwmSetWindowAttribute 便作用在一个不存在的窗口上 —— 标题栏配色静默失效。
@@ -152,7 +152,7 @@ def apply_to_hwnd(hwnd, mode="dark", bg=None, text=None, border=None,
         try:
             setter(hwnd, attr, val)
             applied.append(attr)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             failed.append(attr)
         # 深色模式的新编号不被认识时补一次旧编号（1809~1903）
         if attr == DWMWA_USE_IMMERSIVE_DARK_MODE and attr in failed:
@@ -175,12 +175,12 @@ def _hwnd_of(native):
                    lambda: native):
         try:
             v = getter()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             continue
         try:
             # pythonnet 的 IntPtr 不能直接 int()，它有 ToInt64()
             return int(v.ToInt64()) if hasattr(v, "ToInt64") else int(v)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             continue
     return 0
 
@@ -215,7 +215,7 @@ def find_window(pid=None, title_hint=""):
             ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
             wintypes.LPARAM]
         user32.EnumWindows.restype = wintypes.BOOL
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return 0
     pid = int(pid or os.getpid())
     found = []
@@ -237,7 +237,7 @@ def find_window(pid=None, title_hint=""):
 
     try:
         user32.EnumWindows(_cb, 0)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return 0
     if not found:
         return 0
@@ -272,7 +272,7 @@ def attach(native=None, timeout=4.0, interval=0.12, pid=None,
         hwnd = 0
         try:
             hwnd = _hwnd_of(native)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             hwnd = 0
         if not hwnd:
             hwnd = find_window(pid, title_hint)
@@ -300,7 +300,7 @@ def _resolve_system_mode():
         ) as key:
             val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
         return "light" if val == 1 else "dark"
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return "dark"
 
 
@@ -322,7 +322,7 @@ def apply_for_mode(mode="dark", native=None, pid=None, title_hint="ADB",
     if native is not None:
         try:
             hwnd = _hwnd_of(native)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             hwnd = 0
     if not hwnd:
         hwnd = find_window(pid, title_hint)

@@ -303,7 +303,7 @@ class DeviceManager:
                 raw, err = out.stdout or "", ""
             except subprocess.TimeoutExpired:
                 raw, err = None, "timeout"
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 raw, err = None, str(ex) or ex.__class__.__name__
             if raw is not None:
                 if parse_devices(raw) or not had:
@@ -367,7 +367,7 @@ class DeviceManager:
             return False
         try:
             return bool(guard())
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False
 
     # ------------------------------------------------------------------

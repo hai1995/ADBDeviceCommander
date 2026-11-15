@@ -109,7 +109,7 @@ def _command_sig(c):
     try:
         return tuple((str(e.get("command", "")), int(e.get("delay", 0) or 0))
                      for e in c.get("commands", []))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return tuple()
 
 
@@ -213,7 +213,7 @@ def discover_commands(directory=None):
         base = os.path.basename(p)
         try:
             raw = _read_json(p)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             warnings.append(f"命令文件读取失败：{base}（{ex}）")
             continue
         if not isinstance(raw, (list, dict)):
@@ -221,7 +221,7 @@ def discover_commands(directory=None):
             continue
         try:
             cmds, w = normalize_commands(raw)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             warnings.append(f"命令文件 {base} 解析异常：{ex}")
             continue
         for msg in w:
@@ -362,7 +362,7 @@ def normalize_commands(raw):
                     if isinstance(cmd, str) and cmd.strip():
                         try:
                             d = int(e.get("delay", 0) or 0)
-                        except Exception:
+                        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                             d = 0
                         entries.append({"command": cmd.strip(), "delay": d})
                     elif cmd is not None:
@@ -380,7 +380,7 @@ def normalize_commands(raw):
 
         try:
             clicks = int(c.get("clickCount", 0) or 0)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             clicks = 0
 
         # inputOnly：electerm 的「仅输入」标记 —— 点击命令卡片时只把命令文本
@@ -479,7 +479,7 @@ def save_click_deltas(deltas):
     try:
         with open(long_path(p), encoding="utf-8-sig") as f:
             raw = json.load(f)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return
     items = list(raw.values()) if isinstance(raw, dict) else raw
     if not isinstance(items, list):
@@ -502,7 +502,7 @@ def save_click_deltas(deltas):
             applied.add(key)
             try:
                 old = int(c.get("clickCount", 0) or 0)
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 old = 0
             c["clickCount"] = old + deltas[key]
             changed = True
@@ -532,7 +532,7 @@ def _write_json_atomic(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(ltmp, lpath)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):
             if path_exists(ltmp):
                 os.remove(ltmp)
@@ -583,7 +583,7 @@ def load_commands(directory=None):
     """
     try:
         cmds, warnings, _files = discover_commands(directory or command_scan_dir())
-    except Exception as ex:
+    except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return merge_builtins([]), [
             f"快捷命令加载出现异常：{ex}（已回退到内置默认）"]
     if not cmds:

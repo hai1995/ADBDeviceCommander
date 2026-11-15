@@ -143,7 +143,7 @@ def _pywebview_version():
     try:
         from importlib import metadata
         return metadata.version("pywebview")
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -197,7 +197,7 @@ def _win32():
         user32 = ctypes.windll.user32
         shell32 = ctypes.windll.shell32
         k32 = ctypes.windll.kernel32
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None, None, None
     user32.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
                                    ctypes.c_wchar_p, ctypes.c_uint]
@@ -249,7 +249,7 @@ def _show_native_error(title, lines, url=None):
             if url and res == IDOK:
                 with contextlib.suppress(Exception):
                     shell32.ShellExecuteW(None, "open", url, None, None, 1)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             shown = False
     if not shown:
         print(f"\n[环境检查未通过] {title}\n{text}\n", file=sys.stderr)
@@ -270,7 +270,7 @@ def _write_crash_log(title, exc_type, exc, tb):
         buf = io.StringIO()
         traceback.print_exception(exc_type, exc, tb, file=buf)
         body = buf.getvalue().rstrip()
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         body = "{}: {}".format(getattr(exc_type, "__name__", exc_type), exc)
     text = "\n".join([
         "=" * 64,
@@ -301,7 +301,7 @@ def _write_crash_log(title, exc_type, exc, tb):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             return path
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             continue
     return None
 
@@ -318,7 +318,7 @@ def _notify_crash(log_path):
         _user32.MessageBoxW(
             None, lines, "ADB 设备指令台 · 崩溃提示",
             MB_ICONERROR | MB_SYSTEMMODAL)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         print(f"[崩溃] {log_path}", file=sys.stderr)
 
 
@@ -427,7 +427,7 @@ def _process_age_seconds():
         # FILETIME：100ns 计数，起点 1601-01-01；11644473600 是 1601→1970 的秒数
         ft = (created.dwHighDateTime << 32) | created.dwLowDateTime
         return max(0.0, time.time() - (ft / 1e7 - 11644473600))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return None
 
 
@@ -588,7 +588,7 @@ def _delete_zone_identifier(ads_path):
         fn.argtypes = [ctypes.c_wchar_p]
         fn.restype = ctypes.c_int
         return bool(fn(ads_path))
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
 
 
@@ -639,7 +639,7 @@ def _report_gui_init_failure(exc):
     try:
         log = _write_crash_log("窗口启动失败（GUI 初始化）", type(exc), exc,
                                exc.__traceback__)
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         log = None
     if log:
         lines += ["", f"崩溃详情已写入：{log}"]
@@ -773,7 +773,7 @@ def _launch(args, api, url, _T0=None):
         webview.start(debug=args.debug, func=_theme_window, args=(window,))
     except KeyboardInterrupt:
         print("[main] 收到中断信号，正在退出…", file=sys.stderr)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         # pythonnet / WebView2 初始化失败（典型：onedir 分发件的 DLL 带
         # 「来自网络」标记，.NET Framework 拒绝加载）。MOTW 清理由上面兜底，
         # 这里再兜一层：只读目录 / 企业策略删不掉 ADS 时，给用户一条能自己
@@ -783,7 +783,7 @@ def _launch(args, api, url, _T0=None):
     finally:
         try:
             api.shutdown()
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             print(f"[main] 退出清理异常：{ex}", file=sys.stderr)
     return window
 

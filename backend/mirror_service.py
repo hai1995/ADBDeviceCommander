@@ -198,7 +198,7 @@ def probe_player(pref_path=""):
                            creationflags=no_window_flags())
         out = (r.stdout or "").strip() or (r.stderr or "").strip()
         version = out.splitlines()[0].strip()[:60] if out else ""
-    except Exception:
+    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         version = ""
     return {"ok": True, "kind": kind, "path": exe, "version": version,
             "note": note}
@@ -319,7 +319,7 @@ class PipeMirror:
                 [self.player_exe] + _player_args(self.player_kind, self.fps),
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, creationflags=no_window_flags())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, f"播放器启动失败：{e}"
         # 必须有人把 stderr 读走：管道容量只有 64KB，mpv / vlc 这类会持续
         # 打日志的播放器写满之后就会**阻塞在写日志上**，随之不再消费 stdin，
@@ -348,7 +348,7 @@ class PipeMirror:
             self._adb_proc = subprocess.Popen(
                 self._adb_cmd(), stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, creationflags=no_window_flags())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False, f"screenrecord 启动失败：{e}"
         # adb stderr 可能输出设备掉线 / 权限不足等报错：管道 64KB 写满后 adb
         # 会阻塞在 write 上（stdout 的视频流也会停止、player 收不到新帧），
@@ -390,7 +390,7 @@ class PipeMirror:
             return False
         try:
             return p.poll() is None
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return False
 
     def _close_player(self, wait=2.0):
@@ -403,11 +403,11 @@ class PipeMirror:
                 self._close_player_pipes(player)
                 return
             player.terminate()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return
         try:
             player.wait(timeout=wait)
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 player.kill()
         self._close_player_pipes(player)
@@ -442,7 +442,7 @@ class PipeMirror:
                             self._started_ok = True   # 此后中断才值得回调整
                             self._first_data.set()
                             self._done.set()     # 放行 start() 的同步等待
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     self.error = f"转发中断：{e}"
                 with contextlib.suppress(Exception):
                     if proc.stdout: proc.stdout.close()
@@ -450,7 +450,7 @@ class PipeMirror:
                     if proc.stderr: proc.stderr.close()
                 try:
                     proc.wait(timeout=5)
-                except Exception:
+                except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     # 读循环已退出但 adb 还活着：必须主动收掉。否则每次中断都留
                     # 一个挂着设备端 screenrecord 的 adb 进程，而续流又会再起
                     # 一个新的 —— 几轮下来设备端编码器被抢光。
@@ -554,7 +554,7 @@ class PipeMirror:
             return False
         try:
             return bool(self.rec_guard())
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return True
 
     def alive(self):
@@ -584,7 +584,7 @@ class FrameServer:
         try:
             self._httpd = _ThreadingFrameServer(("127.0.0.1", 0), _make_handler(self))
             self._port = self._httpd.server_address[1]
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._httpd = None
             return 0
         self._thread = threading.Thread(
@@ -735,7 +735,7 @@ class SnapMirror:
             if not data:
                 return None, f"设备返回的画面无法识别（{note}）"
             return data, None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 超时时 communicate 只抛错、不终止子进程：卡住的 adb 会变孤儿
             if proc is not None:
                 with contextlib.suppress(Exception):

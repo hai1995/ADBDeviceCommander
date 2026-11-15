@@ -73,10 +73,10 @@ class ScreenshotMixin:
             # +1/-1 同源同宿，任何执行时序（同步/异步 spawn）都自然平衡。
             try:
                 self.workers.spawn(
-                    "screenshot_%s_%d" % (s, next(self._shot_seq)),
+                    f"screenshot_{s}_{next(self._shot_seq):d}",
                     self._do_screenshot, s, save_dir, to_clipboard and not batch,
                     batch, bstate, save_file)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 # 线程起不来（线程数耗尽 / 内存告急）：这台没有 worker，也就不会
                 # 有任何人来记账 —— 批量汇总永远凑不齐（那条 toast 再也弹不出来），
                 # 而 API 仍回 ok=True，前端的禁用态只能等下一次 devices 事件才解。
@@ -84,11 +84,11 @@ class ScreenshotMixin:
                 failed.append(s)
                 if batch:
                     self._shot_batch_done(
-                        ok=False, serial=s, err="无法启动截图线程：{}".format(e),
+                        ok=False, serial=s, err=f"无法启动截图线程：{e}",
                         bstate=bstate)
                 else:
                     self._push_status(
-                        "err", "⚠ 无法启动截图线程 {}：{}".format(s, e))
+                        "err", f"⚠ 无法启动截图线程 {s}：{e}")
         if failed and len(failed) == len(serials):
             # 一台都没跑起来：明确告诉调用方失败，前端据此立刻恢复按钮
             # （没有 worker 就没有 shot_state 事件，等不到那次「已完成」）。
@@ -150,19 +150,17 @@ class ScreenshotMixin:
             where = ("保存目录 {}".format(b["dir"])) if saved else "（未保存到目录）"
             self._push_toast(
                 "warn",
-                "⚠ 批量截图完成：%d 成功，%d 失败（%s）——%s"
-                % (b["ok"], b["fail"], "；".join(b["errs"])[:120], where))
+                f"⚠ 批量截图完成：{b['ok']:d} 成功，{b['fail']:d} 失败（{'；'.join(b['errs'])[:120]}）——{where}")
         else:
             where = ("保存目录 {}".format(b["dir"])) if saved else "（未保存到目录）"
             self._push_toast(
-                "ok", "✓ 已完成 %d 台设备的截图，%s"
-                % (b["ok"], where))
+                "ok", f"✓ 已完成 {b['ok']:d} 台设备的截图，{where}")
 
     def _shot_to_clipboard_pref(self):
         """用户偏好：截图后同步到粘贴板与否（缺省开启）。"""
         try:
             return bool(get_pref("shot_to_clipboard", True))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return True
 
     def _shot_save_file_pref(self):
@@ -173,7 +171,7 @@ class ScreenshotMixin:
         """
         try:
             return bool(get_pref("shot_save_file", True))
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return True
 
     def _do_screenshot(self, serial, save_dir, to_clipboard=False, batch=False,
@@ -201,7 +199,7 @@ class ScreenshotMixin:
         path, err = ScreenCapturer.screenshot(
             self.state.adb_path, serial, save_dir, save_file)
         if err:
-            self._push_status("err", "⚠ 截图失败 {}: {}".format(serial, err))
+            self._push_status("err", f"⚠ 截图失败 {serial}: {err}")
             if batch:
                 self._shot_batch_done(ok=False, serial=serial, err=err,
                                       bstate=bstate)
@@ -214,7 +212,7 @@ class ScreenshotMixin:
         # save_file=False 时不落盘到保存目录（只到临时目录供预览/剪贴板用），
         # 措辞改「截图完成（未保存到目录）」避免用户去保存目录找一份不存在的图。
         if save_file:
-            saved_msg = "✓ 已保存截图: {}".format(path)
+            saved_msg = f"✓ 已保存截图: {path}"
         else:
             saved_msg = "✓ 截图完成（未保存到目录）"
         if batch:
@@ -255,7 +253,7 @@ class ScreenshotMixin:
         try:
             with open(long_path(p), "rb") as f:
                 data = f.read()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return {"ok": False, "reason": str(e)}
         if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
             return {"ok": False, "reason": "not_png"}

@@ -76,12 +76,12 @@ class RecordMixin:
             return False, "已在录音"
         try:
             self._mic = MicRecorder()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._mic = None
             return False, str(e)
         try:
             ok, p = self._mic.start(save_dir)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 self._mic.stop()
             self._mic = None
@@ -135,7 +135,7 @@ class RecordMixin:
                     serial, with_devaudio, with_mic, save_dir,
                     with_logcat, zip_on_stop, logcat_levels,
                     pointer_location, show_touches)
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 # 仅撤销「本次调用自己创建的」会话：异常发生时 _rec_session 必然
                 # 是刚建的那份（守卫保证进入前它一定为空），撤销它不会误伤他人。
                 self._cancel_half_started_rec()
@@ -247,7 +247,7 @@ class RecordMixin:
                 try:
                     rs, r = _spawn(s)
                     spawned[rs] = r
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     errors.append(ex)
         else:
             # 上限 4：再多设备同时拉起也挤在同一条 adb server 通道上。
@@ -259,7 +259,7 @@ class RecordMixin:
                 try:
                     rs, r = f.result()
                     spawned[rs] = r
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     errors.append(ex)
 
         if errors:
@@ -448,7 +448,7 @@ class RecordMixin:
                 val = None if (old is None or str(old).strip().lower()
                                in ("null", "")) else str(old).strip()
                 ok, err = self._set_device_setting(s, key, val)
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 ok, err = False, str(ex)[:160]
             return s, key, ok, err
 
@@ -515,7 +515,7 @@ class RecordMixin:
                     "ok", f"✓ 录屏已完成{seg_tip}：{len(files):d} 个文件已保存到 {sess.get('dir') or '保存目录'}")
             self._push_logcat_notes(sess)
             return {"ok": True}
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_toast("err", f"⚠ 录屏收尾出现异常：{ex}")
             return {"ok": False, "reason": "stop_error", "error": str(ex)}
         finally:
@@ -535,7 +535,7 @@ class RecordMixin:
         with self._rec_lock:
             try:
                 return self._screen_record_cancel_locked()
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 self._push_toast("err", f"⚠ 取消录屏出现异常：{ex}")
                 return {"ok": False, "reason": "cancel_error", "error": str(ex)}
             finally:
@@ -601,7 +601,7 @@ class RecordMixin:
                         # 旧实现 / 测试替身没有 discard_ex：退化为正常停止 + 删除
                         # （多花一次 pull，但语义仍然是「一个都不留」）。
                         ok, paths, err = self._stop_video(s)
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     ok, paths, err = False, [], str(ex)
                 candidates.extend(paths or [])
                 # 「该设备未在录制」是正常情况（它已经自己收尾过了），不报警
@@ -612,7 +612,7 @@ class RecordMixin:
             if s in devaudio_map:
                 try:
                     local_a = self.device_audio.stop(s)
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     local_a = None
                     self._push_status(
                         "warn", f"⚠ {s} 取消时设备音频收尾失败：{ex}")
@@ -623,7 +623,7 @@ class RecordMixin:
             mic = None
             try:
                 mic = self._mic.stop()
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 mic = None
             self._mic = None
             if mic:
@@ -642,7 +642,7 @@ class RecordMixin:
                 try:
                     if not self.logcat_capture.is_running(s):
                         break
-                except Exception:
+                except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     break
                 time.sleep(0.1)
         return self._delete_files(candidates)
@@ -663,7 +663,7 @@ class RecordMixin:
                 continue
             try:
                 key = os.path.normcase(os.path.abspath(p))
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 key = p
             if key in seen:
                 continue
@@ -673,7 +673,7 @@ class RecordMixin:
                     continue
                 os.remove(long_path(p))
                 removed += 1
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 kept.append(p)
         return removed, kept, len(seen)
 
@@ -729,7 +729,7 @@ class RecordMixin:
         if self._mic is not None:
             try:
                 mic_path = self._mic.stop()
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 mic_path = None
             self._mic = None
         rec_files = []   # 最终要打包的产出文件
@@ -880,7 +880,7 @@ class RecordMixin:
                                       "本次日志不可用".format(s))]
                 try:
                     facts = self.logcat_capture.capture_facts(s) or {}
-                except Exception:
+                except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     facts = {}
                 # ① 抓取起点晚于录制起点：录制开头那段确实没有日志。
                 cap_started = facts.get("started_host")
@@ -921,7 +921,7 @@ class RecordMixin:
                             "请统一按设备时间看".format(
                                 s, _fmt_span(abs(skew)),
                                 "设备偏快" if skew > 0 else "设备偏慢")))
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 return out
             return out
 
@@ -1016,7 +1016,7 @@ class RecordMixin:
             try:
                 os.replace(long_path(merged), long_path(want))
                 final = want
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 # 改不成名（目标被播放器占着等）不是失败：成片已经在 out 上，
                 # 只是名字带 `_full`。说清楚它到底叫什么，别让用户以为没合。
                 self._push_status(
@@ -1118,7 +1118,7 @@ class RecordMixin:
             if s in devaudio_map:
                 try:
                     local_a = self.device_audio.stop(s)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     # 音频收尾失败不能连累视频落盘，也不能让整轮收尾中断
                     self._push_status(
                         "warn", f"⚠ {s} 设备音频收尾失败：{e}")
@@ -1178,7 +1178,7 @@ class RecordMixin:
                         written.append(p)
             if not os.path.exists(lzip):
                 return None
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 打包中途失败：清掉可能残留的半成品 zip，源文件一律保留
             with contextlib.suppress(Exception):
                 if os.path.exists(lzip):
@@ -1193,7 +1193,7 @@ class RecordMixin:
         """用户配置的 scrcpy 路径（读失败一律当空 = 走自动探测）。"""
         try:
             return str(load_prefs().get("scrcpy_path") or "")
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return ""
 
     def scrcpy_probe(self):
@@ -1222,7 +1222,7 @@ class RecordMixin:
             return {"ok": False, "reason": "scrcpy_not_found", "note": note}
         try:
             res = self._scrcpy.launch(serials, exe)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_toast("err", f"⚠ 投屏启动出现异常：{ex}")
             return {"ok": False, "reason": "start_error", "error": str(ex)}
         started = res["started"]
@@ -1246,7 +1246,7 @@ class RecordMixin:
         """备用投屏相关配置（读失败一律回退默认值，不让界面卡在异常上）。"""
         try:
             p = load_prefs()
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             p = {}
         return {
             "player_path": str(p.get("mirror_player_path") or ""),
@@ -1292,7 +1292,7 @@ class RecordMixin:
                 continue
             try:
                 alive = bool(m.alive())
-            except Exception:
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 alive = False          # 探活本身抛错 = 当作已死，让用户能重开
             if alive:
                 return m
@@ -1310,7 +1310,7 @@ class RecordMixin:
             if exe:
                 try:
                     res = self._scrcpy.launch([serial], exe)
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     res = {"started": [], "skipped": [], "failed": [(serial, str(ex))]}
                 if res["started"] or res["skipped"]:
                     return {"mode": "scrcpy", "frame_url": ""}
@@ -1376,7 +1376,7 @@ class RecordMixin:
                 continue
             try:
                 res = self._start_one_mirror(s, pref, mode)
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 res = {"error": str(ex)}
             finally:
                 with self._mirror_lock:

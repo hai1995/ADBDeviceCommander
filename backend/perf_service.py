@@ -404,7 +404,7 @@ def list_packages(adb="adb", serial="", timeout=12):
     args += ["shell", script]
     try:
         r = subprocess.run(args, **adb_kwargs(timeout))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-    except Exception as ex:
+    except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return {"ok": False, "reason": f"adb 调用失败：{ex}"}
     if getattr(r, "returncode", 0) != 0:
         err = (r.stderr or "").strip() or (r.stdout or "").strip()
@@ -563,7 +563,7 @@ class PerfMonitor:
             r = self._run(["shell",
                            "getprop ro.product.model; getprop ro.build.version.release; wm size 2>/dev/null"], timeout=8)
             lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-        except Exception:
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return
         if len(lines) >= 1:
             self.info["model"] = lines[0]
@@ -583,7 +583,7 @@ class PerfMonitor:
         """
         try:
             r = self._run(["shell", self._script()])
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 不记原因的话，start() 只能报一句「读取设备状态失败（是否已授权？）」
             # —— 而真正的答案（device offline / unauthorized / adb 不存在）就在
             # 这个异常里，用户照着那句猜会去检查授权，方向完全是错的。
@@ -619,7 +619,7 @@ class PerfMonitor:
         """采一次样，返回 sample dict（失败返回 None）。"""
         try:
             r = self._run(["shell", self._script()])
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self.error = f"adb 调用失败：{ex}"
             return None
         if getattr(r, "returncode", 0) != 0:
