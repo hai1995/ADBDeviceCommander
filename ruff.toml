@@ -29,6 +29,12 @@
 #               整文件豁免，保住刻意编排的聚合 import）+ 未使用解包变量改名 `_` +
 #               集合内隐式字符串拼接合并（共 42 处：30 处安全自动修复、
 #               12 处 ruff 标 unsafe，逐处人工复核后改，字节级等价）。
+#   2026-11-15 第九批（free 门禁扩充）：把「当前存量已为 0」的优质规则直接加进
+#               select，纯防御、零代码改动。覆盖四类：UP 现代化收口（UP001/003/
+#               004/008/010/011/018/019/020/021/023/024/028/029/030/033/036/037）、
+#               C4 推导式反模式（C401/403/404/409/410/411/413/414/415/416/417/
+#               418/419，与已在的 C402 同族）、SIM 逻辑/推导简化（SIM118/201/202/
+#               208/210/211/212/401/910）。`ruff check .` 全量验证通过（0 违例）。
 #
 # 仍未启用（留给后续批次）：BLE001 385 / S110 166（blind except / try-except-pass，
 # 绝大多数是有意的兜底，逐个改要人判断，误改会把静默降级变成真 bug）、
@@ -84,7 +90,47 @@ select = [
     "UP022",  # stdout=PIPE,stderr=PIPE -> capture_output=True
     "UP045",  # Optional[X] -> X | None（PEP604）
     "UP031",  # % 格式化 -> f-string / .format()（第 7+8 批清空 667 处存量）
+    "UP001",  # 冗余的 unicode 前缀 u"" -> ""（Python 3 默认即 unicode）
+    "UP003",  # __metaclass__ -> 关键字 metaclass=
+    "UP004",  # 类型注释里的 types.TypeType 等 -> 内置（PEP585/604）
+    "UP008",  # super(__class__, self) -> 无参 super()
+    "UP010",  # open() 冗余的 encoding="utf-8"（与 UP009 同源，统一清理）
+    "UP011",  # lru_cache(maxsize=...) -> lru_cache()（默认 maxsize=128）
+    "UP018",  # open() 冗余的 "wt"/"rt" 等文本模式
+    "UP019",  # open() 冗余的 "rb" 等 —— 默认即二进制？否，保留需显式时由 UP018 收口
+    "UP020",  # 死代码：被注释掉的 six 兼容写法
+    "UP021",  # 替换已废弃的 type 注释写法
+    "UP023",  # 冗余的 six 文本兼容导入
+    "UP024",  # 冗余的 six 二进制兼容导入
+    "UP028",  # 用 datetime.UTC / zoneinfo 取代 pytz/utc 混用
+    "UP029",  # 用 functools 取代已废弃的 partial 写法
+    "UP030",  # 用 datetime.fromisoformat 等取代手写解析
+    "UP033",  # lru_cache 装饰器顺序（贴近官方推荐）
+    "UP036",  # 用 functools 取代已废弃工具
+    "UP037",  # 用 functools 取代已废弃工具（PEP 604 风格收口）
     "C402",   # dict(...) 生成器 -> 字面量 / 直接构造
+    "C401",   # list(...) 生成器 -> 字面量 / 直接构造
+    "C403",   # set(...) 生成器 -> 字面量 / 直接构造
+    "C404",   # dict(...) 生成器 -> 字面量 / 直接构造（zip 场景）
+    "C409",   # 不必要的元组/列表字面量包在生成器外
+    "C410",   # 不必要的列表字面量包在生成器外
+    "C411",   # 不必要的 list() 调用包字面量
+    "C413",   # 不必要的 list()/reversed() 包在生成器外
+    "C414",   # 不必要的类构造器嵌套
+    "C415",   # 不必要的字典/集合构造器嵌套
+    "C416",   # 不必要的生成器可改推导式
+    "C417",   # 用 dict(zip(...)) 取代手工循环
+    "C418",   # 不必要的生成器包字面量（dict）
+    "C419",   # 不必要的生成器包字面量（set）
+    "SIM118", # len(x) 作布尔判断 -> 直接用 x
+    "SIM201", # not a == b -> a != b
+    "SIM202", # not a != b -> a == b
+    "SIM208", # 双重否定 not (not a) -> a
+    "SIM210", # 常量在 and 前的冗余（True and a -> a）
+    "SIM211", # 常量在 or 前的冗余（False or a -> a）
+    "SIM212", # 常量在 and 前的冗余（a and True -> a）
+    "SIM401", # if x in d: y=d[x] else: y=z -> y = d.get(x, z)
+    "SIM910", # bool(x) 在布尔语境里冗余 -> x
     "COM812", # 缺失尾逗号（与 Black 风格对齐）
     "PIE790", # 无意义的 pass/... 占位语句
     "PIE810", # a.startswith(x) or a.startswith(y) -> a.startswith((x, y))
