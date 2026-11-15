@@ -97,6 +97,20 @@ def test_player_args_use_stdin():
         assert args and args[-1] == "-", kind
 
 
+def test_player_args_tolerates_non_int_fps():
+    """fps 可能被测试 / 调用方传成 float 或数字字符串（上一提交刚修过同类：
+    常量被 mock 成 float 后 `:d` 抛 ValueError）。mpv 分支的 f"--fps={fps:d}"
+    对 float/str 都会 ValueError，直接让备用投屏起不来；ffplay 分支用 str(fps)
+    则把 60.0 原样传成「-framerate 60.0」。四种播放器都应在入口把 fps 归一成
+    规范整数：既不崩，也不把小数写进命令行。
+    """
+    for kind in svc.PLAYER_ORDER:
+        for fps in (60, 60.0, "60"):
+            args = svc._player_args(kind, fps)
+            assert args and args[-1] == "-", (kind, fps)
+            assert "60.0" not in " ".join(args), (kind, fps, args)
+
+
 # ---------------------------------------------------------------- 分辨率
 
 

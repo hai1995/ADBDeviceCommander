@@ -83,14 +83,20 @@ def _player_args(kind, fps=60):
         `--framedrop=always` 宁可丢帧也要追上实时；
       * mplayer：`-demuxer h264es` 明确告诉它这是裸流，`-cache 512` 给个小窗；
       * vlc：`--demux=h264`（vlc 对裸流的 stdin 支持最别扭，故排最后）。
+
+    fps 在入口归一成整数：调用方 / 测试可能传 float 或数字字符串（配置项
+    mirror_fps 经 int() 落库，但 mock 与直接调用不保证），mpv 分支原先的
+    `f"--fps={fps:d}"` 遇到非 int 会抛 ValueError 让投屏起不来，ffplay 分支的
+    `str(fps)` 则会把 60.0 原样写进 `-framerate`。统一 int() 后两条路径行为一致。
     """
+    fps = int(fps)
     if kind == "ffplay":
         return ["-f", "h264", "-framerate", str(fps), "-framedrop",
                 "-fflags", "nobuffer", "-flags", "low_delay",
                 "-probesize", "32", "-sync", "video", "-"]
     if kind == "mpv":
         return ["--no-cache", "--untimed", "--no-correct-pts",
-                f"--fps={fps:d}", "--framedrop=always", "-"]
+                f"--fps={fps}", "--framedrop=always", "-"]
     if kind == "mplayer":
         return ["-framedrop", "-fps", "6000", "-cache", "512",
                 "-demuxer", "h264es", "-nosound", "-"]
