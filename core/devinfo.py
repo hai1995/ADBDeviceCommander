@@ -113,7 +113,7 @@ def _parse_battery(block):
             continue
         m = re.match(r"temperature:\s*(-?\d+)", line)
         if m:
-            out["temp"] = "%.1f" % (int(m.group(1)) / 10.0)
+            out["temp"] = f"{int(m.group(1)) / 10.0:.1f}"
     return out
 
 
@@ -218,10 +218,10 @@ def _size(kb):
     if n <= 0:
         return "0 MB"
     if n >= 1024 * 1024:
-        return "%.1f GB" % (n / 1024.0 / 1024.0)
+        return f"{n / 1024.0 / 1024.0:.1f} GB"
     if n >= 1024:
-        return "%.0f MB" % (n / 1024.0)
-    return "{:.0f} KB".format(n)
+        return f"{n / 1024.0:.0f} MB"
+    return f"{n:.0f} KB"
 
 
 def fmt_uptime(seconds):
@@ -233,11 +233,11 @@ def fmt_uptime(seconds):
     hours, rest = divmod(rest, 3600)
     mins = rest // 60
     if days:
-        return "%d 天 %d 小时 %d 分" % (days, hours, mins)
+        return f"{days:d} 天 {hours:d} 小时 {mins:d} 分"
     if hours:
-        return "%d 小时 %d 分" % (hours, mins)
+        return f"{hours:d} 小时 {mins:d} 分"
     if mins:
-        return "%d 分" % mins
+        return f"{mins:d} 分"
     return "不足 1 分钟"
 
 
@@ -256,20 +256,20 @@ def rows(info):
     res = (info.get("resolution") or "").strip()
     over = (info.get("resolution_override") or "").strip()
     if res:
-        out.append(("分辨率", res + ("（当前覆盖为 {}）".format(over) if over and over != res else "")))
+        out.append(("分辨率", res + (f"（当前覆盖为 {over}）" if over and over != res else "")))
     den = (info.get("density") or "").strip()
     if den:
-        out.append(("屏幕密度", "{} dpi".format(den)))
+        out.append(("屏幕密度", f"{den} dpi"))
 
     level = (info.get("battery_level") or "").strip()
     temp = (info.get("battery_temp") or "").strip()
     status = BATTERY_STATUS.get((info.get("battery_status") or "").strip(), "")
     if level:
-        line = "{}%".format(level)
+        line = f"{level}%"
         if status:
-            line += "（{}）".format(status)
+            line += f"（{status}）"
         if temp:
-            line += " · {}℃".format(temp)
+            line += f" · {temp}℃"
         out.append(("电量", line))
 
     st_total = info.get("storage_total_kb") or 0
@@ -278,14 +278,13 @@ def rows(info):
         avail = info.get("storage_avail_kb") or 0
         pct = int(round(used * 100.0 / st_total)) if st_total else 0
         out.append(("存储 /data",
-                    "%s / %s 已用（%d%%），剩余 %s"
-                    % (_size(used), _size(st_total), pct, _size(avail))))
+                    f"{_size(used)} / {_size(st_total)} 已用（{pct:d}%），剩余 {_size(avail)}"))
 
     mem_total = info.get("mem_total_kb") or 0
     if mem_total:
         avail = info.get("mem_avail_kb") or 0
         used = max(0, mem_total - avail)
-        out.append(("内存", "{} / {} 已用，可用 {}".format(_size(used), _size(mem_total), _size(avail))))
+        out.append(("内存", f"{_size(used)} / {_size(mem_total)} 已用，可用 {_size(avail)}"))
 
     up = fmt_uptime(info.get("uptime_s"))
     if up:
@@ -295,4 +294,4 @@ def rows(info):
 
 def as_text(info):
     """纯文本版（「复制」按钮用）：`标签: 值` 每行一条。"""
-    return "\n".join("{}: {}".format(k, v) for k, v in rows(info))
+    return "\n".join(f"{k}: {v}" for k, v in rows(info))

@@ -196,7 +196,7 @@ def _trim_jpg(data):
 
 
 def _head_hex(data, n=8):
-    return " ".join("{:02x}".format(b) for b in data[:n])
+    return " ".join(f"{b:02x}" for b in data[:n])
 
 
 def normalize(data):
@@ -211,8 +211,7 @@ def normalize(data):
 
     kind, off = locate(data)
     if kind is None:
-        return b"", None, ("未识别的图片格式（共 %d 字节，头部 %s）"
-                           % (len(data), _head_hex(data)))
+        return b"", None, (f"未识别的图片格式（共 {len(data):d} 字节，头部 {_head_hex(data)}）")
 
     payload = data[off:]
     if kind == "png":
@@ -221,5 +220,5 @@ def normalize(data):
         payload = _trim_jpg(payload)
 
     if off > 0:
-        return payload, kind, ("已跳过 %d 字节前导内容后识别为 %s" % (off, kind))
+        return payload, kind, (f"已跳过 {off:d} 字节前导内容后识别为 {kind}")
     return payload, kind, ""

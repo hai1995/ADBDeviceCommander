@@ -103,12 +103,12 @@ def parse_install_output(text):
         reason = INSTALL_REASONS.get(code)
         if reason:
             return {"ok": False, "code": code,
-                    "message": "{}（{}）".format(reason, code)}
+                    "message": f"{reason}（{code}）"}
         if code.startswith("INSTALL_PARSE_FAILED"):
             return {"ok": False, "code": code,
-                    "message": "安装包解析失败（{}）：包可能损坏或签名异常".format(code)}
+                    "message": f"安装包解析失败（{code}）：包可能损坏或签名异常"}
         return {"ok": False, "code": code,
-                "message": (detail or code) + "（{}）".format(code)}
+                "message": (detail or code) + f"（{code}）"}
 
     # 没有 `Failure [...]` 的失败：设备离线 / 文件不存在等 adb 客户端错误
     for needle, hint in _SYS_HINTS:
@@ -140,7 +140,7 @@ def format_size(num):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
             if unit == "B":
-                return "%d B" % int(n)
-            return "{:.1f} {}".format(n, unit)
+                return f"{int(n):d} B"
+            return f"{n:.1f} {unit}"
         n /= 1024.0
     return ""

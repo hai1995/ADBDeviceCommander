@@ -266,9 +266,9 @@ def unique_path(path, suffixes=()):
         return path
     stem, ext = os.path.splitext(path)
     i = 2
-    while taken("%s_%d%s" % (stem, i, ext)):
+    while taken(f"{stem}_{i:d}{ext}"):
         i += 1
-    return "%s_%d%s" % (stem, i, ext)
+    return f"{stem}_{i:d}{ext}"
 
 
 def is_usable(state: str) -> bool:
@@ -292,16 +292,16 @@ def fmt_size(n: int) -> str:
     if n < 0:
         return ""
     if n < 1024:
-        return "%d B" % n
+        return f"{n:d} B"
     for unit in ("KB", "MB", "GB", "TB"):
         n /= 1024.0
         if n < 1024:
             if abs(n - int(n)) < 1e-6:
-                return "%d %s" % (int(n), unit)
+                return f"{int(n):d} {unit}"
             if n >= 10:
-                return "%d %s" % (int(n), unit)
-            return "{:.1f} {}".format(n, unit)
-    return "%d TB" % int(n)
+                return f"{int(n):d} {unit}"
+            return f"{n:.1f} {unit}"
+    return f"{int(n):d} TB"
 
 
 def parse_ls_output(text: str):

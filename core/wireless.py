@@ -75,7 +75,7 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
     if text is None:
         return "", "请输入设备 IP（或 IP:端口）"
     if not isinstance(text, str):
-        return "", "地址格式不正确：应为文本形式的 IP 或 IP:端口（收到 {}）".format(type(text).__name__)
+        return "", f"地址格式不正确：应为文本形式的 IP 或 IP:端口（收到 {type(text).__name__}）"
     raw = text.strip()
     if not raw:
         return "", "请输入设备 IP（或 IP:端口）"
@@ -124,7 +124,7 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
     if not host:
         return "", "请输入设备 IP（或 IP:端口）"
     if is_v6:
-        return "[%s]:%d" % (host, port), ""
+        return f"[{host}]:{port:d}", ""
     # Android 11+ 的无线调试给的是一串 mDNS 服务名（没有冒号、带下划线），
     # `adb connect adb-XXXX._adb-tls-connect._tcp` 是它的正规用法。若走下面的
     # 主机名白名单，用户会收到「只允许字母、数字、点、横线」——而他要做的只是把
@@ -141,7 +141,7 @@ def normalize_endpoint(text, default_port=DEFAULT_PORT):
         return "", "IP 地址不合法（四段 0~255，形如 192.168.1.23）"
     if not (_IPV4_RE.match(host) or _HOST_RE.match(host)):
         return "", "IP / 主机名含非法字符（只允许字母、数字、点、横线）"
-    return "%s:%d" % (host, port), ""
+    return f"{host}:{port:d}", ""
 
 
 def has_explicit_port(addr) -> bool:
@@ -308,7 +308,7 @@ def parse_tcpip_output(text):
     m = re.search(r"restarting in tcp mode port:?\s*(\d+)", low)
     if m:
         return {"ok": True, "port": int(m.group(1)),
-                "message": "已切换为无线模式（端口 {}）".format(m.group(1))}
+                "message": f"已切换为无线模式（端口 {m.group(1)}）"}
     if "no devices" in low or "device not found" in low or "not found" in low:
         return {"ok": False, "port": 0,
                 "message": "设备已断开：先插好 USB 线（首次开启无线调试必须走 USB）"}
