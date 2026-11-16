@@ -692,3 +692,82 @@ def test_upload_stream_slow_but_alive_is_not_killed(monkeypatch):
         timeout=60, idle_timeout=0.05)
     assert (ok, err) == (True, ""), err
     assert seen[-1] == 100, seen
+
+
+
+def test_upload_stream_forces_progress_flag(monkeypatch):
+    """upload_stream 必须给 adb push 加 -p，否则较新版 adb 在输出被管道捕获时
+    不打印 [ NN%]，真机全程跑马灯、结束才补一个 100%（测试里的假 adb 手工拼了
+    百分比，所以旧实现下这条会失败）。"""
+    import io
+
+    captured = {}
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            captured["argv"] = list(argv)
+            self.stdout = io.StringIO("[ 50%] /sdcard/a\r[100%] /sdcard/a\r")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc(*a, **kw))
+    ok, err = fs_mod.FileService().upload_stream("S", "/tmp/a", "/sdcard/a")
+    assert (ok, err) == (True, ""), err
+    argv = captured["argv"]
+    assert "-p" in argv, f"adb push 未带 -p，真机不会输出百分比：{argv}"
+    i_p, i_push = argv.index("-p"), argv.index("push")
+    assert i_push < i_p < len(argv) - 2, f"-p 须在 push 之后、本地路径之前：{argv}"
+
+
+def test_upload_stream_falls_back_without_p_on_old_adb(monkeypatch):
+    """老版本 adb（<1.0.32）不认 -p 会立即报 unknown option；此时应自动去掉
+    -p 重试一次——宁可没有百分比，也不能让本来能传成的大文件直接失败。"""
+    import io
+
+    calls = []
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            calls.append(list(argv))
+            old_adb = "-p" in argv
+            self.stdout = io.StringIO(
+                "error: unknown option 'p'\n" if old_adb
+                else "[100%] /sdcard/a\r")
+            self.returncode = 1 if old_adb else 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc(*a, **kw))
+    seen = []
+    ok, err = fs_mod.FileService().upload_stream(
+        "S", "/tmp/a", "/sdcard/a", progress=seen.append)
+    assert (ok, err) == (True, ""), err
+    assert len(calls) == 2, f"应带 -p 试一次、失败后去掉 -p 再试一次：{calls}"
+    assert "-p" in calls[0] and "-p" not in calls[1], calls
+    assert seen and seen[-1] == 100, seen
+
+
+def test_upload_stream_no_fallback_on_real_failure(monkeypatch):
+    """真正的传输失败（设备掉线）不能误判成「老 adb 不认 -p」而去重试——
+    那会把一次失败变成两次、还可能造成设备上重复落盘。"""
+    import io
+
+    calls = []
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            calls.append(list(argv))
+            self.stdout = io.StringIO("adb: error: failed to copy: remote offline\n")
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc(*a, **kw))
+    ok, err = fs_mod.FileService().upload_stream("S", "/tmp/a", "/sdcard/a")
+    assert ok is False
+    assert "remote offline" in err, err
+    assert len(calls) == 1, f"真实失败不该重试：{calls}"

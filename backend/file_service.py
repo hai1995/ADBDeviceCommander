@@ -57,6 +57,28 @@ def _ls_says_empty(text):
 _PUSH_PCT_RE = re.compile(r"\[\s*(\d{1,3})\s*%\]")
 
 
+def _rejects_p_flag(reason):
+    """判断失败原因是否是「这个 adb 版本不认 -p」，决定是否值得去掉 -p 重试。
+
+    只认明确针对 -p 的报错（unknown option / unrecognized / invalid + 带 p 字样），
+    且必须是**启动阶段**的拒绝：一旦输出里出现传输百分比或 KB/s 速率，说明 adb
+    已经认了参数、是在真正传输中失败的，那种情况绝不能重试（否则重复落盘）。
+    """
+    text = (reason or "").lower()
+    if not text:
+        return False
+    # 已经传起来了（有进度或速率字样）→ 不是参数被拒，是真失败
+    if _PUSH_PCT_RE.search(text) or "kb/s" in text or "mb/s" in text:
+        return False
+    mentions_p = ("-p" in text or "'p'" in text or '"p"' in text
+                  or "option p" in text or "`p'" in text)
+    if not mentions_p:
+        return False
+    return any(kw in text for kw in (
+        "unknown option", "unrecognized option", "invalid option",
+        "unknown switch", "not support"))
+
+
 def _parse_push_progress(text):
     """从一段 adb push 输出里取最后一个 `[ NN%]` 百分比（0~100），没有则 None。
 
@@ -224,9 +246,33 @@ class FileService:
         这个方法是给「上传队列 + 进度条」用的新通道；原 upload 一字未动，既有
         调用方（含大量 monkeypatch 掉 subprocess.run 的单测）行为完全不变。
         """
+        # 关键：必须显式给 adb push 加 -p。较新版 adb 在 stdout/stderr 被管道
+        # 捕获（本方法的情形）时默认**不打印** [ NN%] 中间进度，只在结束时吐一行
+        # 汇总 —— 于是进度回调一次都不会发生，界面只能一直显示「传输中…」跑马灯，
+        # 最后补一个 100%。-p（1.0.32+）强制逐段输出百分比，才是进度的真正来源。
+        # 老版本 adb 不认 -p 会立刻报 unknown option 并退出；那种情况回退到不带
+        # -p 再传一次（宁可没有百分比，也不能让本来能成功的大文件直接失败）。
+        rejected, ok, err = self._push_once(
+            serial, local, remote, progress, timeout, idle_timeout, with_p=True)
+        if rejected:
+            ok, err = self._push_once(
+                serial, local, remote, progress, timeout, idle_timeout,
+                with_p=False)[1:]
+        return ok, err
+
+    def _push_once(self, serial, local, remote, progress, timeout, idle_timeout,
+                   with_p=True):
+        """执行一次 adb push；返回 (rejected_p_flag, ok, err)。
+
+        rejected_p_flag 仅在「命令因 adb 不认 -p 而失败」时为真，供上层据此回退；
+        真正的传输失败（设备掉线 / 权限不足）恒为假，绝不触发重试。
+        """
+        argv = [self.adb, "-s", serial, "push"]
+        if with_p:
+            argv.append("-p")
+        argv += [local, remote]
         proc = subprocess.Popen(
-            [self.adb, "-s", serial, "push", local, remote],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             **adb_popen_kwargs())
         last = -1
         chunks = []
@@ -270,18 +316,21 @@ class FileService:
             now = time.monotonic()
             if now - idle[0] >= idle_limit:
                 _kill()
-                return False, f"上传卡住（{idle_limit} 秒没有任何传输进展，设备可能已断开）"
+                return False, False, f"上传卡住（{idle_limit} 秒没有任何传输进展，设备可能已断开）"
             if now >= deadline:
                 _kill()
-                return False, f"上传超时（超过 {timeout} 秒）"
+                return False, False, f"上传超时（超过 {timeout} 秒）"
         rc = proc.wait()
         text = "".join(chunks)
         if rc != 0:
-            return False, (text.strip()[:200] or "push 失败（adb 没有给出原因）")
+            reason = text.strip()[:200] or "push 失败（adb 没有给出原因）"
+            if with_p and _rejects_p_flag(reason):
+                return True, False, reason
+            return False, False, reason
         if progress is not None and last != 100:
             with contextlib.suppress(Exception):
                 progress(100)
-        return True, ""
+        return False, True, ""
 
     def download(self, serial, remote, local_dir):
         base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
