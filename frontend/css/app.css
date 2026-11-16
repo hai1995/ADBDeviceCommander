@@ -1925,9 +1925,12 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   padding: 5px 6px; border-radius: var(--r-sm, 4px);
   font-size: var(--fs-md); border-left: 2px solid transparent;
 }
-.upload-item.upload-uploading, .upload-item.upload-reading { border-left-color: var(--accent); }
+.upload-item.upload-uploading, .upload-item.upload-reading,
+.upload-item.upload-downloading { border-left-color: var(--accent); }
 .upload-item.upload-done { border-left-color: var(--ok); }
 .upload-item.upload-failed { border-left-color: var(--err); }
+.upload-item.upload-cancelled { border-left-color: var(--muted); }
+.upload-item.upload-cancelled .upload-name { color: var(--muted); }
 .upload-item .upload-name {
   flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text); font-weight: 500;
@@ -1965,6 +1968,12 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 .upload-item .upload-err { flex: 1 1 auto; color: var(--err); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .upload-item .btn.tiny { min-height: 22px; }
+.upload-item .btn.tiny[data-uact="cancel"] { color: var(--warn, var(--muted)); }
+
+/* 防呆：传输进行中，会干扰传输的文件操作按钮临时置灰（不改动数据，只提示）。 */
+.btn.transfer-locked, label.btn.transfer-locked {
+  opacity: .45; cursor: not-allowed; pointer-events: none;
+}
 
 /* ---------------- 关于 ----------------
    关于页铺满内容区；参数行 = 仪器读数行（等宽数值 + 拉宽字距的键名）。 */

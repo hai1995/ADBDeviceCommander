@@ -494,13 +494,15 @@ class FileMixin:
                                     "uploading", percent=0)
         # try/finally：upload 抛异常（大文件 push 超过 120s 超时、adb 中途消失）时
         # 旧实现会跳过 os.remove，每次失败都在 %TEMP% 留下一个多 MB 的孤儿文件。
+        cancelled = False
         try:
             if use_progress:
                 def on_pct(pct):
                     self._push_upload_event(task_id, serial, name, remote,
                                             "uploading", percent=pct)
                 ok, err = self.file_svc.upload_stream(
-                    serial, tmp, remote, progress=on_pct)
+                    serial, tmp, remote, progress=on_pct,
+                    task_id=task_id, cleanup=(tmp,))
             else:
                 ok, err = self.file_svc.upload(serial, tmp, remote)
         except Exception as e:  # noqa: BLE001  有意把异常转成用户可见的失败事件
@@ -508,17 +510,21 @@ class FileMixin:
         finally:
             with contextlib.suppress(Exception):
                 os.remove(tmp)
-        if ok:
+        cancelled = bool(task_id) and self.file_svc.is_cancelled(task_id)
+        if cancelled:
+            # 用户主动取消：不算失败，不弹红条；只在队列里标记已取消。
+            self._push_upload_event(task_id, serial, name, remote, "cancelled")
+        elif ok:
             self._push_status("ok", f"✓ 上传完成: {remote}")
+            if use_progress:
+                self._push_upload_event(task_id, serial, name, remote, "done", percent=100)
         else:
             self._push_status("err", f"⚠ 上传失败 {remote}: {err}")
-        if use_progress:
-            self._push_upload_event(
-                task_id, serial, name, remote,
-                "done" if ok else "failed",
-                percent=100 if ok else None,
-                error="" if ok else (err or "上传失败"))
+            if use_progress:
+                self._push_upload_event(task_id, serial, name, remote, "failed",
+                                        error=err or "上传失败")
         # 合并刷新：多选上传时 N 个文件只刷一次目录（见 _schedule_file_refresh）
+        # 取消的文件没写完整，仍刷一次以反映设备真实状态（半成本地文件已被清理）。
         self._schedule_file_refresh(serial, remote)
 
     def file_upload_pick(self, serial, remote_dir):
@@ -582,7 +588,11 @@ class FileMixin:
         return {"ok": True, "task_id": tid}
 
     def _do_file_upload_path(self, serial, local, remote, task_id):
-        """把本地文件 push 到设备（路径直传版）：带 adb push 的真实百分比进度。"""
+        """把本地文件 push 到设备（路径直传版）：带 adb push 的真实百分比进度。
+
+        task_id 贯穿进度事件与取消：注册到 FileService 的传输表，前端点取消时
+        cancel_transfer 据此找到 adb 进程并终止。
+        """
         display = os.path.basename(local) or remote
         self._push_upload_event(task_id, serial, display, remote,
                                 "uploading", percent=0)
@@ -594,21 +604,32 @@ class FileMixin:
         try:
             ok, err = self.file_svc.upload_stream(
                 serial, local, remote, progress=on_pct,
-                timeout=push_timeout_for(path_getsize(local)))
+                timeout=push_timeout_for(path_getsize(local)),
+                task_id=task_id)
         except Exception as e:  # noqa: BLE001  有意把异常转成用户可见的失败事件
             ok, err = False, str(e)
-        if ok:
+        if self.file_svc.is_cancelled(task_id):
+            self._push_upload_event(task_id, serial, display, remote, "cancelled")
+        elif ok:
             self._push_status("ok", f"✓ 上传完成: {remote}")
+            self._push_upload_event(task_id, serial, display, remote, "done", percent=100)
         else:
             self._push_status("err", f"⚠ 上传失败 {remote}: {err}")
-        self._push_upload_event(
-            task_id, serial, display, remote,
-            "done" if ok else "failed",
-            percent=100 if ok else None,
-            error="" if ok else (err or "上传失败"))
+            self._push_upload_event(task_id, serial, display, remote, "failed",
+                                    error=err or "上传失败")
         self._schedule_file_refresh(serial, remote)
 
-    def file_download(self, serial, remote, local_dir):
+    def file_download(self, serial, remote, local_dir, task_id=None):
+        """下载一个文件到保存目录。task_id 可选：给了就走带进度/可取消的新通道。
+
+        老调用（自动化 / 旧测试）不传 task_id，行为与从前完全一致（同步 pull +
+        状态栏提示），零回归。前端队列传 task_id 后改走 file_download 事件。
+        """
+        if task_id:
+            return self._file_op(
+                serial, self._do_file_download_path, remote,
+                local_dir or self._default_save_dir(), task_id,
+                key=f"filedl_{serial}_{next(self._file_seq):d}")
         # 每个文件一个独立 worker key（含序列号），保证同一设备批量「下载选中」
         # 时所有文件各自成线程并行 pull，不会被 "fileop_<serial>" 去重吞掉。
         return self._file_op(
@@ -622,6 +643,55 @@ class FileMixin:
             self._push_status("ok", f"✓ 已下载: {path}")
         else:
             self._push_status("err", f"⚠ 下载失败 {remote}: {err}")
+
+    def _do_file_download_path(self, serial, remote, local_dir, task_id):
+        """带进度、可取消的下载：走 download_stream，推 file_download 事件。"""
+        name = os.path.basename(remote.rstrip("/")) or remote
+        self._push_download_event(task_id, serial, name, remote, local_dir,
+                                  "downloading", percent=0)
+
+        def on_pct(pct):
+            self._push_download_event(task_id, serial, name, remote, local_dir,
+                                      "downloading", percent=pct)
+
+        try:
+            path, err = self.file_svc.download_stream(
+                serial, remote, local_dir, progress=on_pct, task_id=task_id)
+        except Exception as e:  # noqa: BLE001  有意把异常转成用户可见的失败事件
+            path, err = None, str(e)
+        if self.file_svc.is_cancelled(task_id):
+            self._push_download_event(task_id, serial, name, remote, local_dir,
+                                      "cancelled")
+        elif path:
+            self._push_status("ok", f"✓ 已下载: {path}")
+            self._push_download_event(task_id, serial, name, remote, local_dir,
+                                      "done", percent=100, local=path)
+        else:
+            self._push_status("err", f"⚠ 下载失败 {remote}: {err}")
+            self._push_download_event(task_id, serial, name, remote, local_dir,
+                                      "failed", error=err or "下载失败")
+
+    def _push_download_event(self, task_id, serial, name, remote, local_dir,
+                             status, percent=None, error="", local=""):
+        """推一条 file_download 进度事件（前端下载队列据此更新对应项）。"""
+        payload = {"task_id": task_id, "serial": serial, "name": name,
+                   "remote": remote, "local_dir": local_dir, "status": status}
+        if percent is not None:
+            payload["percent"] = percent
+        if error:
+            payload["error"] = error
+        if local:
+            payload["local"] = local
+        self.bus.push("file_download", payload)
+
+    def file_transfer_cancel(self, task_id):
+        """取消一个正在进行的上传/下载：终止 adb 进程并清理半成本地文件。
+
+        由前端传输队列的「取消」按钮调用。找不到任务（已自然结束 / 从未登记）
+        也返回 ok，避免竞态下用户点了取消却看到报错。
+        """
+        found = self.file_svc.cancel_transfer(task_id)
+        return {"ok": True, "found": found, "task_id": task_id}
 
     def file_view(self, serial, path):
         # 查看同样用唯一 key：连续点开两个文件的「查看」时，固定 key 会让第二个

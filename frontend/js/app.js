@@ -1065,6 +1065,7 @@
       case "file": onFile(p); break;
       case "file_view": onFileView(p); break;
       case "file_upload": onFileUploadEvent(p); break;
+      case "file_download": onFileDownloadEvent(p); break;
     }
   }
 
@@ -5881,8 +5882,14 @@
   function renderFileDev() {
     // 文件 tab 与 Logcat 完全对齐：随左侧受控设备自动联动，取第一个作为当前浏览设备
     const next = firstChecked();
-    els.fileDevNow.textContent = next ? "设备: " + next : "未选设备";
     const changed = next !== fileSerial;
+    // 防呆：传输进行中不允许切换/取消设备——否则进度事件仍指向旧设备，且传输
+    // 目标设备与界面显示的设备错配。必须在改 fileSerial 之前拦截。
+    if (changed && guardActive()) {
+      pushStatus("warn", "⚠ 文件传输进行中，暂不能切换设备；请等待完成或取消传输。");
+      return;
+    }
+    els.fileDevNow.textContent = next ? "设备: " + next : "未选设备";
     fileSerial = next;
     if (!next) {
       // 无受控设备：清空表格，同时复位选择态——否则「已选 N 项」与批量按钮
@@ -6050,9 +6057,7 @@
   async function fileRunAction(act, path, name, btn) {
     if (!path) return;
     if (act === "download") {
-      if (btn) { btn.disabled = true; markBtnBusy(btn, true); }
-      await callApi(api.file_download(fileSerial, path, null));
-      if (btn) { markBtnBusy(btn, false); btn.disabled = false; }
+      startDownload(path, name || (path || "").split("/").pop(), null);
     } else if (act === "view") {
       if (btn) { btn.disabled = true; markBtnBusy(btn, true); }
       await callApi(api.file_view(fileSerial, path));
@@ -6124,7 +6129,14 @@
   // 目录路径归一化（去尾部斜杠，空则视为根），用于判断两次列目录请求是否同一目录。
   function normDir(s) { const t = (s || "/").replace(/\/+$/, ""); return t || "/"; }
   function sameDir(a, b) { return normDir(a) === normDir(b); }
-  function gotoPath() {
+  function gotoPath(force) {
+    // 防呆：传输中切目录/刷新会与后端的目录刷新事件交错，导致列表跳变；
+    // 内部调用（如设备初始化）可传 force=true 绕过。
+    if (!force && guardActive()) {
+      if (els.filePath) els.filePath.value = filePath;   // 回退用户刚改的路径
+      pushStatus("warn", "⚠ 文件传输进行中，暂不能切换目录 / 刷新；请等待完成或取消传输。");
+      return;
+    }
     if (els.fileRefresh) markBtnBusy(els.fileRefresh, true);
     const p = callApi(api.file_list(fileSerial, els.filePath.value.trim() || "/"));
     Promise.resolve(p).then(() => { if (els.fileRefresh) markBtnBusy(els.fileRefresh, false); });
@@ -6189,9 +6201,12 @@
       row.className = "upload-item upload-" + t.status;
       row.dataset.task = t.id;
 
+      const isDown = t.kind === "down";
+      const arrow = isDown ? "⬇ " : "⬆ ";
       const name = document.createElement("span");
       name.className = "upload-name";
-      name.textContent = (t.status === "done" ? "✓ " : t.status === "failed" ? "✗ " : "⬆ ") + t.name;
+      name.textContent = (t.status === "done" ? "✓ " : t.status === "failed" ? "✗ "
+        : t.status === "cancelled" ? "⊘ " : arrow) + t.name;
       name.title = t.remote || t.name;
       row.appendChild(name);
 
@@ -6199,11 +6214,14 @@
       meta.className = "upload-meta dim";
       const pct = typeof t.percent === "number" ? t.percent : 0;
       // 传输中却一直没有新百分比：切成不确定态（见 touchUploadStale）
-      const stale = t.status === "uploading" && !!t.stale;
+      const inFlight = (t.status === "uploading" || t.status === "reading"
+        || t.status === "downloading");
+      const stale = (t.status === "uploading" || t.status === "downloading") && !!t.stale;
       if (stale) row.classList.add("upload-stale");
       meta.textContent = (t.status === "reading") ? "读取中"
         : (t.status === "done") ? "完成"
         : (t.status === "failed") ? "失败"
+        : (t.status === "cancelled") ? "已取消"
         : stale ? "传输中…" : pct + "%";
       row.appendChild(meta);
 
@@ -6211,7 +6229,8 @@
       bar.className = "upload-bar";
       const fill = document.createElement("i");
       fill.style.width = (t.status === "done" || stale ? 100
-        : (t.status === "failed" || t.status === "reading") ? 0 : pct) + "%";
+        : (t.status === "failed" || t.status === "reading"
+           || t.status === "cancelled") ? 0 : pct) + "%";
       bar.appendChild(fill);
       row.appendChild(bar);
 
@@ -6231,6 +6250,17 @@
         retry.title = t.file ? "用已缓存的文件重新上传（无需重选）" : "重新上传";
         row.appendChild(retry);
       }
+      // 进行中的任务给「取消」：终止后端 adb 进程并清理半成品（见 file_transfer_cancel）。
+      if (inFlight) {
+        const cancel = document.createElement("button");
+        cancel.className = "btn tiny";
+        cancel.type = "button";
+        cancel.dataset.uact = "cancel";
+        cancel.dataset.task = t.id;
+        cancel.textContent = "取消";
+        cancel.title = "终止本次传输并清理未完成的文件";
+        row.appendChild(cancel);
+      }
       const remove = document.createElement("button");
       remove.className = "btn tiny";
       remove.type = "button";
@@ -6242,14 +6272,74 @@
     });
     els.uploadQueueList.textContent = "";
     els.uploadQueueList.appendChild(frag);
+    applyTransferGuard();   // 传输中锁定关键操作，见下方防呆
+  }
+
+  /* 是否有正在进行的传输（上传/下载）。取消按钮据此判定。 */
+  function isTransferring() {
+    return Object.values(uploadTasks).some((t) =>
+      t.status === "uploading" || t.status === "reading"
+      || t.status === "downloading");
+  }
+
+  /* 防呆延迟：小文件常常零点几秒就传完，若一入队就锁按钮，用户点完下载立刻想
+     切目录会被莫名挡一下。只有传输持续超过这个时长（才算「大文件长时间传输」）
+     才真正激活锁定。 */
+  const GUARD_DELAY_MS = 1500;
+  let guardTimer = null;
+  function guardActive() {
+    const now = Date.now();
+    return Object.values(uploadTasks).some((t) =>
+      (t.status === "uploading" || t.status === "reading" || t.status === "downloading")
+      && (now - (t.startedAt || now)) >= GUARD_DELAY_MS);
+  }
+
+  /* 防呆：传输持续中锁定会干扰的操作（切目录/刷新/新建/删除/批量下载/上传
+     按钮），避免误操作打断 adb 传输。只置灰 + 提示，不改数据；传输结束/取消后
+     由 renderUploadQueue 调本函数自动解锁。查看其它页签不受影响。 */
+  const GUARD_BTN_IDS = ["file-up", "file-refresh", "file-mkdir", "file-touch",
+                         "file-batch-dl", "file-batch-del", "file-upload-btn",
+                         "file-pick", "file-open"];
+  function applyTransferGuard() {
+    const busy = guardActive();
+    // 有传输但还没到阈值：安排一次延时复核（无进度事件的大文件也能按时锁上）。
+    if (!busy && isTransferring()) {
+      if (!guardTimer) {
+        guardTimer = setTimeout(() => { guardTimer = null; applyTransferGuard(); },
+                                GUARD_DELAY_MS);
+      }
+    } else if (guardTimer) {
+      clearTimeout(guardTimer); guardTimer = null;
+    }
+    GUARD_BTN_IDS.forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.classList.toggle("transfer-locked", busy);
+      // 只锁非队列自身的按钮；还原时不能覆盖 batch 按钮「未选中」的 disabled 态
+      if (busy) {
+        if (el.dataset.guardPrevDisabled === undefined) {
+          el.dataset.guardPrevDisabled = el.disabled ? "1" : "0";
+        }
+        el.disabled = true;
+        el.title = "文件传输进行中，请等待完成或取消后再操作";
+      } else if (el.dataset.guardPrevDisabled !== undefined) {
+        el.disabled = el.dataset.guardPrevDisabled === "1";
+        delete el.dataset.guardPrevDisabled;
+        if (el.title === "文件传输进行中，请等待完成或取消后再操作") el.title = "";
+      }
+    });
+    if (els.filePath) els.filePath.readOnly = busy;
   }
 
   function setUploadTask(id, patch) {
     const t = uploadTasks[id];
     if (!t) return;
     Object.assign(t, patch);
-    // 每次有新进度就重置"多久没动静"的计时；收尾（done/failed）时清掉。
-    if (t.status === "uploading") touchUploadStale(id);
+    const inFlight = (t.status === "reading" || t.status === "uploading"
+      || t.status === "downloading");
+    if (inFlight && !t.startedAt) t.startedAt = Date.now();
+    // 每次有新进度就重置"多久没动静"的计时；收尾时清掉。
+    if (t.status === "uploading" || t.status === "downloading") touchUploadStale(id);
     else clearUploadStale(t);
     renderUploadQueue();
   }
@@ -6271,7 +6361,7 @@
     t.stale = false;
     t.staleTimer = setTimeout(() => {
       const cur = uploadTasks[id];
-      if (!cur || cur.status !== "uploading") return;
+      if (!cur || (cur.status !== "uploading" && cur.status !== "downloading")) return;
       cur.staleTimer = null;
       cur.stale = true;
       renderUploadQueue();
@@ -6287,9 +6377,27 @@
       setUploadTask(id, { status: "uploading", percent: p.percent || 0 });
     } else if (p.status === "done") {
       setUploadTask(id, { status: "done", percent: 100, error: "" });
+    } else if (p.status === "cancelled") {
+      setUploadTask(id, { status: "cancelled", error: "" });
     } else if (p.status === "failed") {
       setUploadTask(id, { status: "failed", error: p.error || "上传失败" });
       pushStatus("err", "⚠ 上传失败 " + (uploadTasks[id].name || "") + "：" + (p.error || "上传失败"));
+    }
+  }
+
+  /* 后端 file_download 事件：与上传共用同一队列，按 kind=down 渲染。 */
+  function onFileDownloadEvent(p) {
+    const id = p.task_id;
+    if (!id || !uploadTasks[id]) return;
+    if (p.status === "downloading") {
+      setUploadTask(id, { status: "downloading", percent: p.percent || 0 });
+    } else if (p.status === "done") {
+      setUploadTask(id, { status: "done", percent: 100, error: "", local: p.local || "" });
+    } else if (p.status === "cancelled") {
+      setUploadTask(id, { status: "cancelled", error: "" });
+    } else if (p.status === "failed") {
+      setUploadTask(id, { status: "failed", error: p.error || "下载失败" });
+      pushStatus("err", "⚠ 下载失败 " + (uploadTasks[id].name || "") + "：" + (p.error || "下载失败"));
     }
   }
 
@@ -6361,7 +6469,7 @@
       const id = newUploadTaskId();
       uploadTasks[id] = {
         id, name: f.name || "未命名", size: f.size || 0, file: f,
-        serial: fileSerial, dir: filePath,
+        serial: fileSerial, dir: filePath, startedAt: Date.now(),
         status: "reading", percent: 0, error: "", localPath: "",
       };
       submitUpload(uploadTasks[id]);
@@ -6409,7 +6517,7 @@
       uploadTasks[it.task_id] = {
         id: it.task_id, name: it.name || "未命名", size: it.size || 0,
         file: null, localPath: it.path || "",
-        serial: fileSerial, dir, remote: it.remote,
+        serial: fileSerial, dir, remote: it.remote, startedAt: Date.now(),
         status: "uploading", percent: 0, error: "", stale: false, staleTimer: null,
       };
       touchUploadStale(it.task_id);
@@ -6442,7 +6550,33 @@
     }
   }
 
-  /* 上传队列项的「重试 / 移除」：委托在 #upload-queue-list 上一次绑定。 */
+  /* 下载一个文件：入统一队列（kind=down），带 task_id 走可取消/带进度的通道。
+     返回 task_id 供调用方按需等待；下载完成/取消由 file_download 事件定稿。 */
+  function startDownload(remote, name, dir) {
+    if (!fileSerial) { pushStatus("warn", "⚠ 请先勾选设备后再下载"); return ""; }
+    uploadSeq += 1;
+    const id = "d" + Date.now().toString(36) + "_" + uploadSeq;
+    uploadTasks[id] = {
+      id, kind: "down", name: name || (remote || "").split("/").pop() || "下载",
+      size: 0, serial: fileSerial, remote: remote, dir: dir || "",
+      startedAt: Date.now(),
+      status: "downloading", percent: 0, error: "", stale: false, staleTimer: null,
+    };
+    renderUploadQueue();
+    touchUploadStale(id);
+    callApi(api.file_download(fileSerial, remote, dir || null, id), 0);
+    return id;
+  }
+
+  /* 下载项「重试」：按原 remote / 保存目录再下一次。 */
+  function submitDownload(t) {
+    if (!t || !t.serial) { if (t) failUpload(t.id, "未选中设备"); return; }
+    setUploadTask(t.id, { status: "downloading", percent: 0, error: "" });
+    touchUploadStale(t.id);
+    callApi(api.file_download(t.serial, t.remote, t.dir || null, t.id), 0);
+  }
+
+  /* 上传队列项的「重试 / 取消 / 移除」：委托在 #upload-queue-list 上一次绑定。 */
   function bindUploadQueueEvents() {
     const list = els.uploadQueueList;
     if (list) {
@@ -6453,10 +6587,15 @@
         const t = uploadTasks[id];
         if (!t) return;
         if (btn.dataset.uact === "retry") {
-          // 路径直传的项没有 File 对象，让后端按原路径重推；拖拽来的项还缓存着
-          // File，直接复用（两条路都不必让用户重新挑文件）。
-          if (t.localPath) submitUploadByPath(t);
+          // 下载项按原路径重下；上传路径直传项让后端按原路径重推；拖拽项复用 File。
+          if (t.kind === "down") submitDownload(t);
+          else if (t.localPath) submitUploadByPath(t);
           else submitUpload(t);
+        } else if (btn.dataset.uact === "cancel") {
+          // 真取消：让后端杀掉 adb 进程并清理半成品；界面立即标记已取消，
+          // 不等后端事件（后端 cancelled 事件到达时也只是幂等更新）。
+          setUploadTask(id, { status: "cancelled", error: "" });
+          callApi(api.file_transfer_cancel(id));
         } else if (btn.dataset.uact === "remove") {
           clearUploadStale(t);
           delete uploadTasks[id];
@@ -6467,7 +6606,8 @@
     if (els.uploadQueueClear) {
       els.uploadQueueClear.addEventListener("click", () => {
         Object.keys(uploadTasks).forEach((id) => {
-          if (uploadTasks[id].status === "done" || uploadTasks[id].status === "failed") {
+          const s = uploadTasks[id].status;
+          if (s === "done" || s === "failed" || s === "cancelled") {
             clearUploadStale(uploadTasks[id]);
             delete uploadTasks[id];
           }
@@ -8420,12 +8560,7 @@
       if (!paths.length) return;
       if (!fileSerial) return pushStatus("warn", "请先勾选设备");
       const dir = saveDir();
-      els.fileBatchDl.disabled = true;
-      markBtnBusy(els.fileBatchDl, true);
-      Promise.all(paths.map((p) => callApi(api.file_download(fileSerial, p, dir)))).then(() => {
-        markBtnBusy(els.fileBatchDl, false);
-        updateFileSel();   // 按当前勾选数恢复可用性
-      });
+      paths.forEach((p) => startDownload(p, (p || "").split("/").pop(), dir));
       pushStatus("info", "已发起下载 " + paths.length + " 个文件" + (dir ? " 到 " + dir : ""));
     });
     els.fileBatchDel.addEventListener("click", () => {

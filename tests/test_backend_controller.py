@@ -4544,7 +4544,7 @@ def test_file_upload_progress_events_with_task_id(monkeypatch):
     import base64
     api = _make_api()
 
-    def fake_stream(serial, local, remote, progress=None, timeout=120):
+    def fake_stream(serial, local, remote, progress=None, timeout=120, **kwargs):
         if progress:
             progress(10)
             progress(65)
@@ -4615,7 +4615,7 @@ def test_file_upload_path_pushes_with_real_percent(monkeypatch):
     """路径直传把 adb push 的真实百分比推成事件：0 → 中间值 → done(100)。"""
     api = _make_api()
 
-    def fake_stream(serial, local, remote, progress=None, timeout=None):
+    def fake_stream(serial, local, remote, progress=None, timeout=None, **kwargs):
         assert progress is not None, "直传必须带进度回调，否则进度条永远 0→100"
         progress(37)
         progress(99)
@@ -4642,7 +4642,7 @@ def test_file_upload_path_failure_carries_reason(monkeypatch):
     api = _make_api()
     monkeypatch.setattr(
         api.file_svc, "upload_stream",
-        lambda serial, local, remote, progress=None, timeout=None:
+        lambda serial, local, remote, progress=None, timeout=None, **kwargs:
             (False, "adb: error: failed to copy: remote offline"))
     monkeypatch.setattr(api, "_schedule_file_refresh", lambda *a, **kw: None)
 
@@ -4659,7 +4659,7 @@ def test_file_upload_progress_failure_event_carries_reason(monkeypatch):
     import base64
     api = _make_api()
 
-    def fake_stream(serial, local, remote, progress=None, timeout=120):
+    def fake_stream(serial, local, remote, progress=None, timeout=120, **kwargs):
         if progress:
             progress(30)
         return False, "remote offline"
@@ -5346,3 +5346,77 @@ def test_ws_lock_creation_is_serialized(monkeypatch):
     assert len(got) == 8
     assert len({id(lk) for lk in got}) == 1, \
         "同一工作区拿到了 %d 把不同的锁（应只有 1 把）" % len({id(lk) for lk in got})
+
+
+# ---------------------------------------------------------------- 传输取消 / 下载进度事件
+
+def test_file_transfer_cancel_delegates_to_service(monkeypatch):
+    """取消 API 把 task_id 交给 FileService.cancel_transfer，结果透传。"""
+    api = _make_api()
+    seen = []
+    monkeypatch.setattr(api.file_svc, "cancel_transfer", lambda tid: seen.append(tid) or True)
+    r = api.file_transfer_cancel("t-77")
+    assert seen == ["t-77"], seen
+    assert r == {"ok": True, "found": True, "task_id": "t-77"}, r
+
+
+def test_file_transfer_cancel_missing_task_is_not_error(monkeypatch):
+    """取消一个已结束/不存在的任务不算错误（竞态下用户点了取消不该看到红条）。"""
+    api = _make_api()
+    monkeypatch.setattr(api.file_svc, "cancel_transfer", lambda tid: False)
+    r = api.file_transfer_cancel("gone")
+    assert r["ok"] is True and r["found"] is False, r
+
+
+def test_file_download_with_task_id_pushes_progress_events(monkeypatch):
+    """带 task_id 的下载走 download_stream，推 file_download 进度 → done 事件。"""
+    api = _make_api()
+
+    def fake_stream(serial, remote, local_dir, progress=None, timeout=None,
+                    task_id=None):
+        if progress:
+            progress(20)
+            progress(90)
+        return "/tmp/saved/a.bin", None
+
+    monkeypatch.setattr(api.file_svc, "download_stream", fake_stream)
+    monkeypatch.setattr(api.file_svc, "is_cancelled", lambda tid: False)
+    monkeypatch.setattr(api, "_file_op",
+                        lambda serial, fn, *a, **kw: fn(serial, *a) or {"ok": True})
+
+    api._run_file_op(api._do_file_download_path, "A1", "/sdcard/a.bin",
+                     "/tmp/saved", "d-9")
+
+    evs = _events_by_kind(api).get("file_download", [])
+    downs = [p["percent"] for p in evs if p["status"] == "downloading"]
+    assert downs == [0, 20, 90], downs
+    done = [p for p in evs if p["status"] == "done"]
+    assert len(done) == 1 and done[0]["percent"] == 100, done
+    assert done[0]["local"] == "/tmp/saved/a.bin", done
+
+
+def test_file_download_cancelled_pushes_cancelled_not_failed(monkeypatch):
+    """下载中取消：推 cancelled 事件，不弹「下载失败」红条。"""
+    api = _make_api()
+    monkeypatch.setattr(api.file_svc, "download_stream",
+                        lambda *a, **kw: (None, "已取消"))
+    monkeypatch.setattr(api.file_svc, "is_cancelled", lambda tid: True)
+    statuses = []
+    monkeypatch.setattr(api, "_push_status", lambda kind, text: statuses.append((kind, text)))
+
+    api._run_file_op(api._do_file_download_path, "A1", "/sdcard/a.bin",
+                     "/tmp/saved", "d-10")
+
+    evs = _events_by_kind(api).get("file_download", [])
+    assert evs and evs[-1]["status"] == "cancelled", evs
+    assert not any(k == "err" for k, _ in statuses), statuses
+
+
+def test_file_download_legacy_without_task_id_unchanged(monkeypatch):
+    """不传 task_id 的下载仍走老 download + 状态栏，零回归。"""
+    api = _make_api()
+    called = []
+    monkeypatch.setattr(api.file_svc, "download",
+                        lambda *a: called.append(a) or ("/tmp/a", None))
+    api._run_file_op(api._do_file_download, "A1", "/sdcard/a", "/tmp")
+    assert called == [("A1", "/sdcard/a", "/tmp")], called

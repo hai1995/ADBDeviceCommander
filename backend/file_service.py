@@ -135,6 +135,50 @@ def _err_text(r, fallback="adb 返回失败（没有给出原因）"):
 class FileService:
     def __init__(self, adb="adb"):
         self.adb = adb
+        # 正在进行的传输任务注册表：task_id -> {proc, cleanup}.
+        # 供「中途取消」用：前端点取消 → controller → cancel(task_id) 杀掉 adb
+        # 进程并清理半成本地文件，worker 随即结束并推 cancelled 事件。
+        self._transfer_lock = threading.Lock()
+        self._transfers = {}
+        self._cancelled = set()
+
+    def register_transfer(self, task_id, proc, cleanup=()):
+        """登记一个正在运行的 adb 进程，供随后取消。cleanup 是取消时要删的本地半成品路径。"""
+        if not task_id:
+            return
+        with self._transfer_lock:
+            self._cancelled.discard(task_id)   # 同一 task_id 重试：清掉上次的取消标记
+            self._transfers[task_id] = {"proc": proc, "cleanup": tuple(cleanup)}
+
+    def unregister_transfer(self, task_id):
+        with self._transfer_lock:
+            self._transfers.pop(task_id, None)
+
+    def is_cancelled(self, task_id):
+        with self._transfer_lock:
+            return task_id in self._cancelled
+
+    def cancel_transfer(self, task_id):
+        """取消一个传输：杀进程 + 删半成本地文件。返回是否找到该任务。
+
+        只删登记时明确传入的 cleanup 路径（pull 的落地文件 / push 的本地中转文件），
+        绝不按文件名猜测，避免误删用户的其它文件。进程已自然结束但还没反注册时
+        也照删 cleanup，保证「取消」在竞态窗口里仍然有效。
+        """
+        with self._transfer_lock:
+            info = self._transfers.pop(task_id, None)
+            self._cancelled.add(task_id)
+        if info is None:
+            return False
+        proc = info.get("proc")
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                if proc.poll() is None:
+                    proc.kill()
+        for path in info.get("cleanup", ()):
+            with contextlib.suppress(Exception):
+                os.remove(long_path(path))
+        return True
 
     def _shell(self, serial, args, timeout=30):
         # adb 输出固定 UTF-8（中文文件名/内容），必须显式指定 encoding：
@@ -223,7 +267,7 @@ class FileService:
         return r.returncode == 0, _err_text(r)
 
     def upload_stream(self, serial, local, remote, progress=None, timeout=120,
-                      idle_timeout=60):
+                      idle_timeout=60, task_id=None, cleanup=()):
         """带实时进度的 adb push；返回契约与 upload 一致：(ok, err)。
 
         adb 把 push 进度写到 **stderr**，形如 `[ 10%] /sdcard/a`，并用 `\\r`
@@ -253,15 +297,16 @@ class FileService:
         # 老版本 adb 不认 -p 会立刻报 unknown option 并退出；那种情况回退到不带
         # -p 再传一次（宁可没有百分比，也不能让本来能成功的大文件直接失败）。
         rejected, ok, err = self._push_once(
-            serial, local, remote, progress, timeout, idle_timeout, with_p=True)
+            serial, local, remote, progress, timeout, idle_timeout,
+            task_id=task_id, cleanup=cleanup, with_p=True)
         if rejected:
             ok, err = self._push_once(
                 serial, local, remote, progress, timeout, idle_timeout,
-                with_p=False)[1:]
+                task_id=task_id, cleanup=cleanup, with_p=False)[1:]
         return ok, err
 
     def _push_once(self, serial, local, remote, progress, timeout, idle_timeout,
-                   with_p=True):
+                   task_id=None, cleanup=(), with_p=True):
         """执行一次 adb push；返回 (rejected_p_flag, ok, err)。
 
         rejected_p_flag 仅在「命令因 adb 不认 -p 而失败」时为真，供上层据此回退；
@@ -274,6 +319,9 @@ class FileService:
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             **adb_popen_kwargs())
+        # 登记进程供取消；cleanup 是取消时要删的本地中转文件（push 没有半成品
+        # 落地文件，通常为空；下载走 download_stream 时才传）。
+        self.register_transfer(task_id, proc, cleanup)
         last = -1
         chunks = []
         idle = [time.monotonic()]   # 最近一次收到输出的时刻，由读线程刷新
@@ -304,33 +352,39 @@ class FileService:
 
         reader = threading.Thread(target=_pump, daemon=True)
         reader.start()
-        # 主线程每 0.25s 醒一次看两层超时；读线程一结束 join 立刻返回，正常路径
-        # 只转一圈就退出，没有任何额外延迟。绝不把上传 worker 永久挂住（否则该
-        # 文件一直占着去重 key / 队列项永远转圈）。
+        # 主线程每 0.25s 醒一次看两层超时 + 用户取消；读线程一结束 join 立刻
+        # 返回，正常路径只转一圈就退出，没有任何额外延迟。绝不把上传 worker
+        # 永久挂住（否则该文件一直占着去重 key / 队列项永远转圈）。
         deadline = time.monotonic() + (timeout or 120)
         idle_limit = idle_timeout or 60
-        while True:
-            reader.join(0.25)
-            if not reader.is_alive():
-                break
-            now = time.monotonic()
-            if now - idle[0] >= idle_limit:
-                _kill()
-                return False, False, f"上传卡住（{idle_limit} 秒没有任何传输进展，设备可能已断开）"
-            if now >= deadline:
-                _kill()
-                return False, False, f"上传超时（超过 {timeout} 秒）"
-        rc = proc.wait()
-        text = "".join(chunks)
-        if rc != 0:
-            reason = text.strip()[:200] or "push 失败（adb 没有给出原因）"
-            if with_p and _rejects_p_flag(reason):
-                return True, False, reason
-            return False, False, reason
-        if progress is not None and last != 100:
-            with contextlib.suppress(Exception):
-                progress(100)
-        return False, True, ""
+        try:
+            while True:
+                if task_id and self.is_cancelled(task_id):
+                    _kill()          # 用户取消：立刻杀进程，别误报成超时/卡住
+                    return False, False, "已取消"
+                reader.join(0.25)
+                if not reader.is_alive():
+                    break
+                now = time.monotonic()
+                if now - idle[0] >= idle_limit:
+                    _kill()
+                    return False, False, f"上传卡住（{idle_limit} 秒没有任何传输进展，设备可能已断开）"
+                if now >= deadline:
+                    _kill()
+                    return False, False, f"上传超时（超过 {timeout} 秒）"
+            rc = proc.wait()
+            text = "".join(chunks)
+            if rc != 0:
+                reason = text.strip()[:200] or "push 失败（adb 没有给出原因）"
+                if with_p and _rejects_p_flag(reason):
+                    return True, False, reason
+                return False, False, reason
+            if progress is not None and last != 100:
+                with contextlib.suppress(Exception):
+                    progress(100)
+            return False, True, ""
+        finally:
+            self.unregister_transfer(task_id)
 
     def download(self, serial, remote, local_dir):
         base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
@@ -351,6 +405,10 @@ class FileService:
             **adb_kwargs(120))
         if r.returncode != 0:
             return None, _err_text(r, "pull 失败（adb 没有给出原因）")
+        return self._finalize_download(local_dir, base)
+
+    def _finalize_download(self, local_dir, base):
+        """pull 成功后的落盘名处理：adb 按设备端原名落盘，尽力改成净化名。"""
         # 落盘名是 **adb 自己**按设备端原名生成的，不是我们净化后的名字：
         # `adb pull` 只认远端文件名，我们无法告诉它「落地时换个名」。所以先按
         # 原名找、找得到再尽力改成净化名（设备端文件名可能含 Windows 非法字符，
@@ -371,6 +429,107 @@ class FileService:
             return raw_local, None
         # pull 返回 0 却找不到文件：目录被外部清掉 / adb 把内容放进了子目录
         return None, f"adb 报告成功但本地没有落文件（目标目录：{local_dir}）"
+
+    def download_stream(self, serial, remote, local_dir, progress=None,
+                        timeout=600, idle_timeout=60, task_id=None):
+        """带实时进度的 adb pull；返回 (path, err)，契约与 download 一致。
+
+        与 upload_stream 同理：显式加 -p 强制逐段输出 [ NN%]，Popen 流式读并
+        回调 progress(pct)。register_transfer 登记进程 + 落地文件，取消时杀进程
+        并删除半成品；worker 收尾用 is_cancelled 区分「已取消」与「失败」。
+        """
+        base = os.path.basename(remote.rstrip("/")) or safe_name(remote)
+        target = os.path.join(local_dir, base)
+        if is_too_long(target):
+            return None, explain_long_path(target)
+        try:
+            os.makedirs(long_path(local_dir), exist_ok=True)
+        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
+            return None, f"无法创建保存目录 {local_dir}：{e}"
+
+        # cancel 时删除的半成品：adb 可能已开始写原名 / 净化名两处
+        raw_local = os.path.join(local_dir, base)
+        safe_local = os.path.join(local_dir, safe_name(base))
+        # 老版本 adb 不认 -p：先照常试，若明确是参数被拒则去掉 -p 重来。
+        for with_p in (True, False):
+            cancelled, rejected, reason, last = self._pull_once(
+                serial, remote, local_dir, progress, timeout, idle_timeout,
+                task_id, (raw_local, safe_local), with_p)
+            if cancelled:
+                return None, "已取消"
+            if reason is None:      # 成功
+                if progress is not None and last != 100:
+                    with contextlib.suppress(Exception):
+                        progress(100)
+                return self._finalize_download(local_dir, base)
+            if rejected:            # 老 adb 不认 -p，去掉后重试一次
+                continue
+            return None, reason
+        return None, "下载失败"
+
+    def _pull_once(self, serial, remote, local_dir, progress, timeout,
+                   idle_timeout, task_id, cleanup, with_p=True):
+        """执行一次 adb pull；返回 (cancelled, rejected_p, reason, last_pct)。
+
+        reason 为 None 表示成功；rejected_p 为真表示老 adb 不认 -p（可重试）。
+        """
+        argv = [self.adb, "-s", serial, "pull"]
+        if with_p:
+            argv.append("-p")
+        argv += [remote, local_dir]
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            **adb_popen_kwargs())
+        self.register_transfer(task_id, proc, cleanup)
+        last = -1
+        chunks = []
+        idle = [time.monotonic()]
+
+        def _pump():
+            nonlocal last
+            with proc.stdout:
+                while True:
+                    block = proc.stdout.read(1)
+                    if not block:
+                        break
+                    idle[0] = time.monotonic()
+                    chunks.append(block)
+                    pct = _parse_push_progress("".join(chunks[-256:]))
+                    if pct is not None and pct > last:
+                        last = pct
+                        if progress is not None:
+                            with contextlib.suppress(Exception):
+                                progress(pct)
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + (timeout or 600)
+        idle_limit = idle_timeout or 60
+        try:
+            while True:
+                if task_id and self.is_cancelled(task_id):
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    return True, False, "已取消", last
+                reader.join(0.25)
+                if not reader.is_alive():
+                    break
+                now = time.monotonic()
+                if now - idle[0] >= idle_limit:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    return False, False, f"下载卡住（{idle_limit} 秒没有传输进展，设备可能已断开）", last
+                if now >= deadline:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    return False, False, f"下载超时（超过 {timeout} 秒）", last
+            rc = proc.wait()
+            reason = "".join(chunks).strip()[:200] or "pull 失败（adb 没有给出原因）"
+        finally:
+            self.unregister_transfer(task_id)
+        if rc == 0:
+            return False, False, None, last
+        return False, (with_p and _rejects_p_flag(reason)), reason, last
 
     def view(self, serial, path, max_inline_bytes=1024 * 1024):
         """小文件直接 cat 内容返回；大文件 pull 到临时目录返回本地路径标记。

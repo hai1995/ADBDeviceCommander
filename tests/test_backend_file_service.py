@@ -6,6 +6,7 @@
 """
 import sys
 import os
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -771,3 +772,134 @@ def test_upload_stream_no_fallback_on_real_failure(monkeypatch):
     assert ok is False
     assert "remote offline" in err, err
     assert len(calls) == 1, f"真实失败不该重试：{calls}"
+
+
+
+
+# ---------------------------------------------------------------- 传输取消 / 下载进度
+
+def test_cancel_transfer_kills_proc_and_removes_partial_file():
+    """取消传输：杀掉登记的 adb 进程 + 删除半成品落地文件，且幂等。"""
+    import io
+
+    class FakeProc:
+        def __init__(self):
+            self.killed = False
+            self.stdout = io.StringIO("")
+
+        def poll(self):
+            return None if not self.killed else -9
+
+        def kill(self):
+            self.killed = True
+
+    svc = FileService()
+    proc = FakeProc()
+    partial = os.path.join(tempfile.gettempdir(), "adc_cancel_test_partial.bin")
+    with open(partial, "wb") as f:
+        f.write(b"half")
+
+    svc.register_transfer("t1", proc, (partial,))
+    assert svc.is_cancelled("t1") is False
+    assert svc.cancel_transfer("t1") is True
+    assert proc.killed is True, "必须杀掉 adb 进程"
+    assert not os.path.exists(partial), "必须删掉半成品文件"
+    assert svc.is_cancelled("t1") is True, "取消标记要留住，供 worker 据此推 cancelled"
+    assert svc.cancel_transfer("t1") is False, "重复取消不该报错（返回未找到）"
+
+
+def test_register_transfer_clears_stale_cancel_on_retry():
+    """同一 task_id 重试（「重试」按钮）：注册时清掉上次的取消标记。"""
+    svc = FileService()
+    svc._cancelled.add("t2")
+    svc.register_transfer("t2", object(), ())
+    assert svc.is_cancelled("t2") is False
+
+
+def test_upload_stream_stops_promptly_when_cancelled(monkeypatch):
+    """上传中取消：循环检测到 cancelled 立刻退出，不误报「卡住/超时」。"""
+    class P:
+        """持续输出的 adb 进程；被 kill 后 stdout 立刻给 EOF。
+
+        真实 adb 被 kill 时 stdout 管道关闭、read 返回空。mock 必须照做 ——
+        否则 daemon 读线程永远读下去，即便本用例通过也会拖垮整个 pytest
+        session（表现为全量跑到一半突然卡死）。
+        """
+        def __init__(self):
+            self.returncode = 0
+            self.killed = False
+            self.stdout = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return "" if self.killed else "x"
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+        def poll(self):
+            return None
+
+    made = []
+
+    def make_proc(*a, **kw):
+        p = P()
+        made.append(p)
+        return p
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", make_proc)
+    svc = FileService()
+    # 调用前先放好取消标记，再让 register 不清标记（模拟「传输已开始后才取消」）。
+    svc._cancelled.add("t3")
+
+    def register_no_clear(tid, proc, cleanup=()):
+        with svc._transfer_lock:
+            svc._transfers[tid] = {"proc": proc, "cleanup": tuple(cleanup)}
+    svc.register_transfer = register_no_clear
+
+    ok, err = svc.upload_stream("S", "/tmp/a", "/sdcard/a", task_id="t3",
+                                timeout=60, idle_timeout=60)
+    assert ok is False
+    assert "取消" in err, err
+    # 进程确实被 kill；其 read 从此返回 EOF，读线程会自然收尾，不再空转。
+    assert made and made[0].killed is True
+
+def test_download_stream_reports_progress(monkeypatch, tmp_path):
+    """download_stream 用 -p 输出解析百分比并回调，成功后落地文件。"""
+    import io
+
+    landed = str(tmp_path / "a.bin")
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            assert "-p" in argv, "下载也要带 -p 才有百分比"
+            self.stdout = io.StringIO("[ 30%] a.bin\r[100%] a.bin\r")
+            self.returncode = 0
+            # 假装在 pull 过程中落地了文件
+            with open(landed, "wb") as f:
+                f.write(b"data")
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc(*a, **kw))
+    svc = FileService()
+    seen = []
+    path, err = svc.download_stream(
+        "S", "/sdcard/a.bin", str(tmp_path), progress=seen.append, task_id="d1")
+    assert err is None and path, (path, err)
+    assert 30 in seen and seen[-1] == 100, seen
