@@ -4570,6 +4570,90 @@ def test_file_upload_progress_events_with_task_id(monkeypatch):
     assert len(done) == 1 and done[0]["percent"] == 100, done
 
 
+def test_file_upload_pick_returns_items_without_starting_workers(monkeypatch):
+    """「上传」按钮走原生对话框：只拿本地路径，且**只回报条目**不启动 worker。
+
+    这是「大文件进度条不动 + 请求超时（15s）」的根因修复。走 `<input type=file>`
+    时前端只有 File 对象，只能把整个文件 base64 过 js_api 桥：几百 MB 光序列化
+    就几十秒，期间桥被独占 —— callApi 15s 超时，take_events 轮询排在后面拿不到
+    事件，进度条于是从 0% 直接跳到 100%。路径直传一个字节都不过桥。
+
+    另外这里刻意**不** spawn：启动时机交给前端，等它把队列项建好再逐项调
+    file_upload_path。反过来的话，几 KB 的小文件可能在队列项建好前就 push 完并
+    推了 done，那条事件没有对应项可更新、被前端丢掉，界面永远停在 0%。
+    """
+    api = _make_api()
+    monkeypatch.setattr(
+        api, "_open_dialog",
+        lambda pairs, label="", multiple=False: ["/data/big.bin"])
+    spawned = []
+    monkeypatch.setattr(
+        api, "_file_op",
+        lambda *a, **kw: spawned.append(a) or {"ok": True})
+
+    r = api.file_upload_pick("A1", "/sdcard/Download/")
+
+    assert r["ok"] is True, r
+    assert len(r["items"]) == 1, r
+    item = r["items"][0]
+    assert item["path"] == "/data/big.bin", item
+    assert item["remote"] == "/sdcard/Download/big.bin", item
+    assert item["name"] == "big.bin", item
+    assert item["task_id"], "必须下发 task_id，前端据此建队列项并接收进度事件"
+    assert not spawned, "pick 不该在这里启动 worker（顺序由前端控制）"
+
+
+def test_file_upload_pick_cancel_is_silent(monkeypatch):
+    """取消选择要回 cancelled（前端静默），不能当失败弹红条。"""
+    api = _make_api()
+    monkeypatch.setattr(api, "_open_dialog", lambda *a, **kw: [])
+    assert api.file_upload_pick("A1", "/sdcard") == {"ok": False,
+                                                     "reason": "cancelled"}
+
+
+def test_file_upload_path_pushes_with_real_percent(monkeypatch):
+    """路径直传把 adb push 的真实百分比推成事件：0 → 中间值 → done(100)。"""
+    api = _make_api()
+
+    def fake_stream(serial, local, remote, progress=None, timeout=None):
+        assert progress is not None, "直传必须带进度回调，否则进度条永远 0→100"
+        progress(37)
+        progress(99)
+        return True, ""
+
+    monkeypatch.setattr(api.file_svc, "upload_stream", fake_stream)
+    monkeypatch.setattr(api, "_schedule_file_refresh", lambda *a, **kw: None)
+
+    api._run_file_op(api._do_file_upload_path, "A1", "/data/big.bin",
+                     "/sdcard/big.bin", "t-9")
+
+    evs = _events_by_kind(api).get("file_upload", [])
+    assert evs, "应推送 file_upload 事件"
+    assert all(p["task_id"] == "t-9" and p["serial"] == "A1"
+               and p["remote"] == "/sdcard/big.bin" for p in evs), evs
+    ups = [p["percent"] for p in evs if p["status"] == "uploading"]
+    assert ups == [0, 37, 99], ups
+    done = [p for p in evs if p["status"] == "done"]
+    assert len(done) == 1 and done[0]["percent"] == 100, done
+
+
+def test_file_upload_path_failure_carries_reason(monkeypatch):
+    """路径直传失败要推 failed 且带 adb 给的原因，不能只留一个红叉。"""
+    api = _make_api()
+    monkeypatch.setattr(
+        api.file_svc, "upload_stream",
+        lambda serial, local, remote, progress=None, timeout=None:
+            (False, "adb: error: failed to copy: remote offline"))
+    monkeypatch.setattr(api, "_schedule_file_refresh", lambda *a, **kw: None)
+
+    api._run_file_op(api._do_file_upload_path, "A1", "/data/big.bin",
+                     "/sdcard/big.bin", "t-10")
+
+    evs = _events_by_kind(api).get("file_upload", [])
+    assert evs[-1]["status"] == "failed", evs
+    assert "remote offline" in evs[-1]["error"], evs[-1]
+
+
 def test_file_upload_progress_failure_event_carries_reason(monkeypatch):
     """进度通道上传失败：必须推 failed 事件带原因，不能只推百分比然后没了。"""
     import base64

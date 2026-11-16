@@ -178,17 +178,25 @@ class CommandMixin:
         # 新版：拼成 '描述 (*.ext)' 字符串
         return tuple(f"{desc} ({ext})" for desc, ext in pairs)
 
-    def _open_dialog(self, pairs, label=""):
+    def _open_dialog(self, pairs, label="", multiple=False):
         """弹原生「打开文件」对话框，返回选中文件路径；取消 / 不可用返回空串。
 
         统一收口各版本的 create_file_dialog 签名差异与取消语义，调用方只需
         判断返回是否为空。
+
+        `multiple=True` 时返回**路径列表**（取消 / 不可用为 `[]`）。上传走这条路
+        而不是 `<input type=file>`：浏览器控件只给 File 对象、拿不到本地路径，
+        只能把整个文件的字节搬过 js_api 桥；几百 MB 的文件光序列化就要几十秒，
+        会把桥堵死（同一时刻的 take_events 轮询拿不到进度事件，用户看到的就是
+        「进度条不动」+「请求超时（15s）」）。原生对话框给的是路径，后端直接
+        `adb push` 该路径，一个字节都不用跨桥。
         """
+        empty = [] if multiple else ""
         try:
             import webview
         except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("warn", f"⚠ 当前环境不支持原生文件对话框：{e}")
-            return ""
+            return empty
         win = getattr(self, "window", None)
         try:
             if win is None and hasattr(webview, "active_window"):
@@ -197,34 +205,39 @@ class CommandMixin:
             win = None
         if win is None or not hasattr(win, "create_file_dialog"):
             self._push_status("warn", "⚠ 当前环境不支持原生文件对话框")
-            return ""
+            return empty
         ft = self._dialog_types(pairs)
         directory = str(program_dir())
         try:
             files = win.create_file_dialog(
                 webview.OPEN_DIALOG, directory=directory,
-                allow_multiple=False, file_types=ft)
+                allow_multiple=multiple, file_types=ft)
         except TypeError:
             # 不同版本签名略有差异，做一次位置参数兜底
             try:
                 files = win.create_file_dialog(
-                    webview.OPEN_DIALOG, directory, False, None, ft)
+                    webview.OPEN_DIALOG, directory, multiple, None, ft)
             except TypeError:
                 # 最后一层兜底同样要兜住异常：否则 create_file_dialog 再抛一次
                 # 就冒到 js_api 桥接，用户看到的是「调用后端失败：...」这种
                 # 与「打开对话框」毫无关系的提示。
                 try:
                     files = win.create_file_dialog(
-                        webview.OPEN_DIALOG, directory, False)
+                        webview.OPEN_DIALOG, directory, multiple)
                 except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     self._push_status("warn", f"⚠ 打开文件对话框失败：{e}")
-                    return ""
+                    return empty
         except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("warn", f"⚠ 打开文件对话框失败：{e}")
-            return ""
+            return empty
         if not files:
-            return ""
-        return files[0] if isinstance(files, (list, tuple)) else str(files)
+            return empty
+        # GTK / QT 在单选时直接回字符串而不是列表，两种都要认（见 import_commands_dialog）
+        items = ([str(x) for x in files if x] if isinstance(files, (list, tuple))
+                 else [str(files)])
+        if multiple:
+            return items
+        return items[0] if items else ""
 
     def import_commands_dialog(self):
         """弹出原生文件选择框（默认定位到程序目录），读取 JSON 并导入合并。

@@ -587,3 +587,108 @@ def test_list_dir_reports_unparsable_output_instead_of_empty(monkeypatch):
     items, err = svc.list_dir("SERIAL", "/weird")
     assert items is None, "解析失败不能当作空目录返回"
     assert err and "无法解析" in err, err
+
+
+def test_push_timeout_scales_with_file_size():
+    """push 的总超时上界要随文件大小放大：固定 120s 会把大文件传到一半就杀掉。
+
+    回归：1 GB 走无线 adb（约 2 MB/s）需要 8 分钟，旧实现到点就 kill，界面报
+    「上传超时」，用户以为文件传不动，其实只是被自己设的上界误杀。
+    """
+    assert fs_mod.push_timeout_for(0) == 120, "取不到大小要退回 120s 下限"
+    assert fs_mod.push_timeout_for(None) == 120
+    assert fs_mod.push_timeout_for("oops") == 120, "脏值不能崩"
+    assert fs_mod.push_timeout_for(1024) == 120, "小文件保持 120s"
+    big = fs_mod.push_timeout_for(1024 ** 3)          # 1 GB
+    assert big >= 8 * 60, big                          # 至少容得下 1 MB/s 的 1 GB
+    assert fs_mod.push_timeout_for(10 ** 12) > big, "更大的文件上界要更大"
+
+
+def test_upload_stream_gives_up_when_output_goes_silent(monkeypatch):
+    """管道彻底安静（设备掉线）时要按「空闲」判定卡住，而不是等满总超时。
+
+    回归：read(1) 卡在管道上不会自己返回，旧的固定 join(timeout) 只有总超时
+    到点才收尾；大文件的上界被放宽到十几分钟后，一次掉线就让队列项转十几分钟。
+    """
+    import threading
+    import time as _time
+
+    released = threading.Event()
+
+    class _SilentStream:
+        """永远不吐字节的管道：read 一直阻塞，直到进程被 kill。"""
+        def read(self, n=1):
+            released.wait(5)
+            return ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class SilentProc:
+        def __init__(self):
+            self.stdout = _SilentStream()
+            self.returncode = -9
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+            released.set()
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: SilentProc())
+    started = _time.monotonic()
+    ok, err = FileService().upload_stream(
+        "S", "/tmp/a", "/sdcard/a", timeout=30, idle_timeout=0.1)
+    cost = _time.monotonic() - started
+    assert ok is False
+    assert "卡住" in err, err
+    assert cost < 5, f"空闲超时应当很快判定，实际用了 {cost:.1f}s"
+
+
+def test_upload_stream_slow_but_alive_is_not_killed(monkeypatch):
+    """传输慢但一直有输出（大文件正常情形）绝不能被空闲超时误杀。
+
+    这是「上传到 60% 突然报失败」的防线：判据必须是「多久没动静」，
+    而不是「总共花了多久」。
+    """
+    class SlowProc:
+        """每读一个字符都要 20ms 的管道 —— 比 idle_timeout 慢，但一直有进展。"""
+        def __init__(self):
+            self._src = "[ 30%] /sdcard/a\r[100%] /sdcard/a\r"
+            self._pos = 0
+            self.returncode = 0
+            self.stdout = self
+
+        def read(self, n=1):
+            import time as _time
+            if self._pos >= len(self._src):
+                return ""
+            _time.sleep(0.02)      # 远大于 idle_timeout=0.05 的单次间隔累积
+            ch = self._src[self._pos]
+            self._pos += 1
+            return ch
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: SlowProc())
+    seen = []
+    ok, err = FileService().upload_stream(
+        "S", "/tmp/a", "/sdcard/a", progress=seen.append,
+        timeout=60, idle_timeout=0.05)
+    assert (ok, err) == (True, ""), err
+    assert seen[-1] == 100, seen

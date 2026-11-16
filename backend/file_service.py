@@ -12,6 +12,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 
 from core import tmpfiles
@@ -67,6 +68,28 @@ def _parse_push_progress(text):
     if not matches:
         return None
     return max(0, min(100, int(matches[-1])))
+
+
+# adb push 的慢速下限（字节/秒）。无线 adb / 老旧 USB 口实测常在 1~3 MB/s，
+# 只用来估算「总时长上界」，所以取最保守的一档：估紧了会误杀正常传输。
+_PUSH_MIN_BYTES_PER_S = 1024 * 1024
+
+
+def push_timeout_for(size, floor=120):
+    """按文件大小估算 adb push 的总时长上界（秒）。
+
+    固定 120s 对大文件是**误杀**：1 GB 走无线 adb（约 2 MB/s）要 8 分钟，
+    到点被杀后用户看到「上传超时」，而文件其实只传了一半。这个上界只用于
+    兜住「进程永久挂住」，真正判定卡死的是 upload_stream 的**空闲超时**，
+    因此宁可放宽也不误杀。
+    """
+    try:
+        n = int(size or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return floor
+    return max(floor, n // _PUSH_MIN_BYTES_PER_S + 60)
 
 
 def _err_text(r, fallback="adb 返回失败（没有给出原因）"):
@@ -177,7 +200,8 @@ class FileService:
             **adb_kwargs(120))
         return r.returncode == 0, _err_text(r)
 
-    def upload_stream(self, serial, local, remote, progress=None, timeout=120):
+    def upload_stream(self, serial, local, remote, progress=None, timeout=120,
+                      idle_timeout=60):
         """带实时进度的 adb push；返回契约与 upload 一致：(ok, err)。
 
         adb 把 push 进度写到 **stderr**，形如 `[ 10%] /sdcard/a`，并用 `\\r`
@@ -190,6 +214,13 @@ class FileService:
         忽略错误文案里的「100%」等无关百分比。stdout 里的失败原因同样要收，避免
         「失败却没有任何进度」时用户不知道原因。
 
+        超时分两层——只看总时长会把大文件误杀（1 GB 无线 adb 要 8 分钟，固定
+        120s 到点就杀，文件其实只传了一半）：
+          * `idle_timeout`：连续这么久**没有任何输出**才判定卡死（设备掉线、
+            传输僵住）。传输慢但一直有进展的不会被误杀。
+          * `timeout`：总上界，只用来兜住「循环永远转下去」，由调用方按文件大小
+            估算（见 push_timeout_for）。
+
         这个方法是给「上传队列 + 进度条」用的新通道；原 upload 一字未动，既有
         调用方（含大量 monkeypatch 掉 subprocess.run 的单测）行为完全不变。
         """
@@ -199,6 +230,7 @@ class FileService:
             **adb_popen_kwargs())
         last = -1
         chunks = []
+        idle = [time.monotonic()]   # 最近一次收到输出的时刻，由读线程刷新
 
         def _pump():
             nonlocal last
@@ -209,6 +241,7 @@ class FileService:
                     block = proc.stdout.read(1)
                     if not block:
                         break
+                    idle[0] = time.monotonic()
                     chunks.append(block)
                     pct = _parse_push_progress("".join(chunks[-256:]))
                     if pct is not None and pct > last:
@@ -217,17 +250,30 @@ class FileService:
                             with contextlib.suppress(Exception):
                                 progress(pct)
 
-        reader = threading.Thread(target=_pump, daemon=True)
-        reader.start()
-        # 用 join(timeout) 做整体超时兜底：adb push 卡死（设备掉线、传输僵住）时
-        # read(1) 不会自己返回，必须在主线程设定上界，超时就杀掉进程，绝不把
-        # 上传 worker 永久挂住（否则该文件一直占着去重 key / 队列项永远转圈）。
-        reader.join(timeout)
-        if reader.is_alive():
+        def _kill():
             with contextlib.suppress(Exception):
                 proc.kill()
-            proc.wait()
-            return False, f"上传超时（超过 {timeout} 秒）"
+            with contextlib.suppress(Exception):
+                proc.wait()
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+        # 主线程每 0.25s 醒一次看两层超时；读线程一结束 join 立刻返回，正常路径
+        # 只转一圈就退出，没有任何额外延迟。绝不把上传 worker 永久挂住（否则该
+        # 文件一直占着去重 key / 队列项永远转圈）。
+        deadline = time.monotonic() + (timeout or 120)
+        idle_limit = idle_timeout or 60
+        while True:
+            reader.join(0.25)
+            if not reader.is_alive():
+                break
+            now = time.monotonic()
+            if now - idle[0] >= idle_limit:
+                _kill()
+                return False, f"上传卡住（{idle_limit} 秒没有任何传输进展，设备可能已断开）"
+            if now >= deadline:
+                _kill()
+                return False, f"上传超时（超过 {timeout} 秒）"
         rc = proc.wait()
         text = "".join(chunks)
         if rc != 0:

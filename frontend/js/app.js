@@ -6198,16 +6198,20 @@
       const meta = document.createElement("span");
       meta.className = "upload-meta dim";
       const pct = typeof t.percent === "number" ? t.percent : 0;
+      // 传输中却一直没有新百分比：切成不确定态（见 touchUploadStale）
+      const stale = t.status === "uploading" && !!t.stale;
+      if (stale) row.classList.add("upload-stale");
       meta.textContent = (t.status === "reading") ? "读取中"
         : (t.status === "done") ? "完成"
         : (t.status === "failed") ? "失败"
-        : pct + "%";
+        : stale ? "传输中…" : pct + "%";
       row.appendChild(meta);
 
       const bar = document.createElement("span");
       bar.className = "upload-bar";
       const fill = document.createElement("i");
-      fill.style.width = (t.status === "done" ? 100 : (t.status === "failed" || t.status === "reading") ? 0 : pct) + "%";
+      fill.style.width = (t.status === "done" || stale ? 100
+        : (t.status === "failed" || t.status === "reading") ? 0 : pct) + "%";
       bar.appendChild(fill);
       row.appendChild(bar);
 
@@ -6244,7 +6248,34 @@
     const t = uploadTasks[id];
     if (!t) return;
     Object.assign(t, patch);
+    // 每次有新进度就重置"多久没动静"的计时；收尾（done/failed）时清掉。
+    if (t.status === "uploading") touchUploadStale(id);
+    else clearUploadStale(t);
     renderUploadQueue();
+  }
+
+  /* push 阶段 adb 不一定打印百分比（部分 platform-tools 版本只在结束时给一句
+     「1 file pushed」，中间一个 `[ NN%]` 都没有）。这时进度条会钉在 0% 一动不动，
+     看起来跟卡死没区别。超过 UPLOAD_STALE_MS 没有新进度就切到「传输中…」的
+     不确定态条纹，让用户至少知道还在传。 */
+  const UPLOAD_STALE_MS = 1500;
+  function clearUploadStale(t) {
+    if (!t) return;
+    if (t.staleTimer) { clearTimeout(t.staleTimer); t.staleTimer = null; }
+    t.stale = false;
+  }
+  function touchUploadStale(id) {
+    const t = uploadTasks[id];
+    if (!t) return;
+    if (t.staleTimer) clearTimeout(t.staleTimer);
+    t.stale = false;
+    t.staleTimer = setTimeout(() => {
+      const cur = uploadTasks[id];
+      if (!cur || cur.status !== "uploading") return;
+      cur.staleTimer = null;
+      cur.stale = true;
+      renderUploadQueue();
+    }, UPLOAD_STALE_MS);
   }
 
   /* 后端 file_upload 事件：按 task_id 更新对应项，不认识的直接忽略（可能是别的
@@ -6289,8 +6320,11 @@
         setUploadTask(task.id, { status: "uploading", percent: 0 });
         // 走带进度的后端通道（task_id + progress=true）；callApi 失败也要把该标成失败，
         // 否则该项会永远停在 uploading 转圈。
+        // 超时传 0（不限时）：拖拽上传要把整个文件的 base64 过桥，大文件光这一趟就
+        // 可能几十秒 —— 15s 到点只会制造「上报失败、后端其实还在传」的假失败。
+        // 真卡死由后端的空闲超时兜底（会推 failed 事件）。
         const r = await callApi(api.file_upload_data(serial, task.name, b64, remote,
-                                                     task.id, true));
+                                                     task.id, true), 0);
         if (r === null) {
           failUpload(task.id, "调用后端失败");
         }
@@ -6313,23 +6347,99 @@
     }
   }
 
+  /* 拖拽路径传来的是 File 对象，没有本地路径，只能整包过桥 —— 超过这个量级就
+     值得提醒一句改用「上传」按钮（见 pickUploadFiles）。 */
+  const DROP_BIG_FILE_WARN = 8 * 1024 * 1024;
+
   /* 上传一批文件：拖拽与「上传」按钮共用本函数。每一项立即入队并展示进度。 */
   function uploadFiles(files) {
     if (!files || !files.length) return;
     if (!fileSerial) { pushStatus("warn", "⚠ 请先在左侧勾选一台设备（文件上传需要目标设备）"); return; }
     let n = 0;
+    let big = 0;
     Array.from(files).forEach((f) => {
       const id = newUploadTaskId();
       uploadTasks[id] = {
         id, name: f.name || "未命名", size: f.size || 0, file: f,
         serial: fileSerial, dir: filePath,
-        status: "reading", percent: 0, error: "",
+        status: "reading", percent: 0, error: "", localPath: "",
       };
       submitUpload(uploadTasks[id]);
+      if ((f.size || 0) >= DROP_BIG_FILE_WARN) big++;
       n++;
     });
-    if (n) pushStatus("info", "⬆ 已提交上传 " + n + " 个文件");
+    if (n) {
+      // 拖拽只能拿到 File 对象、没有本地路径，字节必须经 js_api 桥中转。大文件
+      // 这一趟很慢（几百 MB 要几十秒），提前说清楚，别让用户以为卡住了。
+      pushStatus("info", "⬆ 已提交上传 " + n + " 个文件" +
+        (big ? "（其中 " + big + " 个较大，拖拽需经浏览器中转，建议改用「上传」按钮直接选文件）" : ""));
+    }
     renderUploadQueue();
+  }
+
+  /* 「上传」按钮：走原生文件对话框，后端只拿路径、自己读文件再 push。
+     这是大文件唯一靠谱的路径 —— `<input type=file>` 只给 File 对象，只能把整个
+     文件编码成 base64 过 js_api 桥，几百 MB 光序列化就几十秒；桥被独占期间
+     callApi 会 15s 超时、take_events 也拿不到进度事件（进度条 0% 直接跳 100%）。
+     老后端 / 测试环境没有这个接口时，退回原来的浏览器文件选择。 */
+  async function pickUploadFiles() {
+    if (!fileSerial) { pushStatus("warn", "⚠ 请先在左侧勾选一台设备（文件上传需要目标设备）"); return; }
+    if (!api || typeof api.file_upload_pick !== "function") {
+      if (els.fileUpload) els.fileUpload.click();
+      return;
+    }
+    const dir = filePath;
+    // 不限时：对话框要等用户挑文件，完全可能超过默认的 15s
+    let r = null;
+    uploadBegin();
+    try {
+      r = await callApi(api.file_upload_pick(fileSerial, dir), 0);
+    } finally {
+      uploadEnd();
+    }
+    if (!r) return;                     // callApi 已经提示过原因
+    if (!r.ok) {
+      if (r.reason && r.reason !== "cancelled") {
+        pushStatus("err", "⚠ 上传失败：" + r.reason);
+      }
+      return;
+    }
+    const items = r.items || [];
+    items.forEach((it) => {
+      uploadTasks[it.task_id] = {
+        id: it.task_id, name: it.name || "未命名", size: it.size || 0,
+        file: null, localPath: it.path || "",
+        serial: fileSerial, dir, remote: it.remote,
+        status: "uploading", percent: 0, error: "", stale: false, staleTimer: null,
+      };
+      touchUploadStale(it.task_id);
+    });
+    renderUploadQueue();
+    if (items.length) {
+      pushStatus("info", "⬆ 已提交上传 " + items.length + " 个文件到 " + dir);
+    }
+    // 队列项必须先建好再启动：几 KB 的小文件可能在一帧内就 push 完，done 事件
+    // 若比队列项先到会被丢掉，那一项就永远停在 0% 上（看起来像卡死）。
+    items.forEach((it) => submitUploadByPath(uploadTasks[it.task_id]));
+  }
+
+  /* 让后端按本地路径 push 一项：首次提交与「重试」共用这一条路径，
+     两者的进度 / 事件行为因此完全一致。 */
+  async function submitUploadByPath(t) {
+    if (!t) return;
+    if (!t.serial) { failUpload(t.id, "未选中设备"); return; }
+    uploadBegin();
+    try {
+      setUploadTask(t.id, { status: "uploading", percent: 0, error: "" });
+      // 不限时：一个几百 MB 的文件在本机压完再推上去可能远超 15s，默认超时只会
+      // 制造「界面报失败、后端还在传」的假失败。真卡死由后端空闲超时兜底。
+      const r = await callApi(
+        api.file_upload_path(t.serial, t.localPath, t.remote, t.id), 0);
+      if (r === null) failUpload(t.id, "调用后端失败");
+      else if (!r.ok) failUpload(t.id, r.reason || "上传失败");
+    } finally {
+      uploadEnd();
+    }
   }
 
   /* 上传队列项的「重试 / 移除」：委托在 #upload-queue-list 上一次绑定。 */
@@ -6343,9 +6453,12 @@
         const t = uploadTasks[id];
         if (!t) return;
         if (btn.dataset.uact === "retry") {
-          // 复用缓存的 File；失败项才给重试按钮，file 一定还在。
-          submitUpload(t);
+          // 路径直传的项没有 File 对象，让后端按原路径重推；拖拽来的项还缓存着
+          // File，直接复用（两条路都不必让用户重新挑文件）。
+          if (t.localPath) submitUploadByPath(t);
+          else submitUpload(t);
         } else if (btn.dataset.uact === "remove") {
+          clearUploadStale(t);
           delete uploadTasks[id];
           renderUploadQueue();
         }
@@ -6355,6 +6468,7 @@
       els.uploadQueueClear.addEventListener("click", () => {
         Object.keys(uploadTasks).forEach((id) => {
           if (uploadTasks[id].status === "done" || uploadTasks[id].status === "failed") {
+            clearUploadStale(uploadTasks[id]);
             delete uploadTasks[id];
           }
         });
@@ -8259,6 +8373,15 @@
         callApi(api.file_touch(fileSerial, filePath.replace(/\/$/, "") + "/" + v.name));
       });
     });
+    // 「上传」按钮优先弹**原生**文件对话框（后端直接按路径 push，字节不过桥）。
+    // preventDefault 拦住 <label> 对隐藏 input 的默认激活，否则会同时弹出浏览器的
+    // 文件选择框；input 的 change 仍保留，作为老后端 / 拖拽的降级通道。
+    if (els.fileUploadBtn) {
+      els.fileUploadBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        pickUploadFiles();
+      });
+    }
     els.fileUpload.addEventListener("change", (e) => {
       uploadFiles(e.target.files);
       e.target.value = "";   // 允许重复上传同名文件

@@ -62,7 +62,7 @@ from backend.screen_service import (
 from backend.audio_service import (
     MicRecorder, DeviceAudioCapture, ffmpeg_mux, _have_ffmpeg,
 )
-from backend.file_service import FileService
+from backend.file_service import FileService, push_timeout_for
 from backend.scrcpy_service import ScrcpyLauncher, find_scrcpy, probe as scrcpy_probe_info
 from backend.mirror_service import (
     PipeMirror, SnapMirror, FrameServer, find_player, probe_player, plan_size,
@@ -184,6 +184,7 @@ __all__ = [
     "prefs_path",
     "probe_player",
     "program_dir",
+    "push_timeout_for",
     "re",
     "resolve_save_dir",
     "resource_path",

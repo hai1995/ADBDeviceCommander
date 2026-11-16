@@ -1,16 +1,18 @@
 """backend.controllers.file —— 文件浏览 / 增删改 / 上传下载"""
 
 import contextlib
+import uuid
 from typing import ClassVar
 
 from backend.controller import (
     os,
+    push_timeout_for,
     safe_name,
     subprocess,
     sys,
     threading,
 )
-from core.longpath import long_path, path_isdir, path_isfile
+from core.longpath import long_path, path_getsize, path_isdir, path_isfile
 
 
 def _build_browse_info(title):
@@ -198,6 +200,7 @@ class FileMixin:
             "_do_file_list": "列出目录", "_do_file_mkdir": "创建目录",
             "_do_file_touch": "创建文件", "_do_file_remove": "删除",
             "_do_file_rename": "重命名", "_do_file_upload_data": "上传",
+            "_do_file_upload_path": "上传",
             "_do_file_download": "下载", "_do_file_view": "查看",
         }
 
@@ -455,7 +458,6 @@ class FileMixin:
                              progress=False):
         import base64
         import tempfile
-        import uuid
         # 进度通道开启才推事件：老路径（progress=False）一行事件都不发，状态栏与
         # 既有单测的观察点保持不变。
         use_progress = bool(progress and task_id)
@@ -517,6 +519,93 @@ class FileMixin:
                 percent=100 if ok else None,
                 error="" if ok else (err or "上传失败"))
         # 合并刷新：多选上传时 N 个文件只刷一次目录（见 _schedule_file_refresh）
+        self._schedule_file_refresh(serial, remote)
+
+    def file_upload_pick(self, serial, remote_dir):
+        """弹原生「选择文件」框，按**本地路径**直接 push —— 字节不过 js_api 桥。
+
+        为什么不用 `<input type=file>`（拖拽那条路仍保留它）：浏览器控件只暴露
+        File 对象、拿不到本地路径，只能把整个文件编码成 base64 交给后端。几百 MB
+        的文件光「JSON 序列化 + 过桥 + 反序列化」就要几十秒，而这期间桥是独占的：
+
+          * 前端 callApi 有 15s 超时 → 状态栏报「请求超时（15s）」，上传直接算失败；
+          * take_events 轮询排在同一个桥后面 → 后端 push 期间推的进度事件全堆在
+            队列里，等桥腾出来时 push 早已结束，进度条于是从 0% 一步跳到 100%。
+
+        原生对话框只回路径，后端自己读文件，两个问题一起消失；大文件也不再需要
+        在浏览器内存里先翻 1.33 倍的 base64。
+        """
+        if self.state.shutting_down:
+            return {"ok": False, "reason": "shutting_down"}
+        if not serial:
+            self._push_status("warn", "⚠ 请先在左侧勾选一台设备（文件上传需要目标设备）")
+            return {"ok": False, "reason": "no_device"}
+        paths = self._open_dialog((("所有文件", "*.*"),), "选择要上传的文件",
+                                  multiple=True)
+        # 取消是正常操作，静默返回 —— 用户自己按的「取消」，不该再弹一条红字。
+        if not paths:
+            return {"ok": False, "reason": "cancelled"}
+        directory = (remote_dir or "/sdcard").rstrip("/") or "/"
+        items = []
+        for local in paths:
+            name = os.path.basename(local) or "未命名"
+            # 取不到大小（路径过长 / 文件刚被删）不算失败：push 的成败由 adb 说了算，
+            # 这里读大小只是为了给 push 估一个够宽的超时上界。
+            items.append({"task_id": "p" + uuid.uuid4().hex[:10],
+                          "path": local, "name": name,
+                          "size": path_getsize(local),
+                          "remote": directory + "/" + name})
+        # 这里**不启动** worker：前端要先按这些条目把队列项画出来，再由它逐项调
+        # file_upload_path 启动。反过来的话，几 KB 的小文件可能在队列项还没建好
+        # 之前就 push 完并推了 done —— 那条事件因为没有对应项被前端丢掉，界面就
+        # 永远停在 0%。
+        return {"ok": True, "items": items}
+
+    def file_upload_path(self, serial, local, remote, task_id=None):
+        """按本地路径重传一个文件（上传队列里「重试」走这里）。
+
+        与 file_upload_pick 同一条通道：路径由后端持有，用户不必回到文件夹重挑，
+        内容也不必再经 js_api 桥搬一次。
+        """
+        if self.state.shutting_down:
+            return {"ok": False, "reason": "shutting_down"}
+        if not serial:
+            return {"ok": False, "reason": "no_device"}
+        if not path_isfile(local):
+            display = os.path.basename(local or "") or remote
+            self._push_status(
+                "err", f"⚠ 上传失败 {display}：本地文件已不存在（可能被移动或删除）")
+            return {"ok": False, "reason": "本地文件已不存在（可能被移动或删除）"}
+        tid = task_id or ("p" + uuid.uuid4().hex[:10])
+        self._file_op(serial, self._do_file_upload_path, local, remote, tid,
+                      key=f"fileup_{serial}_{next(self._file_seq):d}")
+        return {"ok": True, "task_id": tid}
+
+    def _do_file_upload_path(self, serial, local, remote, task_id):
+        """把本地文件 push 到设备（路径直传版）：带 adb push 的真实百分比进度。"""
+        display = os.path.basename(local) or remote
+        self._push_upload_event(task_id, serial, display, remote,
+                                "uploading", percent=0)
+
+        def on_pct(pct):
+            self._push_upload_event(task_id, serial, display, remote,
+                                    "uploading", percent=pct)
+
+        try:
+            ok, err = self.file_svc.upload_stream(
+                serial, local, remote, progress=on_pct,
+                timeout=push_timeout_for(path_getsize(local)))
+        except Exception as e:  # noqa: BLE001  有意把异常转成用户可见的失败事件
+            ok, err = False, str(e)
+        if ok:
+            self._push_status("ok", f"✓ 上传完成: {remote}")
+        else:
+            self._push_status("err", f"⚠ 上传失败 {remote}: {err}")
+        self._push_upload_event(
+            task_id, serial, display, remote,
+            "done" if ok else "failed",
+            percent=100 if ok else None,
+            error="" if ok else (err or "上传失败"))
         self._schedule_file_refresh(serial, remote)
 
     def file_download(self, serial, remote, local_dir):

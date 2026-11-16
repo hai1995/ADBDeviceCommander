@@ -1946,6 +1946,23 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 .upload-item.upload-done .upload-bar > i { background: var(--ok); }
 .upload-item.upload-failed .upload-bar > i { background: var(--err); }
+/* 不确定态：push 已经开始但 adb 迟迟不吐百分比（部分 platform-tools 版本 / 部分
+   设备就是这样，进度只在结束时给一句「1 file pushed」）。此时进度条钉在 0% 一动不动，
+   看起来跟卡死没区别 —— 换成流动条纹，明确「还在传，只是没有百分比」。 */
+.upload-item.upload-stale .upload-bar > i {
+  background: repeating-linear-gradient(
+    90deg, var(--accent) 0 10px, transparent 10px 20px);
+  background-size: 20px 100%;
+  transition: none;
+  animation: upload-stripe .8s linear infinite;
+}
+@keyframes upload-stripe {
+  from { background-position: 0 0; }
+  to { background-position: 20px 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .upload-item.upload-stale .upload-bar > i { animation: none; }
+}
 .upload-item .upload-err { flex: 1 1 auto; color: var(--err); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .upload-item .btn.tiny { min-height: 22px; }
 
