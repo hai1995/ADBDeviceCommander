@@ -8,12 +8,20 @@ backend.file_service —— 设备文件系统管理（基于 adb shell + pull/p
 """
 import contextlib
 import os
+import re
 import subprocess
 import tempfile
+import threading
 import uuid
 
 from core import tmpfiles
-from core.constants import adb_kwargs, parse_ls_output, posix_join, safe_name
+from core.constants import (
+    adb_kwargs,
+    adb_popen_kwargs,
+    parse_ls_output,
+    posix_join,
+    safe_name,
+)
 from core.longpath import (
     explain_long_path,
     is_too_long,
@@ -43,6 +51,22 @@ def _ls_says_empty(text):
     if not lines:
         return False
     return all(ln.lower().startswith("total ") for ln in lines)
+
+
+_PUSH_PCT_RE = re.compile(r"\[\s*(\d{1,3})\s*%\]")
+
+
+def _parse_push_progress(text):
+    """从一段 adb push 输出里取最后一个 `[ NN%]` 百分比（0~100），没有则 None。
+
+    adb 用 `[ 10%] path` 表示进度并以 `\\r` 原地覆盖，一段文本里常含多个，
+    最后一个才是当前值。刻意只认带方括号的形态：错误文案里的「CPU 100%」
+    「电量 50%」不是进度，不能误当成上传完成。
+    """
+    matches = _PUSH_PCT_RE.findall(text or "")
+    if not matches:
+        return None
+    return max(0, min(100, int(matches[-1])))
 
 
 def _err_text(r, fallback="adb 返回失败（没有给出原因）"):
@@ -152,6 +176,66 @@ class FileService:
             [self.adb, "-s", serial, "push", local, remote],
             **adb_kwargs(120))
         return r.returncode == 0, _err_text(r)
+
+    def upload_stream(self, serial, local, remote, progress=None, timeout=120):
+        """带实时进度的 adb push；返回契约与 upload 一致：(ok, err)。
+
+        adb 把 push 进度写到 **stderr**，形如 `[ 10%] /sdcard/a`，并用 `\\r`
+        原地覆盖刷新（`adb_kwargs` 的 capture_output 拿到的是结束后的整段文本，
+        拿不到过程）。这里改用 Popen 逐块读 stderr，每攒到一个新的百分比就回调
+        `progress(pct)`（0~100 int）；成功收尾时补一次 100。`progress` 抛出的
+        异常被吞掉——进度展示是附加价值，绝不能因为界面回调用坏一次上传。
+
+        进度解析交给 `_parse_push_progress`（纯函数、可单测）：只认 `[ NN%]` 形态，
+        忽略错误文案里的「100%」等无关百分比。stdout 里的失败原因同样要收，避免
+        「失败却没有任何进度」时用户不知道原因。
+
+        这个方法是给「上传队列 + 进度条」用的新通道；原 upload 一字未动，既有
+        调用方（含大量 monkeypatch 掉 subprocess.run 的单测）行为完全不变。
+        """
+        proc = subprocess.Popen(
+            [self.adb, "-s", serial, "push", local, remote],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            **adb_popen_kwargs())
+        last = -1
+        chunks = []
+
+        def _pump():
+            nonlocal last
+            # 合并 stdout/stderr 到一条管道：adb 的错误文本有时在 stdout、有时在
+            # stderr，分两条管道并发读容易 deadlock，合并后逐块读最简单可靠。
+            with proc.stdout:
+                while True:
+                    block = proc.stdout.read(1)
+                    if not block:
+                        break
+                    chunks.append(block)
+                    pct = _parse_push_progress("".join(chunks[-256:]))
+                    if pct is not None and pct > last:
+                        last = pct
+                        if progress is not None:
+                            with contextlib.suppress(Exception):
+                                progress(pct)
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+        # 用 join(timeout) 做整体超时兜底：adb push 卡死（设备掉线、传输僵住）时
+        # read(1) 不会自己返回，必须在主线程设定上界，超时就杀掉进程，绝不把
+        # 上传 worker 永久挂住（否则该文件一直占着去重 key / 队列项永远转圈）。
+        reader.join(timeout)
+        if reader.is_alive():
+            with contextlib.suppress(Exception):
+                proc.kill()
+            proc.wait()
+            return False, f"上传超时（超过 {timeout} 秒）"
+        rc = proc.wait()
+        text = "".join(chunks)
+        if rc != 0:
+            return False, (text.strip()[:200] or "push 失败（adb 没有给出原因）")
+        if progress is not None and last != 100:
+            with contextlib.suppress(Exception):
+                progress(100)
+        return True, ""
 
     def download(self, serial, remote, local_dir):
         base = os.path.basename(remote.rstrip("/")) or safe_name(remote)

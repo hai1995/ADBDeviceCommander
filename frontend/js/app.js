@@ -114,6 +114,8 @@
     fileSelAll: $("file-sel-all"), fileBatchDl: $("file-batch-dl"),
     fileBatchDel: $("file-batch-del"), fileSelCount: $("file-sel-count"),
     fileTableWrap: $("file-table-wrap"), fileDropOverlay: $("file-drop-overlay"),
+    uploadQueue: $("upload-queue"), uploadQueueList: $("upload-queue-list"),
+    uploadQueueCount: $("upload-queue-count"), uploadQueueClear: $("upload-queue-clear"),
     // about
     aboutVer: $("about-ver"), aboutAdb: $("about-adb"),
     aboutCmd: $("about-cmd"), aboutDev: $("about-dev"), aboutWarn: $("about-warn"),
@@ -1062,6 +1064,7 @@
       case "logcat_capture": onLogcatCapture(p); break;
       case "file": onFile(p); break;
       case "file_view": onFileView(p); break;
+      case "file_upload": onFileUploadEvent(p); break;
     }
   }
 
@@ -6136,63 +6139,228 @@
     els.modalOpenLocal.hidden = !modalLocalPath;
     els.modal.classList.remove("hidden");
   }
-  /* 上传一批文件：复用现有 base64 + api.file_upload_data 通道（与点击「上传」一致）。
-     拖拽与「上传」按钮共用本函数，避免两份逻辑漂移。 */
+  /* ===== 上传队列（进度展示 + 失败重试 / 免重选）=========================
+     设计要点：
+       · 每个上传任务一个 task_id，贯穿「提交 → 进度 → 完成/失败 → 重试」，
+         后端 file_upload 事件带同一个 id，前端据此更新对应那一项；
+       · 原始 File 对象缓存在 uploadTasks[task_id].file —— 失败重试时直接复用，
+         用户不必重新去文件夹里挑一遍（大文件重新选很烦）；
+       · 队列是纯前端状态，刷新页面即清空，不落盘、不占后端资源。
+  */
+  const uploadTasks = Object.create(null);   // task_id -> {id,name,size,serial,dir,remote,file,status,percent,error}
+  let uploadSeq = 0;
+  let uploadBusy = 0;                        // 在途提交数（读取 + 后端调用），驱动「上传」按钮转圈
+  function newUploadTaskId() {
+    uploadSeq += 1;
+    return "u" + Date.now().toString(36) + "_" + uploadSeq;
+  }
+  function uploadBegin() {
+    if (uploadBusy++ === 0 && els.fileUploadBtn) markBtnBusy(els.fileUploadBtn, true);
+  }
+  function uploadEnd() {
+    if (uploadBusy > 0 && --uploadBusy === 0 && els.fileUploadBtn) {
+      markBtnBusy(els.fileUploadBtn, false);
+    }
+  }
+  /* 失败既要落到队列项（可重试），也要发一条状态栏/toast：历史行为约定是
+     「上传失败一定说的出来」，只进队列容易被顶栏跑马灯没看到的用户漏掉。 */
+  function failUpload(id, why, toast) {
+    setUploadTask(id, { status: "failed", error: why });
+    pushStatus("err", toast || ("⚠ 上传失败：" + why));
+  }
+
+  function renderUploadQueue() {
+    if (!els.uploadQueue) return;
+    const tasks = Object.values(uploadTasks);
+    if (!tasks.length) {
+      els.uploadQueue.hidden = true;
+      if (els.uploadQueueList) els.uploadQueueList.textContent = "";
+      return;
+    }
+    els.uploadQueue.hidden = false;
+    const active = tasks.filter((t) => t.status === "uploading" || t.status === "reading").length;
+    if (els.uploadQueueCount) {
+      els.uploadQueueCount.textContent = "（" + tasks.length + " 项" + (active ? " · " + active + " 进行中" : "") + "）";
+    }
+    if (!els.uploadQueueList) return;
+    const frag = document.createDocumentFragment();
+    tasks.forEach((t) => {
+      const row = document.createElement("div");
+      row.className = "upload-item upload-" + t.status;
+      row.dataset.task = t.id;
+
+      const name = document.createElement("span");
+      name.className = "upload-name";
+      name.textContent = (t.status === "done" ? "✓ " : t.status === "failed" ? "✗ " : "⬆ ") + t.name;
+      name.title = t.remote || t.name;
+      row.appendChild(name);
+
+      const meta = document.createElement("span");
+      meta.className = "upload-meta dim";
+      const pct = typeof t.percent === "number" ? t.percent : 0;
+      meta.textContent = (t.status === "reading") ? "读取中"
+        : (t.status === "done") ? "完成"
+        : (t.status === "failed") ? "失败"
+        : pct + "%";
+      row.appendChild(meta);
+
+      const bar = document.createElement("span");
+      bar.className = "upload-bar";
+      const fill = document.createElement("i");
+      fill.style.width = (t.status === "done" ? 100 : (t.status === "failed" || t.status === "reading") ? 0 : pct) + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+
+      if (t.status === "failed" || t.status === "done") {
+        if (t.error) {
+          const why = document.createElement("span");
+          why.className = "upload-err";
+          why.textContent = t.error;
+          row.appendChild(why);
+        }
+        const retry = document.createElement("button");
+        retry.className = "btn tiny";
+        retry.type = "button";
+        retry.dataset.uact = "retry";
+        retry.dataset.task = t.id;
+        retry.textContent = "重试";
+        retry.title = t.file ? "用已缓存的文件重新上传（无需重选）" : "重新上传";
+        row.appendChild(retry);
+      }
+      const remove = document.createElement("button");
+      remove.className = "btn tiny";
+      remove.type = "button";
+      remove.dataset.uact = "remove";
+      remove.dataset.task = t.id;
+      remove.textContent = "移除";
+      row.appendChild(remove);
+      frag.appendChild(row);
+    });
+    els.uploadQueueList.textContent = "";
+    els.uploadQueueList.appendChild(frag);
+  }
+
+  function setUploadTask(id, patch) {
+    const t = uploadTasks[id];
+    if (!t) return;
+    Object.assign(t, patch);
+    renderUploadQueue();
+  }
+
+  /* 后端 file_upload 事件：按 task_id 更新对应项，不认识的直接忽略（可能是别的
+     会话残留 / 已被用户移除的项）。 */
+  function onFileUploadEvent(p) {
+    const id = p.task_id;
+    if (!id || !uploadTasks[id]) return;
+    if (p.status === "uploading") {
+      setUploadTask(id, { status: "uploading", percent: p.percent || 0 });
+    } else if (p.status === "done") {
+      setUploadTask(id, { status: "done", percent: 100, error: "" });
+    } else if (p.status === "failed") {
+      setUploadTask(id, { status: "failed", error: p.error || "上传失败" });
+      pushStatus("err", "⚠ 上传失败 " + (uploadTasks[id].name || "") + "：" + (p.error || "上传失败"));
+    }
+  }
+
+  /* 真正把一个已缓存的 File 提交上去。首次上传与「重试」共用这一条路径，
+     保证两者的进度/事件行为完全一致。 */
+  function submitUpload(task) {
+    const serial = fileSerial;
+    const dir = filePath;
+    if (!serial) {
+      failUpload(task.id, "未选中设备");
+      return;
+    }
+    uploadBegin();
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; uploadEnd(); } };
+    // 目标设备与目录在提交这一刻快照：FileReader 异步，读完时用户可能已切设备/目录。
+    const remote = (dir.replace(/\/$/, "") + "/" + task.name);
+    setUploadTask(task.id, { status: "reading", percent: 0, serial, dir, remote, error: "" });
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const b64 = (reader.result || "").split(",").pop() || "";
+        if (!b64) {
+          failUpload(task.id, "读到的内容为空（文件被占用或已删除）",
+                     "⚠ 上传失败 " + task.name + "：读到的内容为空（文件被占用或已删除）");
+          return;
+        }
+        setUploadTask(task.id, { status: "uploading", percent: 0 });
+        // 走带进度的后端通道（task_id + progress=true）；callApi 失败也要把该标成失败，
+        // 否则该项会永远停在 uploading 转圈。
+        const r = await callApi(api.file_upload_data(serial, task.name, b64, remote,
+                                                     task.id, true));
+        if (r === null) {
+          failUpload(task.id, "调用后端失败");
+        }
+        // 成功/失败由后端 file_upload 事件最终定稿（uploading→done/failed），
+        // 这里不抢先标 done，避免「后端还在 push、界面已报完成」的假象。
+      } finally {
+        finish();   // API promise 落定（含测试里人为 hanging 的场景 resolve 后）收掉按钮转圈
+      }
+    };
+    reader.onerror = () => {
+      const why = (reader.error && reader.error.message) || "读取失败";
+      failUpload(task.id, why, "⚠ 无法读取 " + task.name + "：" + why);
+      finish();
+    };
+    try {
+      reader.readAsDataURL(task.file);
+    } catch (e) {
+      failUpload(task.id, (e && e.message) || String(e));
+      finish();
+    }
+  }
+
+  /* 上传一批文件：拖拽与「上传」按钮共用本函数。每一项立即入队并展示进度。 */
   function uploadFiles(files) {
     if (!files || !files.length) return;
     if (!fileSerial) { pushStatus("warn", "⚠ 请先在左侧勾选一台设备（文件上传需要目标设备）"); return; }
-    /* 目标设备与目录先快照：FileReader 是异步的，读完时用户完全可能已经切到
-       另一台设备 / 另一个目录。原实现在 onload 里读 fileSerial / filePath，于是
-       「提示写的是 /sdcard/Download，文件却传到了 /sdcard/DCIM」这种错位。
-       提示语也用它，保证「说的」和「做的」是同一个目录。 */
-    const serial = fileSerial;
-    const dir = filePath;
-    const pathOf = (nm) => (dir.replace(/\/$/, "") + "/" + nm);
     let n = 0;
-    // 一批文件的读取 / 传输可能在途多个；等到最后一个回来再收掉「上传」转圈。
-    let pending = 0;
-    const uploadBegin = () => {
-      if (pending++ === 0 && els.fileUploadBtn) markBtnBusy(els.fileUploadBtn, true);
-    };
-    const uploadEnd = () => {
-      if (pending > 0 && --pending === 0 && els.fileUploadBtn) {
-        markBtnBusy(els.fileUploadBtn, false);
-      }
-    };
     Array.from(files).forEach((f) => {
-      const reader = new FileReader();
-      uploadBegin();
-      reader.onload = async () => {
-        try {
-          const b64 = (reader.result || "").split(",").pop() || "";
-          if (!b64) {
-            /* 读到的内容为空（文件在读取瞬间被删 / 被独占锁住 / 磁盘掉线）：
-               空串传到后端会写成一个 0 字节文件，然后照常报「✓ 上传完成」——
-               用户在设备上拿到一个空文件，还以为传成功了。 */
-            pushStatus("err", "⚠ 上传失败 " + f.name + "：读到的内容为空（文件被占用或已删除）");
-            return;
-          }
-          await callApi(api.file_upload_data(serial, f.name, b64, pathOf(f.name)));
-        } finally {
-          uploadEnd();
-        }
+      const id = newUploadTaskId();
+      uploadTasks[id] = {
+        id, name: f.name || "未命名", size: f.size || 0, file: f,
+        serial: fileSerial, dir: filePath,
+        status: "reading", percent: 0, error: "",
       };
-      /* 读取失败（被占用 / 无权限 / 文件已不在）时既不触发 onload 也不报错：
-         旧实现下用户只看到「⬆ 已提交上传 N 个文件」，之后什么都不会发生。 */
-      reader.onerror = () => {
-        const why = (reader.error && reader.error.message) || "读取失败";
-        pushStatus("err", "⚠ 无法读取 " + f.name + "：" + why);
-        uploadEnd();
-      };
-      try {
-        reader.readAsDataURL(f);
-      } catch (e) {
-        pushStatus("err", "⚠ 无法读取 " + f.name + "：" + ((e && e.message) || e));
-        uploadEnd();
-      }
+      submitUpload(uploadTasks[id]);
       n++;
     });
-    pushStatus("info", "⬆ 已提交上传 " + n + " 个文件到 " + dir);
+    if (n) pushStatus("info", "⬆ 已提交上传 " + n + " 个文件");
+    renderUploadQueue();
+  }
+
+  /* 上传队列项的「重试 / 移除」：委托在 #upload-queue-list 上一次绑定。 */
+  function bindUploadQueueEvents() {
+    const list = els.uploadQueueList;
+    if (list) {
+      list.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest("[data-uact]") : null;
+        if (!btn) return;
+        const id = btn.dataset.task;
+        const t = uploadTasks[id];
+        if (!t) return;
+        if (btn.dataset.uact === "retry") {
+          // 复用缓存的 File；失败项才给重试按钮，file 一定还在。
+          submitUpload(t);
+        } else if (btn.dataset.uact === "remove") {
+          delete uploadTasks[id];
+          renderUploadQueue();
+        }
+      });
+    }
+    if (els.uploadQueueClear) {
+      els.uploadQueueClear.addEventListener("click", () => {
+        Object.keys(uploadTasks).forEach((id) => {
+          if (uploadTasks[id].status === "done" || uploadTasks[id].status === "failed") {
+            delete uploadTasks[id];
+          }
+        });
+        renderUploadQueue();
+      });
+    }
   }
   function fmtSize(n) {
     if (!n && n !== 0) return "";
@@ -8103,6 +8271,8 @@
     // 行级交互（进目录 / 切换选中 / 行内按钮）全部委托在 #file-body 上，
     // 一次绑定服务所有行 —— 见 renderFileEntries 的说明。
     bindFileBodyEvents();
+    // 上传队列的「重试 / 移除 / 清除已完成」也用事件委托一次绑定。
+    bindUploadQueueEvents();
     // 文件区拖拽上传：拖入显示遮罩，松手把文件上传到当前目录（与「上传」按钮共用 uploadFiles）
     const dz = els.fileTableWrap;
     if (dz) {

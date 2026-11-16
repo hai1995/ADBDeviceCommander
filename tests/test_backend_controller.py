@@ -4537,6 +4537,89 @@ def test_file_upload_rejects_empty_content(monkeypatch):
     assert not any("上传完成" in t for t in texts), texts
 
 
+def test_file_upload_progress_events_with_task_id(monkeypatch):
+    """开启进度通道后：upload_stream 的每个百分比推一条 file_upload 事件，
+    成功收尾推 done(100)，失败推 failed 且带原因；task_id / name / remote 回传，
+    前端据此更新正确的那个上传队列项。"""
+    import base64
+    api = _make_api()
+
+    def fake_stream(serial, local, remote, progress=None, timeout=120):
+        if progress:
+            progress(10)
+            progress(65)
+        return True, ""
+
+    monkeypatch.setattr(api.file_svc, "upload_stream", fake_stream)
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: fn(*a, **kw))
+    monkeypatch.setattr(api, "_schedule_file_refresh", lambda *a, **kw: None)
+    b64 = base64.b64encode(b"hello").decode()
+
+    api._run_file_op(api._do_file_upload_data, "A1", "big.bin", b64,
+                     "/sdcard/big.bin", "task-42", True)
+
+    evs = [p for p in _events_by_kind(api).get("file_upload", [])]
+    assert evs, "应推送 file_upload 事件"
+    assert all(p["task_id"] == "task-42" and p["name"] == "big.bin"
+               and p["serial"] == "A1" and p["remote"] == "/sdcard/big.bin"
+               for p in evs), evs
+    ups = [p["percent"] for p in evs if p["status"] == "uploading"]
+    assert ups == [0, 10, 65], ups
+    done = [p for p in evs if p["status"] == "done"]
+    assert len(done) == 1 and done[0]["percent"] == 100, done
+
+
+def test_file_upload_progress_failure_event_carries_reason(monkeypatch):
+    """进度通道上传失败：必须推 failed 事件带原因，不能只推百分比然后没了。"""
+    import base64
+    api = _make_api()
+
+    def fake_stream(serial, local, remote, progress=None, timeout=120):
+        if progress:
+            progress(30)
+        return False, "remote offline"
+
+    monkeypatch.setattr(api.file_svc, "upload_stream", fake_stream)
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: fn(*a, **kw))
+    monkeypatch.setattr(api, "_schedule_file_refresh", lambda *a, **kw: None)
+    b64 = base64.b64encode(b"hello").decode()
+
+    api._run_file_op(api._do_file_upload_data, "A1", "x.bin", b64,
+                     "/sdcard/x.bin", "task-7", True)
+
+    evs = _events_by_kind(api).get("file_upload", [])
+    failed = [p for p in evs if p["status"] == "failed"]
+    assert len(failed) == 1, evs
+    assert "remote offline" in failed[0]["error"], failed
+    assert not any(p["status"] == "done" for p in evs), "失败不该推 done"
+
+
+def test_file_upload_without_progress_still_uses_legacy_upload(monkeypatch):
+    """未开启进度通道（老调用/兼容路径）时仍走 upload + 状态栏，不推 file_upload。"""
+    import base64
+    api = _make_api()
+    called = []
+
+    def fake_upload(serial, local, remote):
+        called.append((serial, remote))
+        return True, ""
+
+    monkeypatch.setattr(api.file_svc, "upload", fake_upload)
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **kw: fn(*a, **kw))
+    monkeypatch.setattr(api, "_schedule_file_refresh", lambda *a, **kw: None)
+    b64 = base64.b64encode(b"hi").decode()
+
+    api.file_upload_data("A1", "a.txt", b64, "/sdcard/a.txt")
+
+    assert called == [("A1", "/sdcard/a.txt")], called
+    evs = _events_by_kind(api)
+    assert not evs.get("file_upload"), "老路径不该推进度事件"
+    assert any("上传完成" in p["text"] for p in evs.get("status", [])), evs
+
+
 def test_file_upload_coalesces_directory_refresh(monkeypatch):
     """多选上传 N 个文件，只刷一次目录。
 

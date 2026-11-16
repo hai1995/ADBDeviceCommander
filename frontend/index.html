@@ -705,6 +705,15 @@
             <button id="file-batch-del" class="btn" disabled data-icon="trash">删除选中</button>
             <span id="file-sel-count" class="dim">已选 0 项</span>
           </div>
+          <!-- 上传队列：每项一条进度条，失败/完成项可点击重试/移除。
+               默认隐藏，有上传任务时才展开，不打扰日常浏览。 -->
+          <div class="upload-queue" id="upload-queue" hidden>
+            <div class="upload-queue-head">
+              <span class="upload-queue-title">上传队列 <span id="upload-queue-count" class="dim"></span></span>
+              <button id="upload-queue-clear" class="btn tiny" type="button">清除已完成</button>
+            </div>
+            <div class="upload-queue-list" id="upload-queue-list"></div>
+          </div>
           <div class="file-table-wrap" id="file-table-wrap">
             <div class="file-drop-overlay" id="file-drop-overlay">
               <div class="file-drop-inner">

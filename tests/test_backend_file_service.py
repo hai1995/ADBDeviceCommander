@@ -512,6 +512,66 @@ def test_list_dir_empty_dir_does_not_retry(monkeypatch):
     assert len(records) == 1, "空目录不该重试，实际调用了 %d 次" % len(records)
 
 
+def test_parse_push_progress_picks_last_percentage():
+    """adb push 进度用 [ NN%] 表示，且以 \\r 覆盖刷新：一段输出里会有多个，
+    取最后一个才是当前进度；必须忽略不带方括号的百分比（错误文案里的 100%）。"""
+    parse = fs_mod._parse_push_progress
+    assert parse("[ 45%] /sdcard/a\r[ 67%] /sdcard/a\r") == 67
+    assert parse("[100%] /sdcard/a") == 100
+    assert parse("  [  1%] x\n[ 10%] x") == 10
+    assert parse("CPU 100% memory 50%") is None
+    assert parse("") is None
+    assert parse("adb: error: failed") is None
+
+
+def test_upload_stream_reports_progress_and_succeeds(monkeypatch):
+    """upload_stream 把 adb push 的每个进度百分比回调出来，完成后回调 100。
+
+    返回契约与 upload 一致：(ok, err)。用假 Popen 喂一段典型进度输出，
+    不启动真 adb / 真线程也能验证顺序。"""
+    import io
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = io.StringIO(
+                "[ 10%] /sdcard/a\r[ 50%] /sdcard/a\r[100%] /sdcard/a\r"
+                "/sdcard/a: 1 file pushed, 0 skipped. 2.0 MB/s (10 bytes in 0.005s)\n")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    seen = []
+    ok, err = fs_mod.FileService().upload_stream(
+        "S", "/tmp/a", "/sdcard/a", progress=seen.append)
+    assert (ok, err) == (True, "")
+    assert 10 in seen and 50 in seen, seen
+    assert seen[-1] == 100, seen
+
+
+def test_upload_stream_failure_returns_reason(monkeypatch):
+    """进度流失败时仍给出非空原因，不能只回调进度然后静默失败。"""
+    import io
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = io.StringIO(
+                "[ 10%] /sdcard/a\radb: error: failed to copy: remote offline\n")
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    seen = []
+    ok, err = fs_mod.FileService().upload_stream(
+        "S", "/tmp/a", "/sdcard/a", progress=seen.append)
+    assert ok is False
+    assert "remote offline" in err, err
+    assert seen and seen[-1] != 100, "失败不该回调 100% 完成"
+
+
 def test_list_dir_reports_unparsable_output_instead_of_empty(monkeypatch):
     """有内容却解析不出来时必须报原因，不能画成「空目录」。
 

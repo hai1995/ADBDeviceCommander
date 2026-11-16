@@ -421,19 +421,45 @@ class FileMixin:
             self._push_status("err", f"⚠ 重命名失败: {err}")
         self._file_refresh(serial, old)
 
-    def file_upload_data(self, serial, name, b64, remote):
+    def _push_upload_event(self, task_id, serial, name, remote, status,
+                           percent=None, error=""):
+        """推一条 file_upload 进度事件（前端上传队列据此更新对应项）。
+
+        task_id 由前端生成并贯穿重试：一次「上传 → 失败 → 重试」用同一个 id，
+        前端才能把新进度更新到原来那一格，而不是另起一行。事件载荷尽量自描述，
+        前端不必回头查本地缓存就知道是哪台设备、哪个文件。
+        """
+        payload = {"task_id": task_id, "serial": serial, "name": name,
+                   "remote": remote, "status": status}
+        if percent is not None:
+            payload["percent"] = percent
+        if error:
+            payload["error"] = error
+        self.bus.push("file_upload", payload)
+
+    def file_upload_data(self, serial, name, b64, remote, task_id=None,
+                         progress=False):
         """前端以 base64 传文件内容（浏览器不暴露本地路径），后端落地后 push。
 
         与下载同理：每个文件一个独立 worker key，否则「一次选多个文件上传」会
         被 "fileop_<serial>" 去重吞掉 —— 只有第一个真正传到设备。
+
+        task_id / progress 是「上传队列 + 进度条」的新通道（前端显式开启）；
+        老调用方（自动化脚本 / 历史单测）不传这两个参数时行为完全不变。
         """
         return self._file_op(serial, self._do_file_upload_data, name, b64, remote,
+                             task_id, progress,
                              key=f"fileup_{serial}_{next(self._file_seq):d}")
 
-    def _do_file_upload_data(self, serial, name, b64, remote):
+    def _do_file_upload_data(self, serial, name, b64, remote, task_id=None,
+                             progress=False):
         import base64
         import tempfile
         import uuid
+        # 进度通道开启才推事件：老路径（progress=False）一行事件都不发，状态栏与
+        # 既有单测的观察点保持不变。
+        use_progress = bool(progress and task_id)
+        display = os.path.basename(name or "") or remote
         # 临时文件名带随机串：多设备/多文件并行上传同名文件时，固定名会互相覆盖，
         # 导致其中一个线程上传的是别人的内容（或中途被删而上传失败）。
         # 前端传来的 name 一律先取 basename 并净化：它若含路径分隔符，会把临时文件
@@ -442,8 +468,11 @@ class FileMixin:
         # 然后报「✓ 上传完成」—— 设备上多出一个空文件，用户以为传成功了。
         # 前端那一侧也已拦住，这里再兜一层（桥接直调 / 自动化脚本同样受保护）。
         if not (b64 or "").strip():
-            self._push_status(
-                "err", f"⚠ 上传失败 {os.path.basename(name or '') or remote}：没有收到文件内容（读取结果为空）")
+            why = "没有收到文件内容（读取结果为空）"
+            self._push_status("err", f"⚠ 上传失败 {display}：{why}")
+            if use_progress:
+                self._push_upload_event(task_id, serial, name, remote,
+                                        "failed", error=why)
             return
         tmp = os.path.join(
             tempfile.gettempdir(),
@@ -454,11 +483,26 @@ class FileMixin:
                 f.write(base64.b64decode(b64 or ""))
         except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("err", f"⚠ 解码上传文件失败：{e}")
+            if use_progress:
+                self._push_upload_event(task_id, serial, name, remote,
+                                        "failed", error=str(e))
             return
+        if use_progress:
+            self._push_upload_event(task_id, serial, name, remote,
+                                    "uploading", percent=0)
         # try/finally：upload 抛异常（大文件 push 超过 120s 超时、adb 中途消失）时
         # 旧实现会跳过 os.remove，每次失败都在 %TEMP% 留下一个多 MB 的孤儿文件。
         try:
-            ok, err = self.file_svc.upload(serial, tmp, remote)
+            if use_progress:
+                def on_pct(pct):
+                    self._push_upload_event(task_id, serial, name, remote,
+                                            "uploading", percent=pct)
+                ok, err = self.file_svc.upload_stream(
+                    serial, tmp, remote, progress=on_pct)
+            else:
+                ok, err = self.file_svc.upload(serial, tmp, remote)
+        except Exception as e:  # noqa: BLE001  有意把异常转成用户可见的失败事件
+            ok, err = False, str(e)
         finally:
             with contextlib.suppress(Exception):
                 os.remove(tmp)
@@ -466,6 +510,12 @@ class FileMixin:
             self._push_status("ok", f"✓ 上传完成: {remote}")
         else:
             self._push_status("err", f"⚠ 上传失败 {remote}: {err}")
+        if use_progress:
+            self._push_upload_event(
+                task_id, serial, name, remote,
+                "done" if ok else "failed",
+                percent=100 if ok else None,
+                error="" if ok else (err or "上传失败"))
         # 合并刷新：多选上传时 N 个文件只刷一次目录（见 _schedule_file_refresh）
         self._schedule_file_refresh(serial, remote)
 

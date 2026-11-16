@@ -1907,6 +1907,48 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .file-batch { align-items: center; }
 .file-batch .dim { color: var(--muted); font-size: var(--fs-md); margin-left: auto; font-family: var(--font-mono); }
 
+/* ---------------- 上传队列（进度 / 失败重试）----------------
+   有上传任务时才显示（hidden 属性），默认不占文件列表空间。每项一行：
+   文件名 + 状态 + 进度条；失败/完成项多出「重试 / 移除」。 */
+.upload-queue {
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface-1, var(--surface-2)); padding: 8px 10px;
+  max-height: 168px; overflow: auto; flex: 0 0 auto;
+}
+.upload-queue[hidden] { display: none; }
+.upload-queue-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.upload-queue-title { font: 600 var(--fs-sm)/1 var(--font-display); letter-spacing: .1em; color: var(--text-2); }
+.upload-queue-head .btn { margin-left: auto; }
+.upload-queue-list { display: flex; flex-direction: column; gap: 5px; }
+.upload-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 6px; border-radius: var(--r-sm, 4px);
+  font-size: var(--fs-md); border-left: 2px solid transparent;
+}
+.upload-item.upload-uploading, .upload-item.upload-reading { border-left-color: var(--accent); }
+.upload-item.upload-done { border-left-color: var(--ok); }
+.upload-item.upload-failed { border-left-color: var(--err); }
+.upload-item .upload-name {
+  flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text); font-weight: 500;
+}
+.upload-item.upload-done .upload-name { color: var(--ok); }
+.upload-item.upload-failed .upload-name { color: var(--err); }
+.upload-item .upload-meta { flex: 0 0 auto; min-width: 52px; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.upload-item .upload-bar {
+  flex: 1 1 auto; height: 6px; border-radius: 3px; overflow: hidden;
+  background: rgba(126, 166, 204, .14); min-width: 40px;
+}
+.upload-item .upload-bar > i {
+  display: block; height: 100%; width: 0; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-deep, var(--accent)), var(--accent));
+  transition: width .2s ease;
+}
+.upload-item.upload-done .upload-bar > i { background: var(--ok); }
+.upload-item.upload-failed .upload-bar > i { background: var(--err); }
+.upload-item .upload-err { flex: 1 1 auto; color: var(--err); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-item .btn.tiny { min-height: 22px; }
+
 /* ---------------- 关于 ----------------
    关于页铺满内容区；参数行 = 仪器读数行（等宽数值 + 拉宽字距的键名）。 */
 .about { width: 100%; max-width: none; margin: 0; min-height: 0; flex: 1; overflow: auto; padding-right: 8px; }
