@@ -727,3 +727,60 @@ def test_pipe_stop_never_kills_recording_screenrecord(monkeypatch):
     assert kills, "应精确结束投屏自己那条 screenrecord"
     assert all(c[-1] == "4322" for c in kills), (
         "只能结束投屏进程（4322），不能碰录屏进程（4321）：%r" % (kills,))
+
+
+def test_frame_server_start_idempotent_under_concurrency(monkeypatch):
+    """两台设备同时走 snap 降级投屏时，会并发调用单例 FrameServer.start()。
+
+    修复前 start() 是 check-then-act 且无锁：两个线程都看到 _httpd is None，
+    各自建一个 server + serve_forever 线程，而 _httpd/_port 只保留后写的那个 ——
+    先建的监听 socket 与线程永久泄漏，stop() 也关不掉它。加锁后并发 start
+    只建一个 server，两个线程拿到同一个端口（真正幂等）。
+    """
+    import contextlib
+    import threading
+
+    fs = svc.FrameServer()
+    real_cls = svc._ThreadingFrameServer
+    servers = []
+    gate = threading.Event()
+
+    class TrackedServer(real_cls):
+        def __init__(self, *a, **kw):
+            servers.append(self)
+            # 先到的线程停在这里，给另一线程足够机会通过 check（修复前才会走到这）
+            gate.wait(timeout=3)
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(svc, "_ThreadingFrameServer", TrackedServer)
+
+    ports = []
+
+    def worker():
+        try:
+            ports.append(fs.start())
+        except Exception as e:  # noqa: BLE001  测试里收集异常便于断言
+            ports.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + 2
+    while not servers and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.15)   # 给第二线程通过 check 的时间窗
+    gate.set()         # 放行构造
+    for t in threads:
+        t.join(5)
+
+    try:
+        assert len(servers) == 1, f"并发 start 只能建一个 server，实际 {len(servers)}"
+        assert all(isinstance(p, int) and p > 0 for p in ports), ports
+        assert ports[0] == ports[1], f"两线程应拿到同一端口（幂等）：{ports!r}"
+        assert fs.start() == ports[0], "再次 start 应复用已有端口"
+    finally:
+        for s in servers:
+            with contextlib.suppress(Exception):
+                s.shutdown()
+            with contextlib.suppress(Exception):
+                s.server_close()

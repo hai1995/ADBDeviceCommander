@@ -582,21 +582,31 @@ class FrameServer:
         self._httpd = None
         self._port = 0
         self._thread = None
+        # 启动锁：start() 是 check-then-act（先查 _httpd，再建 server + 起线程）。
+        # 两台不同设备各自按 serial 查重、互不阻塞，可并发走到这里：没有这把锁
+        # 就会各建一个 server，_httpd/_port 只留后写的那个，先建的监听 socket 与
+        # serve_forever 线程永久泄漏（stop() 也关不掉）。与 _lock（只护 _frames）
+        # 职责分开，避免语义混淆。
+        self._start_lock = threading.Lock()
 
     def start(self):
-        """启动服务并返回端口号（重复调用幂等）。"""
-        if self._httpd is not None:
+        """启动服务并返回端口号（重复调用幂等，并发下亦然）。"""
+        # 整段「再检查 + 创建 + 起线程」必须在同一把锁里，才对得起「幂等」二字：
+        # 锁外的第一道检查（controller 的 _mirror_lock）只按设备查重，两台设备
+        # 并发时它挡不住；锁内第二线程看到 _httpd 已建好会直接复用同一端口。
+        with self._start_lock:
+            if self._httpd is not None:
+                return self._port
+            try:
+                self._httpd = _ThreadingFrameServer(("127.0.0.1", 0), _make_handler(self))
+                self._port = self._httpd.server_address[1]
+            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
+                self._httpd = None
+                return 0
+            self._thread = threading.Thread(
+                target=self._httpd.serve_forever, daemon=True, name="mirror-frame-http")
+            self._thread.start()
             return self._port
-        try:
-            self._httpd = _ThreadingFrameServer(("127.0.0.1", 0), _make_handler(self))
-            self._port = self._httpd.server_address[1]
-        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-            self._httpd = None
-            return 0
-        self._thread = threading.Thread(
-            target=self._httpd.serve_forever, daemon=True, name="mirror-frame-http")
-        self._thread.start()
-        return self._port
 
     @property
     def port(self):
