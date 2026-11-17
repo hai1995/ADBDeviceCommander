@@ -523,6 +523,10 @@ def test_parse_push_progress_picks_last_percentage():
     assert parse("CPU 100% memory 50%") is None
     assert parse("") is None
     assert parse("adb: error: failed") is None
+    # 部分 adb 版本/平台输出圆括号百分比（实测 Transferring: x/y (NN%)）
+    assert parse("Transferring: 11468800/38632644 (29%)\r") == 29
+    assert parse("[ 10%] a\rTransferring: x/y (67%)\r") == 67
+    assert parse("Transferring: x/y (45%)\r[ 88%] a\r") == 88
 
 
 def test_upload_stream_reports_progress_and_succeeds(monkeypatch):
@@ -903,3 +907,66 @@ def test_download_stream_reports_progress(monkeypatch, tmp_path):
         "S", "/sdcard/a.bin", str(tmp_path), progress=seen.append, task_id="d1")
     assert err is None and path, (path, err)
     assert 30 in seen and seen[-1] == 100, seen
+
+
+def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
+    """adb 把进度缓冲住/不吐百分比时，靠目标文件大小给出真实进度。
+
+    回归：真机上「等半天直接跳 100%」——文本进度回调一次都不触发，只剩收尾
+    补的 100。这里让 stdout 只读到一个不带百分比的字符就阻塞（模拟 adb 缓冲），
+    用受控时钟跨过探测门槛，验证中间百分比（30%）确实被回调出来。
+    """
+    import threading
+
+    clock = [1000.0]                  # 受控时钟，避免依赖真实等待（稳定不 flaky）
+    monkeypatch.setattr(fs_mod.time, "monotonic", lambda: clock[0])
+    release = threading.Event()
+    probed = threading.Event()
+
+    class StuckProc:
+        def __init__(self):
+            self.stdout = self
+            self.returncode = 0
+            self._n = 0
+
+        def read(self, n=1):
+            self._n += 1
+            if self._n == 1:
+                return "pushing"      # 没有 [ NN%] 也没有 (NN%)
+            clock[0] += 2.0           # 模拟「2 秒没有任何输出」→ 跨过探测门槛
+            release.wait(5)           # 等主线程的 poll_size 探测完再 EOF
+            return ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            release.set()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: StuckProc())
+    svc = FileService()
+
+    def fake_size(serial, p):
+        probed.set()                  # poll_size 真的执行了
+        release.set()                 # 放行读线程 EOF
+        return 300
+    monkeypatch.setattr(svc, "_remote_file_size", fake_size)
+    monkeypatch.setattr(fs_mod, "path_getsize", lambda p: 1000)
+
+    seen = []
+    ok, err = svc.upload_stream(
+        "S", "/tmp/a.bin", "/sdcard/a.bin", progress=seen.append,
+        timeout=20, idle_timeout=20, task_id="sz1")
+    assert (ok, err) == (True, ""), err
+    assert probed.is_set(), "大小探测从未触发"
+    assert 30 in seen, seen           # 文件大小 300/1000 → 30%，来自大小探测
+    assert seen[-1] == 100, seen      # 收尾补 100

@@ -54,7 +54,15 @@ def _ls_says_empty(text):
     return all(ln.lower().startswith("total ") for ln in lines)
 
 
-_PUSH_PCT_RE = re.compile(r"\[\s*(\d{1,3})\s*%\]")
+# adb 各版本/各平台输出进度的形态不止一种，实测至少有两种：
+#   * `[ 29%] /sdcard/a`（方括号，Windows 与多数 platform-tools）
+#   * `Transferring: 11468800/38632644 (29%)`（圆括号，部分 Linux/老版本）
+# 只认方括号会让后一种用户的进度回调一次都不触发 —— 只剩收尾补的 100%，
+# 表现为「等半天直接跳 100%」。两种都用「带括号」约束，避免把错误文案里的
+# 「CPU 100%」「battery 50%」这类裸百分比误当成传输进度。
+_PUSH_PCT_PATTERN = (r"\[\s*(\d{1,3})\s*%\]"       # [ 29%]
+                     r"|\(\s*(\d{1,3})\s*%\)")     # (29%) —— Transferring: x/y (29%)
+_PUSH_PCT_RE = re.compile(_PUSH_PCT_PATTERN)
 
 
 def _rejects_p_flag(reason):
@@ -80,16 +88,17 @@ def _rejects_p_flag(reason):
 
 
 def _parse_push_progress(text):
-    """从一段 adb push 输出里取最后一个 `[ NN%]` 百分比（0~100），没有则 None。
+    """从一段 adb push/pull 输出里取最后一个百分比（0~100），没有则 None。
 
-    adb 用 `[ 10%] path` 表示进度并以 `\\r` 原地覆盖，一段文本里常含多个，
-    最后一个才是当前值。刻意只认带方括号的形态：错误文案里的「CPU 100%」
-    「电量 50%」不是进度，不能误当成上传完成。
+    adb 各版本用 `[ 10%] path` 或 `Transferring: x/y (10%)` 表示进度，以 `\\r`
+    原地覆盖，一段文本里常含多个，最后一个才是当前值。两种形态都要求带括号，
+    避免把错误文案里的「CPU 100%」「电量 50%」误当成上传完成。
     """
-    matches = _PUSH_PCT_RE.findall(text or "")
+    matches = list(_PUSH_PCT_RE.finditer(text or ""))
     if not matches:
         return None
-    return max(0, min(100, int(matches[-1])))
+    groups = matches[-1].groups()      # (方括号百分比, 圆括号百分比)，必有一个非空
+    return max(0, min(100, int(groups[0] or groups[1])))
 
 
 # adb push 的慢速下限（字节/秒）。无线 adb / 老旧 USB 口实测常在 1~3 MB/s，
@@ -185,6 +194,24 @@ class FileService:
         # 中文 Windows 的默认编码是 cp936，不指定就会把 UTF-8 字节解成乱码。
         return subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
             [self.adb, "-s", serial, "shell"] + args, **adb_kwargs(timeout))
+
+    def _remote_file_size(self, serial, path):
+        """查设备端文件当前字节数；查不到返回 None（调用方静默跳过）。
+
+        adb 的文本进度在不同版本里格式不一（方括号/圆括号），且输出被管道
+        捕获时可能被缓冲到结束才吐出 —— 那段时间进度条会钉在 0，最后一跳
+        100。文件大小是另一条**不依赖文本输出**的进度线索：push 时目标文件
+        边传边增长，pull 时源文件总大小可查。这里只读一个数，任何失败都返回
+        None，绝不打断主传输。timeout 取短值，避免拖慢取消响应。
+        """
+        try:
+            r = self._shell(serial, ["stat", "-c", "%s", shq(path)], timeout=3)
+            if r.returncode != 0:
+                return None
+            m = re.search(r"\d+", r.stdout or "")
+            return int(m.group()) if m else None
+        except Exception:  # noqa: BLE001  查询失败一律视为「拿不到大小」
+            return None
 
     def list_dir(self, serial, path):
         """列出目录条目（已排序：目录在前，文件在后；隐藏项保留末尾）。
@@ -322,12 +349,19 @@ class FileService:
         # 登记进程供取消；cleanup 是取消时要删的本地中转文件（push 没有半成品
         # 落地文件，通常为空；下载走 download_stream 时才传）。
         self.register_transfer(task_id, proc, cleanup)
-        last = -1
+        last = [-1]                # 用容器以便读线程和主线程共享推进
         chunks = []
         idle = [time.monotonic()]   # 最近一次收到输出的时刻，由读线程刷新
+        size_at = [0.0]             # 上次按「文件大小」探测进度的时刻
+
+        def report_pct(pct):
+            if pct is not None and pct > last[0]:
+                last[0] = pct
+                if progress is not None:
+                    with contextlib.suppress(Exception):
+                        progress(pct)
 
         def _pump():
-            nonlocal last
             # 合并 stdout/stderr 到一条管道：adb 的错误文本有时在 stdout、有时在
             # stderr，分两条管道并发读容易 deadlock，合并后逐块读最简单可靠。
             with proc.stdout:
@@ -337,12 +371,25 @@ class FileService:
                         break
                     idle[0] = time.monotonic()
                     chunks.append(block)
-                    pct = _parse_push_progress("".join(chunks[-256:]))
-                    if pct is not None and pct > last:
-                        last = pct
-                        if progress is not None:
-                            with contextlib.suppress(Exception):
-                                progress(pct)
+                    report_pct(_parse_push_progress("".join(chunks[-256:])))
+
+        def poll_size(serial, remote, total):
+            """文本进度不动时，按目标文件大小给一个真实百分比（封顶 99）。
+
+            只在距上次输出 >=1s 时才 stat：adb 正常吐进度的版本根本不会走到
+            这里，零额外开销；只有被缓冲/格式不认的版本才靠它兜底。stat 本身
+            也是一条 adb 命令，节流到 <=1s 一次，避免高频轮询拖慢传输。
+            """
+            if not total:
+                return
+            now = time.monotonic()
+            if now - idle[0] < 1.0 or now - size_at[0] < 1.0:
+                return
+            size_at[0] = now
+            cur = self._remote_file_size(serial, remote)
+            if cur and 0 < cur < total:
+                idle[0] = now       # 有字节在增长 = 有进展，别误判成卡住/超时
+                report_pct(min(99, int(cur * 100 / total)))
 
         def _kill():
             with contextlib.suppress(Exception):
@@ -357,6 +404,7 @@ class FileService:
         # 永久挂住（否则该文件一直占着去重 key / 队列项永远转圈）。
         deadline = time.monotonic() + (timeout or 120)
         idle_limit = idle_timeout or 60
+        total = path_getsize(local) or 0   # 大小探测的分母；取不到就只靠文本进度
         try:
             while True:
                 if task_id and self.is_cancelled(task_id):
@@ -365,6 +413,7 @@ class FileService:
                 reader.join(0.25)
                 if not reader.is_alive():
                     break
+                poll_size(serial, remote, total)
                 now = time.monotonic()
                 if now - idle[0] >= idle_limit:
                     _kill()
@@ -379,7 +428,7 @@ class FileService:
                 if with_p and _rejects_p_flag(reason):
                     return True, False, reason
                 return False, False, reason
-            if progress is not None and last != 100:
+            if progress is not None and last[0] != 100:
                 with contextlib.suppress(Exception):
                     progress(100)
             return False, True, ""
@@ -481,12 +530,19 @@ class FileService:
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             **adb_popen_kwargs())
         self.register_transfer(task_id, proc, cleanup)
-        last = -1
+        last = [-1]
         chunks = []
         idle = [time.monotonic()]
+        size_at = [0.0]
+
+        def report_pct(pct):
+            if pct is not None and pct > last[0]:
+                last[0] = pct
+                if progress is not None:
+                    with contextlib.suppress(Exception):
+                        progress(pct)
 
         def _pump():
-            nonlocal last
             with proc.stdout:
                 while True:
                     block = proc.stdout.read(1)
@@ -494,42 +550,55 @@ class FileService:
                         break
                     idle[0] = time.monotonic()
                     chunks.append(block)
-                    pct = _parse_push_progress("".join(chunks[-256:]))
-                    if pct is not None and pct > last:
-                        last = pct
-                        if progress is not None:
-                            with contextlib.suppress(Exception):
-                                progress(pct)
+                    report_pct(_parse_push_progress("".join(chunks[-256:])))
+
+        def poll_size(local_path, total):
+            """文本进度不动时，按本地落地文件已写大小给真实百分比（封顶 99）。"""
+            if not total:
+                return
+            now = time.monotonic()
+            if now - idle[0] < 1.0 or now - size_at[0] < 1.0:
+                return
+            size_at[0] = now
+            cur = path_getsize(local_path) or 0
+            if 0 < cur < total:
+                idle[0] = now
+                report_pct(min(99, int(cur * 100 / total)))
 
         reader = threading.Thread(target=_pump, daemon=True)
         reader.start()
         deadline = time.monotonic() + (timeout or 600)
         idle_limit = idle_timeout or 60
+        # 分母取设备端源文件大小（一次 adb stat）；本地落地文件 = cleanup[0]（原名）。
+        total = self._remote_file_size(serial, remote) or 0
+        local_path = cleanup[0] if cleanup else None
         try:
             while True:
                 if task_id and self.is_cancelled(task_id):
                     with contextlib.suppress(Exception):
                         proc.kill()
-                    return True, False, "已取消", last
+                    return True, False, "已取消", last[0]
                 reader.join(0.25)
                 if not reader.is_alive():
                     break
+                if local_path:
+                    poll_size(local_path, total)
                 now = time.monotonic()
                 if now - idle[0] >= idle_limit:
                     with contextlib.suppress(Exception):
                         proc.kill()
-                    return False, False, f"下载卡住（{idle_limit} 秒没有传输进展，设备可能已断开）", last
+                    return False, False, f"下载卡住（{idle_limit} 秒没有传输进展，设备可能已断开）", last[0]
                 if now >= deadline:
                     with contextlib.suppress(Exception):
                         proc.kill()
-                    return False, False, f"下载超时（超过 {timeout} 秒）", last
+                    return False, False, f"下载超时（超过 {timeout} 秒）", last[0]
             rc = proc.wait()
             reason = "".join(chunks).strip()[:200] or "pull 失败（adb 没有给出原因）"
         finally:
             self.unregister_transfer(task_id)
         if rc == 0:
-            return False, False, None, last
-        return False, (with_p and _rejects_p_flag(reason)), reason, last
+            return False, False, None, last[0]
+        return False, (with_p and _rejects_p_flag(reason)), reason, last[0]
 
     def view(self, serial, path, max_inline_bytes=1024 * 1024):
         """小文件直接 cat 内容返回；大文件 pull 到临时目录返回本地路径标记。
