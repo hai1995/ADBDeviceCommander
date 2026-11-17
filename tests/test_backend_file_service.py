@@ -913,15 +913,30 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
     """adb 把进度缓冲住/不吐百分比时，靠目标文件大小给出真实进度。
 
     回归：真机上「等半天直接跳 100%」——文本进度回调一次都不触发，只剩收尾
-    补的 100。这里让 stdout 只读到一个不带百分比的字符就阻塞（模拟 adb 缓冲），
-    用受控时钟跨过探测门槛，验证中间百分比（30%）确实被回调出来。
+    补的 100。这里让 stdout 只读到一个不带百分比的字符就一直阻塞（模拟 adb
+    缓冲），主线程靠文件大小探测给出 30%，验证中间百分比确实被回调出来。
+
+    用「隔离的假时钟」而不是真实等待，才能让这个 1 秒探测门槛的用例在慢速 CI
+    上也稳定：
+      * 只把 fs_mod 命名空间里的 time 名字换成假对象——file_service 用假时钟，
+        而 threading / pytest 仍用真 time 模块，互不污染。绝不 setattr 到 time
+        模块本身（那是进程级单例，会改掉全局计时导致 CI flaky）。
+      * probed 只在「大小探测真的执行」时置位，不会被收尾补的 100 误触发；
+      * release 在探测完成后放行读线程 EOF，保证 30% 先于收尾 100。
     """
     import threading
 
-    clock = [1000.0]                  # 受控时钟，避免依赖真实等待（稳定不 flaky）
-    monkeypatch.setattr(fs_mod.time, "monotonic", lambda: clock[0])
-    release = threading.Event()
+    class FakeClock:
+        def __init__(self):
+            self.now = 1000.0
+
+        def monotonic(self):
+            return self.now
+
+    clock = FakeClock()
+    monkeypatch.setattr(fs_mod, "time", clock)   # 仅替换被测模块的 time 名字
     probed = threading.Event()
+    release = threading.Event()
 
     class StuckProc:
         def __init__(self):
@@ -933,8 +948,8 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
             self._n += 1
             if self._n == 1:
                 return "pushing"      # 没有 [ NN%] 也没有 (NN%)
-            clock[0] += 2.0           # 模拟「2 秒没有任何输出」→ 跨过探测门槛
-            release.wait(5)           # 等主线程的 poll_size 探测完再 EOF
+            clock.now += 2.0          # 模拟「2 秒没有任何输出」→ 跨过探测门槛
+            release.wait(20)          # 用真 Event 等待，不受假时钟影响
             return ""
 
         def __enter__(self):
@@ -956,17 +971,19 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
     svc = FileService()
 
     def fake_size(serial, p):
-        probed.set()                  # poll_size 真的执行了
+        probed.set()                  # 标记：大小探测真的执行了
         release.set()                 # 放行读线程 EOF
         return 300
+
     monkeypatch.setattr(svc, "_remote_file_size", fake_size)
     monkeypatch.setattr(fs_mod, "path_getsize", lambda p: 1000)
 
     seen = []
     ok, err = svc.upload_stream(
         "S", "/tmp/a.bin", "/sdcard/a.bin", progress=seen.append,
-        timeout=20, idle_timeout=20, task_id="sz1")
+        timeout=60, idle_timeout=30, task_id="sz1")
     assert (ok, err) == (True, ""), err
+    # probed 只由 fake_size 置位，收尾补的 100 不会碰到它——断言稳定不 flaky。
     assert probed.is_set(), "大小探测从未触发"
-    assert 30 in seen, seen           # 文件大小 300/1000 → 30%，来自大小探测
+    assert 30 in seen, seen           # 文件大小 300/1000 -> 30%
     assert seen[-1] == 100, seen      # 收尾补 100
