@@ -921,8 +921,13 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
       * 只把 fs_mod 命名空间里的 time 名字换成假对象——file_service 用假时钟，
         而 threading / pytest 仍用真 time 模块，互不污染。绝不 setattr 到 time
         模块本身（那是进程级单例，会改掉全局计时导致 CI flaky）。
-      * probed 只在「大小探测真的执行」时置位，不会被收尾补的 100 误触发；
-      * release 在探测完成后放行读线程 EOF，保证 30% 先于收尾 100。
+      * 假进程的「放行」事件按实例隔离，且只放行 upload_stream 真正登记的那个
+        进程。全量跑时别的用例残留的后台线程会经被 patch 的全局 subprocess.Popen
+        拿到本用例的假进程类实例；若放行事件在实例间共享，残留线程 kill 掉它拿
+        到的实例就会误放行本用例的读线程，读线程提前 EOF 后主循环在 poll_size
+        之前就 break，表现为偶发的「大小探测从未触发」。实例隔离后，残留线程
+        只能放掉它自己那个无关实例，碰不到本用例的上传进程。
+      * probed 只在「大小探测真的执行」时置位，不会被收尾补的 100 误触发。
     """
     import threading
 
@@ -936,20 +941,22 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
     clock = FakeClock()
     monkeypatch.setattr(fs_mod, "time", clock)   # 仅替换被测模块的 time 名字
     probed = threading.Event()
-    release = threading.Event()
 
     class StuckProc:
         def __init__(self):
             self.stdout = self
             self.returncode = 0
             self._n = 0
+            # 放行事件按实例隔离：残留线程拿到的同款实例 kill 掉的只是它自己，
+            # 不会影响本用例上传进程读线程的阻塞/放行。
+            self.release = threading.Event()
 
         def read(self, n=1):
             self._n += 1
             if self._n == 1:
                 return "pushing"      # 没有 [ NN%] 也没有 (NN%)
             clock.now += 2.0          # 模拟「2 秒没有任何输出」→ 跨过探测门槛
-            release.wait(20)          # 用真 Event 等待，不受假时钟影响
+            self.release.wait(20)     # 用真 Event 等待，不受假时钟影响
             return ""
 
         def __enter__(self):
@@ -962,17 +969,27 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
             return self.returncode
 
         def kill(self):
-            release.set()
+            self.release.set()        # 只放行本实例，不碰别的假进程
 
         def poll(self):
             return None
 
-    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: StuckProc())
+    made = []
+
+    def make_proc(*a, **kw):
+        p = StuckProc()
+        made.append(p)
+        return p
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", make_proc)
     svc = FileService()
 
     def fake_size(serial, p):
         probed.set()                  # 标记：大小探测真的执行了
-        release.set()                 # 放行读线程 EOF
+        # 只放行 upload_stream 登记的那个进程（made[0] 是本用例自己创建的）。
+        # 即便残留线程又造了同款实例，它们各自的 release 互不相干。
+        if made:
+            made[0].release.set()
         return 300
 
     monkeypatch.setattr(svc, "_remote_file_size", fake_size)
