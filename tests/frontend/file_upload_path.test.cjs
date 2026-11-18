@@ -247,6 +247,60 @@ const ITEM = {
     window.close();
   }
 
+  console.log("\n[6] 后端在 done 前上报 100%：传输中封顶 99%，绝不满格");
+  {
+    const { window, pending } = await boot({
+      file_upload_pick: () => Promise.resolve({ ok: true, items: [ITEM] }),
+    });
+    const doc = window.document;
+    await waitFor(() => /设备: A1/.test(doc.getElementById("file-dev-now").textContent),
+                   3000, "设备就绪");
+    clickUploadBtn(window);
+    await waitFor(() => items(doc).length === 1, 3000, "队列项");
+
+    fireUpload(pending, { task_id: "p1", status: "uploading", percent: 100,
+                          name: "big.bin", remote: "/sdcard/big.bin", serial: "A1" });
+    ok(await waitFor(() => metaOf(doc).indexOf("99%") >= 0, 3000, "封顶 99%"),
+       "上报 100% 但尚未 done → 封顶显示 99%（实际：" + metaOf(doc) + "）");
+    let fill = items(doc)[0].querySelector(".upload-bar > i");
+    ok(fill && fill.style.width === "99%",
+       "传输中进度条不满格（实际：" + (fill ? fill.style.width : "?") + "）");
+
+    fireUpload(pending, { task_id: "p1", status: "done", percent: 100,
+                          name: "big.bin", remote: "/sdcard/big.bin", serial: "A1" });
+    ok(await waitFor(() => metaOf(doc) === "完成", 3000, "完成"),
+       "真正的 done 事件才切完成态：" + metaOf(doc));
+    fill = items(doc)[0].querySelector(".upload-bar > i");
+    ok(fill && fill.style.width === "100%",
+       "完成后才真正铺满（实际：" + (fill ? fill.style.width : "?") + "）");
+    window.close();
+  }
+
+  console.log("\n[7] stale 态保留最后实际进度，不回退也不铺满");
+  {
+    const { window, pending } = await boot({
+      file_upload_pick: () => Promise.resolve({ ok: true, items: [ITEM] }),
+    });
+    const doc = window.document;
+    await waitFor(() => /设备: A1/.test(doc.getElementById("file-dev-now").textContent),
+                   3000, "设备就绪");
+    clickUploadBtn(window);
+    await waitFor(() => items(doc).length === 1, 3000, "队列项");
+
+    fireUpload(pending, { task_id: "p1", status: "uploading", percent: 57,
+                          name: "big.bin", remote: "/sdcard/big.bin", serial: "A1" });
+    ok(await waitFor(() => metaOf(doc) === "57%", 3000, "57%"), "先收到实际进度 57%");
+    ok(await waitFor(() => items(doc)[0]
+        && items(doc)[0].className.indexOf("upload-stale") !== -1, 4000, "stale"),
+       "随后 1.5s 无新进度 → 切不确定态");
+    ok(metaOf(doc).indexOf("57%") >= 0 && metaOf(doc).indexOf("传输中") >= 0,
+       "stale 时仍显示实际进度 + 传输中（实际：" + metaOf(doc) + "）");
+    const fill = items(doc)[0].querySelector(".upload-bar > i");
+    ok(fill && fill.style.width === "57%",
+       "stale 时进度条停在 57%，不空也不满（实际：" + (fill ? fill.style.width : "?") + "）");
+    window.close();
+  }
+
   console.log("\n==============================================");
   console.log("结果：" + pass + " 通过 / " + fail + " 失败");
   process.exit(fail ? 1 : 0);
