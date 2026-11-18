@@ -6455,17 +6455,46 @@
     }
   }
 
-  /* 拖拽路径传来的是 File 对象，没有本地路径，只能整包过桥 —— 超过这个量级就
-     值得提醒一句改用「上传」按钮（见 pickUploadFiles）。 */
+  /* 拖拽 / 降级选择走的是同一条通道：浏览器只给 File 对象、没有本地路径，必须把
+     整个文件转成 base64 经 js_api 桥送到后端。这条通道对大文件不可靠 —— 实测几百
+     MB 的包读出来是空的（"读到的内容为空"），而「上传」按钮走原生对话框、后端按
+     本地路径直接 push 才稳（见 pickUploadFiles）。于是分两档：
+       * DROP_BIG_FILE_WARN（8MB）以上：还能传，状态栏提醒改用「上传」更快；
+       * DROP_MAX_FILE_SIZE（50MB）以上：直接拦下，不走 FileReader、不调后端，用
+         高优先级弹窗明确告知 + 给出操作建议，避免入队后走注定失败的过桥路径。 */
   const DROP_BIG_FILE_WARN = 8 * 1024 * 1024;
+  const DROP_MAX_FILE_SIZE = 50 * 1024 * 1024;
 
-  /* 上传一批文件：拖拽与「上传」按钮共用本函数。每一项立即入队并展示进度。 */
+  /* 上传一批文件：拖拽与（老后端的）文件选择共用本函数。每一项立即入队并展示进度。
+     超大文件在这里被拦截并弹窗引导，而不是入队后走注定失败的 base64 过桥。 */
   function uploadFiles(files) {
     if (!files || !files.length) return;
     if (!fileSerial) { pushStatus("warn", "⚠ 请先在左侧勾选一台设备（文件上传需要目标设备）"); return; }
+    const all = Array.from(files);
+    // 大文件拦截：拖拽 / 浏览器选择这条通道过不去，直接拦下并弹窗引导改用「上传」。
+    // 注意只拦真正的超限文件，小文件（含 8~50MB 的"较大"档）行为完全不变。
+    const tooBig = all.filter((f) => (f.size || 0) > DROP_MAX_FILE_SIZE);
+    if (tooBig.length) {
+      const names = tooBig.slice(0, 6).map((f) =>
+        (f.name || "未命名") + "（" + fmtSize(f.size) + "）").join("、")
+        + (tooBig.length > 6 ? " 等 " + tooBig.length + " 个" : "");
+      showAlert({
+        title: "⚠ 大文件不支持拖拽上传",
+        items: [
+          { level: "err", text: "已跳过 " + tooBig.length + " 个大文件：" + names +
+            "。拖拽 / 选择上传要把整个文件转成文本经程序内部通道传输，超过 " +
+            fmtSize(DROP_MAX_FILE_SIZE) + " 会失败（读到的内容为空 / 长时间无响应）。" },
+          { level: "info", text: "操作建议：点右侧的「上传」按钮，在弹出的系统文件对话框里选择这些文件。" +
+            "该方式由程序按本地路径直接读取并推送，稳定支持大文件。" },
+        ],
+      });
+      // 留痕：即便用户没看弹窗，状态信息里也查得到"为什么没传上去"
+      pushStatus("warn", "⚠ 已跳过 " + tooBig.length + " 个大文件的拖拽上传，请改用「上传」按钮选择文件");
+    }
+    const accepted = all.filter((f) => (f.size || 0) <= DROP_MAX_FILE_SIZE);
     let n = 0;
     let big = 0;
-    Array.from(files).forEach((f) => {
+    accepted.forEach((f) => {
       const id = newUploadTaskId();
       uploadTasks[id] = {
         id, name: f.name || "未命名", size: f.size || 0, file: f,
@@ -6477,10 +6506,8 @@
       n++;
     });
     if (n) {
-      // 拖拽只能拿到 File 对象、没有本地路径，字节必须经 js_api 桥中转。大文件
-      // 这一趟很慢（几百 MB 要几十秒），提前说清楚，别让用户以为卡住了。
       pushStatus("info", "⬆ 已提交上传 " + n + " 个文件" +
-        (big ? "（其中 " + big + " 个较大，拖拽需经浏览器中转，建议改用「上传」按钮直接选文件）" : ""));
+        (big ? "（其中 " + big + " 个较大，拖拽需经浏览器中转，改用「上传」按钮更快更稳）" : ""));
     }
     renderUploadQueue();
   }
