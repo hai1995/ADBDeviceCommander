@@ -6212,7 +6212,12 @@
 
       const meta = document.createElement("span");
       meta.className = "upload-meta dim";
-      const pct = typeof t.percent === "number" ? t.percent : 0;
+      const rawPct = typeof t.percent === "number" ? t.percent : 0;
+      // 「满」只属于真正完成态：adb 常在 done 事件之前先报一个 100%（收尾补的
+      // 100，见 file_service 的上传进度回调）。若照单全收，传输中就会出现
+      // 「传输中… + 满格进度条」，让人误以为已经传完或卡住。传输中一律封顶 99%；
+      // 从没收到过实际进度（0）就保持空槽。只有 done 事件才真正铺满。
+      const pct = t.status === "done" ? 100 : Math.max(0, Math.min(99, rawPct));
       // 传输中却一直没有新百分比：切成不确定态（见 touchUploadStale）
       const inFlight = (t.status === "uploading" || t.status === "reading"
         || t.status === "downloading");
@@ -6222,7 +6227,7 @@
         : (t.status === "done") ? "完成"
         : (t.status === "failed") ? "失败"
         : (t.status === "cancelled") ? "已取消"
-        : stale ? "传输中…" : pct + "%";
+        : stale ? (pct > 0 ? pct + "% · 传输中…" : "传输中…") : pct + "%";
       row.appendChild(meta);
 
       const bar = document.createElement("span");
