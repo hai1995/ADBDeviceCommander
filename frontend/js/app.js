@@ -6228,7 +6228,10 @@
       const bar = document.createElement("span");
       bar.className = "upload-bar";
       const fill = document.createElement("i");
-      fill.style.width = (t.status === "done" || stale ? 100
+      // 进度条长度只认真实进度：done 才铺满；传输中（含 stale 不确定态）一律用
+      // 最后收到的百分比，从没收到过就是 0% 空槽 —— 绝不因为「没有百分比」就
+      // 铺满，否则把「还在传、只是没上报」误读成「快传完了」。
+      fill.style.width = (t.status === "done" ? 100
         : (t.status === "failed" || t.status === "reading"
            || t.status === "cancelled") ? 0 : pct) + "%";
       bar.appendChild(fill);
