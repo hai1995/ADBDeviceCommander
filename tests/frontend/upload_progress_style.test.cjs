@@ -53,6 +53,14 @@ console.log("\n[3] 上传与下载共用同一套进度条渲染");
      "上传/下载走同一个渲染函数，kind 只决定箭头");
 }
 
+console.log("\n[4] 传输中进度条长度：只认真实进度，绝不铺满");
+{
+  ok(!/t\.status === "done" \|\| stale\s*\?\s*100/.test(js),
+     "stale 态不再强制把进度条拉满");
+  ok(/t\.status === "done"\s*\?\s*100/.test(js), "只有完成态才铺满进度条");
+  ok(/:\s*pct\)\s*\+\s*"%"/.test(js), "传输中用最后收到的实际百分比决定宽度");
+}
+
 console.log("\n==============================================");
 console.log("结果：" + pass + " 通过 / " + fail + " 失败");
 process.exit(fail ? 1 : 0);
