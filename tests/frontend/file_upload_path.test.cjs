@@ -207,7 +207,7 @@ const ITEM = {
     ok(items(doc)[0].className.indexOf("upload-stale") === -1, "刚提交时还是普通进度态");
     ok(await waitFor(() => items(doc)[0]
         && items(doc)[0].className.indexOf("upload-stale") !== -1, 4000, "stale"),
-       "1.5s 没有新进度 → 切成不确定态（条纹动画）");
+       "1.5s 没有新进度 → 切成不确定态（纯色进度条 + 传输中…）");
     ok(metaOf(doc) === "传输中…", "文案改为「传输中…」而不是钉在 0%：" + metaOf(doc));
     window.close();
   }
