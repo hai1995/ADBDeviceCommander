@@ -1950,8 +1950,9 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 .upload-item.upload-done .upload-bar > i { background: var(--ok); }
 .upload-item.upload-failed .upload-bar > i { background: var(--err); }
 /* 不确定态：push 已经开始但 adb 迟迟不吐百分比（部分 platform-tools 版本 / 部分
-   设备就是这样，进度只在结束时给一句「1 file pushed」）。此时进度条钉在 0% 一动不动，
-   看起来跟卡死没区别 —— 铺满纯色，配合右侧「传输中…」文案说明仍在传。
+   设备就是这样，进度只在结束时给一句「1 file pushed」）。此时进度条停在最后收到的
+   百分比上；若从未收到过则是空槽（宽度由 JS 给，见 renderUploadQueue）—— 绝不铺满，
+   避免把「还在传、只是没上报」误读成「快传完了」。配合右侧「传输中…」文案说明仍在传。
    不用流动条纹/跑马灯：上传与下载共用这一套进度条，纯色风格与正常进度条、下载
    完成态保持一致，界面更清爽，也不会让人误以为在循环加载。 */
 .upload-item.upload-stale .upload-bar > i {
