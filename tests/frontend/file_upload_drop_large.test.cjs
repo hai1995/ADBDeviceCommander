@@ -15,7 +15,8 @@
      [2] 被拦的大文件不入队、不调 file_upload_data（避免注定失败的过桥）；
      [3] 小文件拖拽照常上传（别把拦截做过头）；
      [4] 大小混合：大的拦、小的传，两不误；
-     [5] 弹窗层级足够、role=alertdialog、需主动关闭。 */
+     [5] 弹窗层级足够、role=alertdialog、需主动关闭；
+     [6] 上限提高到 200MB 后，一百多MB的 APK 仍可正常拖拽上传（不被误拦）。 */
 const fs = require("fs");
 const path = require("path");
 const { JSDOM } = require("jsdom");
@@ -174,6 +175,19 @@ const clickEl = (doc, el) => el.dispatchEvent(new doc.defaultView.Event("click",
     clickEl(doc, doc.getElementById("alert-ok"));
     await sleep(60);
     ok(!alertOpen(doc), "点「我知道了」可关闭弹窗");
+    window.close();
+  }
+
+  console.log("\n[6] 一百多MB的 APK 可拖拽（上限提高到 200MB 的回归）");
+  {
+    const { window, calls } = await boot();
+    const doc = window.document;
+    dropFiles(window, [mkFile("app-release.apk", 120 * MB)]);
+    const sent = await waitFor(() => calls.some((c) => c.fn === "file_upload_data"),
+                               3000, "apk upload called");
+    ok(sent, "120MB 的 APK 仍可拖拽上传（不被误拦）");
+    ok(!alertOpen(doc), "120MB 的 APK 不弹「大文件」告警");
+    ok(queueText(doc).indexOf("app-release.apk") >= 0, "APK 正常进入上传队列");
     window.close();
   }
 
