@@ -209,6 +209,12 @@ const ITEM = {
         && items(doc)[0].className.indexOf("upload-stale") !== -1, 4000, "stale"),
        "1.5s 没有新进度 → 切成不确定态（纯色进度条 + 传输中…）");
     ok(metaOf(doc) === "传输中…", "文案改为「传输中…」而不是钉在 0%：" + metaOf(doc));
+    const fill = items(doc)[0].querySelector(".upload-bar > i");
+    ok(!!fill, "进度条填充元素存在");
+    ok(fill && fill.style.width !== "100%",
+       "stale 态进度条不铺满（实际：" + (fill ? fill.style.width : "?") + "）");
+    ok(fill && fill.style.width === "0%",
+       "没有实际百分比时是空槽而非满格（实际：" + (fill ? fill.style.width : "?") + "）");
     window.close();
   }
 
