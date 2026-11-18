@@ -130,6 +130,102 @@ def test_mark_booted_keeps_input_only_flag():
     assert by_id["b"]["inputOnly"] is False
 
 
+def test_mark_booted_keeps_custom_colors_and_note():
+
+    """用户自定义按钮配色 / 备注必须随 booted 载荷下发给前端。
+
+
+
+    回归：mark_booted 曾以白名单逐字段重建命令字典，漏掉了 bg/fg/note。
+
+    现象：用户在编辑弹窗给命令设好「按钮颜色 / 文字颜色」，点保存后颜色确实
+
+    写进了 commands.json，重启时 normalize_commands 也正确读回了内存；但在
+
+    「booted 载荷下发前端」这一跳三个字段被丢掉，前端 cmdColor(c.bg) 拿到
+
+    undefined，卡片颜色被重置成主题默认色、备注 tip 也不见了 —— 界面完全不报错，
+
+    正是最难发现的那种「功能做了但重启后没生效」。
+
+    """
+
+    st = AppState()
+
+    payload = st.mark_booted([
+
+        {"id": "a", "name": "醒目", "labels": ["x"],
+
+         "commands": [{"command": "adb devices", "delay": 0}],
+
+         "bg": "#ffcc00", "fg": "#003366", "note": "常用：先看设备"},
+
+        {"id": "b", "name": "普通", "labels": ["x"],
+
+         "commands": [{"command": "git status", "delay": 0}]},
+
+    ], [])
+
+    by_id = {c["id"]: c for c in payload["commands"]}
+
+    assert by_id["a"]["bg"] == "#ffcc00"
+
+    assert by_id["a"]["fg"] == "#003366"
+
+    assert by_id["a"]["note"] == "常用：先看设备"
+
+    # 没设配色的命令：字段不必出现（前端 cmdColor(undefined) 按主题色渲染）
+
+    assert not by_id["b"].get("bg") and not by_id["b"].get("fg")
+
+    assert not by_id["b"].get("note")
+
+
+
+
+
+def test_mark_booted_passes_through_command_fields():
+
+    """booted 下发用整条拷贝：将来新增的命令字段能自动到前端，不再逐个补测试。
+
+
+
+    历史上这个白名单已经漏过 builtin / section / scope / inputOnly / bg / fg / note，
+
+    每次表现都是「功能做了但重启后没生效」。用一个占位新字段锁定「整条透传」
+
+    这个行为，避免下一个新增字段再踩同一个坑。
+
+    """
+
+    st = AppState()
+
+    payload = st.mark_booted([
+
+        {"id": "a", "name": "带新字段", "labels": ["x"],
+
+         "commands": [{"command": "ls", "delay": 0}],
+
+         "a_future_field": "keep-me"},
+
+    ], [])
+
+    cmd = payload["commands"][0]
+
+    assert cmd["a_future_field"] == "keep-me"
+
+    # 需要规整的字段仍然被覆盖为标准形态
+
+    assert cmd["labels"] == ["x"]
+
+    assert cmd["commands"] == [{"command": "ls", "delay": 0}]
+
+    assert cmd["inputOnly"] is False and cmd["builtin"] is False
+
+
+
+
+
 def test_mark_shutdown_and_snapshot():
     st = AppState()
     st.begin_run()
