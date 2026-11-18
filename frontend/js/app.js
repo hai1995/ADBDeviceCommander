@@ -6460,10 +6460,14 @@
      MB 的包读出来是空的（"读到的内容为空"），而「上传」按钮走原生对话框、后端按
      本地路径直接 push 才稳（见 pickUploadFiles）。于是分两档：
        * DROP_BIG_FILE_WARN（8MB）以上：还能传，状态栏提醒改用「上传」更快；
-       * DROP_MAX_FILE_SIZE（50MB）以上：直接拦下，不走 FileReader、不调后端，用
+       * DROP_MAX_FILE_SIZE（200MB）以上：直接拦下，不走 FileReader、不调后端，用
          高优先级弹窗明确告知 + 给出操作建议，避免入队后走注定失败的过桥路径。 */
   const DROP_BIG_FILE_WARN = 8 * 1024 * 1024;
-  const DROP_MAX_FILE_SIZE = 50 * 1024 * 1024;
+  /* 上限取 200MB：覆盖常见的一百多 MB 的 APK/安装包并留余量。这不是 js_api 的
+     硬限制（这里 callApi 传的 timeout=0，不限时），真正的卡点是浏览器把大文件
+     拼成 base64 data URL 的内存/长度天花板 —— 实测 414MB 读出来是空的。再大就
+     只能走「上传」按钮的本地路径通道，由后端直接 adb push。 */
+  const DROP_MAX_FILE_SIZE = 200 * 1024 * 1024;
 
   /* 上传一批文件：拖拽与（老后端的）文件选择共用本函数。每一项立即入队并展示进度。
      超大文件在这里被拦截并弹窗引导，而不是入队后走注定失败的 base64 过桥。 */
