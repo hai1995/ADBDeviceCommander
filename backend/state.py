@@ -62,10 +62,22 @@ class AppState:
                 "lc_buffers": {k: list(v) for k, v in LOGCAT_BUFFERS.items()},
                 "commands": [
                     {
+                        # 先整条浅拷贝，再对「必须规整的字段」做覆盖 —— 避免白名单
+                        # 逐字段挑时漏字段。历史上这里漏过 builtin / section / scope /
+                        # inputOnly，这次又漏了用户自定义配色 bg/fg 与备注 note：
+                        # 命令确实写进了 commands.json、重启也读回了内存，却在
+                        # 「下发前端」这一步被丢掉，界面颜色被重置成默认、备注消失。
+                        # 整条拷贝后，将来 normalize_commands 新加的字段会自动随
+                        # booted 到达前端，不再需要每个字段都来补一次回归测试。
+                        **{
+                            k: v for k, v in c.items()
+                            if k not in ("commands", "labels")
+                        },
                         "id": c.get("id", ""),
                         "name": c.get("name", ""),
                         "labels": list(c.get("labels", [])),
                         # 含命令文本，供前端指令台按「命令内容」检索（applyCmdFilter）
+                        # 逐条重建以规整 delay（老文件 / 手写 payload 字段可能缺失）。
                         "commands": [
                             {"command": e.get("command", ""), "delay": e.get("delay", 0)}
                             for e in (c.get("commands") or [])
