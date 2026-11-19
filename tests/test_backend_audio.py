@@ -824,3 +824,62 @@ def test_open_uses_wave_mapper_not_device_zero(monkeypatch):
         "每次 waveInOpen 都必须用 WAVE_MAPPER，绝不写死设备号 0（实测 %r）"
         % (fake.devices,))
 
+
+def test_wavehdr_layout_matches_windows_sdk():
+    """WAVEHDR 的字段顺序/宽度必须与 mmeapi.h 一致，尤其不能漏 lpNext。
+
+    回归（真实 CI 用户现场）：windll 打开麦克风成功，但 waveInPrepareHeader
+    返回 11（MMSYSERR_INVALPARAM）。根因是 _WAVEHDR 少了 lpNext 字段，且
+    dwUser / reserved 被写成 32 位 —— x64 下整个结构体偏移错位，SDK 读到
+    的 dwBufferLength / lpData 全是错的。本用例不依赖 Windows，在任何平台
+    都按「指针宽度」核对布局，把这类 ABI 错误挡在 CI。
+    """
+    ptr = ctypes.sizeof(ctypes.c_void_p)
+    names = [n for n, _ in _WAVEHDR._fields_]
+    assert names == [
+        "lpData", "dwBufferLength", "dwBytesRecorded", "dwUser",
+        "dwFlags", "dwLoops", "lpNext", "reserved",
+    ], "字段顺序必须与 WAVEHDR 完全一致，lpNext 不能漏"
+    # 指针宽度字段：lpData / dwUser / lpNext / reserved 都是指针宽度
+    field_types = dict(_WAVEHDR._fields_)
+    for name in ("lpData", "dwUser", "lpNext", "reserved"):
+        assert ctypes.sizeof(field_types[name]) == ptr, (
+            "%s 必须是指针宽度（DWORD_PTR / 指针），x64 下 8 字节" % name)
+    # 4 个指针宽度字段 + 4 个 DWORD：x64 下 4*8+4*4=48 字节，x86 下 4*4+4*4=32。
+    # 用通用公式避免写死平台。
+    assert ctypes.sizeof(_WAVEHDR) == ptr * 4 + 4 * 4, (
+        "WAVEHDR 总尺寸错误：%d（指针 %d）" % (ctypes.sizeof(_WAVEHDR), ptr))
+    # lpNext 必须排在 dwLoops 之后、reserved 之前，偏移正确
+    assert _WAVEHDR.lpNext.offset == _WAVEHDR.dwLoops.offset + 4
+    assert _WAVEHDR.reserved.offset == _WAVEHDR.lpNext.offset + ptr
+
+
+def test_open_prepares_full_wavehdr(monkeypatch):
+    """_open() 传给 waveInPrepareHeader 的必须是完整、字段正确的 WAVEHDR。
+
+    严格替身按真实 SDK 的读法校验：从传入的指针按 _WAVEHDR 布局取出
+    lpData / dwBufferLength，并核对 cbSize 传的是完整结构体尺寸。少字段
+    或字段错位时这里就会失败，等价于真实环境下返回错误码 11 的情形。
+    """
+    seen = {}
+
+    class _StrictWinMM(_FakeOpenWinMM):
+        def waveInPrepareHeader(self, h, hdrp, cb):
+            hdr = ctypes.cast(hdrp, ctypes.POINTER(_WAVEHDR)).contents
+            seen["lpData"] = hdr.lpData
+            seen["dwBufferLength"] = hdr.dwBufferLength
+            seen["cb"] = cb
+            seen["size"] = ctypes.sizeof(_WAVEHDR)
+            return 0
+
+    fake = _StrictWinMM()
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(winmm=fake), raising=False)
+    mr = _bare_recorder()
+    mr._open()
+    assert seen, "waveInPrepareHeader 未被调用"
+    assert seen["lpData"], "lpData 必须指向有效缓冲区"
+    assert seen["dwBufferLength"] == 4096, "dwBufferLength 应为缓冲区大小"
+    assert seen["cb"] == seen["size"], "cbSize 必须是完整 WAVEHDR 尺寸"
+    assert seen["size"] == ctypes.sizeof(ctypes.c_void_p) * 4 + 16
+
