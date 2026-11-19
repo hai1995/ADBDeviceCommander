@@ -6750,3 +6750,47 @@ exe 同目录），`sys._MEIPASS` 是那个临时解压目录（`resource_path()
 - 逐文件核对行尾：`build.py` 保持 CRLF，其余改动文件 LF，与改动前一致。
 - 文档同步：`README.md` 打包章节、`使用说明.txt` 一句话与更新提示、本轮记录；
   `build.py` 头部把「为什么默认单文件 / 三件提速」写全。
+
+---
+
+## 2026-11-19 — 麦克风录音静音的真正根因：waveInOpen 写死设备号 0
+
+### 触发
+
+用户反馈「设备录屏的录制音频还是不对，电脑里没看见有权限申请」，并附 Windows
+「隐私和安全性 → 麦克风」截图（总开关与「让桌面应用访问麦克风」都已开，列表里
+有 DingTalk / EV录屏 等）。这条链路历史上修过多轮（ctypes 原型、格式降级、恢复
+开关），用户仍反复觉得「不对」——这次从代码里查出真正的根因，不在权限。
+
+### 根因
+
+`backend/audio_service.py` 的 `MicRecorder._open()` 调 `waveInOpen` 时第二个参数
+`uDeviceID` **写死为 0**，等于永远打开系统里第 0 号输入设备。而用户机器装有钉钉
+/ EV录屏 / 腾讯会议这类软件，它们会往输入设备列表插**虚拟麦克风**，且常排在最前
+占住 0 号位；这些虚拟设备平时没有信号源，录出来就是一条纯静音 wav。表现出来正是
+「勾了麦克风、权限也给了、成片却没声音」。
+
+至于「没看见权限申请」：Win32 桌面程序**从不弹**「允许访问麦克风」的申请窗
+（那是 Store 应用的机制），也**不会**出现在「允许访问的应用」列表里，只受
+「让桌面应用访问麦克风」总开关控制。用户盯着那个列表找不到本程序，自然怀疑权限，
+其实权限一直是通的，选错设备才是问题。
+
+### 修复
+
+- `backend/audio_service.py`：新增 `WAVE_MAPPER = 0xFFFFFFFF`，`waveInOpen` 的
+  `uDeviceID` 由写死的 0 改为 `WAVE_MAPPER` —— 让系统按用户在「声音设置 → 输入」
+  选定的**默认输入设备**映射，绕开虚拟声卡占用 0 号位的问题。注释写明这一层因果。
+- `backend/controllers/record.py`：麦克风启动成功时明确 toast「已启动（使用系统
+  默认输入设备）」并点明无声时该查默认设备；启动失败的排查指引补上「桌面程序不弹
+  权限申请窗」这一条，避免用户继续在权限设置里空找。
+- `frontend/index.html` / `README.md`：开关 title、说明文字、FAQ 同步上述机制，
+  明确「系统声音回环仍不支持」「无声先查默认输入设备是否为虚拟麦克风」。
+- `tests/test_backend_audio.py`：`_FakeOpenWinMM` 记录每次 `waveInOpen` 的 dev，
+  新增 `test_open_uses_wave_mapper_not_device_zero` 断言每次都用 `WAVE_MAPPER`。
+
+### 验证
+
+- Python 全量 **1546 passed / 1 skipped**（上轮 1545，净增 1 条回归）；
+  `ruff check .` All checks passed、`pyflakes` 无输出。
+- 前端 `node tests/frontend/run-all.cjs`：**101 个文件 0 失败**。
+- 逐文件核对行尾：改动文件均保持 LF，与改动前一致。
