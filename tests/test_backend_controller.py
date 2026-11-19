@@ -2013,6 +2013,118 @@ def test_screen_record_stop_pushes_completion_toast(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 合成成功后的中间文件清理：只留成片，失败/部分失败要保留供重试
+# ---------------------------------------------------------------------------
+def _mux_stop_session(monkeypatch, tmp_path, serials=("A1",)):
+    """搭建「单/多设备 + 麦克风 + 视频已落盘」的收尾场景，供合成清理测试用。
+
+    直接 patch _teardown_devices / _merge_device_segments 跳过真实 adb pull，
+    专注验证合成循环对原始视频与 mic wav 的清理策略。
+    """
+    videos = {}
+    for s in serials:
+        p = tmp_path / f"record_{s}_ts1.mp4"
+        p.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
+        videos[s] = p
+    mic = tmp_path / "mic_20260101_000000.wav"
+    mic.write_bytes(b"RIFF" + b"\x00" * 64)
+
+    api = _make_api()
+    api._rec_session = {
+        "ts": "ts1", "dir": str(tmp_path), "with_zip": False,
+        "videos": {s: str(p) for s, p in videos.items()},
+        "devaudio": {}, "logcat_captures": {},
+        "with_mic": True, "mic_started": True,
+    }
+    api._mic = type("_Mic", (), {"stop": lambda self: str(mic)})()
+
+    monkeypatch.setattr(
+        api, "_teardown_devices",
+        lambda serials, dead, vm, dm, pretaken=None: {
+            s: ([str(p)], None) for s, p in videos.items()})
+    monkeypatch.setattr(
+        api, "_merge_device_segments", lambda s, vs: (None, 0, []))
+    return api, videos, mic
+
+
+def _fake_mux_ok(vp, audios, out):
+    """合成成功替身：真的写出成片，返回路径（与真实 ffmpeg_mux 语义一致）。"""
+    with open(out, "wb") as f:
+        f.write(b"\x00\x00\x00\x18ftypmp42moov")
+    return out
+
+
+def test_mux_success_cleans_intermediate_files(monkeypatch, tmp_path):
+    """合成成功后只留成片：原始无声视频与麦克风 wav 都要删。
+
+    回归：用户录屏目录里同时留着 mic_*.wav、record_*.mp4、*_final.mp4 三份，
+    后两份是中间产物。合成成功后即应清理，只保留成片，避免冗余。
+    """
+    api, videos, mic = _mux_stop_session(monkeypatch, tmp_path)
+    patch_ctrl(monkeypatch, "ffmpeg_mux", _fake_mux_ok)
+    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: True)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    video = videos["A1"]
+    final = tmp_path / "record_A1_ts1_final.mp4"
+    assert not video.exists(), "合成成功后原始无声视频应被清理"
+    assert not mic.exists(), "合成成功后麦克风 wav 应被清理"
+    assert final.exists(), "成片 *_final.mp4 必须保留"
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("已合成音视频" in t for t in texts), texts
+    assert any("已清理" in t and "中间文件" in t for t in texts), texts
+
+
+def test_mux_failure_keeps_intermediate_files(monkeypatch, tmp_path):
+    """合成失败必须保留原始视频与麦克风 wav，供事后重试。
+
+    用户可能装好 ffmpeg / 换好麦克风后想重新合成，中间文件是唯一的素材；
+    此时删掉等于把录像彻底毁掉。只有「合成成功」才允许清理。
+    """
+    api, videos, mic = _mux_stop_session(monkeypatch, tmp_path)
+    patch_ctrl(monkeypatch, "ffmpeg_mux", lambda *a, **k: None)
+    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: True)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    assert videos["A1"].exists(), "合成失败时原始视频必须保留"
+    assert mic.exists(), "合成失败时麦克风 wav 必须保留（供事后重试）"
+    assert not (tmp_path / "record_A1_ts1_final.mp4").exists()
+    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
+    assert any("合成音视频失败" in t for t in texts), texts
+    assert not any("已清理" in t and "中间文件" in t for t in texts), texts
+
+
+def test_mux_partial_failure_keeps_shared_mic_wav(monkeypatch, tmp_path):
+    """多设备共用一条 mic wav：只要有一台合成失败，wav 就得留着。
+
+    mic 是整场连续录的一条，A/B 两台都用同一份。若 A 成功就删了 wav，
+    B 合成失败时素材已没了，用户无法只对 B 重试。
+    """
+    api, videos, mic = _mux_stop_session(monkeypatch, tmp_path,
+                                         serials=("A1", "B2"))
+
+    def fake_mux(vp, audios, out):
+        if "A1" in os.path.basename(vp):
+            return _fake_mux_ok(vp, audios, out)
+        return None  # B2 合成失败
+
+    patch_ctrl(monkeypatch, "ffmpeg_mux", fake_mux)
+    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: True)
+
+    assert api.screen_record_stop() == {"ok": True}
+    api.workers.shutdown(timeout=2.0)
+
+    assert not videos["A1"].exists(), "A1 合成成功，原始视频应清理"
+    assert (tmp_path / "record_A1_ts1_final.mp4").exists()
+    assert videos["B2"].exists(), "B2 合成失败，原始视频必须保留"
+    assert mic.exists(), "存在失败设备时共用 mic wav 必须保留"
+
+
+# ---------------------------------------------------------------------------
 # 录屏收尾：异常不得让会话标记残留（否则录屏永久锁死）
 # ---------------------------------------------------------------------------
 def test_screen_record_stop_clears_session_even_on_exception(monkeypatch, tmp_path):
