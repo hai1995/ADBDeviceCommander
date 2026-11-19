@@ -2996,7 +2996,10 @@
       return;
     }
     const serial = lcSerial;
-    callApi(api.logcat_packages(serial)).then((r) => {
+    // 第二个参数传 false：取设备上的**全部**已安装应用（第三方 + 系统）。
+    // 不传时后端默认 third_party_only=True，只跑 pm list packages -3，
+    // 车机预置应用 / 系统应用就永远筛不到（下拉里只剩两三个第三方包）。
+    callApi(api.logcat_packages(serial, false)).then((r) => {
       if (serial !== lcSerial) return;   // 期间又切了设备，丢弃过期结果
       const pkgs = (r && Array.isArray(r.packages)) ? r.packages : [];
       let html = '<option value="">（全部）</option>';
