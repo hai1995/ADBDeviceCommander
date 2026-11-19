@@ -185,19 +185,30 @@ function switchTab(doc, key) {
     ok(hitCount(doc) === 2, "pkg:com.demo.app 命中该包的两个进程", counterOf(doc));
   }
 
-  console.log("\n[6] 「按包」下拉：选中包 → 写入过滤表达式");
+  console.log("\n[6] 「按包」下拉：全量包（含系统应用）+ 选中包 → 写入过滤表达式");
   {
     const lines = [line("I", "T", "main", 5417, 1)];
+    let pkgArgs = null;
     const { window, doc } = await bootWith(lines, {
-      logcat_packages: () => Promise.resolve({ ok: true, packages: ["com.demo.app", "com.other"] }),
+      logcat_packages: (...args) => {
+        pkgArgs = args;
+        return Promise.resolve({ ok: true, packages: [
+          "android", "com.android.systemui", "com.demo.app", "com.other"
+        ] });
+      },
       logcat_pidof: () => Promise.resolve({ ok: true, pids: ["5417"] }),
     });
     // 分步加载：包下拉是 Logcat 页专属数据，切到该页才拉设备包名列表。
     // boot 时设备已确定但没进过 Logcat 页，不会白打这次设备调用。
     switchTab(doc, "logcat");
     const sel = doc.getElementById("lc-pkg");
-    const filled = await waitFor(() => sel.options.length >= 3, 4000, "包列表填充");
-    ok(filled, "设备确定后包下拉被填充（全部 + 2 个包）", sel.options.length + " 项");
+    const filled = await waitFor(() => sel.options.length >= 5, 4000, "包列表填充");
+    ok(filled, "设备确定后包下拉被填充（全部 + 4 个包）", sel.options.length + " 项");
+    ok(pkgArgs && pkgArgs.length >= 2 && pkgArgs[1] === false,
+       "取包列表时显式传 third_party_only=false：" + JSON.stringify(pkgArgs));
+    const vals = Array.from(sel.options).map((o) => o.value);
+    ok(vals.indexOf("android") >= 0 && vals.indexOf("com.android.systemui") >= 0,
+       "系统应用出现在下拉列表中：" + vals.join(","));
 
     sel.value = "com.demo.app";
     sel.dispatchEvent(new window.Event("change", { bubbles: true }));
