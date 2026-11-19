@@ -206,6 +206,24 @@ STATE_LABEL = {
 
 # WinMM waveIn 录音用到的 WAVEHDR 结构（模块级定义，保证录音器与测试共用同一内存布局）
 class _WAVEHDR(ctypes.Structure):
+    """WinMM WAVEHDR —— 字段顺序/宽度必须与 Windows SDK 逐字节一致。
+
+    完整定义（mmeapi.h）：
+        LPSTR  lpData;            // 指针
+        DWORD  dwBufferLength;
+        DWORD  dwBytesRecorded;
+        DWORD_PTR dwUser;         // 指针宽度
+        DWORD  dwFlags;
+        DWORD  dwLoops;
+        LPWAVEHDR lpNext;         // ← 指针，必须有，不能省
+        DWORD_PTR reserved;       // 指针宽度
+
+    曾经漏掉 lpNext：x64 下 sizeof 少 8 字节、reserved 的偏移错位，
+    waveInPrepareHeader 按 SDK 布局读到错误的字段，返回 11
+    （MMSYSERR_INVALPARAM「参数无效」）—— 表现是「麦克风能打开，但
+    waveInPrepareHeader 失败，录音起不来」。这里补齐 lpNext，各指针字段
+    保持 c_void_p（等价 DWORD_PTR），64/32 位下布局都正确。
+    """
     _fields_ = [
         ("lpData", ctypes.c_void_p),
         ("dwBufferLength", ctypes.c_uint32),
@@ -213,6 +231,7 @@ class _WAVEHDR(ctypes.Structure):
         ("dwUser", ctypes.c_void_p),
         ("dwFlags", ctypes.c_uint32),
         ("dwLoops", ctypes.c_uint32),
+        ("lpNext", ctypes.c_void_p),
         ("reserved", ctypes.c_void_p),
     ]
 
