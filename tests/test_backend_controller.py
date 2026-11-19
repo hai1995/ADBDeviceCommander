@@ -5276,6 +5276,34 @@ def test_logcat_packages_falls_back_to_all_when_no_third_party(monkeypatch):
     assert "-3" in seen[0] and "-3" not in seen[1]
 
 
+def test_logcat_packages_explicit_all_includes_system(monkeypatch):
+    """显式 third_party_only=False → 一次取全量，系统应用也要进下拉。
+
+    前端「按包过滤」下拉现在传 False：车机预置应用（com.android.*）同样是要
+    排查的对象。全量模式不该先打 -3 再回落，一次 pm list packages 就够。
+    """
+    import backend.controllers.logcat as lc_ctrl
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(list(cmd))
+
+        class R:
+            returncode = 0
+            stdout = ("package:android\npackage:com.android.systemui\n"
+                      "package:com.demo.app\n")
+        return R()
+
+    monkeypatch.setattr(lc_ctrl.subprocess, "run", fake_run)
+    api = WebApi()
+    res = api.logcat_packages("A1", False)
+    assert res["ok"] is True
+    assert res["packages"] == ["android", "com.android.systemui", "com.demo.app"]
+    # 全量模式一次调用、不带 -3：不浪费一次 adb，也不漏系统包
+    assert len(seen) == 1, seen
+    assert "-3" not in seen[0]
+
+
 def test_logcat_packages_without_device_returns_empty(monkeypatch):
     import backend.controllers.logcat as lc_ctrl
 
