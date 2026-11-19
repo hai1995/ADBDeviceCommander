@@ -6838,3 +6838,24 @@ waveInOpen 失败，把这一步盖住了。
 
 - Python 全量见下；`ruff check .` All checks passed。
 - 新增 2 条布局/ABI 用例，跨平台可跑。
+
+## 合成成功后清理中间文件（record_*.mp4 与 mic_*.wav）
+
+- 用户反馈：录音/合成打通后，录屏目录里一次留下三份文件——`mic_*.wav`、
+  `record_*.mp4`（原始无声视频）、`record_*_final.mp4`（成片），前两份是中间产物，
+  显得冗余。
+- `backend/controllers/record.py` 的 `_session_teardown` 合成循环：
+  - 合成**成功**：把 `vlocal`（原始无声视频）从磁盘删掉——成片是 ffmpeg 重新封装
+    出的 `*_final.mp4`，删原始段不影响成片，也不影响打包（打包用 `rec_files`
+    里的 final）。
+  - 合成**失败**：原样保留 `vlocal` 与 mic wav（用户装好 ffmpeg / 换好麦克风后
+    还能拿它们重试），并在状态栏 toast 说清原因。
+  - mic wav 是整场共用的一条：新增 `mic_consumed_ok` / `mic_merge_failed` 两个
+    标志，**只有所有用到它的合成都成功才删**；多设备时一台失败就留着 wav，
+    避免 A 成功删掉后 B 失败、素材全无。设备端临时 wav（`adb_devaudio_*.wav`）
+    仍按原逻辑无条件清理（用途单一、只在 TEMP）。
+  - 删除后状态栏 `info` 提示「已清理 N 个合成中间文件」，让用户知道文件去哪了，
+    不以为程序弄丢录像。
+- 文档：`README.md` FAQ 第 5 条写清「成功清理 / 失败保留」两种行为。
+- `tests/test_backend_controller.py` 新增 3 条回归：成功清理只留成片、失败保留
+  全部中间文件、多设备部分失败仍保留共用 mic wav。
