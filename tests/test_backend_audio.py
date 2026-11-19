@@ -721,8 +721,10 @@ class _FakeOpenWinMM:
     def __init__(self, fail=()):
         self.fail = set(fail)
         self.formats = []
+        self.devices = []          # 记录每次 waveInOpen 的 uDeviceID
 
     def waveInOpen(self, phwi, dev, fmtp, cb, inst, flags):
+        self.devices.append(dev)
         raw = ctypes.string_at(fmtp, 18)
         _tag, channels, rate = struct.unpack_from("<HHI", raw)
         self.formats.append((channels, rate))
@@ -798,4 +800,27 @@ def test_open_reports_last_format_error_when_all_unsupported(monkeypatch):
     assert "32" in str(ei.value) and "音频格式" in str(ei.value)
     assert fake.formats == list(au._MIC_FORMATS), "应按顺序全部试一遍"
     assert mr._wavein is None
+
+
+def test_open_uses_wave_mapper_not_device_zero(monkeypatch):
+    """waveInOpen 的 uDeviceID 必须是 WAVE_MAPPER，不能写死设备号 0。
+
+    回归背景：装有钉钉 / EV录屏等软件会往系统输入设备列表插虚拟麦克风，
+    这些虚拟设备常常占住 0 号位。旧实现 waveInOpen 第二参写死 0，于是无论
+    用户在系统里把哪个麦克风设为默认，程序录的都是那个没有信号的虚拟设备
+    —— 录出全程静音，用户却因为「没看到权限申请弹窗」一直怀疑是权限问题。
+    WAVE_MAPPER（(UINT)-1）让系统按用户选定的默认输入设备映射，才是正解。
+    """
+    import backend.audio_service as au
+
+    assert au.WAVE_MAPPER == 0xFFFFFFFF, "WAVE_MAPPER 必须是 (UINT)-1"
+    fake = _FakeOpenWinMM()
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(winmm=fake), raising=False)
+    mr = _bare_recorder()
+    mr._open()
+    assert fake.devices, "waveInOpen 至少调用了一次"
+    assert all(d == au.WAVE_MAPPER for d in fake.devices), (
+        "每次 waveInOpen 都必须用 WAVE_MAPPER，绝不写死设备号 0（实测 %r）"
+        % (fake.devices,))
 
