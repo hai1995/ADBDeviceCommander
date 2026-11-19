@@ -745,6 +745,11 @@ class RecordMixin:
                 mic_path = None
             self._mic = None
         rec_files = []   # 最终要打包的产出文件
+        # mic wav 是整场共用的一条：任一设备合成失败都要留着它供事后重试合成，
+        # 只有所有用到它的合成都成功，收尾时才删。这两个标志在下面的合成循环里维护。
+        mic_consumed_ok = False
+        mic_merge_failed = False
+        cleaned_sources = 0
         # 「勾了麦却没声」只在麦克风**确实启动过**时才提示：启动就失败的场景
         # 上面已经 toast 过「电脑麦克风启动失败」，不再重复归因为「全程静音」。
         mic_lost = bool(sess.get("with_mic") and sess.get("mic_started")
@@ -772,6 +777,9 @@ class RecordMixin:
                     # 无音轨视频，并明确说出来（不说的话用户会以为是合成失败）。
                     self._push_status(
                         "warn", f"⚠ {s} 共 {len(vlist):d} 段：音频只并入第 1 段，其余段为无音轨视频")
+            # 本设备这一场是否用到了麦克风 wav。mic wav 是整场共用的一条，
+            # 删不删由 mic_consumed_ok / mic_merge_failed 两个标志统一决定（见循环之后）。
+            uses_mic = bool(mic_path and mic_path in audios)
             for idx, vlocal in enumerate(vlist):
                 if audios and idx == 0:
                     final = (vlocal[:-4] + "_final.mp4") if vlocal.endswith(
@@ -780,6 +788,16 @@ class RecordMixin:
                     if merged:
                         self._push_status("ok", f"✓ 已合成音视频: {merged}")
                         rec_files.append(merged)
+                        # 合成成功：原始无声视频已无用，删掉。用户反馈目录里同时留着
+                        # record_*.mp4 与 *_final.mp4 两份太冗余；成片是 ffmpeg 重新
+                        # 封装出的 final，删原始段不影响成片，也不影响打包（打包用的是
+                        # rec_files 里的 final）。合成失败时走 else 分支保留原视频。
+                        with contextlib.suppress(Exception):
+                            if path_exists(vlocal):
+                                os.remove(long_path(vlocal))
+                                cleaned_sources += 1
+                        if uses_mic:
+                            mic_consumed_ok = True
                     else:
                         # 合成失败/产出不可播放时**保留原视频**，并说清原因：
                         # 「未安装 ffmpeg」只是其中一种，音频为空、ffmpeg 过旧同样会走到这里。
@@ -788,6 +806,9 @@ class RecordMixin:
                             "warn", f"⚠ 合成音视频失败{why}，原始视频已保存（无音轨）: {vlocal}")
                         if path_exists(vlocal):
                             rec_files.append(vlocal)
+                        if uses_mic:
+                            # 留着 wav：用户装好 ffmpeg 后还能拿它重试合成。
+                            mic_merge_failed = True
                 else:
                     self._push_status("ok", f"✓ 录屏已保存: {vlocal}")
                     if path_exists(vlocal):
@@ -805,6 +826,18 @@ class RecordMixin:
             with contextlib.suppress(Exception):
                 if lp and os.path.exists(long_path(lp)):
                     os.remove(long_path(lp))
+        # 麦克风 wav：合成成功后声音已进 final，原始 wav 不该再留在保存目录里。
+        # 但它是整场共用的一条，只要有一台设备合成失败就得留着（供事后重试），
+        # 只有所有用到它的合成都成功，才在这里删。
+        if mic_path and mic_consumed_ok and not mic_merge_failed:
+            with contextlib.suppress(Exception):
+                if path_exists(mic_path):
+                    os.remove(long_path(mic_path))
+                    cleaned_sources += 1
+        if cleaned_sources:
+            self._push_status(
+                "info",
+                f"ℹ 已清理 {cleaned_sources:d} 个合成中间文件（原始无声视频 / 麦克风 wav）")
         # 同步 logcat 抓取收尾：**录屏结束，日志必须同时结束**。
         # 日志的用途是事后按时间轴对照视频找问题，录像停了日志还在往下写、
         # 或者日志比视频多跑一大截，两边就对不齐了。所以这里不做任何例外：
