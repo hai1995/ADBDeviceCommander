@@ -6794,3 +6794,47 @@ exe 同目录），`sys._MEIPASS` 是那个临时解压目录（`resource_path()
   `ruff check .` All checks passed、`pyflakes` 无输出。
 - 前端 `node tests/frontend/run-all.cjs`：**101 个文件 0 失败**。
 - 逐文件核对行尾：改动文件均保持 LF，与改动前一致。
+
+---
+
+## 2026-11-19（续）— waveInPrepareHeader 错误码 11：WAVEHDR 结构漏字段
+
+### 触发
+
+上一轮改 WAVE_MAPPER 后用户再试，错误从 `waveInOpen` 变成
+**`waveInPrepareHeader 失败，错误码 11（参数无效）`**。改 WAVE_MAPPER 生效了
+（设备成功打开），把下游真正的 bug 暴露出来。
+
+### 根因
+
+`core/constants.py` 的 `_WAVEHDR` 结构与 Windows SDK（mmeapi.h）不一致：
+
+1. **漏了 `lpNext` 字段**（`struct wavehdr_tag *`，指针宽度）—— 这是唯一的、也是
+   致命的差异（其余字段 `dwUser` / `reserved` 原本就正确用了指针宽度的
+   `c_void_p`，等价于 DWORD_PTR，无需改）。
+
+漏 `lpNext` 导致 x64 下 `sizeof(_WAVEHDR)` 比真实 WAVEHDR 少 8 字节，
+`reserved` 落到 `lpNext` 的位置，整个结构偏移错位。`waveInPrepareHeader`
+按 SDK 布局读 `lpData` / `dwBufferLength` / cbSize，拿到全是错的，于是返回
+`MMSYSERR_INVALPARAM`（11）。这是一直潜伏的 bug：设备号写死 0 时先一步在
+waveInOpen 失败，把这一步盖住了。
+
+（第八轮审查只补了 WinMM 函数的 argtypes/restype，没核对结构体本身的字段
+布局 —— 函数原型对、结构错位，照样崩。）
+
+### 修复
+
+- `core/constants.py`：`_WAVEHDR` 补齐 `lpNext`（`c_void_p`），字段顺序与
+  `mmeapi.h` 逐项对齐；`dwUser` / `lpNext` / `reserved` 均用指针宽度的
+  `c_void_p`（等价 DWORD_PTR），x64 / x86 布局都正确。补详细注释说明
+  「漏 lpNext → 错误码 11」的因果。
+- `tests/test_backend_audio.py`：新增
+  `test_wavehdr_layout_matches_windows_sdk`（不依赖 Windows，按指针宽度核对
+  字段顺序、宽度、总尺寸 4*ptr+16、lpNext/reserved 偏移）与
+  `test_open_prepares_full_wavehdr`（严格替身按 SDK 读法校验 lpData /
+  dwBufferLength / cbSize）。把这类 ABI 错误挡进 CI。
+
+### 验证
+
+- Python 全量见下；`ruff check .` All checks passed。
+- 新增 2 条布局/ABI 用例，跨平台可跑。
