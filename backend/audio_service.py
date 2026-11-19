@@ -50,6 +50,18 @@ _MM_ERROR_TEXT = {
 # 这类错误换格式也不会好，必须原样报出来，否则用户永远查不到真正原因。
 _MIC_FORMATS = ((2, 44100), (2, 48000), (1, 48000), (1, 44100), (1, 16000))
 
+# waveInOpen 的 uDeviceID 必须传 WAVE_MAPPER（= (UINT)-1），让系统按用户在
+# 「声音设置 → 输入」里选定的**默认麦克风**去映射，而不是写死 0。
+#
+# 写死 0 = 永远打开系统里的第 0 号输入设备，这在多声卡机器上几乎必然出错：
+# 钉钉 / EV录屏 / 腾讯会议 / 各类声卡驱动都会往输入设备列表里插**虚拟麦克风**
+# （往往排在最前，正好占住 0 号位），这些虚拟设备平时没有真实信号源，录出来
+# 就是一条纯静音 wav —— 表现正是「勾了麦克风、权限也给了，视频却没声音」。
+# 用户再去翻「隐私 → 麦克风」会发现程序根本不在列表里、也没弹过权限申请，
+# 于是误以为是权限没开；其实 Win32 桌面程序从不弹权限窗（那是 Store 应用的
+# 机制），只受「让桌面应用访问麦克风」这个总开关控制，真正的问题是选错了设备。
+WAVE_MAPPER = 0xFFFFFFFF
+
 
 def _check_mmresult(mr, what):
     """WinMM 调用返回非 0 就抛可读异常（0 / None 视为成功）。
@@ -568,7 +580,10 @@ class MicRecorder:
                 rate * block_align, block_align, self.sample_bits, 0)
             phwi = ctypes.c_void_p()
             mr = winmm.waveInOpen(
-                ctypes.byref(phwi), 0, ctypes.byref(fmt),
+                # uDeviceID 用 WAVE_MAPPER，交给系统按默认输入设备映射；写死 0
+                # 会打开第 0 号设备，在装有虚拟声卡（钉钉 / EV录屏等）的机器上
+                # 往往落到没有信号的虚拟设备上，录出全程静音。见 WAVE_MAPPER 注释。
+                ctypes.byref(phwi), WAVE_MAPPER, ctypes.byref(fmt),
                 # dwCallback 是 DWORD_PTR（回调函数地址）：声明了 c_void_p 之后
                 # 必须显式 cast，直接传 CFUNCTYPE 实例会被拒。
                 ctypes.cast(self._callback, ctypes.c_void_p),
