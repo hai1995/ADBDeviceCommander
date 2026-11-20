@@ -101,7 +101,7 @@ class DiskNative:
 def _start(monkeypatch, native, save_dir):
     monkeypatch.setattr(mcs.subprocess, "Popen", lambda cmd, **kw: _FakeProc())
     svc = mcs.MFCaptureService(native=native)
-    ok, reason, firsts = svc.start_all(["s1"], save_dir, {}, {}, None)
+    ok, reason, _firsts = svc.start_all(["s1"], save_dir, {}, {}, None)
     assert ok is True, reason
     return svc
 
@@ -163,3 +163,31 @@ def test_missing_product_is_reported_not_fake_success(monkeypatch, tmp_path):
     assert paths == []
     assert "未落盘" in err
     assert not (save / "record_final.mp4").exists()
+
+
+def test_publish_does_not_overwrite_existing_product(monkeypatch, tmp_path):
+    """保存目录已有同名视频时：成品回拷必须补 _2，不覆盖上一场用户产物。
+
+    与项目其它产物链路（截图/logcat/perf/命令导出/wav）的 unique_path 约定
+    对齐。A 方案把成品从 work_dir copy 回 save_dir 时若直接用 basename 落盘，
+    同秒 stop→start（stem 时间戳相同）会静默覆盖上一份视频，故加此回归。
+    """
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / "record_final.mp4").write_bytes(b"OLD_USER_VIDEO")
+    native = DiskNative()
+    svc = _start(monkeypatch, native, str(save))
+    out = svc.stop_all()
+    paths, err = out["s1"]
+    assert err == ""
+    assert paths == [str(save / "record_final_2.mp4")]
+    assert (save / "record_final.mp4").read_bytes() == b"OLD_USER_VIDEO"
+    assert (save / "record_final_2.mp4").exists()
+
+    # 再次录制：连同名 _2 也已被占，应落到 _3，且前两份都不动
+    svc2 = _start(monkeypatch, native, str(save))
+    out2 = svc2.stop_all()
+    paths2, _ = out2["s1"]
+    assert paths2 == [str(save / "record_final_3.mp4")]
+    assert (save / "record_final.mp4").read_bytes() == b"OLD_USER_VIDEO"
+    assert (save / "record_final_2.mp4").exists()

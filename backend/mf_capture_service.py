@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import threading
 
-from core.constants import no_window_flags, safe_name
+from core.constants import no_window_flags, safe_name, unique_path
 from core.longpath import long_path, path_isfile
 
 # 首帧等待：screenrecord 秒退（ROM 不支持 --output-format=h264）要能快速报错。
@@ -290,7 +290,13 @@ class MFCaptureSession:
                     else:
                         out.append(p)   # 占位/替身路径，原样保留（上层 path_exists 过滤）
                     continue
-                dst = os.path.join(self.save_dir, os.path.basename(p))
+                # [修复-防覆盖] 与项目其它产物链路（截图/logcat/perf/命令导出/wav）
+                # 一致走 unique_path：保存目录已有同名文件时补 _2/_3...，绝不静默
+                # 覆盖上一场用户已拿到的视频（"停止→立刻再开始"落在同一秒、stem
+                # 时间戳相同即可触发）。suffixes 把后续打包的 .zip 一并视为占用。
+                dst = unique_path(
+                    os.path.join(self.save_dir, os.path.basename(p)),
+                    suffixes=(".zip",))
                 if p_abs != os.path.abspath(dst):
                     shutil.copy2(long_path(p), long_path(dst))
                 out.append(dst)
