@@ -273,7 +273,13 @@ class RecordMixin:
         """
         with self._rec_lock:
             try:
-                if self._mf_usable():
+                # [修复] 同源录制（MF）的唯一价值是"麦克风语音与画面同源合成
+                # 带声 MP4"：native 会话无条件建 AAC 轨、麦克风由 WASAPI 采集。
+                # 若用户没勾"同步录制电脑麦克风"却仍走 MF，等于**偷偷录音**——
+                # 既违背用户意愿，又把一条静音/无关声音的 AAC 轨塞进成片。
+                # 未勾麦克风时走老路径：纯视频录制本就不需要 ffmpeg（无音频可
+                # 合成），screenrecord 原生 mp4 直接落盘，行为与改造前一致。
+                if with_mic and self._mf_usable():
                     return self._mf_record_start_locked(
                         serial, with_devaudio, with_mic, save_dir,
                         with_logcat, zip_on_stop, logcat_levels,

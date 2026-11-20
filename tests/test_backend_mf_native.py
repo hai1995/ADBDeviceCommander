@@ -20,13 +20,16 @@ class FakeNative:
     """记录调用序列的 native 替身；available 可控。"""
 
     class FakeWorker:
+        def __init__(self, owner):
+            self.owner = owner
+
         def stop(self):
-            pass
+            self.owner.calls.append(("worker_stop",))
 
     def __init__(self, available=True, fail_serial=None):
         self._available = available
         self.error = "未找到 adc_mf_sink.dll（测试替身）"
-        self.worker = self.FakeWorker()
+        self.worker = self.FakeWorker(self)
         self.calls = []
         self._h = 0
         self.fail_serial = fail_serial
@@ -307,3 +310,93 @@ def test_tail_nal_written_on_normal_stop(monkeypatch):
     sess._read_thread.join(timeout=3)
     writes = [c for c in fake.calls if c[0] == "write_video"]
     assert len(writes) >= 1, "最后一帧 NAL 应在 stop 前经 flush 写入"
+
+
+# ------------------------- 第四轮审查修复回归 ---------------------------
+
+def test_stderr_does_not_overwrite_real_error(monkeypatch):
+    """stderr 退出日志不能覆盖读线程记录的首个真实错误（如 overflow）。
+
+    第三轮修了写入异常要上报；但若 stderr 线程退出时无条件覆盖 _error，
+    真实原因仍会被吞掉，用户只看到一句无关的 "screenrecord exited"。
+    """
+    fake = FakeNative(available=True)
+    two_nals = b"\x00\x00\x01\x65" + b"\xaa" * 8 + b"\x00\x00\x01\x41" + b"\xbb" * 8
+
+    class ProcWithStderr(FakeProc):
+        def __init__(self, chunks, err_bytes):
+            super().__init__(chunks)
+            import io
+            self.stderr = io.BytesIO(err_bytes)
+
+    def fake_popen(cmd, **kw):
+        return ProcWithStderr([two_nals], b"screenrecord: encoder stopped\n")
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+
+    def boom_write(h, data):
+        raise RuntimeError("overflow：队列超过 5s")
+
+    fake.session_write_video = boom_write
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "overflow" in reason, "真实错误必须保留，不能被 stderr 覆盖"
+    assert "encoder stopped" not in reason
+
+
+def test_normal_stop_does_not_report_stderr_as_error(monkeypatch):
+    """正常停止时 stderr 的退出日志不能被误报成收尾错误。
+
+    stop() 会 terminate adb 进程，stderr 线程读到 EOF 后拿到非空 tail；
+    旧实现把它写进 _error → controller 弹无关的"收尾提示"warn。
+    """
+    fake = FakeNative(available=True)
+
+    class ProcWithStderr(FakeProc):
+        def __init__(self, chunks, err_bytes):
+            super().__init__(chunks)
+            import io
+            self.stderr = io.BytesIO(err_bytes)
+
+    def fake_popen(cmd, **kw):
+        return ProcWithStderr([b"\x00\x00\x01\x65" + b"\xaa" * 16],
+                              b"screenrecord: signal 15 (SIGTERM)\n")
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True
+    _, err = svc.stop_all()["s1"]
+    assert err == "", f"正常停止不应有错误提示，实际: {err!r}"
+
+
+def test_mic_start_failure_stops_worker(monkeypatch):
+    """mic_start 失败（错误码/异常）必须停掉 worker，不能留常驻 MTA 线程。"""
+    fake = FakeNative(available=True)
+
+    def fail_mic(endpoint, rate, bits, channels):
+        fake.calls.append(("mic_start", endpoint, rate, bits, channels))
+        return 0x80070005  # E_ACCESSDENIED
+
+    fake.mic_start = fail_mic
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "worker_stop" in [c[0] for c in fake.calls], "失败路径必须停 worker"
+    assert fake.worker is None
+
+
+def test_mic_start_exception_stops_worker(monkeypatch):
+    """mic_start 抛异常同样要停 worker + 停麦克风。"""
+    fake = FakeNative(available=True)
+
+    def boom(endpoint, rate, bits, channels):
+        raise RuntimeError("native 崩溃")
+
+    fake.mic_start = boom
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "启动麦克风采集失败" in reason
+    assert "worker_stop" in [c[0] for c in fake.calls]

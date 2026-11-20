@@ -77,17 +77,38 @@ def test_start_goes_mf_when_available(monkeypatch, tmp_path):
     api = _api(monkeypatch, tmp_path)
     fake = FakeMFCapture(available=True)
     api.mf_capture = fake
-    res = api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
+    res = api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
     assert res["ok"] is True
     assert api._rec_session.get("mf") is True
     assert any(c[0] == "start_all" for c in fake.calls)
+
+
+def test_start_without_mic_never_uses_mf(monkeypatch, tmp_path):
+    """未勾麦克风时绝不能走 MF：native 会无条件采麦克风 → 偷偷录音。
+
+    老路径的纯视频录制不需要 ffmpeg（无音频可合成），screenrecord 原生 mp4
+    直接落盘，行为与 MF 改造前一致。这是隐私/功能回归测试。
+    """
+    api = _api(monkeypatch, tmp_path)
+    fake = FakeMFCapture(available=True)   # 即使 dll 可用
+    api.mf_capture = fake
+
+    class FakeVideo:
+        def start(self, s, d, extra_name=None):
+            return True, f"{d}\\record_{s}.mp4"
+
+    api.video = FakeVideo()
+    res = api.screen_record_start(serial="SER1", with_mic=False, save_dir=str(tmp_path))
+    assert res["ok"] is True
+    assert "mf" not in api._rec_session
+    assert any(c[0] == "start_all" for c in fake.calls) is False
 
 
 def test_stop_uses_mf_teardown(monkeypatch, tmp_path):
     api = _api(monkeypatch, tmp_path)
     fake = FakeMFCapture(available=True)
     api.mf_capture = fake
-    api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
+    api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
     # 让 path_exists 认下假产物
     import backend.controllers.record as rec_mod
     monkeypatch.setattr(rec_mod, "path_exists", lambda p: True)
@@ -101,7 +122,7 @@ def test_cancel_uses_mf_discard(monkeypatch, tmp_path):
     api = _api(monkeypatch, tmp_path)
     fake = FakeMFCapture(available=True)
     api.mf_capture = fake
-    api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
+    api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
     res = api.screen_record_cancel()
     assert res["ok"] is True
     assert any(c[0] == "cancel_all" for c in fake.calls)

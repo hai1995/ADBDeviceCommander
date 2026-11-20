@@ -64,6 +64,11 @@ class MFCaptureSession:
         self._err_thread = None
         self._first_data = threading.Event()
         self._error = ""
+        # stderr 只作诊断信息，单独存放。它绝不能写进 _error：_error 是主流程
+        # 错误通道，正常 stop 时 terminate 进程会让 stderr 读到 EOF/退出日志，
+        # 若写进 _error 会（a）覆盖读线程记录的首个真实错误（overflow/WriteSample
+        # 失败），（b）即使录制完全成功也可能在收尾时报一句无关的"警告"。
+        self._stderr_tail = ""
         self._lock = threading.Lock()
         self._stats = {"bytes": 0, "first_ok": False}
         self._tmp_first = ""
@@ -103,6 +108,9 @@ class MFCaptureSession:
             self._error = self._error or (
                 f"screenrecord 未在 {FIRST_DATA_TIMEOUT_S:.0f}s 内输出 H264 数据"
                 f"（退出码 {proc.poll()}）")
+            # stderr 只在启动失败诊断时拼进原因；正常路径绝不把它当错误。
+            if self._stderr_tail and self._stderr_tail not in self._error:
+                self._error = f"{self._error}（{self._stderr_tail}）"
             if not ok:
                 self._stop.set()
             return False, self._error
@@ -164,7 +172,7 @@ class MFCaptureSession:
                     break
                 tail = (tail + line)[-2048:]
             if tail:
-                self._error = tail.decode("utf-8", "replace").strip()[-300:]
+                self._stderr_tail = tail.decode("utf-8", "replace").strip()[-300:]
         except Exception:  # noqa: BLE001  后台读 stderr，失败不影响主流程
             pass
 
@@ -269,12 +277,21 @@ class MFCaptureService:
             return False, self.error or "同源录制不可用", {}
         worker = self.native.start_worker()
         # 麦克风：native 内部采集；先启动并用其回读的真实格式建会话。
+        # [修复] 失败路径必须与下方 mic_format 失败分支一样停掉 worker：
+        # worker 是常驻 MTA 线程（已 MFStartup）。这里若直接 return，controller
+        # 侧因会话尚未登记不会调 stop_all/cancel_all，worker 会一直挂到进程退出。
         try:
             rc = self.native.mic_start(mic_endpoint, *DEFAULT_MIC)
             if rc != 0:
-                return False, self.native.last_error(), {}
+                reason = self.native.last_error()   # 先取，stop 可能覆盖 native 末次错误
+                worker.stop()
+                self.native.worker = None
+                return False, reason, {}
             self._mic_started = True
         except Exception as ex:  # noqa: BLE001
+            self._stop_mic()
+            worker.stop()
+            self.native.worker = None
             return False, f"启动麦克风采集失败：{ex}", {}
         # native 回读真实 mix format，顺序 (rate, bits, channels) 原样传给会话，
         # 保证音频流媒体类型与实际采集一致（否则 Finalize 0xC00D4A45）。

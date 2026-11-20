@@ -7065,3 +7065,36 @@ Linux 沙箱用 MSVC 编译/运行**，第 1/2/3/5 项须在 Win11 x64 真机确
 native 改动经括号平衡（134/649/30 对）与符号引用静态检查通过；但**无法在 Linux
 沙箱用 MSVC 编译/运行**，第 1/2/3 项的真机行为（格式就绪时序、分段可播性、
 取消清理）仍须按 `native/README.md` 在 Win11 x64 确认。
+
+---
+
+## 同源录制改造审查修复·第四轮
+
+对第三轮落地后的代码再逐段审查，修复以下**真实缺陷**（均有源码实证）。
+本轮未改 native（`adc_mf_sink.cpp/.h` 未动），不引入新的真机验证项。
+
+1. **隐私/功能 bug：未勾麦克风仍被偷偷录音**（`controllers/record.py`）。
+   `_mf_record_start_locked` 从不看 `with_mic`，而 `start_all` 无条件
+   `mic_start`——用户没勾「同步录制电脑麦克风」时，只要本机 dll 可用就走 MF，
+   WASAPI 仍采集并把声音塞进成片，违背意愿。MF 路径的唯一价值就是「麦克风与
+   画面同源合成带声 MP4」；未勾麦克风时改走老路径的纯视频录制（无需 ffmpeg，
+   无音频可合成，screenrecord 原生 mp4 直接落盘），行为与改造前一致。门控改为
+   `if with_mic and self._mf_usable()`。
+2. **错误被吞：stderr 覆盖真实错误**（`mf_capture_service.py`）。
+   `_drain_stderr` 原用 `self._error = tail...` 无条件赋值；读线程记录的真实错误
+   （overflow / WriteSample 失败，第三轮刚修好要上报）会在 stderr 线程退出时被
+   一句无关的退出日志覆盖。改为单独存 `_stderr_tail`，**仅启动首数据超时失败时**
+   拼进原因，正常运行期间绝不写 `_error`。
+3. **误报：正常停止把 stderr 当收尾错误**（同上）。stop() terminate adb 进程后
+   stderr 读到 SIGTERM 日志，旧实现把它写进 `_error` → controller 弹「收尾提示」
+   warn。随第 2 项一并修复：正常 stop 不再报 stderr。
+4. **资源泄漏：mic_start 失败未停 worker**（同上）。`mic_start` 返回错误码或抛
+   异常时原样 return，但 worker 是常驻 MTA 线程（已 MFStartup）；此时会话尚未
+   登记，controller 不会调 stop_all/cancel_all，worker 一直挂到进程退出。补上
+   `worker.stop()` + `self.native.worker = None`（与 mic_format 失败分支对齐），
+   且错误码分支先取 `last_error()` 再 stop（stop 会覆盖 native 末次错误）。
+
+**验证**：MF 专项 **23 passed**（新增 5 项：stderr 不覆盖真实错误、正常停止不误报、
+mic_start 错误码停 worker、mic_start 异常停 worker、未勾麦走老路径），
+全量 **1582 passed / 1 skipped**；改动文件 `py_compile` 通过。native 未改，
+括号平衡检查 134/134、670/670、45/45 对。版本号本轮未动，远端仍为 `2026.1120.0302`。
