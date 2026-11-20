@@ -23,6 +23,7 @@ import threading
 
 from core.constants import no_window_flags, safe_name, unique_path
 from core.longpath import long_path, path_isfile
+from core.tmpfiles import MF_WORKDIR_PREFIX
 
 # 首帧等待：screenrecord 秒退（ROM 不支持 --output-format=h264）要能快速报错。
 FIRST_DATA_TIMEOUT_S = 6.0
@@ -248,7 +249,7 @@ class MFCaptureSession:
             err = err or f"同源合成失败：{ex}"
         # [EDR 误报缓解] native 产物在 TEMP 工作目录里：只在 finalize 成功后
         # 把成品 copy 回用户保存目录。copy 失败或未落盘的产物不入列表并明确
-        # 上报（work_dir 随后被删，返回悬空 TEMP 路径没有意义），绝不误报成功。
+        # 上报（work_dir 留待下次启动清理，返回 TEMP 路径没有意义），绝不误报成功。
         published, pub_err = self._publish_to_save_dir(paths)
         err = err or pub_err
         self._teardown_native(discard=False)
@@ -284,8 +285,8 @@ class MFCaptureSession:
                     in_work = False
                 if not path_isfile(p):
                     if in_work:
-                        # finalize 报了产物却没落盘：work_dir 随后被删，绝不能
-                        # 把悬空 TEMP 路径当成功产物，过滤并明确上报。
+                        # finalize 报了产物却没落盘：work_dir 留待下次启动清理，
+                        # 绝不能把悬空 TEMP 路径当成功产物，过滤并明确上报。
                         errs.append(f"同源产物未落盘：{os.path.basename(p)}")
                     else:
                         out.append(p)   # 占位/替身路径，原样保留（上层 path_exists 过滤）
@@ -301,8 +302,8 @@ class MFCaptureSession:
                     shutil.copy2(long_path(p), long_path(dst))
                 out.append(dst)
             except Exception as ex:  # noqa: BLE001
-                # 不加入产物列表：work_dir 随后会被清理，返回 TEMP 原路径没有
-                # 意义且可能让上层误报成功；改为明确上报搬运失败。
+                # 不加入产物列表：work_dir 留待下次启动清理，返回 TEMP 原路径
+                # 没有意义且可能让上层误报成功；改为明确上报搬运失败。
                 errs.append(f"搬运 {os.path.basename(str(p))} 失败：{ex}")
         return out, "; ".join(errs)
 
@@ -377,7 +378,7 @@ class MFCaptureService:
         self._lock = threading.Lock()
         self._mic_started = False
         # [EDR 误报缓解] 本次录制共用的系统 TEMP 工作目录（所有设备会话共享，
-        # 各设备 stem 不同天然隔离）。stop/cancel 收尾后统一删除。
+        # 各设备 stem 不同天然隔离）。收尾不删，留待下次启动 sweep_workdirs 清理。
         self._work_dir = None
 
     @property
@@ -433,8 +434,9 @@ class MFCaptureService:
             return False, f"麦克风格式非法（{mic_fmt}），无法建音频流", {}
         # [EDR 误报缓解] 建系统 TEMP 工作目录：native 的所有 .tmp.mp4 写入、
         # 改名、取消删除都落这里，用户保存目录不再出现勒索特征文件操作。
-        # 所有设备会话共享一个目录（stem 不同天然隔离），收尾统一清理。
-        self._work_dir = tempfile.mkdtemp(prefix="adc_mf_")
+        # 所有设备会话共享一个目录（stem 不同天然隔离）；收尾不删，留待下次
+        # 启动由 tmpfiles.sweep_workdirs 后台清理，让"点停止"瞬间零批量删除。
+        self._work_dir = tempfile.mkdtemp(prefix=MF_WORKDIR_PREFIX)
         started, first_err = {}, None
         for s in serials:
             stem = self._value(stems, s, f"record_{safe_name(s)}")
@@ -494,16 +496,19 @@ class MFCaptureService:
             self._drop_work_dir()
 
     def _drop_work_dir(self):
-        """删除本次录制的工作目录（含所有 .tmp.mp4 中间态），幂等。
+        """放弃本次工作目录的引用，**不在收尾瞬间删除**（幂等）。
+
+        [EDR 误报缓解] 旧实现在此处对 TEMP 工作目录做一次集中 rmtree。亚信
+        「未授权文件加密」盯的正是"写高熵 MP4 → 改名 → 批量删"的行为序列；
+        即使前两步已搬进 TEMP，"点停止"这一刻仍紧跟一次目录级批量删除，仍是
+        可疑信号。现在收尾只清引用、不碰磁盘：TEMP 里的中间态留给下次启动
+        由 core.tmpfiles.sweep_workdirs 后台清理 —— 那时没有活跃录制会话，
+        删除不会与写入/改名挤在同一瞬间。
 
         在 stop_all（成品已 copy 回保存目录）/ cancel_all（丢弃半成品）/ 启动
-        全失败三种收尾调用。删除失败只吞异常——TEMP 残留由系统清理，不影响用户。
+        全失败三种收尾调用。目录残留由下次启动兜底清理，绝不影响本次结果。
         """
-        wd = self._work_dir
         self._work_dir = None
-        if wd:
-            with contextlib.suppress(Exception):
-                shutil.rmtree(long_path(wd), ignore_errors=True)
 
     def _stop_mic(self):
         if self._mic_started:

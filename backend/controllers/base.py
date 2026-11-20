@@ -225,6 +225,11 @@ class WebApiBase:
         # 放在后台线程：列目录本身可能很慢（TEMP 里堆了几万个文件），
         # 不能让它挡住窗口显示。
         self.workers.spawn(None, tmpfiles.boot_sweep)
+        # 清理上一轮同源录制遗留在系统 TEMP 的工作目录（见
+        # core.tmpfiles.sweep_workdirs）：收尾时不再"点停止即批量删除"，那次
+        # 删除挪到启动时、无活跃录制会话时做，避开 EDR 勒索特征的行为序列。
+        # 同样放后台线程，绝不挡窗口显示；单目录删除失败只跳过。
+        self.workers.spawn(None, tmpfiles.sweep_workdirs)
         # 版本检查：后台线程里「等 8 秒再查首次」——启动瞬间 adb 探测、命令加载、
         # 设备首刷都在抢时间，再叠一个网络请求会让窗口第一秒的响应变钝。
         # 之后每 CHECK_INTERVAL_S 复查一次（见 _update_loop）。

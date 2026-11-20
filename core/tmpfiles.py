@@ -19,6 +19,7 @@ core.tmpfiles —— 系统临时目录里「本程序遗留文件」的保守�
 返回值是统计字典，便于日志 / 单测断言；本模块不抛异常。
 """
 import os
+import shutil
 import tempfile
 import time
 
@@ -38,6 +39,11 @@ VIEW_PREFIX = "adb_view_"
 UPLOAD_PREFIX = "adb_up_"
 DEVAUDIO_PREFIX = "adb_devaudio_"
 SCRCPY_LOG_PREFIX = "adc_scrcpy_"
+# 同源录制（mf_capture_service）在系统 TEMP 里的共享工作目录前缀。
+# 放在 core 层作为单一来源：cleanup 与创建两处都用它，避免前缀漂移导致
+# 「建了却没人清」的 TEMP 堆积。它不在 DEFAULT_PREFIXES —— 那是文件前缀，
+# 工作目录是目录，清理走专门的 sweep_workdirs（shutil.rmtree 递归）。
+MF_WORKDIR_PREFIX = "adc_mf_"
 DEFAULT_PREFIXES = (VIEW_PREFIX, UPLOAD_PREFIX, DEVAUDIO_PREFIX,
                     SCRCPY_LOG_PREFIX)
 
@@ -120,3 +126,54 @@ def boot_sweep(min_age_s=3600.0, directory=None, now=None):
     """
     return sweep(prefixes=DEFAULT_PREFIXES, keep_newest=0,
                  min_age_s=min_age_s, directory=directory, now=now)
+
+
+def sweep_workdirs(min_age_s=60.0, directory=None, now=None):
+    """启动时清理上一轮同源录制遗留在 TEMP 的工作目录（递归删整个目录）。
+
+    与 ``sweep``（只删普通文件）分开：这些是 ``mkdtemp(prefix=adc_mf_)`` 建的
+    **目录**，里面是 native 的 .tmp.mp4 中间态，须用 ``shutil.rmtree`` 递归删。
+
+    为什么存在：EDR 误报缓解把收尾的集中 rmtree 从「点停止」移到了「下次启动」
+    （见 backend.mf_capture_service._drop_work_dir）。停止瞬间不再批量删除，遗留
+    的目录由这里的后台启动清理兜底 —— 那时没有活跃录制会话，删除不会和"写高熵
+    MP4 → 改名"的勒索特征序列挨在一起。
+
+    保守策略（延续本模块「宁可留，也不误删」）：
+      * 只碰名字以 MF_WORKDIR_PREFIX 开头、**真实目录且非符号链接**的直接子项；
+      * ``min_age_s`` 宽限跳过刚生成的目录 —— 多开实例时另一个可能正在录制，
+        其工作目录 mtime 会因分片/音频写入保持新鲜，不会被误删；
+      * 单个目录删除失败（被占用 / 权限）只计数跳过，不影响其它目录，不抛异常。
+
+    返回 ``{"removed": n, "failed": n, "kept": n, "scanned": n}``。
+    """
+    d = directory or tempfile.gettempdir()
+    t = time.time() if now is None else float(now)
+    stats = {"removed": 0, "failed": 0, "kept": 0, "scanned": 0}
+    try:
+        names = os.listdir(d)
+    except Exception:  # noqa: BLE001  TEMP 不可列举时静默跳过
+        return stats
+    for name in names:
+        if not name.startswith(MF_WORKDIR_PREFIX):
+            continue
+        path = os.path.join(d, name)
+        try:
+            # islink 优先：目录符号链接一律不碰；只认真实目录。
+            if os.path.islink(path) or not os.path.isdir(long_path(path)):
+                continue
+            st = os.stat(long_path(path))
+        except OSError:
+            continue
+        stats["scanned"] += 1
+        if min_age_s and (t - st.st_mtime) < float(min_age_s):
+            stats["kept"] += 1     # 太新：可能是另一实例的活跃目录
+            continue
+        try:
+            shutil.rmtree(long_path(path))
+            stats["removed"] += 1
+        except OSError:
+            # 被占用 / 权限不足：留到下次启动再清，绝不影响调用方。
+            stats["failed"] += 1
+            stats["kept"] += 1
+    return stats

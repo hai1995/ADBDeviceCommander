@@ -7423,3 +7423,41 @@ feed 发请求、无任何校验；而对照的 backend `update_open()` 有 `_ho
 全仓全绿。其余审查方向（命令注入/路径穿越/Zip Slip/反序列化/敏感信息/鉴权）均
 确认无问题：subprocess 全列表传参、上传 basename+safe_name、ZipFile 只写不解压、
 无 eval/pickle/yaml.load、token 多处打码、FrameServer 仅绑 127.0.0.1 且校验回环。
+
+---
+
+## 第六十八轮：收尾批量删除延迟到下次启动（点停止零删除）
+
+**诉求**：用户接受真机反复验证但无法找 IT 加白名单，提出"是不是删除频率太高"，
+要求预先把收尾的集中 rmtree 改成延迟/下次启动清理，让"点停止"瞬间无批量删除。
+
+**先纠正假设**：核对代码后确认"删除频率"不成立——当前 A 方案下正常收尾对用户
+保存目录零删除、TEMP 仅一次集中 rmtree；分段每 170s 是改名（MoveFileEx）非删除。
+亚信"未授权文件加密"看的是**行为序列**（写高熵文件→改名→批量删的 encrypt-then-
+rename 特征），不是速率，加 sleep 无效反拉长采样窗口。但"把那次集中删除挪出
+交互热路径"本身合理，故按用户要求实施。
+
+**修复**（C++ 零改动，纯 Python 编排层）：
+1. `backend.mf_capture_service._drop_work_dir()`：不再 `shutil.rmtree`，收尾只把
+   `self._work_dir` 置 None、不碰磁盘。三处调用（stop_all / cancel_all / 启动全
+   失败）语义不变，但"点停止"这一刻不再有任何目录级批量删除。
+2. `core.tmpfiles` 新增 `sweep_workdirs()`：启动时后台递归清理上一轮遗留的
+   `adc_mf_` 工作目录。保守策略延续本模块"宁可留不误删"：只碰前缀匹配、真实
+   目录、非符号链接；`min_age_s=60` 宽限跳过刚生成的（多开时另一实例可能正录制）；
+   单目录删除失败只计数跳过、不抛异常。返回统计 dict。
+3. 前缀常量 `MF_WORKDIR_PREFIX = "adc_mf_"` 放 core 层作单一来源，创建与清理都
+   引用它，避免漂移导致"建了却没人清"。
+4. `backend.controllers.base.boot()`：紧随 `tmpfiles.boot_sweep` 之后 spawn
+   `tmpfiles.sweep_workdirs`，后台执行不挡窗口。
+5. 成品早已在 stop 时 copy 回保存目录，延迟清理只影响 TEMP 中间态，用户无感知。
+
+**验证**：`test_mf_edr_workdir.py` 两条断言从"收尾即删"改为"收尾保留、下次启动
+清"，新增完整链路测试（停止不删→sweep 删→成品不受影响）；`test_core_tmpfiles.py`
+新增 2 项（只删旧目录/保留新目录、不碰文件与其它前缀/符号链接）。专项 20 项、
+全量 1614 passed / 1 skipped、ruff 全仓全绿。
+
+**边界**：延迟清理把删除从"用户点停止"移到"下次应用启动"——那一刻无活跃录制
+会话，删除不与写/改名序列相邻，已从行为链路上松开 EDR 最敏感的组合。但这仍是
+启发式缓解，不能保证 100% 不被企业 EDR 误报；真机 EDR 环境验证才有定论。若真机
+仍触发，下一步可考虑让 native 直接把临时分片写到 TEMP 后由系统回收（连启动清理
+都省），或保留目录交给磁盘清理工具。

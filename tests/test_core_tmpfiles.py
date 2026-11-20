@@ -143,3 +143,55 @@ def test_boot_sweep_covers_scrcpy_logs(tmp_path):
     assert stat["removed"] == 1, stat
     assert not os.path.exists(log)
     assert os.path.exists(keep)
+
+
+def _mk_workdir(dirp, name, age_s=0):
+    """造一个带 .tmp.mp4 中间态的工作目录，并可选地回拨 mtime。"""
+    d = os.path.join(str(dirp), name)
+    os.makedirs(d)
+    with open(os.path.join(d, "seg.tmp.mp4"), "wb") as f:
+        f.write(b"MP4" * 10)
+    t = time.time() - age_s
+    for p in (d, os.path.join(d, "seg.tmp.mp4")):
+        os.utime(p, (t, t))
+    return d
+
+
+def test_sweep_workdirs_removes_old_only(tmp_path):
+    """只递归删除足够旧的 adc_mf_ 目录，新的（另一实例活跃）保留。"""
+    old = _mk_workdir(tmp_path, "adc_mf_old_1", age_s=7200)
+    fresh = _mk_workdir(tmp_path, "adc_mf_fresh_2", age_s=5)
+    stat = tmpfiles.sweep_workdirs(
+        min_age_s=600, directory=str(tmp_path), now=time.time())
+    assert stat["removed"] == 1 and stat["kept"] == 1, stat
+    assert not os.path.exists(old), "旧工作目录应被递归删除"
+    assert os.path.isdir(fresh), "刚生成的目录（可能正被录制）不能删"
+    assert stat["scanned"] == 2
+
+
+def test_sweep_workdirs_skips_files_and_other_prefixes(tmp_path):
+    """普通文件、其它前缀、符号链接一律不碰（宁可留，也不误删）。"""
+    work = _mk_workdir(tmp_path, "adc_mf_dead_1", age_s=7200)
+    other_dir = os.path.join(str(tmp_path), "adb_view_something")
+    os.makedirs(other_dir)
+    plain = _mk(tmp_path, "report.docx", age_s=7200)
+    stat = tmpfiles.sweep_workdirs(
+        min_age_s=0, directory=str(tmp_path), now=time.time())
+    assert stat["removed"] == 1, stat
+    assert not os.path.exists(work)
+    assert os.path.isdir(other_dir), "前缀不符的目录不能删"
+    assert os.path.exists(plain), "普通文件不能删"
+
+    # 符号链接伪装成 adc_mf_ 目录：不跟随、不删除（Windows 上创建可能需权限，
+    # 失败则跳过该分支，不算测试失败）。
+    target = os.path.join(str(tmp_path), "keep_target")
+    os.makedirs(target)
+    link = os.path.join(str(tmp_path), "adc_mf_link")
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return
+    stat2 = tmpfiles.sweep_workdirs(
+        min_age_s=0, directory=str(tmp_path), now=time.time())
+    assert stat2["removed"] == 0, stat2
+    assert os.path.isdir(target), "符号链接的目标绝不能被删"

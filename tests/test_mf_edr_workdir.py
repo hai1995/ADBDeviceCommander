@@ -134,19 +134,21 @@ def test_finalized_product_copied_back_to_save_dir(monkeypatch, tmp_path):
     assert len(paths) == 1
     assert paths[0] == str(save / "record_final.mp4")
     assert os.path.isfile(paths[0]), "成品必须真实落地到保存目录"
-    # 工作目录（含 .tmp.mp4 中间态）收尾后删除
-    assert not os.path.exists(work), "工作目录应在 stop_all 后清理"
+    # [延迟清理] 收尾瞬间不再批量删除：工作目录原样留在 TEMP，绝不在
+    # "点停止"这一刻 rmtree（避开 EDR 勒索特征的写→改名→删序列）。
+    # 目录由下次启动的 tmpfiles.sweep_workdirs 后台清理，见专项测试。
+    assert os.path.isdir(work), "收尾不删工作目录，删除推迟到下次启动"
 
 
-def test_cancel_cleans_workdir_without_publish(monkeypatch, tmp_path):
-    """取消时不发布成品，且工作目录被清理。"""
+def test_cancel_defers_workdir_cleanup_without_publish(monkeypatch, tmp_path):
+    """取消时不发布成品，工作目录同样留待下次启动清理（收尾零删除）。"""
     save = tmp_path / "save"
     save.mkdir()
     native = DiskNative()
     svc = _start(monkeypatch, native, str(save))
     work = native.out_dirs[0]
     svc.cancel_all()
-    assert not os.path.exists(work), "取消后工作目录也应清理"
+    assert os.path.isdir(work), "取消收尾不删工作目录，删除推迟到下次启动"
     assert not (save / "record_final.mp4").exists(), "取消不应发布成品"
 
 
@@ -191,3 +193,36 @@ def test_publish_does_not_overwrite_existing_product(monkeypatch, tmp_path):
     assert paths2 == [str(save / "record_final_3.mp4")]
     assert (save / "record_final.mp4").read_bytes() == b"OLD_USER_VIDEO"
     assert (save / "record_final_2.mp4").exists()
+
+
+def test_deferred_workdir_cleaned_by_next_boot_sweep(monkeypatch, tmp_path):
+    """停止后遗留的工作目录，在下次启动由 sweep_workdirs 后台清理。
+
+    串起完整链路：本次 stop 不删（上面已断言）→ 模拟下次启动调用 sweep →
+    旧工作目录被递归删除，而用户保存目录里的成品不受影响。
+    """
+    from core import tmpfiles
+    import tempfile
+
+    save = tmp_path / "save"
+    save.mkdir()
+    # 把工作目录重定向到 tmp_path（默认落系统 TEMP），这样 sweep 只扫这一处，
+    # 测试互不干扰、也不碰真机 TEMP。
+    real_mkdtemp = tempfile.mkdtemp
+    monkeypatch.setattr(
+        tempfile, "mkdtemp",
+        lambda prefix="": real_mkdtemp(prefix=prefix, dir=str(tmp_path)))
+    native = DiskNative()
+    svc = _start(monkeypatch, native, str(save))
+    work = native.out_dirs[0]
+    out = svc.stop_all()
+    published = out["s1"][0][0]
+    assert os.path.isdir(work), "前提：收尾不删"
+    assert os.path.isfile(published), "前提：成品已回拷"
+
+    # 下次启动的后台清理：工作目录足够旧（注入 now 前进），应被递归删除。
+    stat = tmpfiles.sweep_workdirs(
+        min_age_s=60.0, directory=str(tmp_path), now=9999999999.0)
+    assert stat["removed"] >= 1, stat
+    assert not os.path.exists(work), "下次启动时旧工作目录应被清理"
+    assert os.path.isfile(published), "清理工作目录绝不能碰用户保存目录的成品"
