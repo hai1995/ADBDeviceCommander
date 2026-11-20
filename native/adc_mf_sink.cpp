@@ -359,7 +359,7 @@ private:
             DWORD wait = WaitForSingleObject(evt, 200);
             if (wait == WAIT_TIMEOUT) continue;   // 每 200ms 回到循环，外层可重查设备
             if (wait != WAIT_OBJECT_0) break;
-            UINT32 n = 0, flags = 0; BYTE* data = nullptr; UINT64 devpos = 0, ts = 0;
+            UINT32 n = 0; DWORD flags = 0; BYTE* data = nullptr; UINT64 devpos = 0, ts = 0;
             while (SUCCEEDED(cap->GetBuffer(&data, &n, &flags, &devpos, &ts))) {
                 if (!n) { cap->ReleaseBuffer(n); break; }
                 AudioBlock blk;
@@ -449,7 +449,7 @@ public:
     }
 
     int write_video(const unsigned char* data, int len) {
-        if (finalized_ || discarded_) return MF_E_INVALIDSTATE;
+        if (finalized_ || discarded_) return E_FAIL;
         video_bytes_ += len;
         // [修复] 每个视频 sample 到来时顺带把音频队列排空写入 writer。
         // 原实现只在 finalize 才 drain，但采集线程一直在入队、又有 5s 上限，
@@ -666,21 +666,34 @@ private:
                                  "设置 MF_MT_MPEG_SEQUENCE_HEADER 失败");
             }
         }
+        // 目标格式就是 H264 本身（remux 不重编码）：AddStream 的 pTargetMediaType
+        // 即写入文件的格式，SinkWriter 对 compressed-in 流直接以它作为输出。
+        // 不存在 SetOutputMediaType；原实现调用了幻想 API，MSVC 编译直接失败。
         IF_FAILED_RETURN(writer_->AddStream(vin, &vstream_), "AddStream(video) 失败");
-        IMFMediaType* vout = nullptr;
-        IF_FAILED_RETURN(MFCreateMediaType(&vout), "MFCreateMediaType(video out) 失败");
-        IF_FAILED_RETURN(vout->CopyAllItems(vin), "video out CopyAllItems 失败");
-        IF_FAILED_RETURN(writer_->SetOutputMediaType(vstream_, vout, nullptr),
-                         "SetOutputMediaType(video) 失败（H264 压缩输入/相同输出不被接受）");
-        vout->Release(); vin->Release();
+        vin->Release();
         return S_OK;
     }
 
     HRESULT config_audio_stream() {
-        // PCM 输入 + MFAudioFormat_AAC 输出：让系统 AAC MFT 编码，
+        // PCM 输入 + MFAudioFormat_AAC 目标：让系统 AAC MFT 编码，
         // 避免裸 PCM 直接喂 MP4 sink 在 Finalize 报 0xC00D4A45。
-        IMFMediaType* ain = nullptr;
-        IF_FAILED_RETURN(MFCreateMediaType(&ain), "MFCreateMediaType(audio in) 失败");
+        //
+        // IMFSinkWriter 正确用法（无 SetOutputMediaType 这个方法）：
+        //   1) AddStream(目标类型=AAC) 建流；pTargetMediaType 描述"写进文件"的格式；
+        //   2) SetInputMediaType(输入类型=PCM) 告诉 SinkWriter 喂进来的样本格式。
+        // 原实现把 PCM 当目标、AAC 当输出并调用幻想的 SetOutputMediaType，
+        // MSVC 编译直接失败（C2039）。
+        IMFMediaType* aout = nullptr;   // 目标/编码格式：AAC
+        IF_FAILED_RETURN(MFCreateMediaType(&aout), "MFCreateMediaType(audio AAC) 失败");
+        aout->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        aout->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+        aout->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ach_);
+        aout->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, arate_);
+        aout->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000 / 8);
+        IF_FAILED_RETURN(writer_->AddStream(aout, &astream_), "AddStream(audio/AAC) 失败");
+
+        IMFMediaType* ain = nullptr;    // 输入格式：WASAPI 采集的 PCM
+        IF_FAILED_RETURN(MFCreateMediaType(&ain), "MFCreateMediaType(audio PCM) 失败");
         ain->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         ain->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
         ain->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ach_);
@@ -688,17 +701,9 @@ private:
         ain->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, abits_);
         ain->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, ach_ * abits_ / 8);
         ain->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, arate_ * ach_ * abits_ / 8);
-        IF_FAILED_RETURN(writer_->AddStream(ain, &astream_), "AddStream(audio) 失败");
-        IMFMediaType* aout = nullptr;
-        IF_FAILED_RETURN(MFCreateMediaType(&aout), "MFCreateMediaType(audio out) 失败");
-        aout->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        aout->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-        aout->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ach_);
-        aout->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, arate_);
-        aout->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000 / 8);
-        IF_FAILED_RETURN(writer_->SetOutputMediaType(astream_, aout, nullptr),
-                         "SetOutputMediaType(AAC) 失败（系统 AAC 编码器不可用/格式不支持）");
-        aout->Release(); ain->Release();
+        IF_FAILED_RETURN(writer_->SetInputMediaType(astream_, ain, nullptr),
+                         "SetInputMediaType(audio/PCM) 失败（系统 AAC 编码器不可用/格式不支持）");
+        ain->Release(); aout->Release();
         return S_OK;
     }
 

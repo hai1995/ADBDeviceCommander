@@ -7121,3 +7121,28 @@ mic_start 错误码停 worker、mic_start 异常停 worker、未勾麦走老路�
 全量 **1582 passed / 1 skipped**。本轮未改 native，无新真机验证项。版本号保持
 `2026.1120.0302`。前端单测本轮未动前端文件、不受影响（npm 依赖下载在沙箱内超时，
 未本地复跑；改造前提交的前端 CI 为 success）。
+
+---
+
+## CI 打包 job 首次运行暴露的 native 编译错误修复
+
+静态检查修复后测试 job 全绿，打包 job（needs: test）**首次真正执行** native
+编译——这是 MF 改造 4 个提交以来从未跑到的阶段。MSVC 报 4 处编译错误（native
+代码自编写起从未在 Windows 编译过，Linux 沙箱无法验证，前几轮审查均漏掉）：
+
+1. `adc_mf_sink.cpp:363` `IAudioCaptureClient::GetBuffer` 第 3 参数类型是
+   `DWORD*`（flags），原代码声明为 `UINT32` → C2664。改为 `DWORD flags`。
+2. `adc_mf_sink.cpp:452` `MF_E_INVALIDSTATE` 未定义 → C2065。改用标准 `E_FAIL`
+   （与文件内其他 C ABI 错误码一致）。
+3. `adc_mf_sink.cpp:673` `IMFSinkWriter::SetOutputMediaType` 不存在 → C2039。
+   经 MSDN 核实：AddStream 的 pTargetMediaType 即写入文件的目标格式，H264 直通
+   无需（也没有）该方法。删除整段 vout/SetOutputMediaType，AddStream(vin) 即可。
+4. `adc_mf_sink.cpp:699` 同上。音频流改为正确用法：AddStream(AAC 目标类型) 建流
+   + SetInputMediaType(PCM 输入类型)。原实现把 PCM 当目标、AAC 当输出且调用
+   幻想 API，方向完全反了。
+
+**验证**：本地静态扫描无残留非法 API；Python 层全量 1582 passed / 1 skipped。
+native 编译由 CI Windows runner（MSVC）真实验证——这是本轮修复能否成立的关键，
+若仍有遗漏错误以 CI 日志为准继续迭代。音频流 API 方向的修正属实质性变更，
+AAC 编码/播放可播性仍按 native/README.md 在 Win11 x64 真机确认。
+版本号保持 `2026.1120.0302`。
