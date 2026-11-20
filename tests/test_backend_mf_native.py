@@ -206,3 +206,104 @@ def test_h264_cmd_has_no_ffmpeg_and_explicit_format():
     assert "--bit-rate" in cmd and "12000000" in cmd
     assert "-" == cmd[-1]
     assert all("ffmpeg" not in str(x) for x in cmd)
+
+
+# ------------------------- 第三轮审查修复回归 ---------------------------
+
+def test_mic_format_zero_rejected(monkeypatch):
+    """native 回读 (0,0,0)（格式未就绪/无设备）时必须明确失败，不建会话。"""
+    fake = FakeNative(available=True)
+    fake.mic = (0, 0, 0)
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "麦克风格式" in reason
+    assert not any(c[0] == "session_create" for c in fake.calls)
+    # 失败路径必须停麦克风 + 停 worker，不能留后台采集线程
+    assert any(c[0] == "mic_stop" for c in fake.calls)
+
+
+def test_mic_format_exception_becomes_reason(monkeypatch):
+    """native mic_format 抛异常（错误码）要转成可读 reason，不冒泡成 500。"""
+    fake = FakeNative(available=True)
+
+    def boom():
+        raise RuntimeError("native 3s 内无 PCM 格式")
+
+    fake.mic_format = boom
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "读取麦克风格式失败" in reason
+
+
+def test_write_video_error_is_reported(monkeypatch):
+    """native session_write_video 报错必须上报，不能吞成假成功。
+
+    回归：旧实现用 contextlib.suppress 吞掉写入异常，会话"看起来成功"，
+    但 native 已 overflow 丢弃音频/视频，最终产出残缺文件还报成功。
+    """
+    fake = FakeNative(available=True)
+    two_nals = b"\x00\x00\x01\x65" + b"\xaa" * 8 + b"\x00\x00\x01\x41" + b"\xbb" * 8
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([two_nals])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+
+    def boom_write(h, data):
+        raise RuntimeError("overflow：队列超过 5s")
+
+    fake.session_write_video = boom_write
+    svc = mcs.MFCaptureService(native=fake)
+    # 首块写入即报错 → _error 记录 → start 返回失败并带出可读原因，
+    # 而不是静默成功。
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "overflow" in reason
+    assert firsts == {}
+
+
+def test_finalize_error_is_reported(monkeypatch):
+    """native finalize 报错要转成可读 err，不能返回 paths=[] + err=''。"""
+    fake = FakeNative(available=True)
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+
+    def boom_finalize(h):
+        raise RuntimeError("0xC00D4A45 Finalize 失败")
+
+    fake.session_finalize = boom_finalize
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True
+    out = svc.stop_all()
+    assert out["s1"][0] == []
+    assert "Finalize 失败" in out["s1"][1]
+
+
+def test_tail_nal_written_on_normal_stop(monkeypatch):
+    """正常 stop 时缓冲里的最后一帧 NAL 必须写入（不能被 _stop 挡掉）。"""
+    fake = FakeNative(available=True)
+
+    def fake_popen(cmd, **kw):
+        # 只有一条 NAL：它留在 NalBuffer 里直到 flush()
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 16])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    # 等读线程把数据读完、进入 finally 写入尾帧
+    sess._read_thread.join(timeout=3)
+    writes = [c for c in fake.calls if c[0] == "write_video"]
+    assert len(writes) >= 1, "最后一帧 NAL 应在 stop 前经 flush 写入"

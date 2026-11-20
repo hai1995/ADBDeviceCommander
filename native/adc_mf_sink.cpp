@@ -218,6 +218,7 @@ public:
             set_error(hr, "WASAPI 线程 CoInitializeEx 失败"); return (int)hr;
         }
         stop_.store(false);
+        fmt_ready_.store(false);   // 新一轮录制：格式需重新回读，避免拿到上一次的陈旧值
         endpoint_id_ = endpoint_id ? endpoint_id : L"";
         want_rate_ = rate; want_bits_ = bits; want_ch_ = channels;
         thread_ = CreateThread(nullptr, 0, &AudioCapture::thread_proc, this, 0, nullptr);
@@ -231,6 +232,17 @@ public:
         if (thread_) { WaitForSingleObject(thread_, 5000); CloseHandle(thread_); thread_ = nullptr; }
     }
     int format(int* r, int* b, int* c) {
+        // [修复] mic_start() 只负责 CreateThread 就立即返回；真实 mix format 要等
+        // 采集线程跑 GetMixFormat 才有。若此刻直接回读，rate_/bits_/channels_ 仍
+        // 是初始的 0 —— 会话用它建音频流时 MF_MT_AUDIO_SAMPLES_PER_SECOND=0，
+        // AddStream 失败，导致整场同源录制根本无法启动（启动竞态）。
+        // 这里等格式就绪（有界 ~3s），拿不到就明确报错让 Python 回退，绝不返回 0。
+        for (int i = 0; i < 300 && !fmt_ready_.load(); ++i) Sleep(10);
+        if (!fmt_ready_.load()) {
+            set_error_text("麦克风采集线程未在 3s 内回读到 PCM 格式"
+                           "（无输入设备 / 设备被占用 / 权限未授予？）");
+            return MF_E_UNEXPECTED;
+        }
         std::lock_guard<std::mutex> lk(fmt_mtx_);
         *r = rate_; *b = bits_; *c = channels_; return 0;
     }
@@ -294,8 +306,11 @@ private:
                 if (SUCCEEDED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&tmpc))) {
                     WAVEFORMATEX* f = nullptr;
                     if (SUCCEEDED(tmpc->GetMixFormat(&f)) && f) {
-                        std::lock_guard<std::mutex> lk(fmt_mtx_);
-                        rate_ = f->nSamplesPerSec; bits_ = f->wBitsPerSample; channels_ = f->nChannels;
+                        {
+                            std::lock_guard<std::mutex> lk(fmt_mtx_);
+                            rate_ = f->nSamplesPerSec; bits_ = f->wBitsPerSample; channels_ = f->nChannels;
+                        }
+                        fmt_ready_.store(true);   // 唤醒等待中的 format()
                         CoTaskMemFree(f);
                     }
                     tmpc->Release();
@@ -326,6 +341,7 @@ private:
             std::lock_guard<std::mutex> lk(fmt_mtx_);
             rate_ = fmt->nSamplesPerSec; bits_ = fmt->wBitsPerSample; channels_ = fmt->nChannels;
         }
+        fmt_ready_.store(true);   // 唤醒等待中的 format()
         REFERENCE_TIME dur = 10000000; // 1s 缓冲（共享模式）
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                 dur, 0, fmt, nullptr);
@@ -367,6 +383,7 @@ private:
     std::wstring endpoint_id_;
     int want_rate_, want_bits_, want_ch_;
     int rate_, bits_, channels_;
+    std::atomic<bool> fmt_ready_{false};   // 采集线程是否已回读到真实 mix format
     std::mutex fmt_mtx_;
     std::atomic<int> device_events_;
     std::vector<AudioSink*> subs_;
@@ -394,7 +411,7 @@ public:
           fps_num_(fps_num > 0 ? fps_num : 30), fps_den_(fps_den > 0 ? fps_den : 1),
           arate_(arate), abits_(abits), ach_(ach),
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
-          seg_no_(0),
+          seg_no_(0), seg_start_hns_(0),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
           last_audio_end_(0) {}
 
@@ -535,11 +552,17 @@ public:
         discarded_ = true;
         unsubscribe_();
         close_writer(false);
-        for (const auto& t : tmp_files_) {
-            wchar_t w[MAX_PATH]; MultiByteToWideChar(CP_UTF8, 0, t.c_str(), -1, w, MAX_PATH);
+        // [修复] 段切换（170s）已原子发布的 .mp4 在 published_ 里，取消时也必须
+        // 删除，否则用户点"取消"后目录里仍残留前面已发布的段（语义矛盾）。
+        auto delete_utf8 = [](const std::string& path) {
+            wchar_t w[2048];
+            MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, w, 2048);
             DeleteFileW(w);
-        }
+        };
+        for (const auto& t : tmp_files_) delete_utf8(t);
         tmp_files_.clear();
+        for (const auto& p : published_) delete_utf8(p);
+        published_.clear();
     }
 
     void stats(long long* vb, long long* af, long long* dr, int* qp) {
@@ -577,7 +600,12 @@ private:
         if (SUCCEEDED(buf->Lock(&dst, nullptr, nullptr)) && dst) { memcpy(dst, data, len); buf->Unlock(); }
         buf->SetCurrentLength(len);
         sample->AddBuffer(buf); buf->Release();
-        sample->SetSampleTime(ts); sample->SetSampleDuration(dur);
+        // [修复] 每段是独立 MP4，sample 时间戳必须相对本段起点（seg_start_hns_），
+        // 否则第二段起全局 QPC 已走过 170s+，写进去会让播放器显示 170s 黑屏开头、
+        // 时长错乱。上一段残留、采集早于 writer 创建的块可能为负，clamp 到 0。
+        LONGLONG rel_ts = ts - seg_start_hns_;
+        if (rel_ts < 0) rel_ts = 0;
+        sample->SetSampleTime(rel_ts); sample->SetSampleDuration(dur);
         HRESULT hr = writer_->WriteSample(stream, sample);
         sample->Release();
         if (FAILED(hr)) { set_error(hr, "WriteSample 失败"); dropped_++; }

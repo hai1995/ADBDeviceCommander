@@ -1,6 +1,19 @@
 # 修复说明
 
-- **同源录制改造审查修复（最新一轮）**：对方案 B 落地代码做二次审查，修复：
+- **同源录制审查修复·第三轮（最新一轮）**：再次逐段审查，修复 6 项真实缺陷：
+  ①**致命启动竞态**——`mic_start()` 只 `CreateThread` 即返回，真实 mix format
+  要等采集线程 `GetMixFormat` 才有，`mic_format()` 立即回读到 `(0,0,0)` → 会话
+  `AddStream` 失败、整场录制根本起不来；native 加 `fmt_ready_` 就绪标志 +
+  `format()` 有界等待（3s，超时明确报错），Python 侧拦截 0 值/异常并转成可读
+  reason（原本异常会冒泡成 API 500）。②**分段时间戳错乱**——音频/视频 sample
+  用全局 QPC，第二段起会带 170s+ 偏移（播放器显示长黑屏）；改为相对本段
+  `seg_start_hns_`，负值 clamp 0。③**取消残留**——`discard()` 只删 tmp，段切换
+  已原子发布的 `.mp4` 仍留在磁盘；改为连 `published_` 一并删。④**写入假成功**——
+  `session_write_video`/finalize 的异常被 `suppress` 吞掉，native overflow/
+  Finalize 失败时用户看不到原因；改为记录并上报、启动即失败。⑤**末帧丢失**——
+  stop 时 finally 的尾部 NAL 被 `_stop` 标志挡掉；改为仅出错时跳过尾帧写入。
+  ⑥防御性地初始化 `seg_start_hns_`。新增 5 项回归测试，全量 1577 passed。
+- **同源录制改造审查修复（上一轮）**：对方案 B 落地代码做二次审查，修复：
   ①native 音频队列原本只在 finalize 才排空、却有 5s 上限 → 任何 >5s 录制必
   Overflow 失败；改为随视频帧高频排空（写 writer 仍单线程）。②WASAPI 采集线程
   缺 `CoInitializeEx(MTA)`、`CoCreateInstance` 必失败致全程静音 → 补齐并配对
@@ -7008,3 +7021,47 @@ mirror 投屏路径已用过该命令），PC 边收边把压缩 sample 喂给 S
 **验证**：Python 全量 1572 passed / 1 skipped（新增 1 项 NalBuffer 回归），
 MF 专项 13 passed。native 改动经括号平衡与符号引用静态检查通过，但**无法在
 Linux 沙箱用 MSVC 编译/运行**，第 1/2/3/5 项须在 Win11 x64 真机确认。
+
+---
+
+## 同源录制改造审查修复·第三轮
+
+对二次审查落地后的代码再逐段审查，修复以下**真实缺陷**（均有源码实证），
+本轮不改架构，只修正既有设计的实现漏洞。
+
+1. **致命启动竞态：麦克风格式回读 (0,0,0)**（`adc_mf_sink.cpp` /
+   `mf_capture_service.py`）。`adc_mic_start()` 内部 `AudioCapture::start()` 只
+   `CreateThread` 就返回；真实 PCM 格式（`rate_/bits_/channels_`）要等采集线程
+   跑到 `GetMixFormat` 才写入。Python 紧接着 `mic_format()` 立刻回读，极可能
+   拿到初始的 `(0,0,0)`，用它 `session_create` → `config_audio_stream` 里
+   `MF_MT_AUDIO_SAMPLES_PER_SECOND=0` → AddStream 失败 → 整场同源录制根本无法
+   启动。修复：AudioCapture 新增 `std::atomic<bool> fmt_ready_`，两处
+   GetMixFormat 后置 true、`start()` 重置 false；`format()` 有界等待（~3s），
+   超时 `set_error_text` + 返回 `MF_E_UNEXPECTED`，绝不返回 0。Python 侧
+   `start_all` 接住 `mic_format()` 异常（原本冒泡到 controller 无 try 处 →
+   API 500）并校验非正值，都转成可读 reason 并停麦克风/worker。
+2. **分段时间戳错乱**（`adc_mf_sink.cpp::push_sample`）：每个 170s 段是独立 MP4，
+   但 sample 时间戳用的是全局 QPC。第二段的 sample 一进来就是 ~170s 起，
+   播放器会显示 170s 黑屏开头、时长错乱。修复：`rel_ts = ts - seg_start_hns_`，
+   负值（段切换残留、采集早于 writer 创建）clamp 到 0。
+3. **取消后已发布段残留**（`RecordSession::discard`）：段切换时 `close_writer(true)`
+   已把前面段原子发布为 `.mp4` 并记入 `published_`，但 `discard()` 只遍历
+   `tmp_files_` 删除，`published_` 里的文件在用户点"取消"后仍残留（语义矛盾）。
+   修复：抽出 `delete_utf8` lambda，tmp 与 published 都删并清空。
+4. **写入/合成失败被吞成"假成功"**（`mf_capture_service.py`）：`_read_loop` 里
+   `session_write_video` 用 `contextlib.suppress(Exception)`，native overflow /
+   `WriteSample` 失败抛的错被静默吞掉，最终产出残缺文件还报成功；`stop()` 里
+   `session_finalize` 的异常同样被吞，`paths=[]` + `err=""` 被 controller 当成
+   "正常停止但无产物"。修复：写入异常记入 `_error` 并置停止标志（首错为准）、
+   finalize 异常转成可读 err 上抛。
+5. **末帧 NAL 丢失**（`_read_loop` finally）：正常 `stop()` 会先置 `_stop`，
+   而 finally 用 `if not self._stop.is_set()` 挡住尾部 flush，导致留在 NalBuffer
+   的最后一帧永久丢失。修复：改为仅当记录过错误时才跳过尾帧写入。
+6. **防御性初始化**：`RecordSession` 构造函数补 `seg_start_hns_(0)`（原靠
+   `ensure_writer` 兜底），并按成员声明顺序排列以避免 `-Wreorder` 警告。
+
+**验证**：MF 专项 18 passed（新增 5 项：0 值格式拒绝、格式异常转 reason、
+写入错误上报、finalize 错误上报、末帧写入），全量 **1577 passed / 1 skipped**。
+native 改动经括号平衡（134/649/30 对）与符号引用静态检查通过；但**无法在 Linux
+沙箱用 MSVC 编译/运行**，第 1/2/3 项的真机行为（格式就绪时序、分段可播性、
+取消清理）仍须按 `native/README.md` 在 Win11 x64 确认。

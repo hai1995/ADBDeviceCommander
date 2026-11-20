@@ -126,17 +126,30 @@ class MFCaptureSession:
                 for nal in nal_buf.feed(chunk):
                     if self._stop.is_set():
                         break
-                    with contextlib.suppress(Exception):
+                    # [修复] native 写入失败（overflow / WriteSample 失败）必须
+                    # 记录，不能被 suppress 吞成"假成功"——否则 finalize 出一个
+                    # 缺帧/无音视频还向用户报成功。首错为准，并置停止标志。
+                    try:
                         self.native.session_write_video(self._handle, nal)
                         self._stats["bytes"] += len(nal)
+                    except Exception as ex:  # noqa: BLE001
+                        self._error = self._error or f"写入 H264 流失败：{ex}"
+                        self._stop.set()
+                        break
         except Exception as ex:  # noqa: BLE001  读线程异常记录原因，不吞
-            self._error = f"读取 H264 流失败：{ex}"
+            self._error = self._error or f"读取 H264 流失败：{ex}"
         finally:
-            for tail in nal_buf.flush():
-                if not self._stop.is_set():
-                    with contextlib.suppress(Exception):
+            # 正常 stop 时也要把缓冲里的最后一帧写入（[修复]：原实现用
+            # `if not self._stop.is_set()` 挡住，而 stop() 会先置该标志，导致
+            # 末帧永久丢失）。仅在记录过错误时才跳过尾部写入。
+            if not self._error:
+                for tail in nal_buf.flush():
+                    try:
                         self.native.session_write_video(self._handle, tail)
                         self._stats["bytes"] += len(tail)
+                    except Exception as ex:  # noqa: BLE001
+                        self._error = self._error or f"写入 H264 尾帧失败：{ex}"
+                        break
             self._first_data.set()   # 即使失败也唤醒 wait，避免等满超时
 
     def _drain_stderr(self):
@@ -164,11 +177,17 @@ class MFCaptureSession:
         if not self._handle:
             return [], self._error or "会话未创建"
         with self._lock:
-            self.native.session_mark_mic_stop(self._handle)
+            with contextlib.suppress(Exception):
+                self.native.session_mark_mic_stop(self._handle)
         paths = []
         err = self._error
-        with contextlib.suppress(Exception):
+        # [修复] finalize 失败（overflow / SinkWriter::Finalize 报错）必须转成
+        # 可读原因上抛，否则 paths=[] + err="" 会被 controller 当成"正常停止但
+        # 无产物"，用户看不到任何失败提示。
+        try:
             paths = self.native.session_finalize(self._handle)
+        except Exception as ex:  # noqa: BLE001
+            err = err or f"同源合成失败：{ex}"
         self._teardown_native(discard=False)
         return paths, err
 
@@ -259,8 +278,22 @@ class MFCaptureService:
             return False, f"启动麦克风采集失败：{ex}", {}
         # native 回读真实 mix format，顺序 (rate, bits, channels) 原样传给会话，
         # 保证音频流媒体类型与实际采集一致（否则 Finalize 0xC00D4A45）。
-        mic_fmt = self.native.mic_format()
-
+        # [修复] native 在无设备/未就绪时会报错误码，MFNative.mic_format 抛
+        # MFNativeError；这里必须接住并转成可读 reason，否则异常冒泡到
+        # controller 的 start_all 调用点（无 try）会变成 API 500。0 值同样
+        # 是非法的（会让 AddStream 失败），一并拦截。
+        try:
+            mic_fmt = self.native.mic_format()
+        except Exception as ex:  # noqa: BLE001
+            self._stop_mic()
+            worker.stop()
+            self.native.worker = None
+            return False, f"读取麦克风格式失败：{ex}", {}
+        if not mic_fmt or any(not isinstance(x, int) or x <= 0 for x in mic_fmt):
+            self._stop_mic()
+            worker.stop()
+            self.native.worker = None
+            return False, f"麦克风格式非法（{mic_fmt}），无法建音频流", {}
         started, first_err = {}, None
         for s in serials:
             stem = self._value(stems, s, f"record_{safe_name(s)}")
