@@ -707,6 +707,32 @@ def test_compare_alert_table_flags_bad_device():
     assert "达标" in html                    # S1 的帧率/温度/卡顿都达标
 
 
+def test_report_escapes_device_metadata():
+    """单设备报告的 meta 区同样吃设备端数据（型号 / 序列号 / 包名），必须转义。
+
+    回归：`build_report_html` 早前把 meta 的 value 直接 f-string 拼进正文，而
+    `build_compare_html` 对同样字段已 esc_html。伪造型号的恶意设备可用
+    `<img src=x onerror=alert(1)>` 注入脚本，用户双击导出报告即中招。
+    """
+    info = {
+        "serial": 'emulator-5554"><script>alert(1)</script>',
+        "model": '<img src=x onerror=alert(1)>',
+        "android": '<b>14</b>',
+        "size": "1080x2400",
+        "pkg": 'com.evil"><svg onload=alert(1)>',
+        "started_at": "2026-10-29 07:00:00",
+        "interval": 1.0,
+    }
+    html = svc.build_report_html(_demo_samples(3), info)
+    body = _report_markup(html)  # 只查正文；内联 ECharts 脚本不参与 HTML 解析
+    # 原始标签一个都不能漏进正文，全部以实体形式出现
+    for payload in ("<img src=x", "<script>alert(1)</script>", "<b>14</b>",
+                    "<svg onload=alert(1)>"):
+        assert payload not in body
+    assert "&lt;img" in body and "&lt;b&gt;14&lt;/b&gt;" in body
+    assert "&lt;svg" in body and "&quot;&gt;" in body
+
+
 def test_compare_report_escapes_device_label():
     """设备型号来自设备端，可能带尖括号；拼进 HTML 正文必须转义。"""
     e = _entries()

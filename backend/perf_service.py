@@ -1808,8 +1808,14 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
         ("时长", dur_txt),
         ("样本数", str(n)),
     ]
-    meta_html = "".join(f"<div><b>{k}</b> <span>{v}</span></div>"
-                        for k, v in meta)
+    # 这些 value 全部来自设备端（model 来自 getprop ro.product.model、serial、
+    # android、size、包名）或用户配置——都不是可信文本。必须逐个 HTML 转义后再
+    # 拼进正文，否则一个伪造型号的恶意设备就能把 `<img onerror=...>` 注入报告，
+    # 用户浏览器打开导出的 html 时在 file:// 上下文执行脚本。多设备对比报告
+    # （build_compare_html）对同样的字段早已 esc_html，这里此前漏掉，补齐对齐。
+    meta_html = "".join(
+        f"<div><b>{esc_html(k)}</b> <span>{esc_html(v)}</span></div>"
+        for k, v in meta)
 
     alert_html = _alert_card_html(evaluate_alerts(samples, th), th)
 
