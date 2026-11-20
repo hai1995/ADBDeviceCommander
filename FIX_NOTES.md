@@ -7393,3 +7393,33 @@ zip 还会写压缩包 + 批量删源文件。这套 syscall 组合在受监控�
 
 **验证**：新增 `test_publish_does_not_overwrite_existing_product` 回归（含 _2/_3
 连发不覆盖），MF 专项 5 项、全量 1605 passed / 1 skipped，ruff 全仓全绿。
+
+---
+
+## 第六十七轮：更新源 URL 未校验导致 SSRF / 本地文件探测（中危）
+
+**全系统审查（后台 agent）确认的唯一漏洞**：`core.update.check()` 取数路径直接用
+feed 发请求、无任何校验；而对照的 backend `update_open()` 有 `_host_allowed()`
+白名单。feed 来自 config.json（文档鼓励拷到别机同步）且可被前端 `save_settings`
+改写，默认 `auto_update=True` 启动 8 秒后自动触发，响应正文经 `normalize()` 回显
+到弹窗。故 `file:///C:/...` 可读本机任意文件并回显，`http://127.0.0.1:8080` /
+`http://169.254.169.254`（云元数据）可打内网形成带回显 SSRF。复现脚本确认旧行为
+确实请求 file:// 且 notes 回显 PWNED。
+
+**修复**（保住"内网自建更新源"这一明确功能，不一刀切禁内网）：
+1. `core.update` 新增 `feed_url_allowed(url)`：scheme 仅 http/https；必须有 host；
+   IP 字面量拒绝回环/链路本地（含 169.254 元数据）/保留/组播/未指定，内网私网
+   （10./172.16-31./192.168.）放行；域名放行但 localhost/*.localhost 拒绝。
+   DNS 重绑定是纯字符串校验的已知边界，注明在 docstring。
+2. `check()` 入口校验所有 feed，混入任一不安全源即整体拒绝、返回完整 error 结构
+   （走既有错误通道，自动静默/手动显示），绝不发请求。
+3. `_http_get()` 加纵深防御：绕过 check 直接传危险 URL 也抛错不发请求。
+4. backend `_update_feed()` 再收一道：不安全 feed 当未配置回落内置 GitHub 源，
+   连 `update_open()` 给白名单的 extra 都不被污染。
+5. 新增 `tests/test_core_update.py` 4 项（规则 / SSRF 拒绝 / 内网源仍可用 / 混合
+   拒绝）+ `tests/test_backend_update.py` 1 项（不安全 feed 回落 GitHub）。
+
+**验证**：update 专项 77 + 后端 33 项通过；全量 1610 passed / 1 skipped，ruff
+全仓全绿。其余审查方向（命令注入/路径穿越/Zip Slip/反序列化/敏感信息/鉴权）均
+确认无问题：subprocess 全列表传参、上传 basename+safe_name、ZipFile 只写不解压、
+无 eval/pickle/yaml.load、token 多处打码、FrameServer 仅绑 127.0.0.1 且校验回环。

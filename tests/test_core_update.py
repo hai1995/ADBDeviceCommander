@@ -315,6 +315,68 @@ def test_check_passes_timeout_through():
 
 
 # --------------------------------------------------------------------------- #
+# 更新源 URL 安全（SSRF / 本地文件探测）
+# --------------------------------------------------------------------------- #
+def test_feed_url_allowed_rules():
+    """危险源拒绝、合法源放行；内网自建更新源是明确功能，不能一刀切。"""
+    for url in (
+        "file:///C:/Users/v/secrets.txt", "ftp://host/x", "gopher://host/x",
+        "http://127.0.0.1:8080/admin", "http://127.1.2.3/",
+        "http://169.254.169.254/latest/meta-data/", "http://[::1]:80/",
+        "http://localhost:8080/", "http://a.localhost/", "http://0.0.0.0/",
+        "http://224.0.0.1/", "not a url", "",
+    ):
+        assert not update.feed_url_allowed(url), url
+    for url in (
+        "https://github.com/x/y/releases/latest/download/latest.json",
+        "https://api.github.com/repos/x/y/releases/latest",
+        "http://192.168.1.10/version.json", "http://10.0.0.5/v.json",
+        "http://172.16.0.1/v.json", "https://intra.example.com/v.json",
+    ):
+        assert update.feed_url_allowed(url), url
+
+
+def test_check_rejects_ssrf_feed_without_request():
+    """恶意 feed 绝不发出请求，响应也不回显（带回显 SSRF）。"""
+    calls = []
+
+    def opener(url, timeout):
+        calls.append(url)
+        return 200, '{"version":"2099.0101.0000","notes":"PWNED"}'
+
+    for evil in ("file:///C:/secrets.txt", "http://127.0.0.1:8080/admin",
+                 "http://169.254.169.254/latest/meta-data/"):
+        calls.clear()
+        res = update.check("2026.0101.0000", evil, opener)
+        assert calls == [], f"不应请求 {evil}"
+        assert res["status"] == "error"
+        assert res["notes"] == "" and res["version"] == ""
+
+
+def test_check_still_allows_intranet_feed():
+    """内网私网更新源仍可正常检查（保住自建源功能）。"""
+    calls = []
+
+    def opener(url, timeout):
+        calls.append(url)
+        return 200, _gh()
+
+    res = update.check("2026.0101.0000", "http://192.168.1.10/v.json", opener)
+    assert calls == ["http://192.168.1.10/v.json"]
+    assert res["status"] == "update"
+
+
+def test_check_rejects_unsafe_when_mixed_with_safe_feeds():
+    """feed 列表里只要混入不安全源就整体拒绝，不偷偷只查安全的那个。"""
+    calls = []
+    res = update.check("2026.0101.0000",
+                       ["https://github.com/x/y", "http://127.0.0.1/x"],
+                       lambda u, t: calls.append(u) or (200, _gh()))
+    assert calls == []
+    assert res["status"] == "error"
+
+
+# --------------------------------------------------------------------------- #
 # 展示串
 # --------------------------------------------------------------------------- #
 def test_summary_covers_every_status():

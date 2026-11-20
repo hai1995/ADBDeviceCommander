@@ -108,6 +108,15 @@ def test_update_info_blank_feed_falls_back_to_github(api):
     assert api.update_info()["feed"] == ctrl.updater.FEED_URL
 
 
+def test_update_info_unsafe_feed_falls_back_to_github(api):
+    """config.json 被写入 file:// / 回环 / 元数据源时，一律当作没配置回落到
+    内置 GitHub 源，连 update_open 的白名单 extra 都不会被污染。"""
+    for evil in ("file:///C:/secrets.txt", "http://127.0.0.1:8080/",
+                 "http://169.254.169.254/latest/meta-data/"):
+        ctrl.save_prefs({"update_feed": evil})
+        assert api.update_info()["feed"] == ctrl.updater.FEED_URL, evil
+
+
 # --------------------------------------------------------------------------- #
 # 是否去查
 # --------------------------------------------------------------------------- #

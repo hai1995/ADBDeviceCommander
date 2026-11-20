@@ -219,7 +219,52 @@ def _host(url: str) -> str:
     return m.group(1) if m else (url or "更新源")
 
 
+def feed_url_allowed(url: str) -> bool:
+    """更新源 URL 是否安全可取 —— 堵住 SSRF / 本地文件探测。
+
+    `update_feed` 来自 config.json（文档鼓励拷到别的电脑同步）且可被前端
+    `save_settings` 改写，而 `check()` 启动 8 秒后自动触发、响应正文会经
+    `normalize()` 回显到弹窗。若不校验，`file:///C:/...` 能读本机任意文件并
+    回显，`http://127.0.0.1:8080` / `http://169.254.169.254`（云元数据）等
+    可打内网并形成带回显的 SSRF。
+
+    规则（保住"内网自建更新源"这一明确功能，不一刀切禁内网）：
+      * scheme 仅 http / https —— 挡 file / ftp / gopher 等 urlopen 支持的协议；
+      * 必须有 host；
+      * host 是 IP 字面量时，拒绝回环 / 链路本地（含 169.254 元数据）/
+        保留 / 组播 / 未指定地址；内网私网段（10./172.16-31./192.168.）放行；
+      * host 是域名时放行（可以是自建域名）；形如 localhost / *.localhost 的
+        域名按回环处理，拒绝。
+
+    DNS 重绑定（域名解析到私网）不在纯字符串校验的能力范围，属已知边界；
+    真正的更新源是 GitHub 域名或用户显式配置的内网地址，风险可接受。
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except Exception:  # noqa: BLE001  解析异常一律拒绝
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True    # 域名：放行（GitHub 或用户自建）
+    # IP 字面量：只挡"绝无可能是更新源"的段，保留内网私网
+    return not (ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
+
+
 def _http_get(url: str, timeout: int):
+    # 纵深防御：即使调用方绕过 check() 直接传危险 URL，这里也不发请求。
+    if not feed_url_allowed(url):
+        raise ValueError("不安全的更新源地址（仅允许 http/https 且非回环/元数据地址）")
     """默认取数实现：返回 (HTTP 状态码, 响应正文)。
 
     只用标准库（打包体积不增加，也不需要为一次 GET 引入 requests）。
@@ -272,6 +317,17 @@ def check(current: str, feed=None, opener=None, timeout: int = TIMEOUT) -> dict:
     else:
         feeds = list(FEEDS)
     opener = opener or _http_get
+
+    # [安全] 校验每个源，挡住 SSRF / 本地文件探测（file://、127.0.0.1、
+    # 169.254.169.254 等）。全部不安全时返回一个完整 error 结构，走既有
+    # 错误通道（自动检查静默、手动检查显示），绝不发出任何危险请求。
+    unsafe = [f for f in feeds if not feed_url_allowed(f)]
+    if unsafe:
+        return {"status": "error", "current": current or "", "feed": unsafe[0],
+                "version": "", "notes": "", "url": "", "asset": {},
+                "error": ("更新源地址不安全，已拒绝访问：{}（只允许 http/https，"
+                          "且不能是本机地址或云元数据地址）。".format(_host(unsafe[0]))),
+                "checked_at": _now()}
 
     last = None
     for one in feeds:

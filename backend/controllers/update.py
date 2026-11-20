@@ -23,9 +23,13 @@ class UpdateMixin:
         共用一个公司出口 IP 时不会集体查到「限流」。
         """
         try:
-            return (get_pref("update_feed", "") or "").strip()
+            feed = (get_pref("update_feed", "") or "").strip()
         except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             return ""
+        # [安全] 不安全的 feed（file:// / 回环 / 元数据）视为未配置，回落到内置
+        # GitHub 源。check() 层已有同样校验，这里再收一道：连 update_open()
+        # 给 _host_allowed() 的 extra 白名单都不会被恶意 feed 污染。
+        return feed if (not feed or updater.feed_url_allowed(feed)) else ""
 
     def update_info(self):
         """「关于」页要的版本信息：当前版本 / 是否自动检查 / 上次结果（不发请求）。"""
