@@ -7146,3 +7146,10 @@ native 编译由 CI Windows runner（MSVC）真实验证——这是本轮修复
 若仍有遗漏错误以 CI 日志为准继续迭代。音频流 API 方向的修正属实质性变更，
 AAC 编码/播放可播性仍按 native/README.md 在 Win11 x64 真机确认。
 版本号保持 `2026.1120.0302`。
+
+**CI 验证结论（已通过）**：提交 `445d3b76` 触发的 run `44686272313` 两个 job 全部
+success——测试 job（静态检查 + Python 单测 + 前端单测）全绿；打包 job 的 native
+编译（MSVC）、PyInstaller 构建、SHA256、上传 artifact 全部 success。4 处 native
+编译错误修复成立，native 扩展首次在 Windows runner 上真实编译通过。版本号
+`2026.1120.0302` 未变。剩余 [NEEDS-VERIFY] 仅为运行时行为（AAC 可播性、moov 前置、
+60min 漂移、设备热切换等），需 Win11 x64 真机确认，不影响 CI 编译/打包。
