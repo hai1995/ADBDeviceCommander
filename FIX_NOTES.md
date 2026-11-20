@@ -7461,3 +7461,38 @@ rename 特征），不是速率，加 sleep 无效反拉长采样窗口。但"�
 启发式缓解，不能保证 100% 不被企业 EDR 误报；真机 EDR 环境验证才有定论。若真机
 仍触发，下一步可考虑让 native 直接把临时分片写到 TEMP 后由系统回收（连启动清理
 都省），或保留目录交给磁盘清理工具。
+
+---
+
+## 第六十九轮：其他方向专项审查（关窗资源收尾 / 传输缓冲）
+
+三个只读审查 agent 并行覆盖并发竞态、异常安全、前端 JS 三个未系统审过的方向；
+另用 bandit 静态分析 + 启动路径/数据边界人工复核。bandit 2 条中危均误报（diag
+的 IP 正则被误认成 bind；update 的 urlopen 已有 feed_url_allowed 守卫）。
+
+**确认并修复 2 项**（均在文件传输链路）：
+1. 【中】关窗未取消在途传输 → 孤儿 adb 进程 + TEMP 半成品残留。`base.shutdown()`
+   清理了 logcat/video/audio/mirror/perf/scrcpy/多工作区会话，唯独漏了 file_svc：
+   push/pull 大文件（pull 超时 600s）跑在 daemon 工作线程，`workers.shutdown(2s)`
+   超时后线程随进程被硬杀、来不及走 finally 反注册。修复：`FileService` 新增
+   `cancel_all_transfers()`（逐项 cancel_transfer：kill+wait+删半成品），shutdown
+   在 `workers.shutdown()` **之前**调用，让传输线程及时看到取消标记自然收尾。
+2. 【低】输出缓冲无界累积。`upload_stream`/`download_stream` 的 `chunks` 是无界
+   list 且每字符对全量做 `[-256:]` 切片+join；刷屏设备每次输出刷新 idle 让 60s
+   空闲超时失效，600s 可积数十万元素 + 单核 CPU 占用（DoS 型）。修复：改
+   `deque(maxlen=4096)`，进度解析用独立 256 字符滚动 tail（不再全量切片），
+   错误文本仍取窗口内 join（正常输出远小于 4096，行为不变）。
+   顺带把 `_pull_once` 三处只 kill 不 wait 统一到新 `_kill_proc()`（kill+wait 回收）。
+
+**判定为误报、未改（2 项）**：
+- 前端文件浏览"旧响应覆盖新目录"：`onFile` 只校验 serial 看似不足，但后端
+  `file.py:288 _do_file_list` 已有 seq 守卫（`_file_req[serial] != seq` 丢弃迟到
+  结果），且有 `test_file_list_supersedes_stale_result` 覆盖。同设备只推最新一次，
+  前端校验 serial 足够，无需重复加前端 seq。
+- bandit B310/B104：见上，均有既有防护/非网络绑定。
+
+**验证**：新增 4 项回归（批量取消 kill+wait+清理、`_kill_proc` 语义、刷屏输出仍能
+解析最新进度、shutdown 先取消传输再收 workers）。专项 6 项、全量 1618 passed /
+1 skipped、ruff 全仓全绿。其余方向（锁/死锁、进程管道消费者、共享状态竞态、
+异常吞没/假成功、API 500、边界/配置健壮性、前端 DOM XSS/属性注入/事件重复绑定/
+eval）均确认无问题。

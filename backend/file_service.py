@@ -6,6 +6,7 @@ backend.file_service —— 设备文件系统管理（基于 adb shell + pull/p
 
 调用方负责把结果经 bus 推送为 file 事件。本模块只做命令执行与解析。
 """
+import collections
 import contextlib
 import os
 import re
@@ -30,6 +31,20 @@ from core.longpath import (
     path_getsize,
     path_isfile,
 )
+
+
+def _kill_proc(proc):
+    """强杀 adb 子进程并 wait 回收（幂等，任何失败都不影响调用方）。
+
+    kill() 只发信号，不 wait 的话进程表项/句柄要等 Popen 对象被 GC 才回收；
+    Windows 上短期会积累僵尸进程与句柄。取消/超时/关窗批量取消三条路径统一
+    走这里，保证"杀了就一定回收"。
+    """
+    with contextlib.suppress(Exception):
+        if proc.poll() is None:
+            proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait()
 
 
 def shq(text) -> str:
@@ -181,13 +196,25 @@ class FileService:
             return False
         proc = info.get("proc")
         if proc is not None:
-            with contextlib.suppress(Exception):
-                if proc.poll() is None:
-                    proc.kill()
+            _kill_proc(proc)
         for path in info.get("cleanup", ()):
             with contextlib.suppress(Exception):
                 os.remove(long_path(path))
         return True
+
+    def cancel_all_transfers(self):
+        """取消全部在途传输（关窗收尾用）。返回取消的任务数。
+
+        窗口关闭时若正在 push/pull 大文件（pull 超时可达 600s），这些传输跑在
+        daemon 工作线程里，若不强杀：线程会在 workers.shutdown 的 join 超时后
+        随进程退出被硬杀，来不及走 finally 反注册 —— Windows 上 adb.exe 子进程
+        不会随父进程退出，成为孤儿继续传输，半成本地文件也留在 TEMP。这里在
+        workers.shutdown 之前调用，逐个走 cancel_transfer（杀进程 + wait 回收
+        + 删半成品），让每个传输线程都能及时看到取消标记并自然收尾。
+        """
+        with self._transfer_lock:
+            task_ids = list(self._transfers)
+        return sum(1 for tid in task_ids if self.cancel_transfer(tid))
 
     def _shell(self, serial, args, timeout=30):
         # adb 输出固定 UTF-8（中文文件名/内容），必须显式指定 encoding：
@@ -350,7 +377,11 @@ class FileService:
         # 落地文件，通常为空；下载走 download_stream 时才传）。
         self.register_transfer(task_id, proc, cleanup)
         last = [-1]                # 用容器以便读线程和主线程共享推进
-        chunks = []
+        # [低危加固] 输出缓冲定长：老 ROM / 错误重试会刷屏，且每次输出都刷新
+        # idle 让 60s 空闲超时失效。无界 list 在 600s 里可涨到数十万元素并每字符
+        # 做一次 O(256) 切片+join，形成内存/CPU 型 DoS。改 deque 定长，够进度解析
+        # （最近 256）与错误文本（末尾 200）即可，绝不全量保留。
+        chunks = collections.deque(maxlen=4096)
         idle = [time.monotonic()]   # 最近一次收到输出的时刻，由读线程刷新
         size_at = [0.0]             # 上次按「文件大小」探测进度的时刻
 
@@ -360,6 +391,8 @@ class FileService:
                 if progress is not None:
                     with contextlib.suppress(Exception):
                         progress(pct)
+
+        tail = [""]                # 最近 256 字符滚动窗口，供进度解析（避免每次切片 join 整个 deque）
 
         def _pump():
             # 合并 stdout/stderr 到一条管道：adb 的错误文本有时在 stdout、有时在
@@ -371,7 +404,8 @@ class FileService:
                         break
                     idle[0] = time.monotonic()
                     chunks.append(block)
-                    report_pct(_parse_push_progress("".join(chunks[-256:])))
+                    tail[0] = (tail[0] + block)[-256:]
+                    report_pct(_parse_push_progress(tail[0]))
 
         def poll_size(serial, remote, total):
             """文本进度不动时，按目标文件大小给一个真实百分比（封顶 99）。
@@ -531,7 +565,9 @@ class FileService:
             **adb_popen_kwargs())
         self.register_transfer(task_id, proc, cleanup)
         last = [-1]
-        chunks = []
+        # 输出缓冲定长（同 upload_stream）：刷屏设备的无界累积会形成内存/CPU DoS。
+        chunks = collections.deque(maxlen=4096)
+        tail = [""]                # 最近 256 字符滚动窗口，供进度解析
         idle = [time.monotonic()]
         size_at = [0.0]
 
@@ -550,7 +586,8 @@ class FileService:
                         break
                     idle[0] = time.monotonic()
                     chunks.append(block)
-                    report_pct(_parse_push_progress("".join(chunks[-256:])))
+                    tail[0] = (tail[0] + block)[-256:]
+                    report_pct(_parse_push_progress(tail[0]))
 
         def poll_size(local_path, total):
             """文本进度不动时，按本地落地文件已写大小给真实百分比（封顶 99）。"""
@@ -575,8 +612,7 @@ class FileService:
         try:
             while True:
                 if task_id and self.is_cancelled(task_id):
-                    with contextlib.suppress(Exception):
-                        proc.kill()
+                    _kill_proc(proc)
                     return True, False, "已取消", last[0]
                 reader.join(0.25)
                 if not reader.is_alive():
@@ -585,12 +621,10 @@ class FileService:
                     poll_size(local_path, total)
                 now = time.monotonic()
                 if now - idle[0] >= idle_limit:
-                    with contextlib.suppress(Exception):
-                        proc.kill()
+                    _kill_proc(proc)
                     return False, False, f"下载卡住（{idle_limit} 秒没有传输进展，设备可能已断开）", last[0]
                 if now >= deadline:
-                    with contextlib.suppress(Exception):
-                        proc.kill()
+                    _kill_proc(proc)
                     return False, False, f"下载超时（超过 {timeout} 秒）", last[0]
             rc = proc.wait()
             reason = "".join(chunks).strip()[:200] or "pull 失败（adb 没有给出原因）"

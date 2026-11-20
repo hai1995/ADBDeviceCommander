@@ -342,6 +342,13 @@ class WebApiBase:
         for t in pending:
             with contextlib.suppress(Exception):
                 t.cancel()
+        # 在途文件传输：必须在 workers.shutdown 之前先取消。push/pull 大文件
+        # 跑在 daemon 工作线程里（pull 超时可达 600s），若直接 join 2s 超时，
+        # 线程随进程退出被硬杀、来不及走 finally 反注册 —— Windows 上 adb.exe
+        # 子进程不会随父进程退出，成为孤儿继续传输，TEMP 半成品也残留。逐项
+        # 取消（杀进程+wait+删半成品）后，传输线程能及时看到取消标记自然收尾。
+        with contextlib.suppress(Exception):
+            self.file_svc.cancel_all_transfers()
         self.workers.shutdown(timeout=2.0)
         # 投屏窗口由本程序拉起，关闭时一并收掉（用户早已自己关掉的不会受影响）
         with contextlib.suppress(Exception):

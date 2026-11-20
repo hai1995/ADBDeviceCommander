@@ -820,6 +820,67 @@ def test_register_transfer_clears_stale_cancel_on_retry():
     assert svc.is_cancelled("t2") is False
 
 
+def test_cancel_all_transfers_kills_every_proc_and_cleans_partials():
+    """关窗批量取消：所有在途传输进程都被 kill+wait，半成品都删除。"""
+    import io
+
+    class FakeProc:
+        def __init__(self):
+            self.killed = False
+            self.waited = False
+            self.stdout = io.StringIO("")
+
+        def poll(self):
+            return None if not self.killed else -9
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self):
+            self.waited = True
+
+    svc = FileService()
+    procs = [FakeProc() for _ in range(3)]
+    partials = []
+    for i, proc in enumerate(procs):
+        partial = os.path.join(tempfile.gettempdir(), f"adc_cancel_all_{i}.bin")
+        with open(partial, "wb") as f:
+            f.write(b"half")
+        partials.append(partial)
+        svc.register_transfer(f"t{i}", proc, (partial,))
+
+    n = svc.cancel_all_transfers()
+    assert n == 3, n
+    for proc in procs:
+        assert proc.killed and proc.waited, "每个进程都要 kill 且 wait 回收"
+    for partial in partials:
+        assert not os.path.exists(partial), "每个半成品都要删除"
+    assert svc._transfers == {}, "批量取消后注册表应清空"
+
+def test_kill_proc_waits_after_kill():
+    """_kill_proc：kill 之后必须 wait，避免僵尸进程/句柄累积。"""
+    class P:
+        def __init__(self):
+            self.events = []
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.events.append("kill")
+
+        def wait(self):
+            self.events.append("wait")
+
+    p = P()
+    fs_mod._kill_proc(p)
+    assert p.events == ["kill", "wait"]
+    # 已结束的进程：不 kill，但仍 wait 回收
+    q = type("Q", (), {"poll": lambda self: 0,
+                       "kill": lambda self: (_ for _ in ()).throw(AssertionError()),
+                       "wait": lambda self: None})()
+    fs_mod._kill_proc(q)   # 不应抛（kill 不该被调用）
+
 def test_upload_stream_stops_promptly_when_cancelled(monkeypatch):
     """上传中取消：循环检测到 cancelled 立刻退出，不误报「卡住/超时」。"""
     class P:
@@ -1004,3 +1065,27 @@ def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):
     assert probed.is_set(), "大小探测从未触发"
     assert 30 in seen, seen           # 文件大小 300/1000 -> 30%
     assert seen[-1] == 100, seen      # 收尾补 100
+def test_upload_stream_flood_output_still_parses_latest_progress(monkeypatch):
+    """刷屏输出（远超 4096 字符）时仍能解析最新百分比，且缓冲定长不撑爆内存。
+
+    回归：旧实现 chunks 是无界 list 且每字符对全量做 [-256:] 切片+join，
+    设备端刷屏会在 600s 里积累数十万元素形成内存/CPU DoS。改 deque 定长 +
+    短 tail 滚动窗口后，超长输出下功能不变、内存有界。
+    """
+    import io
+
+    class FakeProc:
+        def __init__(self):
+            # 先一大段噪声（刷屏），最后一个进度百分比
+            self.stdout = io.StringIO("noise " * 2000 + "[ 77%] /sdcard/a\rDONE\n")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    seen = []
+    ok, err = fs_mod.FileService().upload_stream(
+        "S", "/tmp/a", "/sdcard/a", progress=seen.append)
+    assert (ok, err) == (True, ""), err
+    assert 77 in seen, "刷屏后的最新进度仍须解析到：%r" % seen

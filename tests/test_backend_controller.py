@@ -4939,6 +4939,27 @@ def test_shutdown_cancels_pending_file_refresh(monkeypatch):
     assert not api._file_refresh_timers, "定时器应已在关闭时清空"
 
 
+def test_shutdown_cancels_inflight_file_transfers(monkeypatch):
+    """关闭程序时必须在 workers.shutdown 之前取消在途传输。
+
+    否则 push/pull 大文件的 daemon 线程在 join 超时后被硬杀，来不及反注册 ——
+    Windows 上 adb.exe 成孤儿继续传输、TEMP 半成品残留。
+    """
+    api = _make_api()
+    order = []
+    monkeypatch.setattr(api.file_svc, "cancel_all_transfers",
+                        lambda: order.append("cancel") or 1)
+    orig_shutdown = api.workers.shutdown
+    monkeypatch.setattr(api.workers, "shutdown",
+                        lambda *a, **kw: order.append("workers") or orig_shutdown(*a, **kw))
+
+    api.shutdown()
+
+    assert "cancel" in order, "关闭时必须批量取消在途传输"
+    assert order.index("cancel") < order.index("workers"), (
+        "必须先取消传输再收 workers，否则传输线程被硬杀：%r" % order)
+
+
 def test_screen_record_start_twice_says_why_in_plain_words(monkeypatch, tmp_path):
     """已在录屏时再点「开始」：必须说清「正在录」并给出下一步，而不是回一个机器码。
 
