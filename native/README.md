@@ -46,14 +46,16 @@ Microsoft Learn 逐条核对：
    保存在本地、由本机播放器双击播放，moov 在尾部完全可播，不需要 faststart；已
    改回 sink 默认的 moov-after-mdat 布局（`MFCreateSinkWriterFromURL` 的
    pAttributes 传 nullptr）。新增源码守卫测试锁定该属性不被重新引入。
-2. **H264 compressed-in/identical-out**：`MFVideoFormat_H264` + 压缩输入
-   相同输出是「Using the Sink Writer」文档明确支持的组合（remux 不转码）。
-   但 SPS/PPS 的注入方式（`MF_MT_MPEG_SEQUENCE_HEADER`、AVCC 长度前缀
-   还是 annex-B、AddStream 前必须就位）需真机验证。当前实现已在
-   `write_video` 里缓存 SPS/PPS，并在 `config_video_stream` 的 AddStream 前
-   以 `MF_MT_MPEG_SEQUENCE_HEADER` 注入；**首段 writer 创建早于首帧**，此刻
-   缓存可能为空，若首段 Finalize 失败/不可播，需把首段 writer 创建推迟到
-   收到 SPS/PPS 之后（第 2 段起缓存已就位、自动生效）。
+2. **H264 compressed-in/identical-out [已修复]**：`MFVideoFormat_H264` + 压缩
+   输入相同输出是「Using the Sink Writer」文档明确支持的组合（remux 不转码）。
+   SPS/PPS 必须以 AVCC 长度前缀通过 `MF_MT_MPEG_SEQUENCE_HEADER` 在 AddStream
+   前注入。**真机曾现首段 `_p1.tmp.mp4` 收尾稳定报 `0xC00D4A45`**
+   （"required headers were not provided to the sink"）：根因是旧实现在
+   `create()` 里提前建首段 writer，那时 SPS/PPS 尚未到达、header 为空；第 2 段
+   起因缓存已就位才正常。**已改为首段 writer 延迟到 `write_video` 收到 SPS+PPS
+   之后才创建**，`config_video_stream` 缺任一项即明确失败；并配套处理：writer
+   未建时保留音频队列、不误触发切段、全程无视频帧时报错而非假成功。首段注入
+   格式本身（AVCC 长度前缀）仍建议真机确认成片可解码。
 3. **AAC 编码**：`MFAudioFormat_AAC` 输出让系统 AAC MFT 编码；需核对系统
    AAC 编码器支持的 PCM 输入（位深/采样率/声道）。裸 PCM 直喂 MP4 sink
    会在 Finalize 报 `0xC00D4A45`（用户实测），必须用 AAC 输出。

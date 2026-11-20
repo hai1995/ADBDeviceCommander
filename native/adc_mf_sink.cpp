@@ -17,9 +17,11 @@
  * │  1. [已移除] 原用 moov 前置属性让 moov 写在 mdat 前，真机 Finalize   │
  * │     二次 seek/remux 时稳定报 E_ACCESSDENIED(0x80070005)。本地播放    │
  * │     无需 faststart，已改回 sink 默认的 moov-after-mdat 布局。         │
- * │  2. H264 compressed-in/identical-out 的 MF_MT_* 属性集，尤其 SPS/PPS │
- * │     （MF_MT_MPEG_SEQUENCE_HEADER）打包格式与 AddStream 时机。         │
- * │  3. 系统 AAC MFT 的 PCM 输入位深/采样率矩阵；0xC00D4A45 触发条件。   │
+ * │  2. [已修复] H264 的 SPS/PPS（MF_MT_MPEG_SEQUENCE_HEADER）必须在      │
+ * │     AddStream 前注入；旧实现在 create() 提前建首段 writer 致 header 空，│
+ * │     真机首段收尾报 0xC00D4A45。已改为收到 SPS+PPS 后才创建首段 writer。│
+ * │  3. 系统 AAC MFT 的 PCM 输入位深/采样率矩阵（音频已用 AAC 目标规避    │
+ * │     裸 PCM 喂 MP4 sink 的 0xC00D4A45）。                              │
  * │  4. WASAPI 共享模式 + IAudioClient/IMMDeviceEnumerator 线程模型；    │
  * │     默认设备热切换（GetId 变化）重建 client 的时序。                 │
  * │  5. H264 ES 无内建时间戳：native 按 AU 顺序补 QPC 时间戳，60min 漂移 │
@@ -424,13 +426,14 @@ public:
         // 采集线程仍持有本对象指针并回调 on_audio → use-after-free 崩溃。
         g_audio.subscribe(this);
         subscribed_.store(true);
-        HRESULT hr = ensure_writer(first_tmp);
-        if (FAILED(hr)) {
-            // 创建失败也要退订，避免悬空指针残留。
-            unsubscribe_();
-            set_error(hr, "创建 SinkWriter/首段失败");
-            return (int)hr;
-        }
+        // [修复-首段 0xC00D4A45] 首段 writer 不再在此提前创建。此刻还没有视频帧，
+        // SPS/PPS 为空；若此时 AddStream 视频流，config_video_stream 无法注入
+        // MF_MT_MPEG_SEQUENCE_HEADER，MP4 sink 在 Finalize 时生成不了 stsd box →
+        // 报 0xC00D4A45（"required headers were not provided to the sink"）。
+        // 改为只预算首段临时名返回上层（纯字符串，前端展示用），writer 延迟到
+        // write_video 收到 SPS+PPS 后在其中内联创建。第 2 段起 check_rotate
+        // 正常切段、缓存已有 SPS/PPS，不受影响。
+        first_tmp = seg_tmp_path(1);
         return 0;
     }
 
@@ -467,6 +470,24 @@ public:
         // 注意：write_video 由 MTA worker 线程调用，与 finalize 同一线程，
         // 满足 SinkWriter 单线程写入约束。
         drain_audio_queued();
+        // [修复-首段 0xC00D4A45] SPS/PPS 到达后、写首个视频 sample 之前，
+        // 若 writer 尚未创建（首段被延迟），此刻创建：config_video_stream 能
+        // 从缓存注入 sequence header，从根上消除 Finalize 缺 header 的错误。
+        // video_bytes_ 已累加首字节，音频可能已入队，但都只是内存缓冲，writer
+        // 一建好即可正常写入（音频块在 writer 创建前 drain 会被跳过，下个 tick
+        // 继续，不丢）。SPS/PPS 可能分帧到达，故每帧都检查，两者齐备才建。
+        if (!writer_) {
+            bool have_seq = false;
+            {
+                std::lock_guard<std::mutex> lk(seq_mtx_);
+                have_seq = !sps_.empty() && !pps_.empty();
+            }
+            if (have_seq) {
+                std::string dummy;
+                HRESULT hr = ensure_writer(dummy);
+                if (FAILED(hr)) return (int)hr;
+            }
+        }
         size_t pos = 0;
         std::vector<std::vector<unsigned char>> au;
         const unsigned char* p = data;
@@ -517,6 +538,10 @@ public:
         // 永远留在内存、收尾也写不进成片。丢弃策略在 on_audio 已完成，这里只管把
         // 队列里剩下的块正常写入。
         std::lock_guard<std::mutex> lk(audio_q_mtx_);
+        // [修复-首段延迟创建] 首段 writer 尚未建立（在等 SPS/PPS）时不要 pop 音频块：
+        // write_audio_block 会因 !writer_ 静默丢弃，导致录制开头的音频丢失。保留在
+        // 有界队列里，writer 一建好（收到 SPS/PPS 后）下一个 drain tick 即写入。
+        if (!writer_) return;
         while (!audio_q_.empty()) {
             AudioBlock blk = std::move(audio_q_.front()); audio_q_.pop_front();
             write_audio_block(blk);
@@ -555,6 +580,15 @@ public:
         if (!mic_stopped_.load()) mark_mic_stop();
         int rc = drain_audio();               // 麦克风先停、先排空，替代 -shortest
         if (FAILED(rc)) return rc;
+        // [修复-首段延迟创建] 若全程未收到 SPS/PPS，writer 从未创建、published_
+        // 为空；close_writer(true) 会因 !writer_ 直接返回 S_OK，造成"报成功但无
+        // 产物"的假成功。这里显式转成可读错误，让上层如实提示用户。
+        if (!writer_ && published_.empty()) {
+            set_error(E_FAIL, "未收到有效 H264 视频帧（缺 SPS/PPS），无可发布录制");
+            finalized_ = true;
+            unsubscribe_();
+            return E_FAIL;
+        }
         HRESULT hr = close_writer(true);
         if (FAILED(hr)) return (int)hr;
         finalized_ = true;
@@ -630,11 +664,17 @@ private:
         if (FAILED(hr)) { set_error(hr, "WriteSample 失败"); dropped_++; }
     }
 
+    // 段临时文件名：create() 预算首段名与 ensure_writer() 实际写入名共用，
+    // 保证两者一致（首段延迟创建后，上层拿到的 first_tmp 仍指向正确路径）。
+    std::string seg_tmp_path(int n) {
+        char name[1024];
+        _snprintf_s(name, sizeof(name), "%s_p%d.tmp.mp4", stem_.c_str(), n);
+        return std::string(out_dir_) + "\\" + name;
+    }
+
     HRESULT ensure_writer(std::string& first_tmp_out) {
         ++seg_no_;
-        char name[1024];
-        _snprintf_s(name, sizeof(name), "%s_p%d.tmp.mp4", stem_.c_str(), seg_no_);
-        std::string tmp = std::string(out_dir_) + "\\" + name;
+        std::string tmp = seg_tmp_path(seg_no_);
         wchar_t wtmp[2048];
         MultiByteToWideChar(CP_UTF8, 0, tmp.c_str(), -1, wtmp, 2048);
 
@@ -672,18 +712,23 @@ private:
         MFSetAttributeRatio(vin, MF_MT_FRAME_RATE, fps_num_, fps_den_);
         MFSetAttributeRatio(vin, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         // H264→MP4 remux 必须带 AVCC 风格 sequence header（SPS/PPS），否则
-        // Finalize 会失败或产出无法解码的文件。write_video 已缓存 SPS/PPS，
-        // 这里在 AddStream 前注入。首段创建早于首帧时缓存可能为空（见
-        // [NEEDS-VERIFY]：真机若首段 Finalize 失败，需把首段 writer 创建推迟
-        // 到收到 SPS/PPS 之后）；第 2 段起缓存已有，自动生效。
+        // Finalize 报 0xC00D4A45 "required headers were not provided to the sink"
+        // 或产出无法解码的文件。真机曾现首段 _p1.tmp.mp4 收尾稳定报此错：根因是
+        // 旧实现在 create() 里提前建 writer，那时 SPS/PPS 尚未到达、header 为空。
+        // [修复] 首段 writer 已延迟到 write_video 收到 SPS+PPS 后才创建，故走到
+        // 这里缓存必然齐备；缺任一项说明调用路径异常，返回明确错误而非写入一个
+        // 注定 Finalize 失败的流。
         {
             std::lock_guard<std::mutex> lk(seq_mtx_);
-            if (!sps_.empty() || !pps_.empty()) {
-                std::vector<unsigned char> hdr = make_seq_header(sps_, pps_);
-                IF_FAILED_RETURN(vin->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
-                                              hdr.data(), (UINT32)hdr.size()),
-                                 "设置 MF_MT_MPEG_SEQUENCE_HEADER 失败");
+            if (sps_.empty() || pps_.empty()) {
+                vin->Release();
+                set_error(E_FAIL, "创建视频流时缺少 SPS/PPS（无法注入 sequence header）");
+                return E_FAIL;
             }
+            std::vector<unsigned char> hdr = make_seq_header(sps_, pps_);
+            IF_FAILED_RETURN(vin->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
+                                          hdr.data(), (UINT32)hdr.size()),
+                             "设置 MF_MT_MPEG_SEQUENCE_HEADER 失败");
         }
         // 目标格式就是 H264 本身（remux 不重编码）：AddStream 的 pTargetMediaType
         // 即写入文件的格式，SinkWriter 对 compressed-in 流直接以它作为输出。
@@ -727,6 +772,10 @@ private:
     }
 
     HRESULT check_rotate() {
+        // [修复-首段延迟创建] writer 未建立（仍在等 SPS/PPS）时 seg_start_hns_
+        // 尚为 0，此刻做差会得到巨大的伪经过时间而误触发切段。首段还没开始写，
+        // 无需切段，直接返回。
+        if (!writer_) return S_OK;
         LONGLONG seg_limit = (LONGLONG)SEGMENT_SECONDS_ * 10000000LL;
         if (qpc_now_hns() - seg_start_hns_ < seg_limit) return S_OK;
         // 段切换：先停音频并入队静止（音频由订阅广播继续，我不在此 drain），

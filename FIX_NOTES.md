@@ -7294,3 +7294,38 @@ Finalize 阶段二次访问输出文件的配置。
 native 改动无法在 Linux 沙箱用 MSVC 编译/运行，由 CI Windows runner 的 MSVC
 编译验证；真机收尾是否不再报 `0x80070005` 仍需按 `native/README.md` 确认。
 版本号保持远端 `2026.1120.0834`。
+
+---
+
+## 第 N+1 轮：同源录制首段收尾报 `0xC00D4A45`（缺 sequence header）
+
+**现象**：上一轮移除 moov 前置属性后，`0x80070005` 消失，真机开启录音的录屏
+收尾改报 `SinkWriter::Finalize 失败（HRESULT 0xC00D4A45）`，用户目录只留下
+`record_xxx_p1.tmp.mp4`（首段，带警告标记），拿不到带声成片。
+
+**根因**：`0xC00D4A45 = "Sink could not create valid output file because required
+headers were not provided to the sink"`。H264 remux 进 MP4 必须在 AddStream 前
+注入 `MF_MT_MPEG_SEQUENCE_HEADER`（SPS/PPS），否则 sink 在 Finalize 时无法生成
+stsd box。旧实现在 `create()` 里**提前**创建首段 writer，此刻还没有视频帧、
+SPS/PPS 缓存为空，`config_video_stream` 的 `if (!sps_.empty() || !pps_.empty())`
+不成立，header 未注入 → 首段 Finalize 必失败；第 2 段起缓存已就位才正常，故
+**只有 p1 失败**——与用户截图完全吻合。这正是文件头 `[NEEDS-VERIFY]` 第 2 项
+早就预言、但从未真机验证的问题；上一轮 overflow/moov 修复让 finalize 第一次
+真正跑到 Finalize()，才把它暴露出来。
+
+**修复**（`native/adc_mf_sink.cpp`）：
+1. `create()` 不再调用 `ensure_writer()`，只预算首段临时名（`seg_tmp_path(1)`）
+   返回上层展示用；抽出 `seg_tmp_path(n)` 与 `ensure_writer()` 共用，保证名字一致。
+2. `write_video()` 每帧检查：SPS+PPS 均到达且 writer 未创建时，才 `ensure_writer()`
+   创建首段 writer；`config_video_stream` 此时能从缓存注入 header，并把条件从
+   `||` 收紧为「缺任一即明确失败」，杜绝写入注定 Finalize 失败的流。
+3. 配套守护：writer 未建时 `drain_audio_queued()` 不 pop（避免开头音频丢失）、
+   `check_rotate()` 直接返回（seg_start=0 时差值巨大，避免误切段）；`finalize()`
+   对「全程无 SPS/PPS、writer 从未创建」显式报错，杜绝"报成功但无产物"。
+4. 同步更正文件头 `[NEEDS-VERIFY]`、`native/README.md`，新增 6 项源码守卫
+   （首段不提前建、SPS&&PPS 才注入、延迟创建由 write_video 驱动、配套守护、
+   无视频帧报错）。
+
+**验证**：新增守卫后 `test_native_sink_guards.py` 共 10 项；全量测试 + pyflakes
++ ruff 全绿。native 改动需 CI Windows runner MSVC 编译、真机重跑「开启录音的
+录屏→停止」确认不再报 `0xC00D4A45` 且产出可播成片。版本号保持 `2026.1120.0834`。

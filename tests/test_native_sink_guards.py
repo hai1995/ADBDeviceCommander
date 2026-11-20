@@ -46,3 +46,55 @@ def test_publish_happens_only_after_finalize():
     finalize_at = src.index("writer_->Finalize()")
     publish_at = src.index("MOVEFILE_REPLACE_EXISTING")
     assert finalize_at < publish_at
+
+
+def test_first_writer_not_created_eagerly():
+    """create() 不得立即建首段 writer：此刻无 SPS/PPS 会导致 Finalize 0xC00D4A45。"""
+    src = _cpp()
+    create_body = src[src.index("int create(std::string& first_tmp)"):
+                      src.index("/* AudioSink：采集线程回调")]
+    assert "ensure_writer(" not in create_body, (
+        "首段 writer 必须延迟到收到 SPS/PPS 后创建，create() 只能预算临时名")
+    assert "first_tmp = seg_tmp_path(1);" in create_body
+
+
+def test_video_stream_requires_both_sps_and_pps():
+    """视频 sequence header 必须 SPS+PPS 齐备才注入，缺一即失败而非写入坏流。"""
+    src = _cpp()
+    assert "if (sps_.empty() || pps_.empty())" in src
+    # 确认 header 注入在 AddStream(video) 之前
+    check_at = src.index("if (sps_.empty() || pps_.empty())")
+    add_at = src.index('AddStream(vin, &vstream_)')
+    assert check_at < add_at
+
+
+def test_writer_creation_driven_by_sps_pps_in_write_video():
+    """write_video 收到 SPS+PPS 后触发首段 writer 创建（延迟创建核心逻辑）。"""
+    src = _cpp()
+    wv = src[src.index("int write_video(const unsigned char* data, int len)"):
+             src.index("int mark_mic_stop()")]
+    assert "have_seq = !sps_.empty() && !pps_.empty();" in wv
+    assert "if (have_seq)" in wv
+    assert "HRESULT hr = ensure_writer(dummy);" in wv
+    # 延迟创建逻辑必须位于写视频 sample 的循环之前
+    assert wv.index("have_seq") < wv.index("while (pos < total)")
+
+
+def test_lazy_create_guards():
+    """延迟创建的配套守护：drain/check_rotate 在 writer 未建时不得误处理。"""
+    src = _cpp()
+    drain = src[src.index("void drain_audio_queued()"):
+                src.index("/* 最终排空 + 补静音")]
+    assert "if (!writer_) return;" in drain, "writer 未建时不 pop 音频块，避免开头音频丢失"
+    rotate = src[src.index("HRESULT check_rotate()"):
+                 src.index("HRESULT close_writer(bool publish)")]
+    assert "if (!writer_) return S_OK;" in rotate, "writer 未建时 seg_start=0 不得误触发切段"
+
+
+def test_finalize_reports_no_video_frame():
+    """全程无 SPS/PPS（writer 从未创建）必须报错，不能报成功但无产物。"""
+    src = _cpp()
+    fin = src[src.index("int finalize(std::string& published)"):
+              src.index("void discard()")]
+    assert "未收到有效 H264 视频帧" in fin
+    assert "if (!writer_ && published_.empty())" in fin
