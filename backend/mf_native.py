@@ -192,6 +192,7 @@ class MFNative:
         lib.adc_session_create.restype = ll
         lib.adc_session_write_video.argtypes = [ll, U8P, i]; lib.adc_session_write_video.restype = i
         lib.adc_session_mark_mic_stop.argtypes = [ll]; lib.adc_session_mark_mic_stop.restype = i
+        lib.adc_session_drain_audio.argtypes = [ll]; lib.adc_session_drain_audio.restype = i
         lib.adc_session_finalize.argtypes = [ll, ctypes.c_char_p, i]; lib.adc_session_finalize.restype = i
         lib.adc_session_discard.argtypes = [ll]; lib.adc_session_discard.restype = None
         lib.adc_session_destroy.argtypes = [ll]; lib.adc_session_destroy.restype = None
@@ -251,6 +252,14 @@ class MFNative:
         rc = self.worker.call(self._lib.adc_session_write_video, h, buf, len(data))
         if rc != ADC_OK:
             raise MFNativeError(self.last_error())
+
+    def session_drain_audio(self, h):
+        """主动排空该会话的音频队列（经 worker 线程，满足 SinkWriter 单线程约束）。
+
+        定时器每 200ms 调用一次，使音频写入与视频帧解耦。视频流稀疏/中断时，
+        视频帧驱动不到 drain，靠这个定时器保证音频持续写入、队列不积压。
+        """
+        return self.worker.call(self._lib.adc_session_drain_audio, h)
 
     def session_finalize(self, h):
         out = ctypes.create_string_buffer(8192)

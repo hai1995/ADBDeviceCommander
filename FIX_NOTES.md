@@ -7153,3 +7153,42 @@ success——测试 job（静态检查 + Python 单测 + 前端单测）全绿�
 编译错误修复成立，native 扩展首次在 Windows runner 上真实编译通过。版本号
 `2026.1120.0302` 未变。剩余 [NEEDS-VERIFY] 仅为运行时行为（AAC 可播性、moov 前置、
 60min 漂移、设备热切换等），需 Win11 x64 真机确认，不影响 CI 编译/打包。
+
+---
+
+## 真机 overflow 故障修复（录制不可播放 / 几十 KB）
+
+**真机现象**：Win11 录制 1min+，产出 `record_*_p1.tmp.mp4` 仅几十 KB、无法播放；
+日志报「同源合成失败：麦克风音频队列超过 5 秒上限，已明确失败（未静默丢帧）」。
+
+**根因链**：native 的音频队列 `audio_q_` 原本**只由 `write_video()` 驱动排空**
+（`drain_audio_queued()` 在每个 video sample 到来时调用）。真机上 screenrecord 的
+H264 流长时间稀疏/中断（write_video 极少被调用）→ 音频采集线程持续入队、5s 队列
+积压 → `on_audio` 置 `overflow_=true` → finalize 里 `drain_audio()` 返回
+`MF_E_BUFFERTOOSMALL` → `finalize` 提前 return、**不执行 `close_writer(true)`** →
+临时文件 `.tmp.mp4` 不原子发布、SinkWriter 未 Finalize（无 moov atom）→ 不可播放。
+此外 `drain_audio_queued` 有 `if (overflow_) return`，一旦溢出永久停止排空，
+已入队音频也写不进成片。
+
+**修复**（native + Python）：
+1. 新增 C ABI `adc_session_drain_audio(handle)` → `RecordSession::drain_audio_tick()`：
+   供上层定时器经 worker 线程主动排空音频队列，**音频写入与视频帧彻底解耦**。
+2. `mf_native.py` 绑定新符号 + `session_drain_audio()` 便捷方法。
+3. `mf_capture_service.py` 每会话起音频排空定时器（200ms，daemon），start 时启动、
+   stop/cancel 时先停定时器再 finalize/discard；排空异常记首错不打断录制。
+4. **overflow 降级**：`on_audio` 超限改为「丢弃当前块 + `dropped_++`」，队列恒有界
+   （≤5s），不再触发致命失败；`overflow_` 仅保留为诊断标记。
+5. `drain_audio_queued` 删除 `if (overflow_) return`，队列始终可排空。
+6. `drain_audio` 删除 `MF_E_BUFFERTOOSMALL` 致命分支——即使中途丢过音频块，也要
+   排空剩余块 + 补静音 + `close_writer(true)` 发布**可播放的 MP4**。丢块数经 stats 暴露。
+7. 头文件同步声明新 API。
+
+**验证**：新增 2 项回归（定时排空独立于视频帧、取消后定时器停止），MF 专项 25 passed，
+全量 **1584 passed / 1 skipped**；pyflakes + ruff 全绿。native C++ 改动由 CI Windows
+runner 的 MSVC 编译验证。
+
+**仍待真机确认 / 后续排查**：视频「几十 KB」若修复后仍复现，嫌疑点是录制命令
+`h264_cmd` 无条件透传探测到的 `wm size` 原始分辨率给 `screenrecord --size`
+（对比：投屏 `plan_size` 只传设备支持的尺寸、读不到就不传）。本轮未改此处——
+缩放到 1080 会牺牲录制画质，需真机确认是「size 不被接受导致流停滞」后再定夺。
+版本号保持 `2026.1120.0302`。

@@ -26,6 +26,9 @@ FIRST_DATA_TIMEOUT_S = 6.0
 # QPC 时间戳。1MB 在 8Mbps 下要约 8s 才攒满，会让整批帧挤到同一时刻、时间轴
 # 严重压缩；64KB 约 0.5s，兼顾系统调用次数与时间精度。
 READ_CHUNK = 64 * 1024
+# 音频队列排空周期（秒）：远小于 native 的 5s 队列上限，留出充足余量。
+# 音频写入因此不依赖 video sample 到达——视频流稀疏/中断时音频仍能持续写盘。
+AUDIO_DRAIN_INTERVAL_S = 0.2
 # 名义帧率（H264 ES 无时间戳，native 用它估 duration；真机核对）。
 FPS_NUM, FPS_DEN = 30, 1
 # 默认麦克风目标格式 (rate, bits, channels)，与 native adc_mic_start /
@@ -62,6 +65,10 @@ class MFCaptureSession:
         self._stop = threading.Event()
         self._read_thread = None
         self._err_thread = None
+        # [修复-真机 overflow] 音频排空定时器：独立于视频帧，周期把 native 音频
+        # 队列写入 SinkWriter，避免视频流稀疏时队列积压 5s 而 overflow。
+        self._drain_thread = None
+        self._drain_stop = threading.Event()
         self._first_data = threading.Event()
         self._error = ""
         # stderr 只作诊断信息，单独存放。它绝不能写进 _error：_error 是主流程
@@ -116,7 +123,27 @@ class MFCaptureSession:
             return False, self._error
         if self._error:
             return False, self._error
+        # [修复-真机 overflow] 启动音频排空定时器：每 200ms 经 worker 线程主动
+        # 排空 native 音频队列。这样即使 screenrecord 的 H264 流稀疏/中断、
+        # write_video 几乎不被调用，音频也持续写入 SinkWriter，不会积压溢出。
+        self._drain_stop.clear()
+        self._drain_thread = threading.Thread(
+            target=self._drain_loop, daemon=True,
+            name=f"mf-audio-drain-{safe_name(self.serial)}")
+        self._drain_thread.start()
         return True, ""
+
+    def _drain_loop(self):
+        """周期性排空音频队列（经 worker 线程）。任何异常不致命，记首错后续上报。"""
+        while not self._drain_stop.wait(AUDIO_DRAIN_INTERVAL_S):
+            h = self._handle
+            if not h:
+                continue
+            try:
+                self.native.session_drain_audio(h)
+            except Exception as ex:  # noqa: BLE001  定时排空失败记首错，不打断录制
+                self._error = self._error or f"音频排空失败：{ex}"
+                break
 
     def _read_loop(self):
         nal_buf = __import__("backend.mf_native", fromlist=["NalBuffer"]).NalBuffer()
@@ -180,6 +207,7 @@ class MFCaptureSession:
     def stop(self):
         """正常收尾：停 adb → 等读线程 → native finalize → 返回发布路径列表。"""
         self._stop.set()
+        self._stop_drain()          # 先停音频排空定时器，再 finalize
         self._close_proc()
         self._join_threads()
         if not self._handle:
@@ -202,6 +230,7 @@ class MFCaptureSession:
     def cancel(self):
         """取消：停 adb → native discard（不发布）→ 删临时文件。"""
         self._stop.set()
+        self._stop_drain()          # 先停音频排空定时器，再 discard
         self._close_proc()
         self._join_threads()
         if self._handle:
@@ -231,10 +260,19 @@ class MFCaptureSession:
             self._proc = None
 
     def _join_threads(self):
-        for t in (self._read_thread, self._err_thread):
+        for t in (self._read_thread, self._err_thread, self._drain_thread):
             if t is not None and t.is_alive():
                 with contextlib.suppress(Exception):
                     t.join(timeout=6)
+
+    def _stop_drain(self):
+        """通知并等待音频排空定时器退出（幂等）。"""
+        self._drain_stop.set()
+        t = self._drain_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            with contextlib.suppress(Exception):
+                t.join(timeout=6)
+        self._drain_thread = None
 
     def _teardown_native(self, discard):
         if not self._handle:

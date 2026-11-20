@@ -67,6 +67,9 @@ class FakeNative:
     def session_mark_mic_stop(self, h):
         self.calls.append(("mark_mic_stop", h))
 
+    def session_drain_audio(self, h):
+        self.calls.append(("drain_audio", h))
+
     def session_finalize(self, h):
         self.calls.append(("finalize", h))
         return [f"out_{h}.mp4"]
@@ -400,3 +403,50 @@ def test_mic_start_exception_stops_worker(monkeypatch):
     assert ok is False
     assert "启动麦克风采集失败" in reason
     assert "worker_stop" in [c[0] for c in fake.calls]
+
+
+# ------------------------- 第五轮：音频排空定时器（真机 overflow 修复） ------
+def test_audio_drain_timer_runs_independent_of_video(monkeypatch):
+    """音频排空定时器独立于视频帧周期运行。
+
+    真机故障：视频流稀疏（1min+ 只有几十KB）→ write_video 几乎不被调用 →
+    音频队列无人排空 → 5s overflow → finalize 失败 → 不可播放的 .tmp.mp4。
+    修复后定时器每 200ms 主动 drain，即使视频帧不来音频也持续写入。
+    """
+    import time as _t
+    fake = FakeNative(available=True)
+
+    def fake_popen(cmd, **kw):
+        # 一段 H264 后 stdout 立即 EOF：模拟视频流很快中断，write_video 只 1 次。
+        return FakeProc([b"\x00\x00\x00\x01\x65" + b"\xaa" * 16])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mcs, "AUDIO_DRAIN_INTERVAL_S", 0.01)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True, reason
+    # 视频读线程早已 EOF，但定时器应持续 drain（≥2 次说明周期运行）。
+    _t.sleep(0.08)
+    drains = [c for c in fake.calls if c[0] == "drain_audio"]
+    assert len(drains) >= 2, f"音频排空定时器应独立于视频帧运行，实际 drain {len(drains)} 次"
+    svc.stop_all()
+
+
+def test_audio_drain_timer_stops_on_cancel(monkeypatch):
+    """取消后定时器必须停止，不能再往已 discard 的 writer 写音频。"""
+    import time as _t
+    fake = FakeNative(available=True)
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x00\x01\x65" + b"\xaa" * 16])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mcs, "AUDIO_DRAIN_INTERVAL_S", 0.01)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True, reason
+    svc.cancel_all()  # 内部会 _stop_drain + discard
+    before = len([c for c in fake.calls if c[0] == "drain_audio"])
+    _t.sleep(0.08)
+    after = len([c for c in fake.calls if c[0] == "drain_audio"])
+    assert after == before, f"取消后不应再有 drain 调用（{before} -> {after}）"

@@ -83,6 +83,11 @@ ADC_API int adc_session_write_video(long long handle, const unsigned char* data,
  * 之后不再接受音频，但视频仍可继续写入，直到 adc_session_finalize。 */
 ADC_API int adc_session_mark_mic_stop(long long handle);
 
+/* 主动排空音频队列：供上层定时器周期性调用（必须在 adc_init 所在的同一 worker
+ * 线程）。音频写入因此与 video sample 解耦——视频流稀疏/中断时音频仍能持续写入
+ * SinkWriter，避免队列积压。幂等，队列为空时无副作用。返回 0。 */
+ADC_API int adc_session_drain_audio(long long handle);
+
 /* 结束会话：排空音频 → Finalize SinkWriter → 把所有已完成段**原子发布**
  * （*.tmp → 正式 mp4）。成功返回 0，并把正式文件路径列表（UTF-8，分号分隔）
  * 写入 published_utf8。失败返回 HRESULT，临时文件保留在 out_dir 供排查。 */

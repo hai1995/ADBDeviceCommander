@@ -440,7 +440,14 @@ public:
         LONGLONG queued = 0;
         for (const auto& b : audio_q_) queued += b.dur_hns;
         if (queued + blk.dur_hns > AUDIO_QUEUE_LIMIT_HNS) {
-            overflow_.store(true);   // 明确失败，不静默丢帧
+            // [修复-真机 overflow] 原实现置 overflow_=true 并让 finalize 直接失败，
+            // 结果是整段视频报废（.tmp 不发布、无 moov、无法播放）——为了几秒钟
+            // 的音频积压毁掉用户一分多钟的录制，代价完全不可接受。改为**丢弃当前
+            // 音频块并计数**：队列恒有界（≤5s），不再有致命 overflow；视频/已入队
+            // 音频照常 finalize 成可播放的 MP4。dropped_ 会在 stats 里暴露，便于
+            // 事后诊断音频是否曾经积压。定时器每 200ms 排空，正常情况永不触发此处。
+            overflow_.store(true);   // 保留为诊断标记，不再让 finalize 失败
+            dropped_++;
             return;
         }
         audio_q_.push_back(blk);
@@ -491,11 +498,23 @@ public:
 
     int mark_mic_stop() { mic_stopped_.store(true); return 0; }
 
+    // [修复-真机 overflow] 音频队列的排空不能再只靠 write_video 驱动：
+    // 真机上 screenrecord 的 H264 流可能长时间稀疏甚至中断（录制 1min+ 只写出
+    // 几十 KB），此时 write_video 极少被调用，音频采集线程持续入队 → 队列 5s
+    // 积压 → overflow → finalize 失败 → .tmp.mp4 不发布/无 moov → 视频报废。
+    // 改为由 Python 层定时器经 worker 线程（满足 SinkWriter 单线程约束）周期性
+    // 调用本方法主动排空，音频写入与视频帧解耦。定时器在 worker 线程执行，
+    // 与 write_video/finalize 串行，无数据竞争。
+    int drain_audio_tick() { drain_audio_queued(); return 0; }
+
     /* 只把队列里已有的音频块写入 writer（不补静音）。由 write_video 高频
      * 调用，也由 finalize 在补静音前调用一次。写完后 last_audio_end_ 记录
      * 最后一块的结束时刻，供补静音使用。 */
     void drain_audio_queued() {
-        if (overflow_.load()) return;   // 溢出时不再写入，交给 finalize 报错
+        // [修复-真机 overflow] 删除 `if (overflow_.load()) return;`：overflow_ 现在
+        // 只是"曾丢过音频块"的诊断标记，不能再阻断排空，否则队列里已入队的音频会
+        // 永远留在内存、收尾也写不进成片。丢弃策略在 on_audio 已完成，这里只管把
+        // 队列里剩下的块正常写入。
         std::lock_guard<std::mutex> lk(audio_q_mtx_);
         while (!audio_q_.empty()) {
             AudioBlock blk = std::move(audio_q_.front()); audio_q_.pop_front();
@@ -508,10 +527,9 @@ public:
 
     /* 最终排空 + 补静音到 stop 时刻（不改已有时间戳）。 */
     int drain_audio() {
-        if (overflow_.load()) {
-            set_error_text("麦克风音频队列超过 5 秒上限，已明确失败（未静默丢帧）");
-            return MF_E_BUFFERTOOSMALL;
-        }
+        // [修复-真机 overflow] 移除 overflow 致命分支：即使中途丢过音频块，也要
+        // 把队列里剩的正常写入并 close_writer 发布成可播放 MP4。丢块数由 dropped_
+        // 统计暴露（stats），用户保住视频远比"因几秒音频积压整段报废"重要。
         drain_audio_queued();
         // [NEEDS-VERIFY] 补静音：把音轨尾部补到视频 stop 时刻；SinkWriter 不支持
         // 运行中改 sample 时间戳，这里只在尾部追加静音 sample，不改已写入的 ts。
@@ -799,6 +817,12 @@ extern "C" int adc_session_write_video(long long h, const unsigned char* data, i
 extern "C" int adc_session_mark_mic_stop(long long h) {
     RecordSession* s = find_session(h);
     return s ? s->mark_mic_stop() : E_INVALIDARG;
+}
+// [修复-真机 overflow] 供 Python 定时器经 worker 线程周期调用，主动排空音频队列，
+// 使音频写入与 video sample 解耦；视频流稀疏/中断时音频仍能持续写入 SinkWriter。
+extern "C" int adc_session_drain_audio(long long h) {
+    RecordSession* s = find_session(h);
+    return s ? s->drain_audio_tick() : E_INVALIDARG;
 }
 extern "C" int adc_session_finalize(long long h, char* published, int cap) {
     RecordSession* s = find_session(h);
