@@ -7225,3 +7225,39 @@ runner 的 MSVC 编译验证。
 README / 使用说明.txt 已同步 -s 新规则与 UTF-8 说明。版本号保持远端 `2026.1120.0726`。
 native 未改，无新真机验证项。中文日志不乱码最终仍需 Win11 真机跑一次该命令确认
 （沙箱无 PowerShell，只能静态验证配置正确）。
+
+
+---
+
+## 同源录制"screenrecord 未在 6s 内输出 H264（退出码 None）"修复
+
+**真机现象**：点击录屏 → "录屏未能启动 / 同源录制启动失败：…screenrecord 未在 6s 内
+输出 H264 数据（退出码 None）"。关键在"退出码 None"——进程其实还活着、数据也在
+慢慢到达，只是被读取方式憋住了。
+
+**根因 1（主因，首帧超时）——`read` vs `read1`**（`backend/mf_capture_service.py`
+`_read_loop`）：原用 `stream.read(READ_CHUNK=64KB)`。BufferedReader 在管道上的 `read(n)`
+会**阻塞到凑满 n 字节或 EOF**；车机静止/低码率画面 H264 输出可能只有几 KB/s，6s 内
+根本攒不满 64KB，`_first_data` 永不置位，`start()` 卡满 `FIRST_DATA_TIMEOUT_S=6s` 后
+误报未输出——而投屏路径 `mirror_service._feed_loop` 一直用 `read1`（有多少读多少），
+同样的 `screenrecord --output-format=h264 -` 命令却正常。改为 `read1`，首字节到达即
+置位首帧事件，慢速流也能秒过判定。加回归测试 `test_sparse_h264_uses_read1_not_read`
+（mock stdout 的 `read()` 直接抛断言、`read1()` 每次只吐 7 字节），锁死该行为防回归。
+
+**根因 2（叠加，分辨率/横竖）——`_mf_probe_size`**（`controllers/record.py`）：旧实现
+自己解析 `wm size` 并 `w<=h` 强行竖屏，横屏车机 1920x1080 会被传成 `--size 1080x1920`，
+编码器声明尺寸与真实帧不符（可能起不来 / 产出旋转、损坏视频）；且 4K 原始分辨率直接
+喂给 screenrecord 编码器可能初始化极慢，同样表现为"6s 内不出首帧"。改为复用投屏成熟的
+`plan_size(adb, serial, max_edge=1920)`：只认 Physical size、保持原始横竖、长边封顶
+1920（比投屏 1080 宽松以保留画质）。同步删去不再使用的 `subprocess` 导入。加回归测试
+`test_mf_probe_size_keeps_landscape_and_caps_edge` 锁定横屏保持 + 上限 1920。
+
+**附带**：首帧超时错误文案补充排查提示（确认屏幕点亮未锁屏 / 部分车机 ROM 不支持
+`--output-format=h264`）。
+
+**验证**：新增 2 项回归，MF 专项 27 passed，全量 **1591 passed / 1 skipped**；
+pyflakes 全绿。native 未改。版本号保持远端 `2026.1120.0726`。
+
+**仍待真机确认**：本次两处均为可静态证明的根因（read 语义差异、横竖颠倒），真机重跑
+应能过首帧并产出可播放 MP4。若仍失败，下一嫌疑点是该 ROM 直接不支持
+`--output-format=h264`（此时 stderr 会有明确报错，已并入启动失败原因）。

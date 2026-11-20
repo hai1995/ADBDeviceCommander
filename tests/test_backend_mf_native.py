@@ -450,3 +450,39 @@ def test_audio_drain_timer_stops_on_cancel(monkeypatch):
     _t.sleep(0.08)
     after = len([c for c in fake.calls if c[0] == "drain_audio"])
     assert after == before, f"取消后不应再有 drain 调用（{before} -> {after}）"
+
+
+def test_sparse_h264_uses_read1_not_read(monkeypatch):
+    """回归：车机静止画面 H264 输出极慢时，read(64KB) 会阻塞到攒满才返回，
+    6s 首帧判定内一个字节都拿不到 → 误报「screenrecord 未在 6s 内输出 H264
+    数据（退出码 None）」，而进程其实还活着、数据只是被憋在管道缓冲里。
+    必须用 read1 有多少读多少，首字节到达即置位 _first_data。投屏路径
+    mirror_service._feed_loop 同样用 read1，这里锁死该行为防回归。"""
+    import io as _io
+
+    fake = FakeNative(available=True)
+    sc = b"\x00\x00\x00\x01"
+    data = sc + b"\x67SPS" + sc + b"\x68PPS" + sc + b"\x65IDR" + b"\xaa" * 32
+
+    class TrickleStdout(_io.BytesIO):
+        def read(self, n=-1):
+            # 真实管道下 read(n) 要凑满 n；这里直接失败，让「改回 read」的
+            # 回归立刻可断言，而不是让测试线程挂满 6s。
+            raise AssertionError(
+                "必须用 read1：稀疏 H264 下 read() 会阻塞过首帧超时")
+
+        def read1(self, n=-1):
+            return super().read(min(n, 7))  # 每次仅吐 7 字节，模拟极低码率
+
+    class TrickleProc(FakeProc):
+        def __init__(self):
+            super().__init__([data])
+            self.stdout = TrickleStdout(data)
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", lambda cmd, **kw: TrickleProc())
+    monkeypatch.setattr(mcs, "FIRST_DATA_TIMEOUT_S", 1.0)  # 回归时快速失败
+    sess = mcs.MFCaptureSession(fake, "s1", "/tmp", "rec", 1920, 1080)
+    ok, err = sess.start()
+    assert ok is True, err
+    assert sess._first_data.is_set() is True
+    sess.cancel()

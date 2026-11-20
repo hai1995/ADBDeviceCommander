@@ -141,3 +141,21 @@ def test_start_falls_back_when_unavailable(monkeypatch, tmp_path):
     api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
     assert "mf" not in api._rec_session
     assert any(c[0] == "start_all" for c in fake.calls) is False
+
+
+def test_mf_probe_size_keeps_landscape_and_caps_edge(monkeypatch, tmp_path):
+    """回归：横屏车机 1920x1080 不能被旧逻辑 `w <= h` 强行改成 1080x1920
+    （编码器声明竖屏、真实帧横屏 → 起不来或产出旋转/损坏视频）；长边还要
+    封顶 1920，避免 4K 原始分辨率让 screenrecord 编码器初始化极慢、首帧超时。"""
+    api = _api(monkeypatch, tmp_path)
+    seen = {}
+
+    def fake_plan_size(adb, serial, max_edge=1080):
+        seen["max_edge"] = max_edge
+        return "1920x1080"          # 模拟横屏车机 wm size 原始输出
+
+    monkeypatch.setattr("backend.controllers.record.plan_size", fake_plan_size)
+    # _api() 为其它测试 mock 了实例方法，这里取回类上的真实实现来验证。
+    real_probe = api.__class__._mf_probe_size.__get__(api)
+    assert real_probe("SER1") == (1920, 1080)
+    assert seen["max_edge"] == 1920  # 录制上限比投屏 1080 宽松，保留画质

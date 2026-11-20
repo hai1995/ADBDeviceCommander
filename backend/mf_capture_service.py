@@ -22,9 +22,10 @@ from core.constants import no_window_flags, safe_name
 
 # 首帧等待：screenrecord 秒退（ROM 不支持 --output-format=h264）要能快速报错。
 FIRST_DATA_TIMEOUT_S = 6.0
-# stdout 读块大小（64KB）：H264 ES 无内建时间戳，native 按 sample 到达时刻打
-# QPC 时间戳。1MB 在 8Mbps 下要约 8s 才攒满，会让整批帧挤到同一时刻、时间轴
-# 严重压缩；64KB 约 0.5s，兼顾系统调用次数与时间精度。
+# stdout 单次读上限（64KB）：H264 ES 无内建时间戳，native 按 sample 到达时刻打
+# QPC 时间戳。用 read1 只按当前可用量返回（稀疏流常常只有几 KB），此值只是上限；
+# 若上限取得过大（如 1MB），突发大块会让多帧挤到同一时刻、时间轴压缩。
+# 64KB 兼顾系统调用次数与时间精度。
 READ_CHUNK = 64 * 1024
 # 音频队列排空周期（秒）：远小于 native 的 5s 队列上限，留出充足余量。
 # 音频写入因此不依赖 video sample 到达——视频流稀疏/中断时音频仍能持续写盘。
@@ -114,7 +115,8 @@ class MFCaptureSession:
             ok = proc.poll() is None
             self._error = self._error or (
                 f"screenrecord 未在 {FIRST_DATA_TIMEOUT_S:.0f}s 内输出 H264 数据"
-                f"（退出码 {proc.poll()}）")
+                f"（退出码 {proc.poll()}；请确认设备屏幕已点亮且未锁屏，"
+                "部分车机 ROM 不支持 --output-format=h264）")
             # stderr 只在启动失败诊断时拼进原因；正常路径绝不把它当错误。
             if self._stderr_tail and self._stderr_tail not in self._error:
                 self._error = f"{self._error}（{self._stderr_tail}）"
@@ -152,7 +154,15 @@ class MFCaptureSession:
             return
         try:
             while not self._stop.is_set():
-                chunk = stream.read(READ_CHUNK)
+                # [修复-首帧超时] 必须用 read1，绝不能退回 read：
+                #   BufferedReader.read(64KB) 在管道上会阻塞到「凑满 64KB 或 EOF」。
+                #   车机静止/低码率画面下 H264 输出可能只有几 KB/s，6s 都攒不满，
+                #   _first_data 因此永不置位，start() 卡满超时后误报「screenrecord
+                #   未在 6s 内输出 H264 数据（退出码 None）」——其实进程还活着、
+                #   数据也在慢慢到达，只是被 read 憋在管道缓冲里。
+                #   read1 有多少读多少，首字节到达即置位首帧事件，慢速流也能秒过
+                #   判定。投屏路径 mirror_service._feed_loop 同样用 read1，对齐。
+                chunk = stream.read1(READ_CHUNK)
                 if not chunk:
                     break
                 if not self._first_data.is_set():

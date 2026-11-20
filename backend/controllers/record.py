@@ -21,7 +21,6 @@ from backend.controller import (
     probe_player,
     safe_name,
     scrcpy_probe_info,
-    subprocess,
     time,
     zipfile,
 )
@@ -141,17 +140,22 @@ class RecordMixin:
                 "started": self._rec_session["video_start_host"]}
 
     def _mf_probe_size(self, serial):
-        """取设备屏幕尺寸 (w, h)；取不到返回 None（用默认值）。"""
+        """取设备屏幕尺寸 (w, h)；取不到返回 None（用默认值）。
+
+        复用投屏的 plan_size，而不是自己解析 wm size：
+          * 它只认 Physical size，忽略用户临时改的 Override；
+          * **保持 wm size 的原始横竖顺序**。旧实现 `w <= h` 强行竖屏，
+            横屏车机 1920x1080 会被传成 `--size 1080x1920`，编码器声明的
+            尺寸与真实帧不符，既可能起不来也会产出旋转/损坏的视频；
+          * 长边限制 1920：4K 车机屏直接喂给 screenrecord 编码器可能初始化
+            极慢甚至失败（表现为 6s 内不出首帧）。比投屏的 1080 宽松，
+            尽量保留录制画质。
+        """
         try:
-            from core.constants import adb_kwargs
-            r = subprocess.run(  # 取不到不致命，调用方用默认值
-                [self.state.adb_path, "-s", serial, "shell", "wm", "size"],
-                **adb_kwargs(8))
-            import re as _re
-            m = _re.search(r"(\d+)\s*x\s*(\d+)", r.stdout or "")
-            if m:
-                w, h = int(m.group(1)), int(m.group(2))
-                return ((w, h) if w <= h else (h, w))   # 竖屏：宽 < 高
+            size = plan_size(self.state.adb_path, serial, max_edge=1920)
+            if size:
+                w, h = str(size).lower().split("x")
+                return int(w), int(h)
         except Exception:  # noqa: BLE001, S110  探测失败用默认值
             pass
         return None
