@@ -254,14 +254,27 @@ private:
     }
 
     void capture_loop() {
+        // [修复] 本方法运行在 CreateThread 新建的采集线程上，COM 单元不继承
+        // 调用线程的状态 —— 必须在本线程自行初始化 MTA，否则下面的
+        // CoCreateInstance(MMDeviceEnumerator) 直接返回 CO_E_NOTINITIALIZED，
+        // 音频全程静音。退出时配对 CoUninitialize。
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
+            set_error(hr, "WASAPI 采集线程 CoInitializeEx(MTA) 失败"); return;
+        }
+        bool com_inited = SUCCEEDED(hr);   // S_FALSE/RPC_E_CHANGED_MODE 不需本线程反初始化
         // [NEEDS-VERIFY] 显式 capture endpoint / 禁用 loopback / 热切换重建。
         // 共享模式只采麦克风（不设 AUDCLNT_STREAMFLAGS_LOOPBACK，绝不混入回放声）。
         // 每 200ms 检查默认设备 GetId 是否变化，变化则重建 IAudioClient，
         // 期间持续 publish，不静音、不崩。
         IMMDeviceEnumerator* enumerator = nullptr;
-        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                      __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
-        if (FAILED(hr)) { set_error(hr, "创建 IMMDeviceEnumerator 失败"); return; }
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                              __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+        if (FAILED(hr)) {
+            set_error(hr, "创建 IMMDeviceEnumerator 失败");
+            if (com_inited) CoUninitialize();
+            return;
+        }
 
         std::wstring current_id;
         while (!stop_.load()) {
@@ -295,6 +308,7 @@ private:
             if (FAILED(hr) && !stop_.load()) Sleep(200);
         }
         enumerator->Release();
+        if (com_inited) CoUninitialize();
     }
 
     /* 对一个设备持续采集，直到：stop / 默认设备变化 / 错误。 */
@@ -380,14 +394,25 @@ public:
           fps_num_(fps_num > 0 ? fps_num : 30), fps_den_(fps_den > 0 ? fps_den : 1),
           arate_(arate), abits_(abits), ach_(ach),
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
-          seg_no_(0), finalized_(false), discarded_(false),
-          video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0) {}
+          seg_no_(0),
+          video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
+          last_audio_end_(0) {}
 
     ~RecordSession() { unsubscribe_(); close_writer(false); }
 
     int create(std::string& first_tmp) {
+        // [修复] 必须同步置位 subscribed_，否则 unsubscribe_() 里的
+        // `if (!subscribed_) return` 永远跳过真正的退订，session 销毁后
+        // 采集线程仍持有本对象指针并回调 on_audio → use-after-free 崩溃。
         g_audio.subscribe(this);
-        IF_FAILED_RETURN(ensure_writer(first_tmp), "创建 SinkWriter/首段失败");
+        subscribed_.store(true);
+        HRESULT hr = ensure_writer(first_tmp);
+        if (FAILED(hr)) {
+            // 创建失败也要退订，避免悬空指针残留。
+            unsubscribe_();
+            set_error(hr, "创建 SinkWriter/首段失败");
+            return (int)hr;
+        }
         return 0;
     }
 
@@ -409,6 +434,14 @@ public:
     int write_video(const unsigned char* data, int len) {
         if (finalized_ || discarded_) return MF_E_INVALIDSTATE;
         video_bytes_ += len;
+        // [修复] 每个视频 sample 到来时顺带把音频队列排空写入 writer。
+        // 原实现只在 finalize 才 drain，但采集线程一直在入队、又有 5s 上限，
+        // 于是任何超过 5s 的录制都会 overflow 失败 —— 等于录不了长视频。
+        // 视频帧由 screenrecord 持续产出（~30fps），借此周期性 drain 音频，
+        // 队列正常只积压一帧时间（~33ms），5s 上限退化为真正的"卡死保护"。
+        // 注意：write_video 由 MTA worker 线程调用，与 finalize 同一线程，
+        // 满足 SinkWriter 单线程写入约束。
+        drain_audio_queued();
         size_t pos = 0;
         std::vector<std::vector<unsigned char>> au;
         const unsigned char* p = data;
@@ -418,8 +451,16 @@ public:
             int type = next_annexb_nal(p, total, pos, &nal, nal_len);
             if (type < 0 || !nal) break;
             std::vector<unsigned char> n(nal, nal + nal_len);
-            if (type == 7) continue;   // SPS：真实注入见 [NEEDS-VERIFY]
-            if (type == 8) continue;   // PPS
+            if (type == 7) {           // SPS：缓存，供首段 writer 注入 sequence header
+                std::lock_guard<std::mutex> lk(seq_mtx_);
+                sps_ = n;
+                continue;
+            }
+            if (type == 8) {           // PPS
+                std::lock_guard<std::mutex> lk(seq_mtx_);
+                pps_ = n;
+                continue;
+            }
             if (type == 9) {           // AUD：新 AU 边界
                 if (!au.empty()) { flush_au(au); au.clear(); }
                 continue;
@@ -433,24 +474,31 @@ public:
 
     int mark_mic_stop() { mic_stopped_.store(true); return 0; }
 
-    /* 排空音频 → 补静音到 stop 时刻（不改已有时间戳）。 */
+    /* 只把队列里已有的音频块写入 writer（不补静音）。由 write_video 高频
+     * 调用，也由 finalize 在补静音前调用一次。写完后 last_audio_end_ 记录
+     * 最后一块的结束时刻，供补静音使用。 */
+    void drain_audio_queued() {
+        if (overflow_.load()) return;   // 溢出时不再写入，交给 finalize 报错
+        std::lock_guard<std::mutex> lk(audio_q_mtx_);
+        while (!audio_q_.empty()) {
+            AudioBlock blk = std::move(audio_q_.front()); audio_q_.pop_front();
+            write_audio_block(blk);
+            audio_frames_ += (LONGLONG)(blk.pcm.size() / (size_t)(ach_ * abits_ / 8));
+            LONGLONG this_end = blk.ts_hns + blk.dur_hns;
+            if (this_end > last_audio_end_) last_audio_end_ = this_end;
+        }
+    }
+
+    /* 最终排空 + 补静音到 stop 时刻（不改已有时间戳）。 */
     int drain_audio() {
         if (overflow_.load()) {
             set_error_text("麦克风音频队列超过 5 秒上限，已明确失败（未静默丢帧）");
             return MF_E_BUFFERTOOSMALL;
         }
-        LONGLONG last_end = 0;
-        {
-            std::lock_guard<std::mutex> lk(audio_q_mtx_);
-            while (!audio_q_.empty()) {
-                AudioBlock blk = std::move(audio_q_.front()); audio_q_.pop_front();
-                write_audio_block(blk);
-                audio_frames_ += (LONGLONG)(blk.pcm.size() / (size_t)(ach_ * abits_ / 8));
-                last_end = blk.ts_hns + blk.dur_hns;
-            }
-        }
+        drain_audio_queued();
         // [NEEDS-VERIFY] 补静音：把音轨尾部补到视频 stop 时刻；SinkWriter 不支持
         // 运行中改 sample 时间戳，这里只在尾部追加静音 sample，不改已写入的 ts。
+        LONGLONG last_end = last_audio_end_;
         LONGLONG stop_t = qpc_now_hns();
         if (stop_t > last_end && last_end > 0) {
             LONGLONG fill = stop_t - last_end;
@@ -576,9 +624,20 @@ private:
         MFSetAttributeSize(vin, MF_MT_FRAME_SIZE, width_, height_);
         MFSetAttributeRatio(vin, MF_MT_FRAME_RATE, fps_num_, fps_den_);
         MFSetAttributeRatio(vin, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        // [NEEDS-VERIFY] SPS/PPS 需在 AddStream 前经 MF_MT_MPEG_SEQUENCE_HEADER
-        // 注入；当前在 write_video 里跳过 SPS/PPS，若真机 Finalize 失败，需在此
-        // 缓存首帧 SPS/PPS 并 SetBlob 后再 AddStream。
+        // H264→MP4 remux 必须带 AVCC 风格 sequence header（SPS/PPS），否则
+        // Finalize 会失败或产出无法解码的文件。write_video 已缓存 SPS/PPS，
+        // 这里在 AddStream 前注入。首段创建早于首帧时缓存可能为空（见
+        // [NEEDS-VERIFY]：真机若首段 Finalize 失败，需把首段 writer 创建推迟
+        // 到收到 SPS/PPS 之后）；第 2 段起缓存已有，自动生效。
+        {
+            std::lock_guard<std::mutex> lk(seq_mtx_);
+            if (!sps_.empty() || !pps_.empty()) {
+                std::vector<unsigned char> hdr = make_seq_header(sps_, pps_);
+                IF_FAILED_RETURN(vin->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
+                                              hdr.data(), (UINT32)hdr.size()),
+                                 "设置 MF_MT_MPEG_SEQUENCE_HEADER 失败");
+            }
+        }
         IF_FAILED_RETURN(writer_->AddStream(vin, &vstream_), "AddStream(video) 失败");
         IMFMediaType* vout = nullptr;
         IF_FAILED_RETURN(MFCreateMediaType(&vout), "MFCreateMediaType(video out) 失败");
@@ -655,9 +714,12 @@ private:
     int arate_, abits_, ach_;
     IMFSinkWriter* writer_;
     DWORD vstream_, astream_;
-    bool writing_, subscribed_{false};
+    bool writing_;
+    std::atomic<bool> subscribed_{false};
     int seg_no_;
-    bool finalized_, discarded_;
+    // 跨线程读写：on_audio 在采集线程检查，write_video/finalize 在 worker
+    // 线程写入 —— 必须是原子，否则数据竞争（未定义行为）。
+    std::atomic<bool> finalized_{false}, discarded_{false};
     LONGLONG seg_start_hns_;
     static const int SEGMENT_SECONDS_ = 170;   // 与 core.constants.REC_SEGMENT_S 一致
     std::vector<std::string> tmp_files_, published_;
@@ -666,6 +728,10 @@ private:
     std::deque<AudioBlock> audio_q_;
     std::mutex audio_q_mtx_;
     std::atomic<bool> overflow_{false}, mic_stopped_{false};
+    LONGLONG last_audio_end_;   // 已写入音频的最后结束时刻（100ns，QPC 时基）
+    // 视频 SPS/PPS 缓存：采集线程(write_video)写，worker 线程(config_video_stream)读。
+    std::vector<unsigned char> sps_, pps_;
+    std::mutex seq_mtx_;
 };
 
 /* --------------------------- 句柄表 & C ABI --------------------------- */

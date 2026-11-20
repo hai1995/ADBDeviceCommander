@@ -65,7 +65,10 @@ class MFWorker:
         self._thread = threading.Thread(
             target=self._loop, name="adc-mf-worker", daemon=True)
         self._thread.start()
-        self._started.wait(timeout=15)
+        if not self._started.wait(timeout=15):
+            # adc_init 未在 15s 内返回（COM/MFStartup 卡死）：不能当成成功，
+            # 否则后续 call 会投递到一个永不消费的队列、调用方永久阻塞。
+            self._init_err = self._init_err or "MF worker 初始化超时（adc_init 15s 未返回）"
         if self._init_err is not None:
             err = self._init_err
             self.stop()
@@ -280,20 +283,21 @@ class NalBuffer:
             return []
         self._buf.extend(chunk)
         out = []
-        # 找第一个起始码；之前的多余字节（连接噪声）丢弃。
+        # 只输出「已完整」的 NAL：即后面已出现下一起始码的那几条。
+        # 最后一条始终留在缓冲里（它可能跨块未完成），等下一块或 flush()。
+        # 旧实现把最后一条也输出、同时又保留，导致它在 feed 和 flush 里各发
+        # 一次 —— 同一 NAL 重复喂给 native 会破坏 H264 参考帧/解码。
         starts = self._find_starts(self._buf)
         if not starts:
-            # 没有任何起始码：保留尾部少量，防止 buffer 无限增长。
+            # 没有任何起始码：只保留尾部少量，防止 buffer 无限增长。
             if len(self._buf) > 1024 * 1024:
                 del self._buf[:-64]
             return []
-        for i, (pos, sc_len) in enumerate(starts):
-            if i + 1 < len(starts):
-                end = starts[i + 1][0]
-            else:
-                end = len(self._buf)
+        for i in range(len(starts) - 1):
+            pos = starts[i][0]
+            end = starts[i + 1][0]
             out.append(bytes(self._buf[pos:end]))
-        # 只保留最后一条（可能跨块未完），从它的起始码开始
+        # 丢弃第一条起始码之前的噪声，保留从最后一条起始码起的数据
         last_pos = starts[-1][0]
         del self._buf[:last_pos]
         return out

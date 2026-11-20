@@ -97,9 +97,13 @@ class RecordMixin:
             w_h = self._mf_probe_size(serials[0])
             if w_h:
                 width, height = w_h
+        # H264/MP4 要求宽高为偶数，向下取偶后再传给 native 与 screenrecord。
+        size = "{}x{}".format(width - width % 2, height - height % 2)
         stems = {s: f"record_{safe_name(s)}_{sess_ts}" for s in serials}
+        # sizes 传字典：让所有设备都用探测到的统一分辨率（之前传 {} 导致探测
+        # 结果被丢弃、native 用默认 1080x1920，与实际画面不符）。
         ok, reason, firsts = self.mf_capture.start_all(
-            serials, save_dir, stems, {}, None)
+            serials, save_dir, stems, {s: size for s in serials}, None)
         if not ok:
             self._push_toast(
                 "err", f"⚠ 同源录制启动失败：{reason}。（本次未产生视频；"

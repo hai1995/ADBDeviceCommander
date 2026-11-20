@@ -1,6 +1,17 @@
 # 修复说明
 
-- **同源录制改造（方案 B，最新）**：录屏从"录无声视频 + ffmpeg 事后合成"改为
+- **同源录制改造审查修复（最新一轮）**：对方案 B 落地代码做二次审查，修复：
+  ①native 音频队列原本只在 finalize 才排空、却有 5s 上限 → 任何 >5s 录制必
+  Overflow 失败；改为随视频帧高频排空（写 writer 仍单线程）。②WASAPI 采集线程
+  缺 `CoInitializeEx(MTA)`、`CoCreateInstance` 必失败致全程静音 → 补齐并配对
+  `CoUninitialize`。③`subscribed_` 从未置位 → 退订永远跳过、session 销毁后
+  采集线程持有悬空指针 → use-after-free → 修复置位与失败路径退订。
+  ④`finalized_/discarded_` 跨线程非原子 → 改 atomic。⑤SPS/PPS 从静默丢弃改为
+  缓存并在 AddStream 前注入 `MF_MT_MPEG_SEQUENCE_HEADER`（首段时机仍标
+  NEEDS-VERIFY）。⑥Python `NalBuffer` 末条 NAL 在 feed+flush 各发一次（重复喂
+  破坏 H264 参考帧）→ 改为末条留缓冲，加回归测试。⑦读取块 1MB→64KB（避免
+  8s 攒块致时间轴压缩）。⑧宽高未传探测值且未补偶 → 修正并向下取偶。详见文末。
+- **同源录制改造（方案 B）**：录屏从"录无声视频 + ffmpeg 事后合成"改为
   Media Foundation SinkWriter 同源写入（设备端裸 H.264 流 + WASAPI 麦克风，统一
   QPC 时基，直接产出 H264+AAC 带声 MP4，moov 前置 + 分段原子发布）。新增
   `native/` C++ 扩展（MSVC / 仅系统 DLL / 无 GPL）、`backend/mf_native.py`、
@@ -6949,3 +6960,51 @@ mirror 投屏路径已用过该命令），PC 边收边把压缩 sample 喂给 S
 全量 1570 passed / 1 skipped。**native 扩展在 Linux 沙箱无法编译/运行**，所有
 `[NEEDS-VERIFY]` 条目与 60min 漂移、拔插、强杀、MediaInfo、PE 依赖清单须真机验证
 （见 `native/README.md` 与方案文档第 12 节）。
+
+---
+
+## 同源录制改造二次审查修复
+
+对已落地的方案 B 代码做逐段审查，修复以下**真实缺陷**（非风格问题）；本轮
+不改架构选择，只让既有设计真正可用。
+
+1. **音频队列致命逻辑错误**（`adc_mf_sink.cpp`）：`on_audio` 把 PCM 持续入队，
+   5s 上限（踩坑 5 要求）；但队列原本只在 `finalize()` 里 `drain_audio()` 一次。
+   结果任何超过 5 秒的录制都会 `overflow_` → finalize 返回 `MF_E_BUFFERTOOSMALL`
+   ——等于几乎录不了正常视频。修复：拆出 `drain_audio_queued()`（只排空、不补
+   静音），在 `write_video()` 开头调用。screenrecord 持续出帧（~30fps）借此
+   周期性把音频写入 writer，队列正常只积压 ~33ms；5s 上限退化为"视频长时间
+   不出帧/写入卡死"的背压保护。写 writer 仍只在 MTA worker 线程，满足
+   SinkWriter 单线程约束。新增 `last_audio_end_` 成员跨两次排空累积补静音基准。
+2. **WASAPI 采集线程 COM 未初始化**（致命，全程静音）：`capture_loop()` 运行在
+   `CreateThread` 新建线程，COM 单元不继承；原实现直接 `CoCreateInstance(
+   MMDeviceEnumerator)` 必返回 `CO_E_NOTINITIALIZED`。修复：线程入口
+   `CoInitializeEx(MTA)`，所有早退/正常退路径配对 `CoUninitialize`（用
+   `com_inited` 标志，S_FALSE/RPC_E_CHANGED_MODE 不反初始化）。
+3. **订阅标志未置位导致 use-after-free**：`create()` 调 `g_audio.subscribe(this)`
+   却从未置 `subscribed_=true`，而 `unsubscribe_()` 首行 `if(!subscribed_)return`
+   永远跳过真正退订；session 销毁后采集线程仍持有悬空指针回调 → 崩溃。修复：
+   subscribe 后置位、失败路径退订、析构照常退订。`subscribed_` 改 atomic。
+4. **跨线程数据竞争**：`finalized_/discarded_` 在采集线程(on_audio)读、worker
+   线程写，改为 `std::atomic<bool>`。
+5. **SPS/PPS 静默丢弃**：`write_video` 原 `if(type==7/8) continue`。H264→MP4
+   remux 必须带 AVCC sequence header，否则 Finalize 失败/文件不可播。修复：
+   缓存 SPS/PPS（`sps_/pps_`+`seq_mtx_`），`config_video_stream` 在 AddStream 前
+   经 `MF_MT_MPEG_SEQUENCE_HEADER` 注入。**首段 writer 创建早于首帧**，首段缓存
+   可能为空——此项保留 `[NEEDS-VERIFY]`：真机若首段不可播，需把首段 writer
+   创建推迟到收到 SPS/PPS 后；第 2 段起自动生效。
+6. **NalBuffer 末条 NAL 重复发送**（`mf_native.py`）：原 `feed()` 把最后一条既
+   输出又保留，导致它在 `feed()` 与 `flush()` 各发一次——重复 NAL 破坏 H264
+   参考帧/解码。修复：只输出"后面已出现下一起始码"的完整段，末条留缓冲；
+   新增 `test_nal_buffer_no_duplicate_last_nal` 回归测试。
+7. **读块过大致时间轴压缩**（`mf_capture_service.py`）：`READ_CHUNK` 1MB→64KB。
+   H264 ES 无时间戳，native 按 sample 到达时刻打 QPC；1MB 在 8Mbps 下要 ~8s
+   才攒满，整批帧挤到同一时刻。64KB ~0.5s，兼顾系统调用与时间精度。
+8. **探测分辨率被丢弃 + 未补偶**（`record.py`）：`_mf_record_start_locked` 探测
+   到 width/height 却给 `start_all` 传 `{}`、用默认 1080x1920；且 H264/MP4 要求
+   宽高偶数。修复：把探测尺寸作为字典传给所有设备、向下取偶；`_parse_size`
+   也统一补偶。
+
+**验证**：Python 全量 1572 passed / 1 skipped（新增 1 项 NalBuffer 回归），
+MF 专项 13 passed。native 改动经括号平衡与符号引用静态检查通过，但**无法在
+Linux 沙箱用 MSVC 编译/运行**，第 1/2/3/5 项须在 Win11 x64 真机确认。

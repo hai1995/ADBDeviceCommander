@@ -22,8 +22,10 @@ from core.constants import no_window_flags, safe_name
 
 # 首帧等待：screenrecord 秒退（ROM 不支持 --output-format=h264）要能快速报错。
 FIRST_DATA_TIMEOUT_S = 6.0
-# stdout 读块大小（1MB）：太大延迟高，太小系统调用多。
-READ_CHUNK = 1024 * 1024
+# stdout 读块大小（64KB）：H264 ES 无内建时间戳，native 按 sample 到达时刻打
+# QPC 时间戳。1MB 在 8Mbps 下要约 8s 才攒满，会让整批帧挤到同一时刻、时间轴
+# 严重压缩；64KB 约 0.5s，兼顾系统调用次数与时间精度。
+READ_CHUNK = 64 * 1024
 # 名义帧率（H264 ES 无时间戳，native 用它估 duration；真机核对）。
 FPS_NUM, FPS_DEN = 30, 1
 # 默认麦克风目标格式 (rate, bits, channels)，与 native adc_mic_start /
@@ -328,14 +330,20 @@ class MFCaptureService:
         return default
 
     @staticmethod
-    def _parse_size(size, dw, dh):
+    def _even(v):
+        """H264/MP4 编码要求宽高为偶数：向下取偶。"""
+        v = int(v)
+        return v if v % 2 == 0 else v - 1
+
+    @classmethod
+    def _parse_size(cls, size, dw, dh):
         if not size:
-            return dw, dh
+            return cls._even(dw), cls._even(dh)
         try:
             w, h = str(size).lower().split("x")
-            return int(w), int(h)
+            return cls._even(w), cls._even(h)
         except Exception:  # noqa: BLE001  非法尺寸退回默认
-            return dw, dh
+            return cls._even(dw), cls._even(dh)
 
     def stats(self):
         with self._lock:

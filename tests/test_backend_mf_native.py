@@ -116,9 +116,25 @@ def test_nal_buffer_splits_across_chunks():
 
 def test_nal_buffer_ignores_noise_before_first_startcode():
     nb = mn.NalBuffer()
-    out = nb.feed(b"NOISE" + b"\x00\x00\x01\x65\xaa\xbb")
+    # 末条 NAL 保留在缓冲直到下一起始码或 flush，避免重复发送。
+    out = nb.feed(b"NOISE" + b"\x00\x00\x01\x65\xaa\xbb") + nb.flush()
     assert len(out) == 1
     assert out[0].startswith(b"\x00\x00\x01")
+
+
+def test_nal_buffer_no_duplicate_last_nal():
+    """回归：末条 NAL 不能在 feed 和 flush 里各发一次（会破坏 H264 参考帧）。"""
+    sc = b"\x00\x00\x00\x01"
+    nb = mn.NalBuffer()
+    first = nb.feed(sc + b"\x65AAA")
+    assert first == []                       # 只有一条起始码 → 未完整，不吐
+    # 下一条起始码到来，第一条才完整吐出；末条仍留缓冲。
+    second = nb.feed(sc + b"\x41BBB")
+    assert len(second) == 1 and b"AAA" in second[0]
+    tail = nb.flush()
+    assert len(tail) == 1 and b"BBB" in tail[0]
+    joined = b"".join(second + tail)
+    assert joined.count(b"AAA") == 1 and joined.count(b"BBB") == 1
 
 
 # ------------------------- MFNative 可用性 -------------------------------

@@ -44,8 +44,11 @@ Microsoft Learn 逐条核对：
 2. **H264 compressed-in/identical-out**：`MFVideoFormat_H264` + 压缩输入
    相同输出是「Using the Sink Writer」文档明确支持的组合（remux 不转码）。
    但 SPS/PPS 的注入方式（`MF_MT_MPEG_SEQUENCE_HEADER`、AVCC 长度前缀
-   还是 annex-B、AddStream 前必须就位）需真机验证；当前实现跳过了 SPS/PPS
-   注入，若 Finalize 失败需回来补。
+   还是 annex-B、AddStream 前必须就位）需真机验证。当前实现已在
+   `write_video` 里缓存 SPS/PPS，并在 `config_video_stream` 的 AddStream 前
+   以 `MF_MT_MPEG_SEQUENCE_HEADER` 注入；**首段 writer 创建早于首帧**，此刻
+   缓存可能为空，若首段 Finalize 失败/不可播，需把首段 writer 创建推迟到
+   收到 SPS/PPS 之后（第 2 段起缓存已就位、自动生效）。
 3. **AAC 编码**：`MFAudioFormat_AAC` 输出让系统 AAC MFT 编码；需核对系统
    AAC 编码器支持的 PCM 输入（位深/采样率/声道）。裸 PCM 直喂 MP4 sink
    会在 Finalize 报 `0xC00D4A45`（用户实测），必须用 AAC 输出。
@@ -55,10 +58,11 @@ Microsoft Learn 逐条核对：
    `IAudioClient` 的时序。
 5. **时间戳**：H264 ES 无内建时间戳，native 按 AU 顺序补 QPC 时间戳；
    AAC sample 是否要求严格等距、60min 累积漂移，须实机测。
-6. **NAL 跨块**：Python 按块读 adb stdout，单条 NAL 可能跨两个块；当前
-   native 按块内边界拆 AU，跨块 NAL 会截断。需验证 screenrecord 的输出
-   分块是否总在 NAL 边界；否则 Python 侧加块间缓冲（见 `mf_native.py`
-   的 `nal_buffer` 处理）。
+6. **NAL 跨块**：Python 按块读 adb stdout，单条 NAL 可能跨两个块；
+   `mf_native.py` 的 `NalBuffer` 已做块间缓冲，只吐出「后面已出现下一起始码」
+   的完整 NAL，末条留到 `flush()`（已修重复发送 bug）。需真机验证 screenrecord
+   在画面静止时是否仍持续出帧——`write_video` 借此周期性 drain 音频队列，
+   若长时间无视频帧，音频队列可能积压触发 5s 上限。
 
 ## 平台下限 / 未专项验证项
 
