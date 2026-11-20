@@ -154,10 +154,9 @@ def _package_excluded(name: str) -> bool:
 # （0xC0000374）崩溃，导致整个打包失败。排除它既避开这个坑，exe 也更小。
 # ⚠️ 若将来项目真的要 import cryptography（或给 webview.start 传 ssl=True），
 #    必须先从这里移除——tests/test_build.py 的源码安全测试会拦住这种改动。
-# imageio_ffmpeg 也排除：它的唯一用途是「构建期提供 ffmpeg 二进制」和「源码运行时
-# 兜底」，二进制已由 pyinstaller_args 用 --add-binary 单独嵌到包根，运行时
-# core.ffmpeg_bin 从 _MEIPASS 直接读。若让 PyInstaller 静态分析把它整包打进去，
-# 会在 imageio_ffmpeg/binaries/ 下多带一份完全相同的 exe —— onefile 白白胖 83MB。
+# imageio_ffmpeg 也排除（防御性）：同源录制已不内置 ffmpeg，兜底改为依赖用户
+# PATH；保留排除项是为了万一开发机仍装着它，PyInstaller 静态分析不会把它的
+# 83MB 二进制拖进 onefile。若将来连兜底也删除，可一并移除此项。
 EXCLUDE_MODULES = ["pytest", "PIL", "cryptography", "imageio_ffmpeg"]
 
 # 可选加速依赖，默认**不进包**（用 --with-numpy 才带上）。
@@ -272,12 +271,11 @@ def ensure_deps(required, auto_install: bool) -> None:
 
 
 def bundled_ffmpeg_path():
-    """返回要嵌进 exe 的 ffmpeg 二进制路径（Path），拿不到返回 None。
+    """[兜底保留，未优化] 返回 ffmpeg 二进制路径或 None。
 
-    来自构建依赖 imageio-ffmpeg 自带的平台二进制（Windows 上是 ffmpeg-*.exe）。
-    这样仓库里无需存 ~85MB 的大文件（避免污染 git 历史 / 超 GitHub 单文件上限），
-    CI / 本地只要 requirements.txt 装好依赖即可自动嵌入。运行时由
-    core.ffmpeg_bin 从 _MEIPASS 找到它（见该模块说明）。
+    同源录制（MF SinkWriter）验收通过后会整段删除本函数、core/ffmpeg_bin.py
+    与 audio_service.ffmpeg_mux。当前按约束原样保留作兜底：内置二进制已从
+    打包中移除（包体回 ~14M、不引 GPL），兜底降级为依赖用户 PATH 的 ffmpeg。
     """
     try:
         import imageio_ffmpeg
@@ -285,6 +283,17 @@ def bundled_ffmpeg_path():
     except Exception:  # noqa: BLE001  没装依赖就降级为「依赖用户 PATH」
         return None
     return Path(exe) if exe and Path(exe).is_file() else None
+
+
+def bundled_native_dll():
+    """返回同源录制 native 扩展 dll 的路径（Path），拿不到返回 None。
+
+    由 native/CMakeLists.txt 编译后安装到 backend/adc_mf_sink.dll。源码态与
+    PyInstaller 构建都从 backend/ 取；找不到时返回 None，打包照常进行，
+    运行时 controller 自动回退 ffmpeg 兜底路径。
+    """
+    dll = ROOT / "backend" / "adc_mf_sink.dll"
+    return dll if dll.is_file() else None
 
 
 # ---------------------------------------------------------------------------
@@ -306,15 +315,18 @@ def pyinstaller_args(args) -> list:
     # 所以这里一律传绝对路径，避免把工程根的文件找成 build/ 下的同名文件。
     for src, dst in BUNDLED_DATA:
         out += ["--add-data", f"{ROOT / src}{os.pathsep}{dst}"]
-    # ffmpeg 二进制嵌进包内根目录：运行时 core.ffmpeg_bin.resource_path("ffmpeg.exe")
-    # 会在 _MEIPASS 找到它。没装 imageio-ffmpeg 时降级为依赖用户 PATH（会在
-    # 构建日志里提示），不影响打出 exe 本身。
-    ffmpeg = bundled_ffmpeg_path()
-    if ffmpeg is not None:
-        # --add-binary 的 DEST 是「目标目录」不是文件名（PyInstaller 文档明确），
-        # 用 "." 放到包根，保留 imageio 的原名（ffmpeg-win-x86_64-v7.1.exe 之类）。
-        # 运行时 core.ffmpeg_bin 用 ffmpeg* glob 匹配，不依赖具体文件名。
-        out += ["--add-binary", f"{ffmpeg}{os.pathsep}."]
+    # 同源录制 native 扩展（adc_mf_sink.dll）：只依赖系统 DLL，编译后由
+    # native/CMakeLists.txt 安装到 backend/。--add-binary 的 DEST 是「目标目录」
+    # 不是文件名，用 "." 放到包根，运行时 backend/mf_native.py 从 _MEIPASS 加载。
+    # 找不到 dll 时**不阻断打包**：同源录制会让 controller 自动回退到 ffmpeg
+    # 兜底路径（依赖用户 PATH 的 ffmpeg），功能不丢失。
+    native_dll = bundled_native_dll()
+    if native_dll is not None:
+        out += ["--add-binary", f"{native_dll}{os.pathsep}."]
+    else:
+        print("[提示] 未找到 backend/adc_mf_sink.dll：本次打包不含同源录制扩展，"
+              "录屏将回退到 ffmpeg 合成路径（需用户机器 PATH 中有 ffmpeg）。",
+              file=sys.stderr)
     for mod in EXCLUDE_MODULES:
         out += ["--exclude-module", mod]
     # numpy 默认不进包（见 OPTIONAL_EXCLUDE_MODULES 的说明）：
@@ -718,8 +730,8 @@ def main(argv=None) -> int:
     elif args.no_deps:
         print("[1/4] 跳过依赖检查（--no-deps）")
     else:
-        ensure_deps([("pyinstaller", "打包工具"), ("pywebview", "运行时宿主，打包期需可导入"),
-                     ("imageio-ffmpeg", "内置 ffmpeg 二进制：录屏音视频合成 / 多段合并")],
+        # imageio-ffmpeg 已移除（同源录制不再内置 ffmpeg；兜底依赖用户 PATH）。
+        ensure_deps([("pyinstaller", "打包工具"), ("pywebview", "运行时宿主，打包期需可导入")],
                     auto_install=True)
 
 

@@ -11,6 +11,7 @@ from backend.controller import (
     FrameServer,
     LogcatCapture,
     LogcatMonitor,
+    MFCaptureService,
     Path,
     ScrcpyLauncher,
     ShellSession,
@@ -56,6 +57,10 @@ class WebApiBase:
         self.logcat_capture = LogcatCapture(self.bus, self.state.adb_path)
         self.video = VideoRecorder(self.bus, self.state.adb_path)
         self.device_audio = DeviceAudioCapture(self.state.adb_path)
+        # 同源录制（方案 B）：MF SinkWriter + WASAPI，直接产出 H264+AAC MP4。
+        # 不可用时（非 Windows / 未编译 dll / 被拦截）available=False，
+        # controller 自动回退到原 ffmpeg 合成路径（兜底代码原样保留）。
+        self.mf_capture = MFCaptureService(adb=self.state.adb_path)
         self.file_svc = FileService(self.state.adb_path)
         # 投屏：只负责「找 scrcpy + 拉起窗口」，进程句柄留在这里用于去重与收尾
         self._scrcpy = ScrcpyLauncher()
@@ -303,8 +308,14 @@ class WebApiBase:
         # 同一台设备（前者走 stop_all 的旧路径、后者走会话记录路径），并发时会各自
         # pull / 合成同一个文件，出现重复合成甚至互相覆盖的半截 zip。
         with self._rec_lock:
-            with contextlib.suppress(Exception):
-                self.video.stop_all()
+            # 同源录制会话：关闭程序属于"非正常收尾"，按踩坑 4 的要求只撤销、
+            # 不发布半成品（强杀/关窗口不得留下被误判为成功的残缺文件）。
+            if self._rec_session.get("mf"):
+                with contextlib.suppress(Exception):
+                    self.mf_capture.cancel_all()
+            else:
+                with contextlib.suppress(Exception):
+                    self.video.stop_all()
             with contextlib.suppress(Exception):
                 # 注意：序列号在 _rec_session["devaudio"] 里，_rec_session 本身是
                 # 会话字段字典（ts/dir/videos/...）。早期实现直接遍历 _rec_session

@@ -1,5 +1,11 @@
 # 修复说明
 
+- **同源录制改造（方案 B，最新）**：录屏从"录无声视频 + ffmpeg 事后合成"改为
+  Media Foundation SinkWriter 同源写入（设备端裸 H.264 流 + WASAPI 麦克风，统一
+  QPC 时基，直接产出 H264+AAC 带声 MP4，moov 前置 + 分段原子发布）。新增
+  `native/` C++ 扩展（MSVC / 仅系统 DLL / 无 GPL）、`backend/mf_native.py`、
+  `backend/mf_capture_service.py`；移除内置 ffmpeg 二进制（包体回 ~14M），兜底代码
+  原样保留；公开录制 API 签名不变，MF 不可用时自动回退。**详见文末「同源录制改造」节。**
 - **第一轮**：录屏启动失败（`screenrecord: unrecognized option '--show-pointer'`）。
 - **第二轮**：录屏可视化语义修正 / 内置命令核实 / 配置持久化核实 / 剪贴板加固。
 - **第三轮**（本文末「第三轮」一节）：状态信息抽离为顶栏跑马灯 + 点击弹窗。
@@ -6894,3 +6900,52 @@ waveInOpen 失败，把这一步盖住了。
 - 测试：`tests/test_backend_audio.py` 新增 3 条（内置优先 / imageio→PATH 回退 /
   合成命令用解析路径）；`tests/test_build.py` 新增 2 条（二进制嵌入并改名 / 无二进制
   仍能打包）。
+
+---
+
+## 同源录制改造（方案 B）—— 从"ffmpeg 事后合成"到"MF SinkWriter 同源写入"
+
+**背景与目标**：旧架构分两路落盘（设备端 `screenrecord` 写无声 MP4 + 电脑麦克风
+WinMM 写 WAV），停止后用内置 ffmpeg 合成。目标改为录制时由同一个 Media Foundation
+SinkWriter 同源写入，直接产出带声 MP4；删除整条后处理链；不引第三方多媒体二进制 /
+GPL；包体回 ~14M；录制 API 签名兼容。
+
+**先探查后动手的结论**：旧视频源是"设备端已编码 MP4 文件，停止后才 pull 回本地"，
+录屏期间 PC 拿不到 video sample → 同源不成立。方案 B 通过**改采集通路**解决：
+视频改走 `adb exec-out screenrecord --output-format=h264 -` 的裸 H.264 流（项目
+mirror 投屏路径已用过该命令），PC 边收边把压缩 sample 喂给 SinkWriter。
+
+**架构**：
+- `native/adc_mf_sink.cpp`（C ABI，MSVC，仅系统 DLL）：MTA worker 内
+  `CoInitializeEx(MTA)` + `MFStartup`；每设备一个 SinkWriter，视频流
+  "H264 压缩输入 + 相同压缩输出"（不解码重编码），音频流 "PCM 输入 +
+  `MFAudioFormat_AAC` 输出"（系统 AAC MFT 编码，规避裸 PCM 直喂在 Finalize 报
+  `0xC00D4A45`）；统一 QPC(100ns) 时基打 timestamp/duration；每 170 秒分段
+  Finalize，moov 前置于 mdat，同目录 `.tmp` + `MoveFileEx` 原子发布。
+- WASAPI capture：显式 capture endpoint、禁用 loopback 回放声、拔插/默认设备切换
+  重建；PCM 广播给所有设备会话，每会话 5s 有界队列，超限明确失败；停止补齐静音
+  但不改已有时间戳。
+- `backend/mf_native.py`：ctypes 封装 + MTA worker + `NalBuffer`（跨块 NAL 切分）；
+  `backend/mf_capture_service.py`：adb 二进制 stdout 读线程 + 多设备会话编排，
+  stop 幂等、清理在 finally。
+- 线程模型：UI 线程(STA) 只做会话登记/状态，不碰 COM；所有 native 调用投递到
+  专用 MTA worker；adb stdout 保持二进制模式（绝不能用文本模式读 H264）。
+
+**保持兼容**：`screen_record_start/stop/cancel` 等公开签名不变；`_mf_usable()`
+门控——扩展不可用时自动回退 ffmpeg 兜底（代码一行未改），但不再内置 ffmpeg
+二进制（移除 imageio-ffmpeg，兜底需用户 PATH 有 ffmpeg）。MF 验收通过后按计划
+整段删除兜底代码。
+
+**修复的本轮真实 bug**（开发中自查发现）：
+- H264 stdout 误用 `adb_popen_kwargs()`（text=True/utf-8）会损坏码流 → 改二进制管道；
+- 麦克风格式参数顺序错位（采样率/位深颠倒）→ 全程统一 `(rate, bits, channels)`；
+- native writer attrs 先 Release 后传入的 use-after-free → 调整顺序；全局音频队列被
+  第一个 session 独占 → 改订阅者广播；QPC 无麦克风时未初始化 → 在 adc_init 初始化。
+- 顺带修复遗留的 CI 版本一致性失败：`core/constants.py` 的 `VERSION` 从旧的
+  `2026.1119.0114` 对齐到 README 已确认的 `2026.1119.0919`。
+
+**测试**：`tests/test_backend_mf_native.py`（7 项）、`tests/test_backend_record_mf_path.py`
+（5 项）纯 Python 可跑；`tests/test_build.py` 改测 native dll 嵌入 / 无 ffmpeg 二进制；
+全量 1570 passed / 1 skipped。**native 扩展在 Linux 沙箱无法编译/运行**，所有
+`[NEEDS-VERIFY]` 条目与 60min 漂移、拔插、强杀、MediaInfo、PE 依赖清单须真机验证
+（见 `native/README.md` 与方案文档第 12 节）。

@@ -62,6 +62,7 @@ from backend.screen_service import (
 from backend.audio_service import (
     MicRecorder, DeviceAudioCapture, ffmpeg_mux, _have_ffmpeg,
 )
+from backend.mf_capture_service import MFCaptureService
 from backend.file_service import FileService, push_timeout_for
 from backend.scrcpy_service import ScrcpyLauncher, find_scrcpy, probe as scrcpy_probe_info
 from backend.mirror_service import (
@@ -122,6 +123,7 @@ __all__ = [
     "KEY_SHOW_TOUCHES",
     "LogcatCapture",
     "LogcatMonitor",
+    "MFCaptureService",
     "MicRecorder",
     "PERF_CRIT_RATIO",
     "PERF_MAX_DEVICES",

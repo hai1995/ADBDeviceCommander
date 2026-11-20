@@ -816,31 +816,28 @@ def test_win_package_onedir_includes_internal_and_skips_personal_data(tmp_path):
     assert top + "commands.json" not in names, "个人命令库不得进分发件"
 
 
-def test_ffmpeg_binary_is_embedded_at_bundle_root(tmp_path, monkeypatch):
-    """ffmpeg 必须以 DEST="." 嵌进包根，保留原名，由 ffmpeg_bin 的 glob 找到。
+def test_native_dll_is_embedded_at_bundle_root(tmp_path, monkeypatch):
+    """同源录制 native 扩展以 DEST="." 嵌进包根（保留原名 adc_mf_sink.dll）。
 
     回归：--add-binary 的 DEST 是「目标目录」不是文件名（PyInstaller 文档明确），
-    写成 "ffmpeg.exe" 会被当成目录名，产生 _MEIPASS/ffmpeg.exe/ffmpeg-win-*.exe，
-    os.path.isfile(".../ffmpeg.exe") 判失败 → 打包能过但运行时找不到内置 ffmpeg。
-    正确做法是 DEST="." 放包根，运行时按 ffmpeg* glob 匹配。
-    同时 imageio_ffmpeg 模块必须被 exclude，否则 PyInstaller 会再打一份
-    相同的 exe 进 imageio_ffmpeg/binaries/，onefile 白白胖 80MB。
+    写成 "adc_mf_sink.dll" 会被当成目录名，产生 _MEIPASS/adc_mf_sink.dll/adc_mf_sink.dll，
+    运行时 backend.mf_native 从 _MEIPASS 根找不到。正确做法是 DEST="."。
     """
-    fake = tmp_path / "ffmpeg-win-x86_64-v7.1.exe"
+    fake = tmp_path / "adc_mf_sink.dll"
     fake.write_bytes(b"fake")
-    monkeypatch.setattr(build, "bundled_ffmpeg_path", lambda: fake)
+    monkeypatch.setattr(build, "bundled_native_dll", lambda: fake)
 
     args = build.pyinstaller_args(_args())
     add_binaries = [args[i + 1] for i, x in enumerate(args) if x == "--add-binary"]
-    # DEST 是目标目录 "."（不是文件名），二进制按原名落到包根；
-    # 运行时 core.ffmpeg_bin 用 ffmpeg* glob 找到它。
     assert any(a == f"{fake}{os.pathsep}." for a in add_binaries), add_binaries
-    assert "imageio_ffmpeg" in build.EXCLUDE_MODULES
+    # 旧架构的内置 ffmpeg 二进制不得再进包（GPL + 83MB）
+    assert not any("ffmpeg" in a.lower() for a in add_binaries), add_binaries
 
 
-def test_no_ffmpeg_binary_still_builds(monkeypatch):
-    """没装 imageio-ffmpeg 时仍能打包（降级为依赖用户 PATH），不硬失败。"""
-    monkeypatch.setattr(build, "bundled_ffmpeg_path", lambda: None)
+def test_no_native_dll_still_builds(monkeypatch):
+    """没编译 native 扩展时仍能打包（回退 ffmpeg 兜底），不硬失败。"""
+    monkeypatch.setattr(build, "bundled_native_dll", lambda: None)
     args = build.pyinstaller_args(_args())
     add_binaries = [args[i + 1] for i, x in enumerate(args) if x == "--add-binary"]
-    assert not any("ffmpeg" in a for a in add_binaries), add_binaries
+    assert not any("adc_mf_sink" in a for a in add_binaries), add_binaries
+    assert not any("ffmpeg" in a.lower() for a in add_binaries), add_binaries

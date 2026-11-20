@@ -21,6 +21,7 @@ from backend.controller import (
     probe_player,
     safe_name,
     scrcpy_probe_info,
+    subprocess,
     time,
     zipfile,
 )
@@ -60,6 +61,143 @@ class RecordMixin:
         KEY_POINTER_LOCATION: "指针位置",
         KEY_SHOW_TOUCHES: "触摸圆点",
     }
+
+    # ---- 同源录制（方案 B：MF SinkWriter + WASAPI）----------------------
+
+    def _mf_usable(self):
+        """本机是否可走同源录制。非 Windows / 未编译 dll 时返回 False，
+        controller 回退到 ffmpeg 兜底（老路径，行为与改动前一致）。
+
+        测试替身没装配 mf_capture 时也返回 False，确保既有测试零回归。
+        """
+        svc = getattr(self, "mf_capture", None)
+        if svc is None:
+            return False
+        try:
+            return bool(svc.available)
+        except Exception:  # noqa: BLE001  可用性探测失败一律走兜底
+            return False
+
+    def _mf_record_start_locked(self, serial=None,
+                                with_devaudio=False, with_mic=False,
+                                save_dir=None, with_logcat=False,
+                                zip_on_stop=False, logcat_levels=None,
+                                pointer_location=True, show_touches=True):
+        """同源录制启动（须持 _rec_lock）。公开 start 的签名与返回结构不变。"""
+        serials = self._target_serials(serial)
+        if not serials:
+            self._push_status("err", "⚠ 录屏前请先勾选至少一个设备。")
+            return {"ok": False, "reason": "no_device"}
+        save_dir = save_dir or self._default_save_dir()
+        sess_ts = time.strftime("%Y%m%d_%H%M%S")
+        # 先探一次分辨率：用第一台设备的屏幕尺寸（同源录制 H264 直接写入，
+        # 分辨率必须提前定，运行中不支持切换）。取不到用默认值 1080x1920。
+        width, height = 1080, 1920
+        with contextlib.suppress(Exception):
+            w_h = self._mf_probe_size(serials[0])
+            if w_h:
+                width, height = w_h
+        stems = {s: f"record_{safe_name(s)}_{sess_ts}" for s in serials}
+        ok, reason, firsts = self.mf_capture.start_all(
+            serials, save_dir, stems, {}, None)
+        if not ok:
+            self._push_toast(
+                "err", f"⚠ 同源录制启动失败：{reason}。（本次未产生视频；"
+                       f"如需继续，请用支持 ffmpeg 的环境）")
+            return {"ok": False, "reason": "mf_start_failed", "error": reason}
+        # 会话结构对齐老路径：videos 登记第一段占位路径，收尾统一由 MF 产出。
+        self._rec_session = {
+            "ts": sess_ts, "dir": save_dir, "mf": True,
+            "start_host": time.time(), "video_start_host": time.time(),
+            "with_devaudio": bool(with_devaudio), "with_mic": bool(with_mic),
+            "with_logcat": bool(with_logcat), "with_zip": bool(zip_on_stop),
+            "mic_path": None, "mic_started": bool(with_mic),
+            "videos": {s: firsts.get(s) for s in serials},
+            "devaudio": {}, "logcat_captures": {},
+            "pointer_location_prev": {}, "show_touches_prev": {},
+        }
+        # overlay 与 logcat 与老路径一致（同源录制只替换视频/音频合成）。
+        for s in serials:
+            if pointer_location:
+                self._enable_overlay(s, KEY_POINTER_LOCATION, "pointer_location_prev")
+            if show_touches:
+                self._enable_overlay(s, KEY_SHOW_TOUCHES, "show_touches_prev")
+        if with_logcat:
+            started_caps = 0
+            for s in serials:
+                lp = os.path.join(save_dir, f"logcat_{safe_name(s)}_{sess_ts}.txt")
+                if self.logcat_capture.start(s, lp, ["all"], level_filter=None):
+                    self._rec_session["logcat_captures"][s] = lp
+                    started_caps += 1
+            if started_caps:
+                self._push_status("info", "已同步开始 logcat 抓取（全部缓冲区 + 全部级别，随录屏停止）")
+        self._push_status(
+            "ok", "✓ 已开始同源录制（H264 画面 + 麦克风语音由系统媒体基础直接合成带声 MP4）")
+        return {"ok": True, "mic": None, "ts": sess_ts,
+                "started": self._rec_session["video_start_host"]}
+
+    def _mf_probe_size(self, serial):
+        """取设备屏幕尺寸 (w, h)；取不到返回 None（用默认值）。"""
+        try:
+            from core.constants import adb_kwargs
+            r = subprocess.run(  # noqa: PLW1510  取不到不致命，调用方用默认值
+                [self.state.adb_path, "-s", serial, "shell", "wm", "size"],
+                **adb_kwargs(8))
+            import re as _re
+            m = _re.search(r"(\d+)\s*x\s*(\d+)", r.stdout or "")
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                return ((w, h) if w <= h else (h, w))   # 竖屏：宽 < 高
+        except Exception:  # noqa: BLE001  探测失败用默认值
+            pass
+        return None
+
+    def _mf_teardown(self, sess):
+        """同源录制收尾：停 native 会话 → logcat → 打包，返回 (文件列表, zip)。"""
+        self._restore_overlays(sess)
+        for s in list(sess.get("logcat_captures", {}).keys()):
+            with contextlib.suppress(Exception):
+                self.logcat_capture.stop(s, zip_on_stop=False)
+        results = self.mf_capture.stop_all()   # {serial: ([路径], 错误)}
+        files = []
+        for s, (paths, err) in results.items():
+            if err:
+                self._push_toast("warn", f"⚠ {s} 同源录制收尾提示：{err}")
+            for p in paths or []:
+                if p and path_exists(p):
+                    files.append(p)
+                    self._push_status("ok", f"✓ {s} 带声视频已保存: {p}")
+        # logcat 文件一并进产物列表
+        for p in (sess.get("logcat_captures") or {}).values():
+            if p and path_exists(p):
+                files.append(p)
+        zpath = None
+        if sess.get("with_zip") and files:
+            z = os.path.join(sess["dir"], "rec_{}.zip".format(sess["ts"]))
+            if self._zip_paths(files, z):
+                zpath = z
+                self._push_status("ok", f"✓ 录制产物已打包: {zpath}")
+            else:
+                self._push_toast(
+                    "warn", "⚠ 录制产物打包失败（文件已单独保存，可直接使用）：{}".format(
+                        sess.get("dir")))
+        return files, zpath
+
+    def _mf_discard(self, sess):
+        """同源录制取消：停 native 会话（不发布）+ 删 logcat。"""
+        self._restore_overlays(sess)
+        self.mf_capture.cancel_all()
+        candidates = list((sess.get("logcat_captures") or {}).values())
+        for s in list((sess.get("logcat_captures") or {}).keys()):
+            with contextlib.suppress(Exception):
+                self.logcat_capture.stop(s, zip_on_stop=False)
+        for _ in range(20):
+            if not any(self.logcat_capture.is_running(s) for s in
+                       (sess.get("logcat_captures") or {})):
+                break
+            time.sleep(0.1)
+        removed, kept, total = self._delete_files(candidates)
+        return removed, kept, total
 
     def _mic_start(self, save_dir):
         """启动电脑麦克风录音；任何一步失败都返回 (False, 人话原因)，**绝不外抛**。
@@ -131,6 +269,11 @@ class RecordMixin:
         """
         with self._rec_lock:
             try:
+                if self._mf_usable():
+                    return self._mf_record_start_locked(
+                        serial, with_devaudio, with_mic, save_dir,
+                        with_logcat, zip_on_stop, logcat_levels,
+                        pointer_location, show_touches)
                 return self._screen_record_start_locked(
                     serial, with_devaudio, with_mic, save_dir,
                     with_logcat, zip_on_stop, logcat_levels,
@@ -498,7 +641,10 @@ class RecordMixin:
         # 录屏」都被 `_screen_record_start_locked` 的守卫判为 recording，录屏功能
         # 永久锁死且只能重启程序；异常还会逃出 js_api 调用，用户看不到任何提示。
         try:
-            files, zpath = self._session_teardown(sess)
+            if sess.get("mf"):
+                files, zpath = self._mf_teardown(sess)
+            else:
+                files, zpath = self._session_teardown(sess)
             self._push_status("info", "⏹ 录屏已停止")
             # 完成强提醒：收尾可能要拉文件 / 等设备端写 moov / 合成 / 打包，
             # 耗时以秒计，用户很可能已切去别的页签——一条汇总 toast 说清
@@ -562,7 +708,10 @@ class RecordMixin:
             self._push_status("info", "ℹ 当前没有进行中的录屏（无需取消）")
             return {"ok": False, "reason": "no_session"}
         sess = self._rec_session
-        removed, kept, total = self._session_discard(sess)
+        if sess.get("mf"):
+            removed, kept, total = self._mf_discard(sess)
+        else:
+            removed, kept, total = self._session_discard(sess)
         self._push_status("info", "🗑 录屏已取消（本次产物未保留）")
         if kept:
             # 删不掉必须说：通常是文件还被别的程序占着（播放器开着刚拉回来的

@@ -236,6 +236,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # 同源录制（方案 B）native 扩展：MSVC 编译，仅依赖系统 DLL。
+      - name: 编译同源录制 native 扩展（MF SinkWriter + WASAPI）
+        shell: pwsh
+        run: |
+          cmake -S native -B native/build -A x64
+          if ($LASTEXITCODE -ne 0) { throw "native CMake 配置失败" }
+          cmake --build native/build --config Release
+          if ($LASTEXITCODE -ne 0) { throw "native 扩展编译失败" }
+          cmake --install native/build --prefix backend
+          if ($LASTEXITCODE -ne 0) { throw "native 扩展安装失败" }
+          if (-not (Test-Path backend/adc_mf_sink.dll)) {
+            throw "编译后未找到 backend/adc_mf_sink.dll"
+          }
+
       - name: 构建（exe + 分发 zip + 源码 zip）
         # 单文件模式（--onefile）：分发件里只有**一个** exe，同事双击即用。
         # 显式写出这个开关，让发版命令自解释（默认值改了也不误读）。

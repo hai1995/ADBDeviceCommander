@@ -7,18 +7,9 @@
 # 挑时间做，依赖这边应当是同一套策略。要升级时显式改这里，跑一遍完整构建。
 pywebview>=6.0,<7        # Web 版宿主（Windows 基于 WebView2），main.py 必需
 pyinstaller>=5.0,<7      # 打包成 exe（仅构建时需要；由 python build.py 调用）
-# 内置 ffmpeg：录屏的音视频合成 / 多段合并不再要求用户自己装 ffmpeg。
-# 打包时 build.py 从这里带的平台二进制取 ffmpeg.exe 嵌进 exe；源码运行时
-# core.ffmpeg_bin 也优先用它。锁在 0.6.x：win exe 83MB、ffmpeg 7.1，体积与
-# 稳定性都已验证；0.8.x 的 exe 涨到 98MB 且 ffmpeg 9，无必要追新。
-# 注意：imageio-ffmpeg 包本身是 BSD，但其捆绑的 ffmpeg 二进制是 GPL 构建
-# （见 README 许可证说明）——仅内部使用一般无碍，对外分发需评估源码义务。
-imageio-ffmpeg>=0.6,<0.7
-
 # 可选（装了会更快：截图写系统剪贴板时的 PNG filter 还原 / BGR 换位向量化，
 # 1080x2400 快 2 倍以上；缺省时 core/clipboard.py 自动回退纯 Python，结果一致）
 numpy>=1.21,<3
 
 # 可选（仅用于重新生成 assets/app.ico 图标，运行时不依赖）
 pillow>=9.0,<12
-
