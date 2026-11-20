@@ -23,6 +23,7 @@ from backend.controller import (
     unique_path,
     uuid,
 )
+from core.constants import is_usable
 from core.longpath import long_path
 
 
@@ -420,9 +421,15 @@ class CommandMixin:
                             if not serials:
                                 self._ws_status("err", self._no_device_hint(name))
                                 return
+                            # 是否给 adb/scrcpy 注入 -s：仅当「系统里可用设备不止一台」
+                            # 时才需要。单设备时 adb 天然指向唯一设备，拼 -s 反而多余，
+                            # 也可能在某些脚本里干扰参数解析；按用户诉求去掉。
+                            # 注意判定依据是「全部可用设备数」而非「勾选数」——连了 2 台
+                            # 但只勾 1 台时若省略 -s，adb 会报 "more than one device"。
+                            inject = self._need_inject_serial()
                             for serial in serials:
                                 self._ws_status("info", f"──── 设备: {serial} ────")
-                                if not self._run_entries(entries, serial):
+                                if not self._run_entries(entries, serial, inject=inject):
                                     break
                         else:
                             self._ws_status(
@@ -461,9 +468,28 @@ class CommandMixin:
             return (f"⚠ 命令「{name}」需要设备，但已勾选的 {len(checked):d} 台当前都不可用（离线 / 未授权 / 正在重连）：{'、'.join(sorted(checked))}")
         return f"⚠ 命令「{name}」需要指定设备，请先在左侧勾选设备。"
 
-    def _run_entries(self, entries, serial):
+    def _need_inject_serial(self):
+        """系统里可用（state==device）设备数 > 1 时才给命令注入 -s。
+
+        单设备场景下 adb / scrcpy 天然指向唯一设备，-s 是多余的；用户诉求是
+        这种情形不再拼接。判定必须用「全部可用设备数」而不是已勾选数：连了
+        多台但只勾一台时，省略 -s 会让 adb 报 "more than one device/emulator"，
+        命令直接失败。统计口径与 selected_serials 一致（is_usable 判可用）。
+        """
+        try:
+            states = getattr(self.devices, "device_state", {}) or {}
+            usable = sum(1 for st in states.values() if is_usable(st))
+            return usable > 1
+        except Exception:  # noqa: BLE001  判定失败时保守注入（多假设，避免误省略）
+            return True
+
+    def _run_entries(self, entries, serial, inject=True):
         """逐条下发命令；adb shell 交互 / 合并 / delay 与 legacy 语义一致。
-        返回 False 表示执行被中断（超时/停止），上层据此停止后续设备。"""
+        返回 False 表示执行被中断（超时/停止），上层据此停止后续设备。
+
+        inject=False 时不给 adb/scrcpy 拼 -s（单设备场景），但 serial 仍保留
+        用于 root 切换保护等按设备判断的逻辑。
+        """
         # 取局部引用：shutdown() 会把会话置空（kill 完再清引用），而本方法跑在
         # 后台 worker 里。用会话自身的话，关窗恰好发生在这条命令序列中途时，
         # 下一条命令会踩到 None 抛 AttributeError，被 _execute 翻译成一句
@@ -475,7 +501,7 @@ class CommandMixin:
         if sess is None:
             return False
         raw_cmds = [e.get("command", "") for e in entries]
-        if serial:
+        if serial and inject:
             raw_cmds = [transform(c, serial) for c in raw_cmds]
         merged = merge_adb_shell_commands_detailed(raw_cmds)
         timeout = self._cmd_timeout()

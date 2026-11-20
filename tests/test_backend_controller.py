@@ -373,6 +373,49 @@ def test_run_command_device_loop_transform_and_delay():
     assert any("✓ 完成" in p["text"] for p in by_kind.get("status", []))
 
 
+def test_single_device_omits_serial_injection(monkeypatch):
+    """系统只有一台可用设备时不再拼 -s（用户诉求：单设备命令更干净）。
+
+    判定口径是「全部可用设备数」而非勾选数——把 B2 置为 unusable，只留 A1。
+    """
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
+    api = _make_api()
+    # 只留 A1 一台可用设备
+    api.devices.device_state = {"A1": "device", "B2": "unauthorized",
+                                "C3": "unauthorized"}
+    api.devices.device_checked = {"A1": True, "B2": False, "C3": False}
+    assert api.run_custom("adb shell date") == {"ok": True}
+    assert wait_until(lambda: len(api.session.calls) >= 1)
+    assert api.session.calls[0]["script"] == "adb shell date", \
+        "单设备不应注入 -s"
+
+
+def test_multiple_available_devices_keep_serial_even_if_one_checked(monkeypatch):
+    """连了多台可用设备、即使只勾选一台，也必须注入 -s。
+
+    否则 adb 报 "more than one device/emulator"——这是省略 -s 判定的关键边界：
+    不能用「勾选数==1」当单设备，否则多设备场景命令全废。
+    """
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
+    api = _make_api()   # A1、B2 都可用，只有 A1 勾选
+    assert api.run_custom("adb shell date") == {"ok": True}
+    assert wait_until(lambda: len(api.session.calls) >= 1)
+    assert api.session.calls[0]["script"] == "adb -s A1 shell date", \
+        "多设备场景必须注入 -s，与勾选数无关"
+
+
+def test_single_device_omits_serial_in_quick_command(monkeypatch):
+    """快捷指令（非自定义）同样遵循单设备省略 -s 的规则。"""
+    patch_ctrl(monkeypatch, "root_state", lambda adb, serial: False)
+    api = _make_api()
+    api.devices.device_state = {"A1": "device", "B2": "offline",
+                                "C3": "unauthorized"}
+    api.devices.device_checked = {"A1": True, "B2": False, "C3": False}
+    assert api.run_command("dev") == {"ok": True}
+    assert wait_until(lambda: len(api.session.calls) >= 1)
+    assert api.session.calls[0]["script"] == "adb shell date"
+
+
 def test_run_command_no_device_needed_runs_once():
     api = _make_api()
     api.devices.device_checked = {"A1": True, "B2": True, "C3": False}

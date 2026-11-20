@@ -46,7 +46,25 @@ class ShellSession:
 
     @staticmethod
     def _init_script():
-        return "$ProgressPreference='SilentlyContinue';"
+        # Windows PowerShell 5.1 默认用系统 ANSI 代码页（中文 Windows = GBK/cp936）
+        # 解码 native 命令（adb）的 UTF-8 输出。于是 `adb logcat > "车机log.log"`
+        # 这类重定向：adb 的 UTF-8 中文字节被 GBK 误解码成乱码字符串，再由 `>`
+        # 写进文件——日志里的中文全乱。把解码编码设为 UTF-8 从根上修好。
+        #
+        # 几点讲究：
+        # * 用 UTF8Encoding($false)（无 BOM）而不是 [Text.Encoding]::UTF8：后者在
+        #   5.1 赋给 $OutputEncoding 时会给首写加 BOM，污染传给 native 程序的输入。
+        # * $OutputEncoding 一并设置：PowerShell 往 native 命令 stdin 传中文字符串
+        #   时也走它，保持双向一致。
+        # * $PSDefaultParameterValues['Out-File:Encoding'] 让 `>` / `>>`（5.1 里就是
+        #   Out-File）写 UTF-8 文件；否则 5.1 默认写 UTF-16LE，换编辑器打开仍可能乱。
+        # 这些设置只作用于本持久会话，不影响系统、不写用户 $PROFILE。
+        return (
+            "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+            "$OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+            "$PSDefaultParameterValues['Out-File:Encoding']='utf8';"
+            "$ProgressPreference='SilentlyContinue';"
+        )
 
     @staticmethod
     def _sentinel_stmt(tag):
@@ -104,9 +122,13 @@ class ShellSession:
         cf = 0
         if sys.platform.startswith("win"):
             cf = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        # text=True 但不指定 encoding：Python 会按系统默认编码（中文 Windows 为 GBK）
-        # 解码 PowerShell 输出，与 PowerShell 实际使用的控制台编码保持一致，
-        # 避免我们强制 UTF-8 后两边编码不匹配导致乱码或输出被吞。
+        # stdin / stdout 的编码要分开看，不能都用系统默认、也不能都用 UTF-8：
+        # * stdin：写的是用户命令（可能含中文，如 `> "车机log-$d.log"`）。PowerShell
+        #   `-Command -` 从重定向 stdin 读脚本按系统 ANSI 代码页（中文 Windows GBK）
+        #   解析，所以必须保持系统默认编码，强制 UTF-8 会让命令里的中文文件名先坏掉。
+        # * stdout：_init_script 已把 [Console]::OutputEncoding 设为 UTF-8，PowerShell
+        #   的回显字节是 UTF-8，必须按 UTF-8 解码，否则纯中文输出回显到指令台会乱码。
+        # Popen 先用系统默认（text=True 不指定 encoding）建流，再只把 stdout 切到 UTF-8。
         self.proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
@@ -118,6 +140,11 @@ class ShellSession:
             creationflags=cf,
             env=os.environ.copy(),
         )
+        # 会话 init 脚本随后会把 PowerShell 输出编码设为 UTF-8；这里同步读侧。
+        # reconfigure 在流尚未读取任何数据前调用，安全；Linux 测试用 sh + UTF-8 locale，
+        # 重配成 UTF-8 无副作用。
+        with contextlib.suppress(Exception):
+            self.proc.stdout.reconfigure(encoding="utf-8")
         self._eof.clear()
         self._abort.clear()
         self._pending = []

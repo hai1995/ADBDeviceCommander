@@ -7192,3 +7192,36 @@ runner 的 MSVC 编译验证。
 （对比：投屏 `plan_size` 只传设备支持的尺寸、读不到就不传）。本轮未改此处——
 缩放到 1080 会牺牲录制画质，需真机确认是「size 不被接受导致流停滞」后再定夺。
 版本号保持 `2026.1120.0302`。
+
+---
+
+## 单设备省略 -s + 指令台日志中文乱码修复
+
+**需求 1：单设备不再拼接 `-s <序列号>`**（`controllers/commands.py`）。
+原先只要命令含 adb/scrcpy，无论连了几台设备都注入 -s。改为按「系统里可用
+（state=device）设备总数」判定：只有 >1 台才注入，单设备保持命令原样，更干净。
+关键边界：判定用「全部可用设备数」而非「勾选数」——连了多台但只勾一台时若省略
+-s，adb 会报 "more than one device/emulator"。实现上给 `_run_entries` 加 `inject`
+开关（而不是传 serial=None），保留 serial 供 root 切换保护等按设备逻辑使用；
+新增 `_need_inject_serial()` 复用 `core.constants.is_usable`，与 selected_serials
+口径完全一致，判定异常时保守注入。
+
+**Bug 2：指令台执行 `adb logcat > "车机log-xxx.log"` 日志中文乱码**（`core/shell.py`）。
+根因：Windows PowerShell 5.1 默认按系统 ANSI 代码页（中文 Windows = GBK/cp936）
+解码 native 命令（adb）的 UTF-8 输出；`>` 从 5.1 起即 Out-File，把已经误解码的
+乱码字符串写进文件，解码阶段就错了、写文件无法还原。经查证微软文档与社区资料，
+标准修法是设置输出解码编码。修复（仅作用于本持久会话，不写系统 / 不改 $PROFILE）：
+1. `_init_script()` 增加三行：`[Console]::OutputEncoding` 与 `$OutputEncoding` 设为
+   无 BOM 的 UTF8Encoding（不用带 BOM 的 [Text.Encoding]::UTF8，避免污染 native
+   程序 stdin），`$PSDefaultParameterValues['Out-File:Encoding']='utf8'` 让 `>`
+   写 UTF-8 文件（否则 5.1 默认 UTF-16LE，换编辑器仍可能乱）。
+2. `_start()` 把 Python 侧 stdout 单独 `reconfigure(encoding="utf-8")`，匹配写侧；
+   stdin 刻意保持系统默认编码——用户命令里的中文文件名必须按 PowerShell 读脚本
+   用的系统 ANSI 编码写入，强制 UTF-8 会先把命令本身弄乱。两侧编码分离是关键。
+
+**验证**：新增 5 项回归（单设备省略 -s ×3：自定义命令 / 多设备仍注入 / 快捷指令；
+编码 ×2：init 脚本含 UTF-8 设置、stdout 按 UTF-8 解码），shell session 专项 16 passed，
+指令相关 28 passed，全量 **1589 passed / 1 skipped**；pyflakes + ruff 全绿。
+README / 使用说明.txt 已同步 -s 新规则与 UTF-8 说明。版本号保持远端 `2026.1120.0726`。
+native 未改，无新真机验证项。中文日志不乱码最终仍需 Win11 真机跑一次该命令确认
+（沙箱无 PowerShell，只能静态验证配置正确）。

@@ -353,15 +353,23 @@ git commit -am "第五十二轮：…" && git tag v<版本号> && git push --tag
 
 | 命令类型 | 行为 |
 | --- | --- |
-| `adb shell …` / `reboot` / `pull` / `install` 等 | 自动拼 `-s <serial>` |
-| `adb -s 0612333… …`（已写死序列号） | **替换为**所选设备序列号 |
+| `adb shell …` / `reboot` / `pull` / `install` 等 | 自动拼 `-s <serial>`（**仅当系统连了多台可用设备**） |
+| **单设备**（系统只有一台可用设备） | **不拼 `-s`**：adb 天然指向唯一设备，命令更干净 |
+| `adb -s 0612333… …`（已写死序列号） | 多设备时**替换为**所选设备序列号；单设备时不再改写 |
 | `adb devices` / `kill-server` / `start-server` / `connect` 等全局子命令 | **不注入** `-s`，原样全局执行 |
 | `adb.exe …`（绝对路径写法） | 同 `adb` 规则 |
-| `scrcpy` | 自动拼 `-s`，多台设备弹多个投屏 |
+| `scrcpy` | 自动拼 `-s`（多设备），多台设备弹多个投屏 |
 | `python` / `git` / `appium` / `cd` 等非 adb 命令 | 原样执行，**不循环** |
+
+**单设备判定**：以「系统里可用（`state=device`）设备总数」为准，不是勾选数。
+连了多台、即使只勾一台，也必须注 `-s`——否则 adb 报 `more than one device/emulator`。
 
 **多设备循环规则**：只有「含需要指定设备的命令（adb/scrcpy 且会被注入 `-s`）」
 的快捷指令才会按设备循环；纯 PC 命令（如跑 pytest、git）只执行一次，避免重复。
+
+**日志中文编码**：指令台在持久 PowerShell 会话中执行，已把输出解码设为 UTF-8，
+因此 `adb logcat > "车机log-xxx.log"` 等重定向写出的日志中文不会乱码；无需手敲
+`[Console]::OutputEncoding` 或 `chcp 65001`。
 
 ---
 

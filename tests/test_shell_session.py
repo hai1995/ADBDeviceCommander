@@ -188,3 +188,27 @@ def test_leave_interactive_only_resets_flag(sess):
 def test_kill_tree_is_noop_off_windows(sess):
     """非 Windows 返回 False，调用方据此回退到普通 terminate。"""
     assert _kill_tree(sess.proc) is False
+
+
+def test_powershell_init_sets_utf8_decoding():
+    """PowerShell 会话初始化必须把 native 命令输出解码设为 UTF-8。
+
+    真机 bug：指令台执行 `adb logcat > "车机log-xxx.log"`，日志文件中文乱码。
+    根因是 Windows PowerShell 5.1 默认按系统 ANSI(GBK) 解码 adb 的 UTF-8 输出，
+    解码阶段就已经错了，后续写文件无法还原。修法是在会话 init 里设 OutputEncoding。
+    这是纯静态方法，不需要真的 PowerShell 也能验证。
+    """
+    script = ShellSession._init_script()
+    assert "Console]::OutputEncoding" in script
+    assert "$OutputEncoding" in script
+    # 无 BOM 的 UTF8Encoding，不能用带 BOM 的 [Text.Encoding]::UTF8
+    assert "UTF8Encoding" in script
+    # `>` 在 5.1 里就是 Out-File，默认写 UTF-16LE；显式设 UTF-8 保证换编辑器也不乱
+    assert "Out-File:Encoding" in script
+
+
+def test_stdout_decoded_as_utf8(sess):
+    """回显按 UTF-8 解码：init 已把 PowerShell 输出设为 UTF-8，读侧必须匹配，
+    否则纯中文输出回显到指令台会乱码（写侧 UTF-8 / 读侧 GBK 的经典不匹配）。"""
+    enc = (sess.proc.stdout.encoding or "").lower().replace("-", "")
+    assert enc == "utf8", "stdout 应按 UTF-8 解码，实际: {!r}".format(enc)
