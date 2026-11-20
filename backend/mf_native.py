@@ -23,7 +23,6 @@ import threading
 
 from core.longpath import path_isfile
 
-
 # ---- 错误码：与 native adc_mf_sink.h 对齐 -------------------------------
 RPC_E_CHANGED_MODE = 0x80010106
 ADC_OK = 0
@@ -179,7 +178,7 @@ class MFNative:
 
     def _bind_signatures(self, lib):
         U8P = ctypes.POINTER(ctypes.c_ubyte)
-        i, u, ll = ctypes.c_int, ctypes.c_uint, ctypes.c_longlong
+        i, ll = ctypes.c_int, ctypes.c_longlong
         lib.adc_init.argtypes = []; lib.adc_init.restype = i
         lib.adc_shutdown.argtypes = []; lib.adc_shutdown.restype = None
         lib.adc_last_error.argtypes = [ctypes.c_char_p, i]; lib.adc_last_error.restype = i

@@ -144,7 +144,7 @@ class RecordMixin:
         """取设备屏幕尺寸 (w, h)；取不到返回 None（用默认值）。"""
         try:
             from core.constants import adb_kwargs
-            r = subprocess.run(  # noqa: PLW1510  取不到不致命，调用方用默认值
+            r = subprocess.run(  # 取不到不致命，调用方用默认值
                 [self.state.adb_path, "-s", serial, "shell", "wm", "size"],
                 **adb_kwargs(8))
             import re as _re
@@ -152,7 +152,7 @@ class RecordMixin:
             if m:
                 w, h = int(m.group(1)), int(m.group(2))
                 return ((w, h) if w <= h else (h, w))   # 竖屏：宽 < 高
-        except Exception:  # noqa: BLE001  探测失败用默认值
+        except Exception:  # noqa: BLE001, S110  探测失败用默认值
             pass
         return None
 
@@ -255,8 +255,9 @@ class RecordMixin:
         with_devaudio：保留但界面已撤掉 —— 设备端 tinycap 在多数机型上需要 root，
         无法稳定承诺；开关留着只会让人以为录进去的是设备声音。
         with_mic：界面已恢复「同步录制电脑麦克风」开关（默认关闭）。录的是**本机
-        麦克风**（说话声），不是电脑正在播放的声音；仅 Windows 支持（WinMM），
-        需要系统麦克风隐私权限，停止时用内置 ffmpeg 合成进视频（无需用户安装）。
+        麦克风**（说话声），不是电脑正在播放的声音；仅 Windows 支持。勾选后走同源
+        录制：画面（ADB 裸 H264）与麦克风（WASAPI）由系统媒体基础（Media Foundation）
+        直接合成带声 MP4，无需 ffmpeg；未勾选则走老路径的纯视频录制。
 
         pointer_location：录屏画面常驻指针准星（设备系统设置
         `settings put system pointer_location 1`，画面 overlay，全版本可用；

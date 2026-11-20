@@ -138,6 +138,6 @@ def test_start_falls_back_when_unavailable(monkeypatch, tmp_path):
         def start(self, s, d, extra_name=None):
             return True, f"{d}\\record_{s}.mp4"
     api.video = FakeVideo()
-    res = api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
+    api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
     assert "mf" not in api._rec_session
     assert any(c[0] == "start_all" for c in fake.calls) is False

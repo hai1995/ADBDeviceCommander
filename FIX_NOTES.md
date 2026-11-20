@@ -7098,3 +7098,26 @@ native 改动经括号平衡（134/649/30 对）与符号引用静态检查通�
 mic_start 错误码停 worker、mic_start 异常停 worker、未勾麦走老路径），
 全量 **1582 passed / 1 skipped**；改动文件 `py_compile` 通过。native 未改，
 括号平衡检查 134/134、670/670、45/45 对。版本号本轮未动，远端仍为 `2026.1120.0302`。
+
+---
+
+## CI 失败修复 + 第五轮审查
+
+**CI 失败根因**：测试 job 的「静态检查（pyflakes + ruff）」步骤报 2 处未使用变量
+（pyflakes 致命，exit 1）：`backend/mf_native.py:182` 的局部 `u`、`tests/`
+`test_backend_record_mf_path.py:141` 的 `res`。因 pyflakes 先失败（同一 run 步骤内
+`&&` 短路），其后的 `ruff check .` 从未执行——修掉 pyflakes 后暴露 4 处潜伏的 ruff
+错误（MF 改造引入后一直未被发现）：1 处多余 noqa（record.py PLW1510）、2 处 S110
+（try/except pass，record.py + mf_capture_service.py）、1 处 import 排序（mf_native.py）。
+均已修复。这是 MF 改造 4 个提交（8973fd57 起）CI 一直红、打包 job 从未真正运行的原因。
+
+**本轮改动**：
+1. 删除 `mf_native.py` 未使用局部变量 `u`；删除测试未使用 `res`。
+2. ruff 4 处：去掉多余 noqa、2 处补 `S110` 到既有 noqa、import 排序由 ruff --fix 整理。
+3. 纠正 `screen_record_start` docstring 里「停止时用内置 ffmpeg 合成」的过时描述
+   （内置 ffmpeg 早已移除、现为 MF 同源录制），改为准确说明 MF/老路径分支。
+
+**验证**：本地完整复现 CI test job 静态检查（pyflakes PASS + ruff All checks passed），
+全量 **1582 passed / 1 skipped**。本轮未改 native，无新真机验证项。版本号保持
+`2026.1120.0302`。前端单测本轮未动前端文件、不受影响（npm 依赖下载在沙箱内超时，
+未本地复跑；改造前提交的前端 CI 为 success）。

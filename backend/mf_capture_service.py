@@ -173,7 +173,7 @@ class MFCaptureSession:
                 tail = (tail + line)[-2048:]
             if tail:
                 self._stderr_tail = tail.decode("utf-8", "replace").strip()[-300:]
-        except Exception:  # noqa: BLE001  后台读 stderr，失败不影响主流程
+        except Exception:  # noqa: BLE001, S110  后台读 stderr，失败不影响主流程
             pass
 
     # ---- 停止 / 取消 ---------------------------------------------------
