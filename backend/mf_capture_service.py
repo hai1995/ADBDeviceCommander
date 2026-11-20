@@ -15,10 +15,14 @@ backend.mf_capture_service —— 同源录屏编排（adb 裸 H264 流 + native
 替身，记录调用序列供断言；真机由 backend.mf_native.MFNative 驱动。
 """
 import contextlib
+import os
+import shutil
 import subprocess
+import tempfile
 import threading
 
 from core.constants import no_window_flags, safe_name
+from core.longpath import long_path, path_isfile
 
 # 首帧等待：screenrecord 秒退（ROM 不支持 --output-format=h264）要能快速报错。
 FIRST_DATA_TIMEOUT_S = 6.0
@@ -51,10 +55,15 @@ class MFCaptureSession:
     """单设备的同源录制会话：一个 adb 进程 + 一个 native session。"""
 
     def __init__(self, native, serial, save_dir, stem, width, height,
-                 mic_fmt=DEFAULT_MIC, adb="adb", size=None):
+                 mic_fmt=DEFAULT_MIC, adb="adb", size=None, work_dir=None):
         self.native = native
         self.serial = serial
         self.save_dir = save_dir
+        # [EDR 误报缓解] native 的工作目录：.tmp.mp4 的写入、Finalize 改名、
+        # 取消删除都发生在这里。默认落系统 TEMP（EDR 对安装器/进程在 TEMP 的
+        # 批量读写天然高容忍），只在 stop 成功后把成品 copy 回 save_dir。
+        # work_dir=None 时退回 save_dir（保留旧行为，便于兼容/调试）。
+        self.work_dir = work_dir
         self.stem = stem
         self.width = int(width)
         self.height = int(height)
@@ -85,9 +94,12 @@ class MFCaptureSession:
     def start(self):
         """返回 (ok, 错误原因)。同步等首字节，秒退立即报错。"""
         arate, abits, ach = self.mic_fmt
+        # [EDR 误报缓解] native 只在 work_dir 里写 .tmp.mp4 / 改名 / 删除，
+        # 用户保存目录不再出现"高熵半成品写入 → 改名 → 批量删"的勒索特征信号。
+        native_dir = self.work_dir or self.save_dir
         with self._lock:
             self._handle, self._tmp_first = self.native.session_create(
-                self.save_dir, self.stem, self.width, self.height,
+                native_dir, self.stem, self.width, self.height,
                 FPS_NUM, FPS_DEN, arate, abits, ach)
         try:
             # H264 是**二进制流**：绝不能用 adb_popen_kwargs()（它带 text=True/
@@ -234,8 +246,59 @@ class MFCaptureSession:
             paths = self.native.session_finalize(self._handle)
         except Exception as ex:  # noqa: BLE001
             err = err or f"同源合成失败：{ex}"
+        # [EDR 误报缓解] native 产物在 TEMP 工作目录里：只在 finalize 成功后
+        # 把成品 copy 回用户保存目录。copy 失败或未落盘的产物不入列表并明确
+        # 上报（work_dir 随后被删，返回悬空 TEMP 路径没有意义），绝不误报成功。
+        published, pub_err = self._publish_to_save_dir(paths)
+        err = err or pub_err
         self._teardown_native(discard=False)
-        return paths, err
+        return published, err
+
+    def _publish_to_save_dir(self, paths):
+        """把工作目录里的成品 copy 回用户保存目录。
+
+        返回 (路径列表, 错误串)。设计要点：
+          * work_dir=None（未启用 A 方案 / 老行为）：原样返回，零副作用；
+          * 源文件是工作目录内的占位但不存在：过滤 + 上报，绝不误报成功；
+          * 源文件不在工作目录（测试替身）：原样返回，由上层 path_exists 过滤；
+          * 跨卷安全：用 shutil.copy2 而非 os.replace（TEMP 与保存目录常不同盘）；
+          * copy 失败：不入产物列表并汇总错误上抛（work_dir 随后被删）。
+        """
+        if not paths or not self.work_dir:
+            return list(paths or []), ""
+        try:
+            os.makedirs(long_path(self.save_dir), exist_ok=True)
+        except Exception as ex:  # noqa: BLE001
+            return list(paths), f"创建保存目录失败：{ex}"
+        work_abs = os.path.abspath(self.work_dir)
+        out, errs = [], []
+        for p in paths:
+            if not p:
+                continue
+            try:
+                p_abs = os.path.abspath(p)
+                # 是否位于工作目录内：真机产物在这里，测试替身的占位路径不在。
+                try:
+                    in_work = os.path.commonpath([p_abs, work_abs]) == work_abs
+                except ValueError:  # 不同盘符（Windows）
+                    in_work = False
+                if not path_isfile(p):
+                    if in_work:
+                        # finalize 报了产物却没落盘：work_dir 随后被删，绝不能
+                        # 把悬空 TEMP 路径当成功产物，过滤并明确上报。
+                        errs.append(f"同源产物未落盘：{os.path.basename(p)}")
+                    else:
+                        out.append(p)   # 占位/替身路径，原样保留（上层 path_exists 过滤）
+                    continue
+                dst = os.path.join(self.save_dir, os.path.basename(p))
+                if p_abs != os.path.abspath(dst):
+                    shutil.copy2(long_path(p), long_path(dst))
+                out.append(dst)
+            except Exception as ex:  # noqa: BLE001
+                # 不加入产物列表：work_dir 随后会被清理，返回 TEMP 原路径没有
+                # 意义且可能让上层误报成功；改为明确上报搬运失败。
+                errs.append(f"搬运 {os.path.basename(str(p))} 失败：{ex}")
+        return out, "; ".join(errs)
 
     def cancel(self):
         """取消：停 adb → native discard（不发布）→ 删临时文件。"""
@@ -307,6 +370,9 @@ class MFCaptureService:
         self._sessions = {}          # serial -> MFCaptureSession
         self._lock = threading.Lock()
         self._mic_started = False
+        # [EDR 误报缓解] 本次录制共用的系统 TEMP 工作目录（所有设备会话共享，
+        # 各设备 stem 不同天然隔离）。stop/cancel 收尾后统一删除。
+        self._work_dir = None
 
     @property
     def available(self):
@@ -359,6 +425,10 @@ class MFCaptureService:
             worker.stop()
             self.native.worker = None
             return False, f"麦克风格式非法（{mic_fmt}），无法建音频流", {}
+        # [EDR 误报缓解] 建系统 TEMP 工作目录：native 的所有 .tmp.mp4 写入、
+        # 改名、取消删除都落这里，用户保存目录不再出现勒索特征文件操作。
+        # 所有设备会话共享一个目录（stem 不同天然隔离），收尾统一清理。
+        self._work_dir = tempfile.mkdtemp(prefix="adc_mf_")
         started, first_err = {}, None
         for s in serials:
             stem = self._value(stems, s, f"record_{safe_name(s)}")
@@ -366,7 +436,8 @@ class MFCaptureService:
             width, height = self._parse_size(size, 1080, 1920)
             session = MFCaptureSession(
                 self.native, s, save_dir, stem, width, height,
-                mic_fmt=mic_fmt, adb=self.adb, size=size)
+                mic_fmt=mic_fmt, adb=self.adb, size=size,
+                work_dir=self._work_dir)
             ok, err = session.start()
             if ok:
                 started[s] = session
@@ -377,6 +448,7 @@ class MFCaptureService:
             self._stop_mic()
             worker.stop()
             self.native.worker = None
+            self._drop_work_dir()
             return False, first_err or "所有设备 H264 流启动失败", {}
         with self._lock:
             self._sessions.update(started)
@@ -398,6 +470,7 @@ class MFCaptureService:
             if self.native.worker is not None:
                 self.native.worker.stop()
                 self.native.worker = None
+            self._drop_work_dir()
         return out
 
     def cancel_all(self):
@@ -412,6 +485,19 @@ class MFCaptureService:
             if self.native.worker is not None:
                 self.native.worker.stop()
                 self.native.worker = None
+            self._drop_work_dir()
+
+    def _drop_work_dir(self):
+        """删除本次录制的工作目录（含所有 .tmp.mp4 中间态），幂等。
+
+        在 stop_all（成品已 copy 回保存目录）/ cancel_all（丢弃半成品）/ 启动
+        全失败三种收尾调用。删除失败只吞异常——TEMP 残留由系统清理，不影响用户。
+        """
+        wd = self._work_dir
+        self._work_dir = None
+        if wd:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(long_path(wd), ignore_errors=True)
 
     def _stop_mic(self):
         if self._mic_started:

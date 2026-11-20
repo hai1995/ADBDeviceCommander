@@ -7329,3 +7329,37 @@ SPS/PPS 缓存为空，`config_video_stream` 的 `if (!sps_.empty() || !pps_.emp
 **验证**：新增守卫后 `test_native_sink_guards.py` 共 10 项；全量测试 + pyflakes
 + ruff 全绿。native 改动需 CI Windows runner MSVC 编译、真机重跑「开启录音的
 录屏→停止」确认不再报 `0xC00D4A45` 且产出可播成片。版本号保持 `2026.1120.0834`。
+
+---
+
+## 第六十五轮：同源录制中间产物收敛到系统 TEMP（企业 EDR 误报缓解，A 方案）
+
+**现象**：长时间录屏（十多分钟、多段）结束后触发亚信"未授权文件加密"告警，
+整个 exe 被隔离。这是 EDR 的勒索行为检测（minifilter），非真病毒。短录制
+不触发，因为只有一段、收尾动作少。
+
+**根因**：同源录制旧实现把 `.tmp.mp4` 半成品直接写在用户保存目录（`D:\BUG`），
+native 每段 Finalize 都做「写高熵视频 → `MoveFileEx` 改名 → 多段重复」，若开
+zip 还会写压缩包 + 批量删源文件。这套 syscall 组合在受监控目录里与勒索加密
+行为签名高度相似，长录制（多段）达到检测阈值即被判定。"未授权文件加密"是
+实时行为检测，无法在 Linux 沙箱复现/验证，代码层只能降低误报概率、不能根治；
+根治需 Authenticode 签名或 EDR 白名单（用户侧不具备该条件）。
+
+**修复**（`backend/mf_capture_service.py`，C++ 零改动）：
+1. `MFCaptureService.start_all` 建系统 TEMP 工作目录（`tempfile.mkdtemp`，
+   前缀 `adc_mf_`），传给每个 `MFCaptureSession`；native 的 out_dir 用它，
+   `.tmp.mp4` 写入/改名/删除全落 TEMP。
+2. `MFCaptureSession.stop` 在 finalize 成功后调 `_publish_to_save_dir`：把成品
+   用 `shutil.copy2`（跨卷安全）copy 回用户保存目录，返回成品路径；工作目录内
+   "报了产物却没落盘"的过滤并明确上报，绝不误报成功。
+3. `stop_all`/`cancel_all`/启动全失败三条收尾路径统一 `_drop_work_dir` 清理
+   工作目录（含所有半成品）。`work_dir=None` 保留旧行为（兼容/调试）。
+4. 同步 README 同源录制段落；新增 `tests/test_mf_edr_workdir.py` 4 项回归
+   （TEMP 隔离 / 成品回搬+清理 / 取消清理 / 未落盘不上报成功）。
+
+**边界**：本方案降低"用户保存目录里勒索特征文件操作"的信号，但无法保证 100%
+不再触发（EDR 是黑盒行为检测，且 native 在 TEMP 内的改名/删除仍在 syscall 层
+发生，只是 EDR 对 TEMP 天然高容忍）。需用户真机打包后反复验证。
+
+**验证**：新增 4 项回归 + MF 专项 27 项全通过；全量测试 + pyflakes + ruff
+全绿。版本号保持 `2026.1120.0834`。
