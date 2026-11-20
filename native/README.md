@@ -38,9 +38,14 @@ cmake --install native/build --prefix backend
 源码里所有 `[NEEDS-VERIFY]` 注释对应下列条目，需在 Win11 x64 上按
 Microsoft Learn 逐条核对：
 
-1. **`MF_MPEG4SINK_MOOV_BEFORE_MDAT`**：GUID 数值（头文件 `mfidl.h` 已有
-   定义，直接用符号）、UINT32=1、Win8+、需可 seek 字节流、额外一次
-   copy/remux。核对页：Microsoft Learn 搜该属性名。
+1. **moov 前置（`MF_MPEG4SINK_MOOV_BEFORE_MDAT`）已移除**：真机开启录音走
+   同源路径时，收尾稳定报 `SinkWriter::Finalize 失败（0x80070005 / 拒绝访问）`。
+   根因是该属性要求 sink 在 Finalize 阶段对同一输出文件做二次 seek/remux 把 moov
+   搬到头部，这一步在真机被拒。此前音频 overflow 修复让 finalize 第一次真正走到
+   `Finalize()`，才暴露出这个一直被 overflow 提前 return 掩盖的问题。本项目录屏
+   保存在本地、由本机播放器双击播放，moov 在尾部完全可播，不需要 faststart；已
+   改回 sink 默认的 moov-after-mdat 布局（`MFCreateSinkWriterFromURL` 的
+   pAttributes 传 nullptr）。新增源码守卫测试锁定该属性不被重新引入。
 2. **H264 compressed-in/identical-out**：`MFVideoFormat_H264` + 压缩输入
    相同输出是「Using the Sink Writer」文档明确支持的组合（remux 不转码）。
    但 SPS/PPS 的注入方式（`MF_MT_MPEG_SEQUENCE_HEADER`、AVCC 长度前缀
@@ -66,7 +71,7 @@ Microsoft Learn 逐条核对：
 
 ## 平台下限 / 未专项验证项
 
-- 下限：Windows 8（`MF_MPEG4SINK_MOOV_BEFORE_MDAT` 的最低客户端）；目标
-  Win11 x64。
+- 下限：Windows 7（`MFCreateSinkWriterFromURL` 起支持；移除 moov 前置属性后
+  不再受 Win8 下限约束）；目标 Win11 x64。
 - 未专项验证：ARM64、HDR、多显示器拓扑变化、休眠唤醒后的设备句柄恢复、
   各 ROM 对 `--output-format=h264` 的支持率。

@@ -14,8 +14,9 @@
  * ┌─────────────────────────────────────────────────────────────────────┐
  * │ [NEEDS-VERIFY] 本文件在 Linux 沙箱内编写，无法用 MSVC 编译验证。     │
  * │ 必须在 Win11 x64 真机上按 Microsoft Learn 逐条核对：                 │
- * │  1. MF_MPEG4SINK_MOOV_BEFORE_MDAT 的 GUID 数值/可用性（Win8+，需要   │
- * │     可 seek 字节流，会有一次额外 copy/remux）。                      │
+ * │  1. [已移除] 原用 moov 前置属性让 moov 写在 mdat 前，真机 Finalize   │
+ * │     二次 seek/remux 时稳定报 E_ACCESSDENIED(0x80070005)。本地播放    │
+ * │     无需 faststart，已改回 sink 默认的 moov-after-mdat 布局。         │
  * │  2. H264 compressed-in/identical-out 的 MF_MT_* 属性集，尤其 SPS/PPS │
  * │     （MF_MT_MPEG_SEQUENCE_HEADER）打包格式与 AddStream 时机。         │
  * │  3. 系统 AAC MFT 的 PCM 输入位深/采样率矩阵；0xC00D4A45 触发条件。   │
@@ -637,17 +638,17 @@ private:
         wchar_t wtmp[2048];
         MultiByteToWideChar(CP_UTF8, 0, tmp.c_str(), -1, wtmp, 2048);
 
-        IMFAttributes* attrs = nullptr;
-        IF_FAILED_RETURN(MFCreateAttributes(&attrs, 4), "MFCreateAttributes(writer) 失败");
-        // moov 前置：[NEEDS-VERIFY] GUID 见 mfidl.h 的 MF_MPEG4SINK_MOOV_BEFORE_MDAT。
-        // 置 1：sink 把 moov 写到 mdat 前（需可 seek 流，文件 URL 满足；额外一次
-        // copy/remux 由"临时文件 + 原子发布"承接）。
-        attrs->SetUINT32(MF_MPEG4SINK_MOOV_BEFORE_MDAT, 1);
-
-        // 注意顺序：先把 attrs 交给 SinkWriter（内部会 AddRef），**再** Release 本地引用，
-        // 避免 use-after-free。
-        HRESULT hr = MFCreateSinkWriterFromURL(wtmp, nullptr, attrs, &writer_);
-        attrs->Release();
+        // [修复-真机 E_ACCESSDENIED] 不再设置 moov 前置（faststart）属性。
+        // 真机现象：开启录音走同源路径时，收尾稳定报
+        // "SinkWriter::Finalize 失败（HRESULT 0x80070005）"，.tmp 不发布、无 moov。
+        // 根因：moov 前置要求 sink 在 Finalize 阶段对同一输出文件做二次 seek/remux，
+        // 把 moov 从尾部搬到头部；这一步在真机被拒（拒绝访问）。此前几轮的音频
+        // overflow 修复让 finalize 第一次真正走到 Finalize()，才暴露出这个一直
+        // 被 overflow 提前 return 掩盖的问题。
+        // 本项目录屏保存在本地、由本机播放器双击播放，moov 在尾部完全可播，
+        // 不需要 faststart；用 sink 默认布局即可从根上消除该二次文件访问。
+        // pAttributes 传 nullptr 合法（SDK 文档允许），无需再创建 attrs。
+        HRESULT hr = MFCreateSinkWriterFromURL(wtmp, nullptr, nullptr, &writer_);
         if (FAILED(hr)) { set_error(hr, "MFCreateSinkWriterFromURL 失败"); return hr; }
         tmp_files_.push_back(tmp);
         if (seg_no_ == 1) first_tmp_out = tmp;

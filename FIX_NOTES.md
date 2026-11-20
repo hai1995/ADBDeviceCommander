@@ -7261,3 +7261,36 @@ pyflakes 全绿。native 未改。版本号保持远端 `2026.1120.0726`。
 **仍待真机确认**：本次两处均为可静态证明的根因（read 语义差异、横竖颠倒），真机重跑
 应能过首帧并产出可播放 MP4。若仍失败，下一嫌疑点是该 ROM 直接不支持
 `--output-format=h264`（此时 stderr 会有明确报错，已并入启动失败原因）。
+
+---
+
+## 真机录音收尾 `SinkWriter::Finalize 失败（0x80070005）` 修复
+
+**真机现象**：开启录音走同源路径，录制正常进行，收尾稳定报
+「同源合成失败：SinkWriter::Finalize 失败（HRESULT 0x80070005）」；只留下
+`.p1.tmp.mp4`（未发布、无 moov、不可播），用户拿不到带声成片。不开录音走老
+路径（screenrecord 原生 MP4 + pull）正常——说明问题在 MF SinkWriter 收尾。
+
+**根因链**：`0x80070005 = E_ACCESSDENIED`（拒绝访问）。`ensure_writer()` 里给
+`MFCreateSinkWriterFromURL` 传了带 **moov 前置（faststart）属性** 的 attrs。
+按微软文档，该属性使 MPEG-4 sink 在 `Finalize()` 阶段需对**同一个输出文件做
+二次 seek/remux**、把 moov 从尾部搬到头部——这一步在真机被拒。此前音频 overflow
+修复把「队列超 5s 就提前 return、根本不执行close_writer → Finalize」改成了
+「丢弃音频块、照常走到 Finalize」，才让这个一直被掩盖的问题第一次暴露。该属性
+从 MF 改造落地起就标注 `[NEEDS-VERIFY]`、从未在真机验证过，是唯一一处会在
+Finalize 阶段二次访问输出文件的配置。
+
+**修复**（最小改动、零功能损失）：
+1. `native/adc_mf_sink.cpp::ensure_writer`：移除 moov 前置属性及其 attrs 创建，
+   `MFCreateSinkWriterFromURL` 的 pAttributes 传 `nullptr`，改用 sink 默认的
+   moov-after-mdat 布局。本地录屏由本机播放器双击播放，moov 在尾部完全可播，
+   无需 faststart；从根上消除 Finalize 的二次文件访问。
+2. 同步更正文件头 `[NEEDS-VERIFY]` 说明、`native/README.md` 验证项与平台下限
+   （移除该 Win8+ 属性后下限回到 Win7）、`README.md` 架构说明。
+3. 新增 `tests/test_native_sink_guards.py` 源码守卫：锁定该属性不被重新引入、
+   pAttributes 传 nullptr、Finalize 失败仍上报、发布只在 Finalize 成功后进行。
+
+**验证**：新增 4 项守卫用例；全量测试 + pyflakes + ruff 全绿（见提交说明）。
+native 改动无法在 Linux 沙箱用 MSVC 编译/运行，由 CI Windows runner 的 MSVC
+编译验证；真机收尾是否不再报 `0x80070005` 仍需按 `native/README.md` 确认。
+版本号保持远端 `2026.1120.0834`。
