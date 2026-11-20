@@ -37,6 +37,7 @@ from backend.audio_service import (
     _video_duration,
 )
 from core.constants import adb_kwargs
+from core.ffmpeg_bin import ffmpeg_exe
 from core.longpath import long_path, path_exists, path_getsize
 
 # 单次合并的超时（秒）。`-c copy` 是纯 IO：57 分钟素材（20 段）在机械盘上
@@ -142,7 +143,7 @@ def join_segments(paths, out_path, timeout=None):
                 "skipped": skipped, "reason": None}
     if not _have_ffmpeg():
         return {"ok": False, "path": None, "used": used, "skipped": skipped,
-                "reason": "未检测到 ffmpeg（合并多段视频需要本机安装 ffmpeg 并加入 PATH）"}
+                "reason": "内置 ffmpeg 无法运行（合并多段视频失败，各分段已保留）"}
 
     list_path = out_path + ".concat.txt"
     # 先写临时名再改名：ffmpeg 中途被杀 / 磁盘写满时会留下半个文件，
@@ -158,7 +159,7 @@ def join_segments(paths, out_path, timeout=None):
             return {"ok": False, "path": None, "used": used,
                     "skipped": skipped,
                     "reason": "无法写入合并清单：{}".format(e)}
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        cmd = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
                "-f", "concat", "-safe", "0", "-i", list_path,
                "-c", "copy", temp]
         try:

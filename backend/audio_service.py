@@ -24,6 +24,7 @@ from core.constants import (
     safe_name,
     unique_path,
 )
+from core.ffmpeg_bin import ffmpeg_exe
 from core.longpath import long_path, path_exists, path_getsize
 
 # MMSYSERR / WAVERR 里最常见的几个：报错时直接翻成人话，用户才知道该动哪里。
@@ -77,7 +78,7 @@ def _check_mmresult(mr, what):
 
 def _have_ffmpeg():
     try:
-        r = subprocess.run(["ffmpeg", "-version"], **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
+        r = subprocess.run([ffmpeg_exe(), "-version"], **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
         return r.returncode == 0
     except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         return False
@@ -305,7 +306,7 @@ def ffmpeg_mux(video_path, audio_paths, out_path):
     duration = _video_duration(video_path)
     if not duration:
         return None
-    cmd = ["ffmpeg", "-y", "-i", video_path]
+    cmd = [ffmpeg_exe(), "-y", "-i", video_path]
     for a in audios:
         cmd += ["-i", a]
     # 视频流直接复制（不重编码，保留 screenrecord 的原始画质与速度）；

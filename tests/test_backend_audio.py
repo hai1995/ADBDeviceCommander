@@ -883,3 +883,99 @@ def test_open_prepares_full_wavehdr(monkeypatch):
     assert seen["cb"] == seen["size"], "cbSize 必须是完整 WAVEHDR 尺寸"
     assert seen["size"] == ctypes.sizeof(ctypes.c_void_p) * 4 + 16
 
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg 内置路径解析：打包用户零配置、离线可用
+# ---------------------------------------------------------------------------
+def test_ffmpeg_exe_prefers_bundled(monkeypatch, tmp_path):
+    """内置副本存在时必须优先用它——打包用户不依赖机器是否装过 ffmpeg。"""
+    import core.ffmpeg_bin as fb
+
+    fake = tmp_path / "ffmpeg.exe"
+    fake.write_bytes(b"fake")
+    monkeypatch.setattr(fb, "_bundled_ffmpeg", lambda: str(fake))
+    monkeypatch.setattr(fb, "_imageio_ffmpeg", lambda: "/some/imageio/ffmpeg")
+    monkeypatch.setattr(fb.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    assert fb.ffmpeg_exe() == str(fake)
+    assert fb.ffmpeg_source() == "bundled"
+
+
+def test_ffmpeg_exe_falls_back_to_imageio_then_path(monkeypatch):
+    """没有内置副本时依次回落到 imageio-ffmpeg、PATH，最后才是裸名字。"""
+    import core.ffmpeg_bin as fb
+
+    monkeypatch.setattr(fb, "_bundled_ffmpeg", lambda: None)
+    monkeypatch.setattr(fb, "_imageio_ffmpeg", lambda: "/some/imageio/ffmpeg")
+    monkeypatch.setattr(fb.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    assert fb.ffmpeg_exe() == "/some/imageio/ffmpeg"
+    assert fb.ffmpeg_source() == "imageio"
+
+    monkeypatch.setattr(fb, "_imageio_ffmpeg", lambda: None)
+    assert fb.ffmpeg_exe() == "/usr/bin/ffmpeg"
+    assert fb.ffmpeg_source() == "path"
+
+    monkeypatch.setattr(fb.shutil, "which", lambda name: None)
+    assert fb.ffmpeg_exe() == "ffmpeg"
+    assert fb.ffmpeg_source() == "missing"
+
+
+def test_ffmpeg_mux_uses_resolved_path(monkeypatch, tmp_path):
+    """合成命令的 argv[0] 必须是解析出的 ffmpeg 路径，不能写死 "ffmpeg"。"""
+    import backend.audio_service as au
+
+    resolved = "/opt/app/ffmpeg.exe"
+    monkeypatch.setattr(au, "ffmpeg_exe", lambda: resolved)
+    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
+    monkeypatch.setattr(au, "_media_duration", lambda p: "3.0")
+    monkeypatch.setattr(au, "_mp4_playable", lambda p: True)
+    captured = []
+
+    def fake_run(cmd, **kw):
+        captured.append(list(cmd))
+        open(cmd[-1], "wb").write(b"x" * 4096)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video")
+    a1 = tmp_path / "a.wav"
+    a1.write_bytes(_wav_bytes())
+    out = tmp_path / "out.mp4"
+    assert au.ffmpeg_mux(str(video), [str(a1)], str(out)) == str(out)
+    assert captured[0][0] == resolved, "合成必须用解析出的 ffmpeg 路径"
+
+
+def test_bundled_ffmpeg_found_by_versioned_name(monkeypatch, tmp_path):
+    """内置 ffmpeg 保留 imageio 的版本化文件名（ffmpeg-win-x86_64-v7.1.exe）
+    时也能被找到——--add-binary 用 DEST="." 放到包根，不做重命名。
+    """
+    import core.ffmpeg_bin as fb
+
+    versioned = tmp_path / "ffmpeg-win-x86_64-v7.1.exe"
+    versioned.write_bytes(b"fake")
+    assert fb._find_in_dir(str(tmp_path)) == str(versioned)
+
+
+def test_exact_name_beats_glob(monkeypatch, tmp_path):
+    """目录里同时有 ffmpeg.exe 和版本化名字时，优先精确名 ffmpeg.exe。"""
+    import core.ffmpeg_bin as fb
+
+    (tmp_path / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")).write_bytes(b"exact")
+    (tmp_path / ("ffmpeg-win-x86_64-v7.1.exe" if os.name == "nt"
+                 else "ffmpeg-linux-x86_64")).write_bytes(b"versioned")
+    found = fb._find_in_dir(str(tmp_path))
+    assert found and os.path.basename(found) in ("ffmpeg.exe", "ffmpeg"), found
+
+
+def test_ffmpeg_exe_finds_bundled_in_meipass(monkeypatch, tmp_path):
+    """模拟 PyInstaller 打包态：版本化命名的 ffmpeg 在 _MEIPASS 里能被找到。"""
+    import core.ffmpeg_bin as fb
+
+    fake = tmp_path / "ffmpeg-win-x86_64-v7.1.exe"
+    fake.write_bytes(b"fake")
+    monkeypatch.setattr(fb.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(fb.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(fb.sys, "executable", str(tmp_path / "app.exe"))
+    assert fb.ffmpeg_exe() == str(fake)
+    assert fb.ffmpeg_source() == "bundled"

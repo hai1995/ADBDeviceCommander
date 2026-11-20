@@ -6859,3 +6859,38 @@ waveInOpen 失败，把这一步盖住了。
 - 文档：`README.md` FAQ 第 5 条写清「成功清理 / 失败保留」两种行为。
 - `tests/test_backend_controller.py` 新增 3 条回归：成功清理只留成片、失败保留
   全部中间文件、多设备部分失败仍保留共用 mic wav。
+
+## 内置 ffmpeg：用户无需自行安装即可合成音视频 / 合并分段
+
+- 用户诉求：没装 ffmpeg 的电脑也能正常录带声音的视频。此前合成（audio_service.ffmpeg_mux）
+  与多段合并（video_join）都要求本机装 ffmpeg 并加 PATH，缺了就只能保留无音轨视频 /
+  保留分段。
+- 方案取舍（实测）：
+  - ffmpeg 本身绕不开：没有可用的纯 Python AAC 编码器；Windows Media Foundation 做
+    「H.264 流复制 + 两路音频混流」的 COM 实现过于复杂；设备端合成需 root。
+  - 项目用法很轻：视频 `-c copy` 搬流、音频用 ffmpeg 内置原生 AAC，不需要 x264 等
+    GPL 编码器，故 **LGPL 构建即可**。但 BtbN 的 win64 **LGPL 静态**构建解压后
+    200MB+，超 GitHub 单文件 100MB 上限、塞进 onefile 会胖到 250MB+，无法落地；
+    LGPL-shared 要带一堆 dll、与单文件 exe 冲突。
+  - 最终选 `imageio-ffmpeg`（0.6.x，win exe 83.6MB）：能进仓库依赖、维持单文件、
+    离线可用。其 Python 包是 BSD，但捆绑的 ffmpeg 二进制是 **GPL 构建**——已在
+    README FAQ 第 7 条如实写明：内部/个人使用无碍，对外分发需评估 GPL 源码义务；
+    本项目未用任何 GPL 编解码器特性（视频 -c copy + 内置 AAC）。
+- 实现：
+  - 新增 `core/ffmpeg_bin.py`：`ffmpeg_exe()` 按「内置副本 → imageio-ffmpeg → PATH」
+    解析；`ffmpeg_source()` 诊断来源。只解析 ffmpeg；ffprobe 仍走 PATH，调用方
+    （_mp4_playable / _video_duration）本就有本地解析 MP4 头的兜底，行为不变。
+  - `backend/audio_service.py` / `backend/video_join.py`：所有 `["ffmpeg", ...]`
+    改为 `[ffmpeg_exe(), ...]`（ffprobe 调用保留）。
+  - `build.py`：`bundled_ffmpeg_path()` 从已安装的 imageio-ffmpeg 取平台二进制，
+    `pyinstaller_args` 用 `--add-binary` 把它**重命名为 ffmpeg.exe** 嵌进包根；
+    `EXCLUDE_MODULES` 加 `imageio_ffmpeg` 避免整包再打一份（否则 onefile 白胖 83MB）；
+    `ensure_deps` 加 imageio-ffmpeg。没装依赖时降级为依赖用户 PATH，仍能打包。
+  - 二进制不进 git：仓库里不存 83MB 大文件（避免污染历史 / 超 GitHub 上限），
+    CI / 本地由 requirements.txt 装好后自动嵌入。
+- 文案：README（FAQ 新增第 7 条许可证说明、功能表、分段说明、代码结构）、
+  `frontend/index.html` 两处、`使用说明.txt` 三处、运行时提示（启动告警 / 合成失败 /
+  合并失败）统一改为「ffmpeg 已内置、无需安装」；内置异常时才提示排查。
+- 测试：`tests/test_backend_audio.py` 新增 3 条（内置优先 / imageio→PATH 回退 /
+  合成命令用解析路径）；`tests/test_build.py` 新增 2 条（二进制嵌入并改名 / 无二进制
+  仍能打包）。

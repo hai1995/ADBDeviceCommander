@@ -2199,11 +2199,11 @@ def test_screen_record_start_survives_mic_exception(monkeypatch, tmp_path):
 
 def test_screen_record_start_warns_when_mic_on_but_ffmpeg_missing(
         monkeypatch, tmp_path):
-    """勾了麦克风但本机没有 ffmpeg：开局就要说清「录得到、合不进视频」。
+    """勾了麦克风但内置 ffmpeg 无法运行：开局说清「录得到、合不进视频」。
 
-    回归背景：麦克风开关恢复后，若机器上没装 ffmpeg，用户会录完整场才发现
-    成片没有声音 —— 而 wav 明明就在目录里。提示必须发生在**开始录制时**，
-    不能等收尾。
+    回归背景：ffmpeg 已内置，正常无需安装；但内置二进制若损坏 / 被安全软件
+    拦截，用户会录完整场才发现成片没声音 —— 而 wav 明明在目录里。提示必须
+    发生在**开始录制时**，不能等收尾。
     """
     api = _make_api()
 
@@ -2222,7 +2222,7 @@ def test_screen_record_start_warns_when_mic_on_but_ffmpeg_missing(
     res = api.screen_record_start(None, with_mic=True, save_dir=str(tmp_path))
     assert res.get("ok") is True, res
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("未检测到 ffmpeg" in t and "mic_" in t for t in texts), texts
+    assert any("ffmpeg 无法运行" in t and "mic_" in t for t in texts), texts
     api._rec_session = {}
     api.workers.shutdown(timeout=2.0)
 

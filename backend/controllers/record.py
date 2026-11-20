@@ -114,7 +114,7 @@ class RecordMixin:
         无法稳定承诺；开关留着只会让人以为录进去的是设备声音。
         with_mic：界面已恢复「同步录制电脑麦克风」开关（默认关闭）。录的是**本机
         麦克风**（说话声），不是电脑正在播放的声音；仅 Windows 支持（WinMM），
-        需要系统麦克风隐私权限，停止时需本机 ffmpeg 才能合成进视频。
+        需要系统麦克风隐私权限，停止时用内置 ffmpeg 合成进视频（无需用户安装）。
 
         pointer_location：录屏画面常驻指针准星（设备系统设置
         `settings put system pointer_location 1`，画面 overlay，全版本可用；
@@ -194,15 +194,16 @@ class RecordMixin:
                     "✓ 电脑麦克风已启动（使用系统默认输入设备）：本次录屏会带上本机说话声；"
                     "若成片无声，请到系统「声音设置 → 输入」确认默认设备不是没有信号的虚拟麦克风"
                     "（钉钉 / EV录屏 等会创建这类设备）。")
-                # 麦克风能录，但合成要靠本机 ffmpeg。等录完再报「合成失败」时，
-                # 用户已经录了一整场，来不及补装 —— 开局就把丑话说在前面。
-                # 麦克风仍照常录：wav 会留在录制目录，事后可自行合成。
+                # ffmpeg 已内置，正常情况下这里必为真；仅当内置二进制损坏 / 被
+                # 安全软件拦截时才会走到下面。等录完再报「合成失败」时用户已经
+                # 录了一整场，所以开局就把丑话说在前面。麦克风仍照常录：wav 会
+                # 留在录制目录，事后可自行合成。
                 if not _have_ffmpeg():
                     self._push_toast(
                         "warn",
-                        "⚠ 未检测到 ffmpeg：麦克风会照常录成 mic_*.wav，但停止时"
+                        "⚠ 内置的 ffmpeg 无法运行：麦克风会照常录成 mic_*.wav，但停止时"
                         "无法把声音合成进视频（wav 保留在录制目录，可事后自行"
-                        "合成）。安装 ffmpeg 并加入 PATH 后重启本程序即可自动合成。")
+                        "合成）。可尝试重启程序，或检查安全软件是否拦截了内置组件。")
             else:
                 self._rec_session["mic_started"] = False
                 # 最常见的两种失败是「系统隐私设置没允许桌面应用用麦克风」和
@@ -800,8 +801,9 @@ class RecordMixin:
                             mic_consumed_ok = True
                     else:
                         # 合成失败/产出不可播放时**保留原视频**，并说清原因：
-                        # 「未安装 ffmpeg」只是其中一种，音频为空、ffmpeg 过旧同样会走到这里。
-                        why = "" if _have_ffmpeg() else "（未检测到 ffmpeg）"
+                        # 「内置 ffmpeg 无法运行」只是其中一种，音频为空、ffmpeg 异常
+                        # 同样会走到这里。
+                        why = "" if _have_ffmpeg() else "（内置 ffmpeg 无法运行）"
                         self._push_toast(
                             "warn", f"⚠ 合成音视频失败{why}，原始视频已保存（无音轨）: {vlocal}")
                         if path_exists(vlocal):
