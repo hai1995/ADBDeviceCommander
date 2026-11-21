@@ -7575,3 +7575,67 @@ host 尾点专项 8 项、相关专项 32 项通过；全量 **1621 passed / 1 s
 ruff 全仓全绿。其余方向（版本比较含跨年/单双位月日、下载落地由
 浏览器完成不适用、白名单绕过各形式、normalize 健壮性、FrameServer 随机端口、
 剪贴板 PNG 上限、背压、配置值边界、主入口注入面、前后端常量一致性）均确认无问题。
+
+---
+
+# 第七十二轮：三向深度审查（推送凭据 / CI 发版 / 并发收尾 / 解析正确性）
+
+用户在「继续完善优化」指令下，对后端服务层、核心工具层、前端与构建发布三向
+并行深度审查，共发现并修复 9 处确凿缺陷（全部有代码证据 + 回归测试）。
+
+## 一、安全 / 凭据（高）
+
+1. **[高] push_github.py 超时路径泄露 base64 编码的 PAT**：`_run` 的
+   `TimeoutExpired` 分支把 `args[:3]` 拼进返回值，而 push 的 `args[2]` 正是
+   `http.extraHeader=Authorization: Basic <base64(token)>`；`_explain_push_failure`
+   只 `out.replace(tok)` 打明文码，对 base64 无效，慢网超时即把可逆凭据打进
+   终端 / CI 日志。修复：超时分支改用 `_safe_args` 把认证头参数打码；失败解释
+   再按 `base64("x-access-token:"+tok)` 兜底替换。补 `TimeoutExpired` 回放测试
+   与 base64 回显打码测试。
+
+## 二、CI 发版（中）
+
+2. **[中] release.yml 显式版本号缺 `--apply` 静默失效**：workflow_dispatch
+   填了 version 却执行 `bump_version.py --set`（默认预览不写盘），紧接从文件
+   读回的仍是旧 VERSION，发出错版本。改为 `--apply --set`。补「--set 必须配
+   --apply」的写入行为测试与 workflow 门禁测试。
+
+## 三、并发 / 资源收尾（中）
+
+3. **[中] device_service 强制解锁后旧 owner 唤醒等待方忙自旋**：refresh 的
+   `finally` 无条件 `self._idle.set()`；adb 卡死触发强制解锁后，旧 owner 回来
+   时新 owner 已 clear 并正在刷新，这个 set 让等待方 `_idle.wait` 立即返回、
+   但 `_busy` 仍为真，循环无 sleep → 100% CPU 空转到 12s 超时。改为只在 owner
+   匹配（真正释放）时 set。补并发测试。
+4. **[中] scrcpy 关窗泄漏在途投屏进程**：`_spawn` Popen 后要 sleep
+   START_SETTLE_S 才登记进 `_procs`，该窗口内 `close_all` 遍历不到刚起的进程，
+   「点投屏后 0.7s 内关窗」留下占着 adb 输入的孤儿 scrcpy。新增 `_spawning`
+   登记 + per-serial 关闭标记，Popen 一返回即入账，close_all 两路收；两处关闭
+   分支补删日志。补观察窗口内关窗的线程竞态测试。
+5. **[中] MFWorker stop 丢弃排队调用 + call 无超时**：`_loop` 以 `_stop.is_set()`
+   为退出条件，stop 置位后队列里在途的音频排空 call 被丢弃，caller 卡在
+   `event.wait()`；界面停在「停止中」。改为以 None 哨兵退出、退出前
+   `_drain_pending` 回写错误唤醒所有等待者，`call` 加 15s 超时兜底。补 3 项
+   生命周期测试。
+
+## 四、解析 / 判定正确性（中低）
+
+6. **[中] parse_ls_output 折叠文件名空格 + 误拆普通文件为链接**：`" ".join(
+   parts[name_idx:])` 把 `my  file.txt` 塌成单空格（下载/删除命中错路径）；
+   任何文件名含 ` -> ` 都被拆成 link+target。改用 token 起点从原始行切片保留
+   任意空白，且只在 perm 以 `l` 开头时才拆 ` -> `。补 2 项测试。
+7. **[中] apk 安装失败文本以 success 结尾被误判成功**：`low.strip().endswith(
+   "success")` 让 `adb: failed to install /sdcard/Success` 判成安装成功。改为
+   只认独立 `success` 行且全文无 `failed`/`failure`/`error:`。补 2 项测试。
+8. **[低] quote_serial 尾随换行未加引号**：`_SAFE_SERIAL_RE` 用 `$`，在末尾
+   换行前也匹配，`quote_serial("evil\n")` 不加引号被换行截断。改 `\Z`。补测试。
+
+## 五、超时收尾竞态（低）
+
+9. **[低] shell sentinel 迟到回显 + 超时临界点误报**：超时先把 sentinel 从
+   `_pending` 移除，进程稍后输出该行时 reader 匹配不到、当普通输出回显
+   `__DONE_xxx__|path` 乱码；且超时置 `_abort` 与命令恰好完成存在竞态。修复：
+   reader 用 `_ORPHAN_SENTINEL_RE` 丢弃三类孤立 sentinel 行；超时分支置 abort
+   前双重检查 `done`。补 2 项测试。
+
+**验证**：全量 **1636 passed / 1 skipped**（较上轮 +15），ruff 全仓全绿。

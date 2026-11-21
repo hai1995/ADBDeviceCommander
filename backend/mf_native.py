@@ -73,6 +73,24 @@ class MFWorker:
             self.stop()
             raise MFNativeError(err)
 
+    def _drain_pending(self):
+        """把队列里尚未处理的调用全部回写错误并唤醒等待方。
+
+        stop() 置位后旧实现直接退出 `_loop`，队列里排着的 call（音频排空定时器
+        每 200ms 排一次，停止瞬间常有一两个在途）永远不会被处理，caller 卡在
+        `event.wait()` 上不放。这里在退出前逐项报错，保证没有悬挂线程。
+        """
+        while True:
+            try:
+                item = self._q.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                continue
+            _fn, _args, done = item
+            done["error"] = MFNativeError("MF worker 已停止，调用未执行")
+            done["event"].set()
+
     def _loop(self):
         lib = self._lib
         try:
@@ -82,10 +100,15 @@ class MFWorker:
                 self._started.set()
                 return
             self._started.set()
-            while not self._stop.is_set():
+            # 退出条件以「读到 None 哨兵」为准，而不是 `_stop.is_set()`：
+            # 后者一旦置位就让还在队列里的 call 被丢弃，caller 永久等待。
+            # stop() 先置位再放哨兵，FIFO 保证哨兵之前的调用都被正常执行。
+            while True:
                 try:
                     item = self._q.get(timeout=0.2)
                 except queue.Empty:
+                    if self._stop.is_set():
+                        break
                     continue
                 if item is None:
                     break
@@ -97,16 +120,23 @@ class MFWorker:
                 finally:
                     done["event"].set()
         finally:
+            # 无论正常哨兵退出、超时退出还是异常，都唤醒所有仍在等的 caller。
+            self._drain_pending()
             with __import__("contextlib").suppress(Exception):
                 lib.adc_shutdown()
 
-    def call(self, fn, *args):
-        """在 worker 线程执行 fn(*args)，同步等结果。"""
+    def call(self, fn, *args, timeout=15.0):
+        """在 worker 线程执行 fn(*args)，同步等结果。
+
+        timeout 兜底：万一 worker 异常死亡（native 崩溃、adc_shutdown 卡死），
+        也绝不让调用方无限期挂着——这是界面「停在停止中」的根因之一。
+        """
         if self._thread is None or not self._thread.is_alive():
             raise MFNativeError("MF worker 未启动")
         done = {"event": threading.Event(), "value": None, "error": None}
         self._q.put((fn, args, done))
-        done["event"].wait()
+        if not done["event"].wait(timeout):
+            raise MFNativeError(f"MF worker 调用超时（{timeout:g}s 未返回）")
         if done["error"] is not None:
             raise done["error"]
         return done["value"]

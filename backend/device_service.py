@@ -205,7 +205,11 @@ class DeviceManager:
                 if self._busy_owner == owner:
                     self._busy = False
                     self._busy_since = 0.0
-            self._idle.set()
+                    # 只在真正释放（owner 匹配）时唤醒等待方。被强制解锁的旧
+                    # owner 回来时 owner 已不匹配，此时若仍 set，等待方 _idle
+                    # .wait 会立即返回、但 _busy 仍被新 owner 持着，循环里没有
+                    # sleep，于是忙自旋到 12s 超时（100% CPU + 界面卡顿）。
+                    self._idle.set()
 
     # ------------------------------------------------------------------
     # 刷新互斥

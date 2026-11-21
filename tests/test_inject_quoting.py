@@ -213,3 +213,14 @@ def test_adb_receives_whole_sequence_as_one_arg():
     merged = _merged(["adb shell", "cd /sdcard", "ls -l", "cat a.txt"])
     args = _ps_split_statements(merged)[0]
     assert args == ["adb", "shell", "cd /sdcard; ls -l; cat a.txt"], args
+
+
+def test_quote_serial_quotes_trailing_newline():
+    """序列号尾随换行必须加引号：$ 在串尾换行前也匹配，会把 `evil\\n`
+    当成安全序列号不加引号，拼进命令行后被换行截断。"""
+    from adb_inject import quote_serial
+    assert quote_serial("evil\n").startswith("'"), "含换行的序列号必须被引用"
+    assert quote_serial("evil\r\n").startswith("'")
+    # 普通安全序列号仍保持原样（不能被误伤）
+    assert quote_serial("emulator-5554") == "emulator-5554"
+    assert quote_serial("192.168.1.5:5555") == "192.168.1.5:5555"

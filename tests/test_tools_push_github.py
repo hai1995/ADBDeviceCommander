@@ -7,6 +7,7 @@
 """
 import base64
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -114,6 +115,34 @@ def test_auth_header_is_basic_and_contains_no_plaintext():
     assert TOKEN not in h, "认证头里不能出现 token 明文"
     raw = base64.b64decode(h.split("Basic ", 1)[1]).decode()
     assert raw == "x-access-token:%s" % TOKEN
+
+
+def test_run_timeout_never_echoes_auth_header(monkeypatch):
+    """超时分支曾把 args[2]（base64 认证头）原样拼进返回值——可逆泄露 PAT。"""
+    def _boom(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=300)
+
+    monkeypatch.setattr(pg.subprocess, "run", _boom)
+    rc, out = pg._run(["git", "-c", pg._auth_header(TOKEN), "push", "-u", "origin", "main"],
+                      timeout=300)
+    assert rc == 124
+    assert TOKEN not in out, "超时回显不能出现 token 明文"
+    b64 = base64.b64encode(("x-access-token:" + TOKEN).encode()).decode()
+    assert b64 not in out, "超时回显不能出现 base64 认证头"
+    assert "Authorization" not in out and "extraHeader" not in out
+    assert "***" in out, "凭据参数必须打码"
+    assert "git" in out, "仍要能看出是哪条命令超时"
+
+
+def test_explain_masks_base64_auth_header(capsys):
+    """git 把 base64 认证头回显进报错时，也要被 _explain_push_failure 擦掉。"""
+    b64 = base64.b64encode(("x-access-token:" + TOKEN).encode()).decode()
+    raw = "fatal: http.extraHeader=Authorization: Basic %s rejected" % b64
+    pg._explain_push_failure(raw, TOKEN)
+    out = capsys.readouterr().out
+    assert TOKEN not in out
+    assert b64 not in out and b64.rstrip("=") not in out
+    assert "***" in out
 
 
 def test_push_url_stays_clean(monkeypatch, tmp_path, capsys):

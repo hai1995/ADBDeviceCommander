@@ -63,6 +63,24 @@ def _out(text=""):
         print(text.encode("utf-8", "replace").decode("gbk", "replace"), flush=True)
 
 
+def _safe_args(args):
+    """把命令行参数回显成安全文本：任何疑似凭据的参数一律打码。
+
+    超时分支要把 args 拼进报错文本；而 push 命令的 args[2] 正是
+    `http.extraHeader=Authorization: Basic <base64(token)>`。base64 串可逆
+    （解出来就是明文 PAT），绝不能原样出现在终端 / CI 日志里。
+    """
+    parts = []
+    for a in args:
+        low = str(a).lower()
+        if ("authorization" in low or "extraheader" in low
+                or "github_pat_" in low or low.startswith("basic ")):
+            parts.append("***")
+        else:
+            parts.append(str(a))
+    return " ".join(parts)
+
+
 def _run(args, timeout=180, check=False):
     """跑一条命令，返回 (returncode, 合并后的输出)。不抛异常。"""
     try:
@@ -71,7 +89,8 @@ def _run(args, timeout=180, check=False):
     except FileNotFoundError:
         return 127, f"找不到命令：{args[0]}（Git 是否已安装并加入 PATH？）"
     except subprocess.TimeoutExpired:
-        return 124, f"命令超时（{timeout:d}s）：{' '.join(args[:3])}"
+        # 只回显打码后的参数：args[2] 含 base64 认证头，原文回显等于泄露 PAT。
+        return 124, f"命令超时（{timeout:d}s）：{_safe_args(args[:3])}"
     txt = (p.stdout or b"").decode("utf-8", "replace") + \
           (p.stderr or b"").decode("utf-8", "replace")
     if check and p.returncode != 0:
@@ -451,6 +470,11 @@ def _explain_push_failure(out, tok):
     # 打码：git 在个别版本 / 代理配置下会把认证头回显出来，原文里有 token。
     # 这一步不是可选的礼仪——原文要打给用户看，就必须先擦掉。
     safe = out.replace(tok, "***") if tok else out
+    if tok:
+        # 超时分支等路径可能把 base64 认证头拼进 out；base64 可逆，必须
+        # 按 base64("x-access-token:"+tok) 再擦一遍，明文 replace 打不到它。
+        b64 = base64.b64encode(("x-access-token:" + tok).encode("utf-8")).decode()
+        safe = safe.replace(b64, "***").replace(b64.rstrip("="), "***")
     hints = []
     if ("authentication failed" in low or "401" in low or "bad credentials" in low
             or "invalid username or password" in low):

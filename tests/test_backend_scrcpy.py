@@ -247,3 +247,49 @@ def test_launch_dedupes_concurrent_start(monkeypatch):
     assert spawned == ["A1"], "同一台设备只能启动一次"
     assert first[0]["started"] == ["A1"]
     assert second == {"started": [], "skipped": ["A1"], "failed": []}
+
+
+def test_close_all_during_settle_terminates_spawning(monkeypatch):
+    """点投屏后在 START_SETTLE_S 观察窗口内关窗，不能留下孤儿 scrcpy 进程。
+
+    回归：_spawn 里 Popen 后要 sleep 一段时间才把句柄登记进 _procs；这段窗口内
+    close_all 只遍历 _procs，刚起的进程不在其中，既不被 terminate 也无日志清理，
+    变成占着 adb 输入 / 麦克风的孤儿窗口。
+    """
+    procs = []
+    gate = threading.Event()
+    entered = threading.Event()
+    real_sleep = time.sleep
+
+    def _popen(args, **kwargs):
+        p = _FakeProc(args, stdout=kwargs.get("stdout"))
+        procs.append(p)
+        return p
+
+    def _blocking_sleep(sec):
+        if sec >= 0.5:                    # 只卡 START_SETTLE_S，不卡测试的轮询 sleep
+            entered.set()
+            gate.wait(3)
+        else:
+            real_sleep(sec)
+
+    monkeypatch.setattr(svc.subprocess, "Popen", _popen)
+    monkeypatch.setattr(svc.time, "sleep", _blocking_sleep)
+    monkeypatch.setattr(svc, "START_SETTLE_S", 0.7)
+
+    L = svc.ScrcpyLauncher()
+    done = []
+    th = threading.Thread(target=lambda: done.append(L.launch(["A1"], "/fake/scrcpy")))
+    th.start()
+    deadline = time.time() + 3
+    while not entered.is_set() and time.time() < deadline:
+        real_sleep(0.01)
+
+    assert entered.is_set(), "没能进入观察窗口"
+    assert procs, "Popen 应已执行"
+    L.close_all()                         # 此刻进程已存在，但还没进 _procs
+    gate.set()
+    th.join(3)
+
+    assert procs[0].terminated is True, "观察窗口内关窗必须 terminate 刚起的进程"
+    assert done and done[0]["started"] == [], "关窗后该启动不该被算作成功"

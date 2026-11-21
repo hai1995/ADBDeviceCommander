@@ -24,7 +24,9 @@ _SERIAL_TOKEN = r"(?:'[^']*'|\"[^\"]*\"|\S+)"
 # 序列号里的「安全字符」：字母数字与 . _ : + -
 # 普通序列号（0612333ABC / 192.168.1.5:5555 / emulator-5554）保持原样拼进命令行，
 # 用户在指令台看到的就是熟悉的样子；含空格 / 引号 / 分号等 shell 元字符时才加引号。
-_SAFE_SERIAL_RE = re.compile(r"^[A-Za-z0-9._:+-]+$")
+# 用 \Z 而非 $：Python 的 $ 在末尾换行前也匹配，"evil\n" 会被当成安全序列号
+# 不加引号，拼进命令行后被换行截断、adb 收到错误参数。\Z 才是真正的串尾。
+_SAFE_SERIAL_RE = re.compile(r"^[A-Za-z0-9._:+-]+\Z")
 
 
 def quote_serial(serial: str) -> str:

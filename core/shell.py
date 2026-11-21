@@ -5,11 +5,19 @@ core.shell —— 持久 PowerShell 会话（ShellSession）。
 import contextlib
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
+
+# 已经从 _pending 移除的（超时 / 初始化已完成）sentinel 行，若进程稍后才输出，
+# reader 匹配不到任何 pending，绝不能当普通输出回显到指令台（形如
+# `__DONE_xxx__|C:\path`）。三类标签都要丢弃。
+_ORPHAN_SENTINEL_RE = re.compile(
+    r"^__(?:DONE|INIT_DONE|CD_DONE)_[0-9a-fA-F]+__(?:\|.*)?$",
+)
 
 
 def _kill_tree(proc):
@@ -231,6 +239,11 @@ class ShellSession:
                 if matched_ev is not None:
                     matched_ev.set()
                     continue   # sentinel 行不渲染
+                # 孤立 sentinel：超时 / 初始化早已从 _pending 移除，但进程此刻才
+                # 输出。匹配不到 pending 时不能当普通输出回显（用户会看到一行
+                # `__DONE_xxx__|C:\path` 的乱码）。
+                if _ORPHAN_SENTINEL_RE.match(t):
+                    continue
                 # 正常输出：有 callback 走 callback，否则入队
                 if self.output_callback:
                     with contextlib.suppress(Exception):
@@ -297,6 +310,11 @@ class ShellSession:
         deadline = time.time() + timeout if timeout else None
         while not (done.is_set() or self._abort.is_set() or self._eof.is_set()):
             if deadline and time.time() > deadline:
+                # 双重检查：循环条件判断 done 尚未置位、到这里命令却刚完成
+                # （reader 在超时边界 set 了 done）。此时绝不能再置 _abort，
+                # 否则「命令其实成功了」被记成超时失败、界面同时显示成功与超时。
+                if done.is_set():
+                    break
                 self.last_error = "命令执行超过 {} 秒，已自动终止".format(timeout)
                 self._emit("⏱ {}。".format(self.last_error), "err")
                 # timeout 到了：温和中止当前命令，不 kill 整个会话。

@@ -633,3 +633,27 @@ def test_refresh_does_not_release_a_busy_owned_by_someone_else(monkeypatch):
     mgr.refresh(adb="adb")
     # 7 != 99：本轮没有所有权，不能替别人解锁
     assert mgr._busy is True, "refresh 误释放了别人的刷新互斥锁"
+
+
+def test_stale_owner_does_not_wake_idle_waiters(monkeypatch):
+    """被强制解锁的旧 owner 收尾时不能 set _idle，否则等待方忙自旋。
+
+    回归：refresh 的 finally 无条件 self._idle.set()。adb 卡死触发强制解锁后，
+    新 owner 已 clear _idle 并在刷新；旧 owner 此刻回来仍无条件 set，等待方
+    _idle.wait 立即返回、但 _busy 仍为真，循环里无 sleep → 100% CPU 空转到超时。
+    """
+    mgr = ds.DeviceManager(BackendBus())
+    monkeypatch.setattr(ds.subprocess, "run",
+                        _fake_run_factory(lines=_adb_lines([("A1", "device", "Pixel")])))
+
+    def _fake_acquire(wait, verbose):
+        with mgr._lock:
+            mgr._busy = True
+            mgr._busy_owner = 99        # 别的线程强制解锁后接管
+            mgr._idle.clear()           # 新 owner 正在刷新，idle 应为未置位
+        return 7                        # 本轮是已被剥夺所有权的旧 owner
+
+    monkeypatch.setattr(mgr, "_acquire", _fake_acquire)
+    mgr._idle.clear()
+    mgr.refresh(adb="adb")
+    assert not mgr._idle.is_set(), "旧 owner 收尾误唤醒了等待方（忙自旋根因）"

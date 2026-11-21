@@ -251,3 +251,31 @@ def test_next_version_overflow_is_reported(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "超出可表示范围" in err, err
     assert "Traceback" not in err
+
+
+def test_set_with_apply_really_writes(tmp_path, monkeypatch, capsys):
+    """`--set` 只有配 `--apply` 才写入（release.yml 显式版本号分支依赖此行为）。
+
+    回归：release.yml 曾用 `bump_version.py --set "$version"`（无 --apply），
+    结果只预览不落盘，紧接着从文件读回的仍是旧 VERSION，发出错版本。
+    """
+    root = _make_project(tmp_path, "2026.0101.0000")
+    # main() 内部调用的 read_version/write_version 用的是定义时绑定的默认 root，
+    # 必须直接把这两个函数替成指向 tmp 项目，绝不能碰真实仓库的 VERSION。
+    real_read, real_write = bv.read_version, bv.write_version
+    monkeypatch.setattr(bv, "read_version", lambda *a, **kw: real_read(root))
+    monkeypatch.setattr(bv, "write_version", lambda new, *a, **kw: real_write(new, root))
+    # 没有 --apply：预览，不能写入
+    assert bv.main(["--set", "2026.0101.0100"]) == 0
+    assert real_read(root) == "2026.0101.0000"
+    # 带 --apply：真正写入
+    assert bv.main(["--apply", "--set", "2026.0101.0100"]) == 0
+    assert real_read(root) == "2026.0101.0100"
+
+
+def test_release_workflow_set_flag_has_apply():
+    """release.yml 显式版本号分支必须带 --apply，否则静默发旧版本。"""
+    wf = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    line = [ln for ln in wf.splitlines() if "--set" in ln and "bump_version" in ln]
+    assert line, "没找到 bump_version --set 调用"
+    assert all("--apply" in ln for ln in line), "每一条 --set 调用都必须带 --apply"

@@ -115,7 +115,12 @@ def parse_install_output(text):
         if needle in low:
             return {"ok": False, "code": "", "message": hint}
 
-    if re.search(r"(^|\n)\s*success\s*($|\n)", low) or low.strip().endswith("success"):
+    # 成功只认「独立的一行 Success」。旧实现还 `low.strip().endswith("success")`，
+    # 于是 `adb: failed to install Success`（失败文本恰以包名/路径 "Success" 结尾）
+    # 被误判为成功。现在要求 success 独占一行，且全文没有 failed/error 字样。
+    has_success_line = any(ln.strip() == "success" for ln in low.splitlines())
+    has_failure = re.search(r"\b(failed|failure)\b|\berror\s*:", low) is not None
+    if has_success_line and not has_failure:
         return {"ok": True, "code": "", "message": "安装成功"}
 
     if "performing streamed install" in low and "failure" not in low:

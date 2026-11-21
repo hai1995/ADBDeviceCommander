@@ -109,3 +109,16 @@ def test_format_size():
     assert apk.format_size(2.5 * 1024 ** 3) == "2.5 GB"
     assert apk.format_size(None) == ""
     assert apk.format_size(-1) == ""
+
+
+def test_failed_line_ending_in_success_is_not_success():
+    """`adb: failed to install ...Success` 不能被误判成安装成功。"""
+    res = apk.parse_install_output("adb: failed to install /sdcard/Success")
+    assert res["ok"] is False
+    assert "安装失败" in res["message"] or res["message"]
+
+
+def test_failure_anywhere_disqualifies_success_line():
+    """即便有一行 Success，只要别处出现 failed 也算失败。"""
+    res = apk.parse_install_output("adb: failed to install app.apk\nSuccess")
+    assert res["ok"] is False

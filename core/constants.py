@@ -372,9 +372,16 @@ def parse_ls_output(text: str):
                 continue
         if name_idx >= len(parts):
             continue
-        name = " ".join(parts[name_idx:])
+        # 名字必须从原始行的第 name_idx 个 token 起点切片到行尾，不能
+        # `" ".join(parts[name_idx:])`：后者会把文件名里的连续空格塌成一个
+        # （`my  file.txt` → `my file.txt`），下载/删除时命中错误路径。
+        # token 起点可由 finditer 精确给出，名字里的任意空白原样保留。
+        tokens = list(re.finditer(r"\S+", line))
+        name = line[tokens[name_idx].start():]
         target = None
-        if " -> " in name:
+        # 只有符号链接（perm 以 l 开头）才有 ` -> target` 语义。对普通文件名
+        # 里含 ` -> ` 的（如 `a -> b.txt`）误拆会把文件当成链接、路径也错。
+        if perm.startswith("l") and " -> " in name:
             name, target = name.split(" -> ", 1)
         out.append({
             "perm": perm,

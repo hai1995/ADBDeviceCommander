@@ -81,7 +81,7 @@ jobs:
         id: bump
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
-            python tools/bump_version.py --set "${{ github.event.inputs.version }}"
+            python tools/bump_version.py --apply --set "${{ github.event.inputs.version }}"
           else
             python tools/bump_version.py --apply
           fi

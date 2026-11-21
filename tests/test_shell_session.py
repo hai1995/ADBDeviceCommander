@@ -212,3 +212,36 @@ def test_stdout_decoded_as_utf8(sess):
     否则纯中文输出回显到指令台会乱码（写侧 UTF-8 / 读侧 GBK 的经典不匹配）。"""
     enc = (sess.proc.stdout.encoding or "").lower().replace("-", "")
     assert enc == "utf8", "stdout 应按 UTF-8 解码，实际: {!r}".format(enc)
+
+
+def test_orphan_sentinel_regex():
+    """三类已完成 sentinel 行都要被识别为「孤立」，不能当普通输出回显。"""
+    from core.shell import _ORPHAN_SENTINEL_RE
+    for line in (
+        "__DONE_abc123__",
+        "__DONE_abc123__|C:\\Users\\me",
+        "__INIT_DONE_deadbeef__|/home/me",
+        "__CD_DONE_1a2b__|/sdcard",
+    ):
+        assert _ORPHAN_SENTINEL_RE.match(line), line
+    # 普通输出不能误伤
+    assert not _ORPHAN_SENTINEL_RE.match("hello world")
+    assert not _ORPHAN_SENTINEL_RE.match("__DONE_nothex__|x")  # 非 hex 标签
+
+
+def test_late_sentinel_is_not_echoed(sess):
+    """超时后进程才吐出的 sentinel 行不能回显到指令台。
+
+    回归：超时会先把 sentinel 从 _pending 移除；进程稍后输出该行时 reader
+    匹配不到 pending，旧实现把它当普通输出回显，用户看到 `__DONE_xxx__` 乱码。
+    """
+    assert sess.run("sleep 5", timeout=1) is False
+    sess.out_lines.clear()
+    # 模拟迟到的 sentinel（此刻它已不在 _pending 里）
+    import contextlib
+    with contextlib.suppress(Exception):
+        sess.proc.stdin.write('echo "__DONE_deadbeef__|/home"\n')
+        sess.proc.stdin.flush()
+    time.sleep(0.5)
+    leaked = [ln for ln in sess.out_lines if "__DONE_" in ln]
+    assert not leaked, "迟到的 sentinel 被当普通输出回显了：%r" % leaked

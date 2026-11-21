@@ -178,9 +178,14 @@ class ScrcpyLauncher:
     """
 
     def __init__(self):
-        self._procs = {}            # serial -> Popen
+        self._procs = {}            # serial -> Popen（已确认启动成功）
         self._logs = {}             # serial -> 日志临时文件路径
         self._pending = set()       # 正在 _spawn 中、还没登记进 _procs 的序列号
+        # Popen 一返回就登记到这里，覆盖 _spawn 里 START_SETTLE_S 观察窗口：
+        # 这段时间内进程已存在却还没进 _procs，关窗时 close_all 必须也能收掉它，
+        # 否则「点投屏后 0.7s 内关窗」会留下占着 adb 输入的孤儿 scrcpy 窗口。
+        self._spawning = {}         # serial -> Popen（刚拉起、还在观察是否秒退）
+        self._closing_serials = set()  # 关窗时已标记要收掉的序列号（含在途）
         self._lock = threading.Lock()
 
     # ---- 查询 ----
@@ -274,9 +279,38 @@ class ScrcpyLauncher:
             if f is not None:
                 f.close()      # 子进程持有自己的句柄，父进程关掉不影响它写
 
+        # Popen 一返回就登记：此后直到登记进 _procs 的整个观察窗口内，
+        # close_all 都能看到这个句柄并在关窗时 terminate，杜绝孤儿进程。
+        with self._lock:
+            self._spawning[serial] = p
+            closing = serial in self._closing_serials
+        if closing:
+            # 在登记句柄之前就已经收到关窗信号（窗口极小但确实存在）。
+            with contextlib.suppress(Exception):
+                if p.poll() is None:
+                    p.terminate()
+            with self._lock:
+                self._spawning.pop(serial, None)
+            with contextlib.suppress(Exception):
+                if os.path.exists(long_path(log_path)):
+                    os.remove(long_path(log_path))
+            return False, "程序正在关闭"
+
         # 观察 START_SETTLE_S：秒退说明 scrcpy 自己报错（未授权 / 版本不兼容 / adb 不可用）
         time.sleep(START_SETTLE_S)
         rc = p.poll()
+        with self._lock:
+            self._spawning.pop(serial, None)
+            closing = serial in self._closing_serials
+        if closing:
+            # 观察窗口内关窗：close_all 已从 _spawning 收走句柄，这里兜底 terminate。
+            with contextlib.suppress(Exception):
+                if p.poll() is None:
+                    p.terminate()
+            with contextlib.suppress(Exception):
+                if os.path.exists(long_path(log_path)):
+                    os.remove(long_path(log_path))
+            return False, "程序正在关闭"
         if rc is not None:
             msg = _tail(log_path)
             with contextlib.suppress(Exception):
@@ -291,9 +325,15 @@ class ScrcpyLauncher:
     def close_all(self):
         """关闭程序时收掉本程序开出的投屏窗口（用户自己关的不会受影响）。"""
         with self._lock:
-            procs = list(self._procs.values())
+            # 把所有在途序列号都打上关闭标记：正在 _spawn 观察窗口里的进程
+            # 由 _spawn 自己 terminate（它持有着尚未登记进 _procs 的句柄）；
+            # 已经登记的进程这里直接收。两路合起来才不留孤儿。
+            self._closing_serials.update(self._pending)
+            self._closing_serials.update(self._spawning)
+            procs = list(self._procs.values()) + list(self._spawning.values())
             logs = list(self._logs.values())
             self._procs.clear()
+            self._spawning.clear()
             self._logs.clear()
         for p in procs:
             with contextlib.suppress(Exception):

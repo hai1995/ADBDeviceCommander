@@ -486,3 +486,84 @@ def test_sparse_h264_uses_read1_not_read(monkeypatch):
     assert ok is True, err
     assert sess._first_data.is_set() is True
     sess.cancel()
+
+
+# ------------------------- MFWorker 生命周期 -----------------------------
+
+class _BlockingLib:
+    """native 替身：adc_init 成功；提供一个可阻塞的函数验证悬挂修复。"""
+
+    def __init__(self):
+        import threading as _th
+        self._gate = _th.Event()
+        self.release = _th.Event()
+
+    def adc_init(self):
+        return 0  # ADC_OK
+
+    def adc_shutdown(self):
+        pass
+
+    def adc_last_error(self, buf, n):
+        pass
+
+    def block_forever(self):
+        self._gate.set()
+        self.release.wait(3)
+        return 99
+
+
+def test_worker_call_timeout_raises_instead_of_hanging():
+    """worker 执行的 fn 卡住时，call 必须超时抛错，不能无限期挂住界面线程。"""
+    lib = _BlockingLib()
+    w = mn.MFWorker(lib)
+    w.start()
+    import threading as _th
+    result = {}
+    th = _th.Thread(target=lambda: result.setdefault(
+        "exc", _call_and_catch(w, lib.block_forever, timeout=0.3)))
+    th.start()
+    assert lib._gate.wait(2), "fn 应已开始执行"
+    th.join(3)
+    assert not th.is_alive(), "call 必须超时返回，不能悬挂"
+    assert isinstance(result.get("exc"), mn.MFNativeError)
+    assert "超时" in str(result["exc"])
+    lib.release.set()
+    w.stop()
+
+
+def _call_and_catch(worker, fn, timeout):
+    try:
+        worker.call(fn, timeout=timeout)
+    except Exception as e:  # noqa: BLE001  测试里收集异常
+        return e
+    return None
+
+
+def test_worker_stop_drains_queued_calls():
+    """stop 时队列里排队的 call 必须被回写错误并唤醒，否则 caller 永久挂起。"""
+    import threading as _th
+
+    lib = _BlockingLib()
+    w = mn.MFWorker(lib)
+    w.start()
+    lib._gate.clear()
+    # 第一个 call 卡住 worker；第二个 call 排队
+    blocker = _th.Thread(target=lambda: _call_and_catch(w, lib.block_forever, timeout=5))
+    blocker.start()
+    assert lib._gate.wait(2), "blocker 应已占用 worker"
+
+    queued_result = {}
+    queued = _th.Thread(target=lambda: queued_result.setdefault(
+        "exc", _call_and_catch(w, lambda: 123, timeout=3)))
+    queued.start()
+    _th.Event().wait(0.1)                 # 让第二个 call 确实排进队列
+
+    lib.release.set()                     # 放行第一个 call，worker 继续消费队列
+    w.stop()                              # 停 worker（哨兵在排队调用之后）
+
+    blocker.join(3)
+    queued.join(3)
+    assert not queued.is_alive(), "排队的 call 不能被悬挂"
+    # 哨兵在排队 call 之后入队：FIFO 保证它先被正常执行，stop 不丢弃在途调用。
+    assert queued_result.get("exc") is None, "排队的 call 应被正常执行而非被丢弃"

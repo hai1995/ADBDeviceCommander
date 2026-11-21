@@ -73,3 +73,32 @@ def test_parse_ls_output_toybox_default():
     assert not f["is_dir"] and f["size"] == 123
     ln = next(e for e in ents if e["name"] == "hw")
     assert ln["is_link"] and ln["target"] == "/system/hw"
+
+
+def test_parse_ls_output_preserves_consecutive_spaces_in_name():
+    """文件名里的连续空格必须原样保留，否则下载/删除命中错误路径。"""
+    sample = (
+        "total 8\n"
+        "-rw-r--r-- 1 root root 100 2024-01-01 12:00 my  file.txt\n"
+        "-rw-r--r-- 1 root root 200 2024-01-01 12:00 a\tb.txt\n"
+    )
+    ents = parse_ls_output(sample)
+    names = [e["name"] for e in ents]
+    assert "my  file.txt" in names, names   # 两个空格不能塌成一个
+    assert "a\tb.txt" in names, names       # 制表符同样原样保留
+
+
+def test_parse_ls_output_only_links_split_arrow():
+    """只有符号链接才有 ` -> target`；普通文件名含 ` -> ` 不能被误拆。"""
+    sample = (
+        "total 8\n"
+        "-rw-r--r-- 1 root root 100 2024-01-01 12:00 a -> b.txt\n"
+        "lrwxrwxrwx 1 root root   7 2024-01-01 12:00 hw -> /system/hw\n"
+    )
+    ents = parse_ls_output(sample)
+    plain = next(e for e in ents if e["perm"].startswith("-"))
+    assert plain["name"] == "a -> b.txt"
+    assert plain["target"] is None
+    assert not plain["is_link"]
+    link = next(e for e in ents if e["is_link"])
+    assert link["name"] == "hw" and link["target"] == "/system/hw"
