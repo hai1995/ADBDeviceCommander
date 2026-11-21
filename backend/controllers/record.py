@@ -83,6 +83,15 @@ class RecordMixin:
                                 zip_on_stop=False, logcat_levels=None,
                                 pointer_location=True, show_touches=True):
         """同源录制启动（须持 _rec_lock）。公开 start 的签名与返回结构不变。"""
+        # 守卫：与老路径 _screen_record_start_locked 一致。MF 分支过去没有这道
+        # 检查，录制中再次 start 会覆盖 _rec_session：第一场的 overlay 原值备份
+        # 丢失、mf_capture.start_all 按 serial 顶掉旧 native 会话（旧会话再无引用、
+        # 停止时不会 finalize，MP4 缺 moov、设备 overlay 无法恢复）。
+        if self._rec_session:
+            n = len(self._rec_session.get("videos") or {})
+            msg = f"正在录屏中{f'（{n:d} 台设备）' if n > 1 else ''}，如需重新开始请先点「停止录屏」"
+            self._push_status("info", "ℹ " + msg)
+            return {"ok": False, "reason": "recording", "message": msg}
         serials = self._target_serials(serial)
         if not serials:
             self._push_status("err", "⚠ 录屏前请先勾选至少一个设备。")
@@ -542,6 +551,14 @@ class RecordMixin:
         自带的 3 分钟上限、界面却没有任何「录制中」提示的孤儿会话。
         """
         sess = self._rec_session or {}
+        # 同源录制（MF）会话：画面由 native SinkWriter 落盘、麦克风由 WASAPI
+        # 采集，self._mic 恒为 None、video.stop 对它无效。过去异常撤销漏了这一
+        # 支：native worker（MTA 线程）、设备端 screenrecord、TEMP 裸流全部泄漏，
+        # 下次 start 复用仍存活的旧 worker 导致产物错乱。对照正常 stop 的
+        # _mf_teardown 与 shutdown 的 cancel_all，这里补上同一收尾。
+        if sess.get("mf"):
+            with contextlib.suppress(Exception):
+                self.mf_capture.cancel_all()
         for s in list(sess.get("videos", {}).keys()):
             with contextlib.suppress(Exception):
                 self.video.stop(s)

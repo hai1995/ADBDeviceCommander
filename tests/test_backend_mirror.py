@@ -196,11 +196,13 @@ class _FakeProc:
         self.returncode = 0
         self.killed = False
         self.terminated = False
+        self.waited = False
 
     def poll(self):
         return None
 
     def wait(self, timeout=None):
+        self.waited = True
         return 0
 
     def communicate(self, timeout=None):
@@ -786,3 +788,22 @@ def test_frame_server_start_idempotent_under_concurrency(monkeypatch):
                 s.shutdown()
             with contextlib.suppress(Exception):
                 s.server_close()
+
+
+def test_pipe_stop_waits_killed_procs_and_clears_refs(monkeypatch):
+    """强杀后必须 wait 回收进程表项，并断开会话对被杀 Popen 的引用。
+
+    回归：mirror 的 stop / _close_player / _feed_loop 三处 kill 后都没有 wait，
+    且引用未置 None —— 反复中断/重连会积累僵尸进程与内核句柄，Windows 上
+    累积到句柄上限后全局文件操作失败。
+    """
+    factory = _PopenFactory([[b"x"]])
+    m = _pipe(monkeypatch, factory, rec_guard=lambda: False)
+    assert m.start()[0] is True
+    m.stop()
+    # 被杀的 adb 进程与播放器都要 wait 过
+    killed_adb = [p for p in factory.adb_procs if p.killed]
+    assert killed_adb and all(p.waited for p in killed_adb), "被杀 adb 未 wait"
+    assert all(p.waited for p in factory.players), "被杀播放器未 wait"
+    # 会话引用被清空，Popen 对象可被回收
+    assert m._adb_proc is None and m._player is None

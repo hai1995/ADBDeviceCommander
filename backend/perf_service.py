@@ -1032,8 +1032,11 @@ def evaluate_alerts(samples, thresholds=None):
         if run_start is not None:
             longest = max(longest, max(0.0, prev_t - run_start))
         if longest <= 0 and len(pts) > 1:
-            # 只有单点超标：用平均采样间隔兜个底，别显示「持续 0 秒」
-            span = pts[-1][0] - pts[0][0]
+            # 只有单点超标：用平均采样间隔兜个底，别显示「持续 0 秒」。
+            # t 来自 time.time()，系统时钟回拨时非单调，span 可能为负——
+            # 上面连续段路径已 max(0.0,...)，兜底这里也要，否则报告出现
+            # 「持续 -10.0 秒」比无数据更误导。
+            span = max(0.0, pts[-1][0] - pts[0][0])
             longest = span / float(max(1, len(pts) - 1))
 
         ratio = round(len(bad) * 100.0 / len(pts), 1)

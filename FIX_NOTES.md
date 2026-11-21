@@ -7639,3 +7639,53 @@ ruff 全仓全绿。其余方向（版本比较含跨年/单双位月日、下�
    前双重检查 `done`。补 2 项测试。
 
 **验证**：全量 **1636 passed / 1 skipped**（较上轮 +15），ruff 全仓全绿。
+
+---
+
+# 第七十三轮：异常安全 / 数值边界 / 子进程资源 三向审查（5 项）
+
+用户「继续完善优化」指令下，对错误处理与异常安全、数值边界与编码、子进程与
+系统资源三个全新方向并行审查，发现并修复 5 处确凿缺陷（均有代码证据 + 回归测试）。
+
+## 一、异常安全（MF 录屏）
+
+1. **[高] MF 录屏启动异常后撤销不清 native 资源**：`screen_record_start` 的兜底
+   `except` 调 `_cancel_half_started_rec`，但该函数只停 video/devaudio/mic/logcat，
+   没有 MF 分支。MF 会话 `self._mic` 恒为 None、`video.stop` 对它无效，native
+   worker（MTA 线程）、设备端 screenrecord、TEMP 裸流全部泄漏，下次 start 复用
+   旧 worker 产物错乱。对照正常 stop 的 `_mf_teardown` 与 shutdown 的 cancel_all，
+   在 `_cancel_half_started_rec` 补 `mf_capture.cancel_all()`。
+2. **[中] MF 启动缺重复启动守卫**：`_mf_record_start_locked` 没有老路径的
+   `if self._rec_session` 守卫，录制中再次 start 覆盖会话引用，旧 native 会话
+   再无引用、停止时不 finalize（MP4 缺 moov）、overlay 原值丢失。补同款守卫。
+   两项各补回归测试。
+
+## 二、数值边界
+
+3. **[中] 更新源 size=inf 抛未捕获 OverflowError**：`core/update.py pick_asset`
+   的 `int(a.get("size") or 0)` 对 JSON `1e999`（json.loads 得 `float('inf')`）
+   抛 OverflowError，不在 `(TypeError, ValueError)` 捕获内，检查更新报英文内部
+   错误。自建内网更新源是可配置项，属真实输入。补 OverflowError 到 except。
+4. **[低] 告警「最长持续」在时间倒流时为负**：`backend/perf_service.py`
+   `evaluate_alerts` 单点兜底 `span = pts[-1][0] - pts[0][0]` 未 max(0)，t 来自
+   time.time()、时钟回拨时 span<0，报告出现「持续 -10.0 秒」。上面连续段路径
+   已有 max(0)，兜底补上。两项各补回归测试。
+
+## 三、子进程与系统资源
+
+5. **[中] mirror 强杀子进程未 wait 且引用未清空**：`backend/mirror_service.py`
+   三处 `kill()`（stop / _close_player / _feed_loop）后都没有 `wait()`，且 stop
+   未把 `_adb_proc`/`_player` 置 None。kill 只发信号不回收进程表项，被杀 Popen
+   对象又随会话长期存活、引用计数不归零，`Popen.__del__` 不触发 —— 反复中断/
+   重连累积僵尸进程与内核句柄，Windows 上句柄耗尽后全局文件操作失败。对照
+   file_service._kill_proc / logcat_service._terminate 的标准做法，三处补
+   `wait(timeout=3)`，stop 末尾置引用为 None。补回归测试（验证 kill 后 wait 过
+   且引用清空）。
+
+**验证**：全量 **1641 passed / 1 skipped**（较上轮 +5），ruff 全仓全绿。其余方向
+（吞异常 / 返回值判断 / core 模块 / 除零空集合 / 时间单位 / 编码 / ReDoS /
+audio waveIn 句柄 / video_join ffmpeg 清理 / scrcpy 启动收尾 / MF EDR 工作目录）
+均确认无新的确凿问题。
+
+**暂缓项不变**：麦克风 `MicRecorder._chunks` 无界、多实例并发写 config 无单实例锁
+（详见第七十二轮，需产品决策，未擅改）。

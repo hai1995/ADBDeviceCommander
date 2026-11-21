@@ -159,3 +159,46 @@ def test_mf_probe_size_keeps_landscape_and_caps_edge(monkeypatch, tmp_path):
     real_probe = api.__class__._mf_probe_size.__get__(api)
     assert real_probe("SER1") == (1920, 1080)
     assert seen["max_edge"] == 1920  # 录制上限比投屏 1080 宽松，保留画质
+
+
+def test_mf_start_rejects_duplicate_session(monkeypatch, tmp_path):
+    """MF 路径也要有重复启动守卫：录制中再点「开始」不能覆盖会话引用。
+
+    回归：MF 分支过去没有这层守卫，第二次 start 会顶掉旧 native 会话，
+    旧的再无引用、停止时不 finalize（MP4 缺 moov），overlay 原值也丢失。
+    """
+    api = _api(monkeypatch, tmp_path)
+    fake = FakeMFCapture(available=True)
+    api.mf_capture = fake
+    res1 = api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
+    assert res1["ok"] is True
+    first_session = api._rec_session
+    res2 = api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
+    assert res2["ok"] is False and res2["reason"] == "recording"
+    assert api._rec_session is first_session, "重复启动覆盖了进行中的会话"
+    # start_all 只该被调用一次
+    assert len([c for c in fake.calls if c[0] == "start_all"]) == 1
+
+
+def test_mf_start_exception_cancels_native_resources(monkeypatch, tmp_path):
+    """MF 启动链路抛异常后，异常撤销必须调 mf_capture.cancel_all()。
+
+    回归：_cancel_half_started_rec 过去只停 video/devaudio/mic/logcat，没有
+    MF 分支；而 MF 会话的 self._mic 恒为 None、video.stop 对它无效，导致
+    native worker / 设备 screenrecord / TEMP 裸流全部泄漏。
+    """
+    api = _api(monkeypatch, tmp_path)
+    fake = FakeMFCapture(available=True)
+    api.mf_capture = fake
+    # 让 with_logcat 抓取在 start_all 之后抛异常，触发 start 的整体 except
+    api._target_serials = lambda serial=None: ["SER1"]
+    real_start = api.__class__.screen_record_start.__get__(api)
+
+    def boom(*a, **kw):
+        raise RuntimeError("模拟 logcat 启动异常")
+
+    api.logcat_capture.start = boom
+    res = real_start(serial="SER1", with_mic=True, with_logcat=True, save_dir=str(tmp_path))
+    assert res["ok"] is False and res["reason"] == "start_error"
+    assert any(c[0] == "cancel_all" for c in fake.calls), "异常撤销未清理 MF native 会话"
+    assert api._rec_session == {}

@@ -168,7 +168,10 @@ def pick_asset(assets, prefer: str = ASSET_SUFFIX) -> dict:
             if hit(str(a.get("name") or "").lower()):
                 try:
                     size = int(a.get("size") or 0)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
+                    # JSON 里的 1e999 会被 json.loads 读成 float('inf')，
+                    # int(inf) 抛的是 OverflowError（不是 ValueError）。自建
+                    # 更新源是可配置项，恶意/损坏的 size 不能让检查更新崩掉。
                     size = 0
                 return {"name": a.get("name") or "",
                         "url": a.get("browser_download_url"),

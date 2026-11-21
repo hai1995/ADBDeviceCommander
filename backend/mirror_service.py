@@ -416,6 +416,10 @@ class PipeMirror:
         except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             with contextlib.suppress(Exception):
                 player.kill()
+            # kill 只发信号、不回收进程表项：不 wait 会留下僵尸进程与句柄。
+            # 与 file_service._kill_proc / logcat_service._terminate 的做法一致。
+            with contextlib.suppress(Exception):
+                player.wait(timeout=3)
         self._close_player_pipes(player)
 
     def _close_player_pipes(self, player):
@@ -462,6 +466,10 @@ class PipeMirror:
                     # 一个新的 —— 几轮下来设备端编码器被抢光。
                     with contextlib.suppress(Exception):
                         proc.kill()
+                    # kill 后必须 wait 回收进程表项与句柄，反复中断不 wait 会
+                    # 在 Windows 上累积到句柄耗尽。
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=3)
             if self._stop.is_set():
                 break
             if not self._player_alive():
@@ -528,6 +536,9 @@ class PipeMirror:
             with contextlib.suppress(Exception):
                 if proc.poll() is None:
                     proc.kill()
+            # kill 后必须 wait 回收进程表项与句柄（不 wait 会积累僵尸进程）。
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=3)
             # 关 adb pipe（drain 线程在 self._stop 后也会自己退，但主动关更快释放句柄）
             with contextlib.suppress(Exception):
                 if proc.stdout: proc.stdout.close()
@@ -549,6 +560,11 @@ class PipeMirror:
                                 match="output-format",
                                 fallback_name_kill=not self._rec_active())
         self._close_player()
+        # 断开会话对被杀 Popen 对象的引用：否则对象随会话长期存活，CPython
+        # 引用计数不归零，Popen.__del__ 里的回收不会触发，句柄持续残留。
+        # 此时 _stop 已置位、_close_player 已收尾，feed_loop 下一轮即退出。
+        self._adb_proc = None
+        self._player = None
 
     def _rec_active(self):
         """这台设备（严格说：任意设备）是否正在录屏。

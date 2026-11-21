@@ -1238,3 +1238,15 @@ def test_stop_monitors_falls_back_to_plain_stop():
     m = _Legacy()
     svc.stop_monitors([m, None])
     assert m.stopped == 1
+
+
+def test_evaluate_alerts_clock_rollback_never_negative():
+    """系统时钟回拨（时间倒流）时，超标时长兜底不能为负。
+
+    回归：单点超标用 pts[-1].t - pts[0].t 兜底，t 来自 time.time()，
+    时钟回拨时 span < 0 → 报告出现「持续 -10.0 秒」。
+    """
+    samples = [{"t": 100.0, "fps": 10.0}, {"t": 90.0, "fps": 10.0}]
+    a = svc.evaluate_alerts(samples)
+    assert a and a[0]["longest_s"] >= 0.0
+    assert "持续 -" not in str(a)

@@ -393,3 +393,23 @@ def test_download_size_formats_mb():
     assert update.download_size({"asset": {}}) == ""
     assert update.download_size({}) == ""
     assert update.download_size(None) == ""
+
+
+def test_pick_asset_handles_non_finite_size():
+    """更新源 size 是 1e999（json.loads 得 inf）时不能抛 OverflowError。
+
+    自建内网更新源是可配置项；损坏/恶意的 size 不该让「检查更新」整体崩成
+    英文内部错误。这类值一律按 0 处理（不影响资产 URL 的选择）。
+    """
+    payload = json.loads(
+        '{"tag_name":"v2026.1120.0912","assets":['
+        '{"name":"app_win64.zip","browser_download_url":"http://x/a.zip","size":1e999}]}')
+    got = update.normalize(payload)
+    assert got is not None
+    assert got["asset"]["size"] == 0
+    assert got["asset"]["url"] == "http://x/a.zip"
+    # nan 同样不能崩
+    payload2 = json.loads(
+        '{"tag_name":"v2026.1120.0912","assets":['
+        '{"name":"app_win64.zip","browser_download_url":"http://x/a.zip","size":NaN}]}')
+    assert update.normalize(payload2)["asset"]["size"] == 0
