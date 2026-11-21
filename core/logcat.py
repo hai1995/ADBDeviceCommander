@@ -187,9 +187,16 @@ def match_one_term(rec, term, pkg_pids=None):
     return low in (rec.get("raw") or "").lower()
 
 
-def match_filter(rec, keyword, pkg_pids=None):
-    """整条表达式是否命中（AND 语义；任一排除词命中即整行不通过）。"""
-    for negate, term in split_filter_terms(keyword):
+def match_filter(rec, keyword, pkg_pids=None, terms=None):
+    """整条表达式是否命中（AND 语义；任一排除词命中即整行不通过）。
+
+    ``terms`` 是可选的预解析结果 ``[(negate, term), ...]``。日志洪流下 keyword
+    在会话内固定，每行重做 ``str.split`` + 构造 tuple list 纯属浪费，调用方可
+    预解析一次后透传。不传时仍按 ``keyword`` 现解析，对外行为与旧版完全一致。
+    """
+    if terms is None:
+        terms = split_filter_terms(keyword)
+    for negate, term in terms:
         ok = match_one_term(rec, term, pkg_pids)
         if negate:
             if ok:

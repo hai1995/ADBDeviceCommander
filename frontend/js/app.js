@@ -4887,31 +4887,27 @@
     const g = perfGeom;
     if (!g) return null;
     let anchor = null;
-    for (const s of g.all) {
-      const n = s.pts.length;
-      for (let i = 0; i < n; i++) {
-        const p = s.pts[i];
-        if (p.v === null) continue;
-        const px = perfPointX(g, p, i, n);
-        const d = Math.abs(px - x);
-        if (!anchor || d < anchor.d) anchor = { d, x: px, p };
-      }
-    }
-    if (!anchor || anchor.d > PERF_TIP_TOL) return null;
-    const rows = [];
+    // 一次遍历同时求「全局最近点」（定位十字线）和「每条序列最近点」（各行
+    // 读数）——两者都用同一个 perfPointX 结果，合并后扫描量减半，判定不变。
+    const picks = [];
     for (const s of g.all) {
       const n = s.pts.length;
       let pick = null;
       for (let i = 0; i < n; i++) {
         const p = s.pts[i];
         if (p.v === null) continue;
-        const d = Math.abs(perfPointX(g, p, i, n) - x);
+        const px = perfPointX(g, p, i, n);
+        const d = Math.abs(px - x);
+        if (!anchor || d < anchor.d) anchor = { d, x: px, p };
         if (!pick || d < pick.d) pick = { d, p };
       }
-      if (!pick) continue;
-      rows.push({ serial: s.serial, color: s.color,
-                  label: perfLabelOf(s.serial), value: pick.p.v });
+      if (pick) picks.push({ s, v: pick.p.v });
     }
+    if (!anchor || anchor.d > PERF_TIP_TOL) return null;
+    const rows = picks.map(({ s, v }) => ({
+      serial: s.serial, color: s.color,
+      label: perfLabelOf(s.serial), value: v,
+    }));
     if (!rows.length) return null;
     return { x: anchor.x, y: g.yOf(anchor.p.v), t: anchor.p.t, rows };
   }
@@ -5155,6 +5151,17 @@
     renderPerfRange(model);
   }
 
+  // 悬停提示对全量采样点做最近点搜索（见 perfTipModel），而 pointermove 每秒
+  // 可触发上百次；把提示更新合并到每帧一次，避免鼠标划过时反复全量扫描。
+  let perfTipQueued = false;
+  function queuePerfTip() {
+    if (perfTipQueued) return;
+    perfTipQueued = true;
+    const run = () => { perfTipQueued = false; updatePerfTip(); };
+    if (window.requestAnimationFrame) window.requestAnimationFrame(run);
+    else setTimeout(run, 16);
+  }
+
   function onPerfHover(e) {
     const x = perfLocalX(e);
     if (perfDrag) {
@@ -5164,7 +5171,7 @@
       return;
     }
     perfHoverX = x;
-    updatePerfTip();
+    queuePerfTip();
   }
 
   function queuePerfDraw() {

@@ -17,6 +17,7 @@ backend.logcat_service —— Logcat 实时监控 + 抓取服务（与 UI 无关
                 zipped = 用户勾选「结束后打包 zip」，停止时把整份 txt 打包
                 packaged（仅 stopped）= 本次已打包，前端不再重复弹完成 toast
 """
+import collections
 import contextlib
 import os
 import queue
@@ -333,13 +334,18 @@ class LogcatMonitor:
         # 必须用它：用户把级别全取消勾选、或关键字一个都没命中时，过滤后的行数
         # 天然是 0，拿它当判据就会把正常监控误报成「设备离线」。
         stats = {"seen": 0}
+        # keyword 在会话内固定：预解析一次过滤词，消费循环每行复用（原先每行
+        # 都 str.split + 建 tuple list，日志洪流下每秒数千次无谓分配）。
+        filter_terms = split_filter_terms(keyword) if keyword else []
         # pkg: 过滤需要把包名解析成 pid 集合。pid 会随应用重启变化，所以在
         # 消费循环的空闲分支里定期重解析（见下方 pkg_refresh_at）。
         pkg_pids = self._resolve_pkg_pids(serial, keyword)
         pkg_refresh_at = time.time() + (PKG_PID_REFRESH_S if pkg_pids else 0)
-        # 启动爆发期：先用定长窗口接住历史 dump，只留最近的若干行
+        # 启动爆发期：先用定长窗口接住历史 dump，只留最近的若干行。
+        # deque(maxlen) 让淘汰从 O(n) 的头删变成 O(1)；丢弃计数仍在 append 前
+        # 显式累加（deque 自动淘汰没有回调，计数语义必须与旧版一致）。
         t0 = time.time()
-        boot_buf = []
+        boot_buf = collections.deque(maxlen=BOOT_KEEP_LINES)
         boot_dropped = 0
         in_boot = True
         # 展示行数软上限（滑动 1s 窗口）：设备日志洪流下从源头节流。没有它时，
@@ -374,13 +380,13 @@ class LogcatMonitor:
                 batch, last = [], now
 
             def _end_boot(now):
-                nonlocal in_boot, boot_buf, batch, last
+                nonlocal in_boot, batch, last
                 in_boot = False
                 if boot_buf:
                     self.bus.push("logcat",
                                   {"serial": serial, "status": "append",
-                                   "lines": boot_buf, "total": total, "exc": exc})
-                    boot_buf = []
+                                   "lines": list(boot_buf), "total": total, "exc": exc})
+                    boot_buf.clear()
                 if boot_dropped:
                     self.bus.push(
                         "status",
@@ -414,7 +420,7 @@ class LogcatMonitor:
                 if raw is _LOGCAT_EOF:
                     break
                 item = self._classify_and_filter(raw, levels, keyword, only_exc,
-                                                 stats, pkg_pids)
+                                                 stats, pkg_pids, filter_terms)
                 if item is None:
                     continue
                 if "raw" in item:
@@ -426,10 +432,9 @@ class LogcatMonitor:
                 total += 1
 
                 if in_boot:
-                    boot_buf.append(item)
-                    if len(boot_buf) > BOOT_KEEP_LINES:
-                        boot_buf.pop(0)
+                    if len(boot_buf) >= BOOT_KEEP_LINES:
                         boot_dropped += 1
+                    boot_buf.append(item)
                     if time.time() - t0 >= BOOT_WINDOW_SEC:
                         # 爆发期结束：把攒下的最近若干行作为第一批推给前端
                         # （设备安静时由上面的超时分支负责收尾）
@@ -463,7 +468,7 @@ class LogcatMonitor:
         finally:
             if in_boot and boot_buf:
                 # 爆发期内就结束了：仍然把攒下的行推给前端，不吞数据
-                batch = boot_buf
+                batch = list(boot_buf)
             if batch:
                 self.bus.push("logcat",
                               {"serial": serial, "status": "append",
@@ -552,7 +557,7 @@ class LogcatMonitor:
 
     @staticmethod
     def _classify_and_filter(raw, levels, keyword, only_exc, stats=None,
-                             pkg_pids=None):
+                             pkg_pids=None, terms=None):
         rec = classify_line(raw)
         if rec is None:
             # 非 threadtime 行（标题/分隔/空行）原样保留给前端做纯文本渲染
@@ -565,7 +570,7 @@ class LogcatMonitor:
             return None
         # 过滤表达式（tag:/msg:/pid:/level:/pkg:、- 排除、空格 AND）统一走
         # core.logcat，避免它与前端各写一套规则后悄然漂移。
-        if keyword and not match_filter(rec, keyword, pkg_pids):
+        if keyword and not match_filter(rec, keyword, pkg_pids, terms=terms):
             return None
         return rec
 

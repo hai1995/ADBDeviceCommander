@@ -1743,7 +1743,7 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
     n = len(samples)
     t0 = samples[0].get("t") if samples else None
     t1 = samples[-1].get("t") if samples else None
-    dur = (t1 - t0) if (t0 and t1) else 0
+    dur = max(0.0, t1 - t0) if (t0 and t1) else 0
     dur_txt = f"{dur / 60.0:.1f} 分钟" if dur >= 60 else f"{dur:.0f} 秒"
 
     rows = []

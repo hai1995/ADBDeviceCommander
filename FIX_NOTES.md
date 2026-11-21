@@ -7496,3 +7496,38 @@ rename 特征），不是速率，加 sleep 无效反拉长采样窗口。但"�
 1 skipped、ruff 全仓全绿。其余方向（锁/死锁、进程管道消费者、共享状态竞态、
 异常吞没/假成功、API 500、边界/配置健壮性、前端 DOM XSS/属性注入/事件重复绑定/
 eval）均确认无问题。
+
+---
+
+## 第七十轮：性能优化专项（4 项确凿热点 + 1 项健壮性）
+
+三个只读 agent 并行审查（后端性能 / 前端性能 / perf_service 实测 benchmark），
+逐条验证后只修有实测收益、行为可证不变的热点。
+
+**修复（4 项性能 + 1 项健壮性）**：
+
+1. **[中] logcat 过滤词每行重复切词**：`core/logcat.py match_filter` 旧版每行
+   `split_filter_terms(keyword)`（str.split + 建 tuple list），keyword 会话内固定，
+   洪流每秒数千行纯浪费。加可选 `terms` 参数（不传时行为完全不变），worker 启动
+   预解析一次透传。实测 2 万行过滤 70.1ms→55.2ms（1.27x），每秒省 2 万次分配。
+   差分验证：预解析 vs 逐行解析判定零差异。
+2. **[低-中] 启动爆发期 `boot_buf.pop(0)` O(n) 头删**：`backend/logcat_service.py`
+   改 `deque(maxlen=BOOT_KEEP_LINES)`，头删 O(n)→O(1)；丢弃计数改 append 前显式
+   累加，推送转 `list()`。逐行模拟 2500 行验证保留窗口与 dropped 计数与旧版一致。
+3. **[低] 性能报告时长未钳制下界**：`perf_service.py:1746` 主机时钟回退时报告显示
+   负时长；改 `max(0.0, t1-t0)` 与对比报告对齐。
+4. **[中] 前端 perf 悬停全量扫描无节流**：`app.js onPerfHover` 每个 pointermove
+   同步跑 `perfTipModel`（对最多 20000×设备数 点做最近点搜索），每秒可上百次。
+   加 rAF 节流（`queuePerfTip`，每帧至多一次）；并把 `perfTipModel` 的双遍扫描
+   合并为一遍（同时求全局 anchor 与各序列 pick，共用同一 perfPointX 结果），
+   扫描量减半。行为不变（同一次遍历内 d 判定完全一致）。
+
+**判定为非问题、未改**：
+- perf_service 全套数据处理函数实测线性（n 翻倍耗时×1.5~2.2，非平方）：
+  4 设备×20000 点对比报告 0.712s、单设备 0.163s，且只在用户点「导出」时触发，
+  不在 UI 热路径。`snapshot` 旧 O(n²) 已改 seq 增量复制。无需优化。
+- 其余 agent 报告方向（正则预编译、frozenset、流式落盘、去重短路）均确认已到位。
+
+**验证**：预解析等价性 + deque 淘汰语义专项脚本通过；前端 perf 5 套测试
+（tooltip 19 / multi_device 18 / range_stats 35 / alerts 9 / tab 68）全过；
+全量 Python 1618 passed / 1 skipped、前端 **101 文件 0 失败**、ruff 全仓全绿。
