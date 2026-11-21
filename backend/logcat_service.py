@@ -771,7 +771,14 @@ class LogcatCapture:
             if time.time() >= deadline:
                 return "timeout"
             # 用 Event 而不是 sleep：stop() 会立刻 set，停抓取不必等满一个轮询间隔。
-            wake.clear()
+            # 复查 _stopreq 与 wake.clear() 必须在**同一把锁**内：stop() 在锁内 add
+            # _stopreq、锁外 set wake。若 clear 留在锁外，stop 可能恰在复查之后、
+            # clear 之前 add+set，唤醒被 clear 抹掉，白睡一个轮询周期。锁内复查+清空
+            # 后，stop 的 add 要么已被看到（直接返回），要么其 set 发生在 clear 之后。
+            with self._lock:
+                if serial in self._stopreq:
+                    return "stopped"
+                wake.clear()
             wake.wait(LOGCAT_CAP_RECONNECT_POLL_S)
 
     def _worker(self, serial, path, buffers, levels=None):

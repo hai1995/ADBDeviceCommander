@@ -412,6 +412,10 @@ class DeviceAudioCapture:
                 time.sleep(1.0)
             rc = proc.poll()
         if rc is not None:
+            # 进程已退出，但 poll() 不等于回收：不 wait() 会留下僵尸 Popen，
+            # 反复失败（每次录制都探一次）会累积句柄直到 fd 耗尽。
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2)
             return False, ("tinycap 启动后立即退出（退出码 {}）："
                            "多数机型需要 root 才能录设备端声音，可先执行 adb root 再试".format(rc))
         with self._lock:

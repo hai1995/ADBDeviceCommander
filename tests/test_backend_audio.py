@@ -1049,8 +1049,6 @@ def test_streaming_empty_recording_is_removed(tmp_path):
 
 def test_start_failure_removes_partial_wav(tmp_path, monkeypatch):
     """_open_wav_stream 失败时要释放麦克风句柄并删掉占位文件，不留残片。"""
-    import backend.audio_service as au
-
     # 构造一个干净的、走完整 start 的 recorder：_open 用替身，建流时抛异常
     mr2 = _bare_recorder()
     mr2._stop = threading.Event()

@@ -4231,6 +4231,50 @@ def test_mirror_start_twice_spawns_only_one_window(monkeypatch):
     assert first["started"][0]["mode"] == "pipe"
 
 
+def test_mirror_stop_during_start_cancels_starting_mirror(monkeypatch):
+    """在「启动中」（等首帧最长 6s）窗口内点停止，必须把刚起来的投屏停掉。
+
+    回归：mirror_start 把设备放进 _mirror_starting 后同步等首帧，期间对象还没
+    登记进 _mirror_pipes。mirror_stop 只看登记表，抓不到这台设备，于是返回
+    「已停止」却什么都没停；随后 start 完成登记，投屏继续占用播放器 / adb。
+    """
+    api = _mirror_api(monkeypatch)
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
+    patch_ctrl(monkeypatch, "find_player",
+               lambda pref: ("ffplay", "/bin/ffplay", "PATH"))
+    patch_ctrl(monkeypatch, "plan_size", lambda adb, serial: "")
+    gate = threading.Event()
+    stopped = []
+
+    class _SlowPipe:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            gate.wait(5)             # 模拟等首帧的那几秒
+            return True, ""
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            stopped.append(1)
+
+    patch_ctrl(monkeypatch, "PipeMirror", _SlowPipe)
+    first = {}
+    t = threading.Thread(target=lambda: first.update(api.mirror_start(None, "pipe")))
+    t.start()
+    assert wait_until(lambda: "A1" in api._mirror_starting), "应已进入启动窗口"
+    # 此刻登记表还是空的（首帧未到），但 stop 必须记录停请求。
+    api.mirror_stop(None)
+    gate.set()
+    t.join(5)
+    assert stopped, "启动完成后应立即停掉刚起来的投屏对象"
+    assert first.get("started") == [], "被取消的启动不应报告为「已开启投屏」"
+    assert api.mirror_status()["pipe"] == [], "停止后登记表不应残留该设备"
+    assert "A1" not in api._mirror_stopreq, "停请求处理后应清理标记"
+
+
 def test_mirror_start_recovers_from_dead_entry(monkeypatch):
     """登记表里只剩「已死」的投屏对象时，不能让设备永远卡在「已在投屏」。
 

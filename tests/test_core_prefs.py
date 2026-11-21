@@ -922,7 +922,6 @@ def test_concurrent_processes_do_not_lose_updates(monkeypatch, tmp_path):
     一会儿自己弹回去」。文件锁把跨进程的读-合并-写整体串行化后，两键都应落盘。
     """
     import multiprocessing as mp
-    import time
 
     cfg = str(tmp_path / "config.json")
     barrier = str(tmp_path / "go")

@@ -102,6 +102,11 @@ function mkEnv(opts) {
           }
           if (k === "perf_poll") {
             const next = pollQueue.shift();
+            // __deferred：挂起这一次 poll，由测试手动 resolve，用来构造「停止前
+            // 发出的 poll 在停止之后才回包」的乱序场景。
+            if (next && next.__deferred) {
+              return new Promise((resolve) => { next.__deferred.resolve = resolve; });
+            }
             return Promise.resolve(next || { running: true, seq: 0, samples: [], info: {} });
           }
           if (k === "perf_stop") return Promise.resolve({ ok: true, samples: 3 });
@@ -328,6 +333,42 @@ const WATCHDOG_MS = 30000;
     ok(/offline/.test(doc.getElementById("perf-state").title || ""),
        "中断原因写进 title（悬停可看）");
     ok(doc.getElementById("perf-start").disabled === false, "界面回到可重新开始的状态");
+    window.close();
+  }
+
+  console.log("\n[8b] 停止后迟到的在途轮询回包不得把界面翻回运行中");
+  {
+    // 回归：点停止时若恰有一次 perf_poll 在途（在后端停止前发出），其回包
+    // running=true 晚于 stopPerf 到达。旧逻辑会把 perfRunning 重设为 true，
+    // 界面短暂「复活」并在 finally 续出一条本不该存在的轮询链。epoch 代数
+    // 让这类过期回包整条丢弃。
+    const gate = { resolve: null };
+    const { window, calls } = mkEnv({
+      polls: [
+        { __deferred: gate },                                  // 第一次 poll 挂起
+        { running: true, seq: 1, samples: SAMPLES },            // 迟到回包用
+        { running: false, seq: 1, samples: [] },                // stop 收尾 poll
+      ],
+    });
+    const doc = window.document;
+    await waitFor(() => doc.getElementById("perf-start").disabled === false, 3000, "设备就绪");
+    click(doc, "perf-start");
+    ok(await waitFor(() => gate.resolve !== null, 3000, "首次 poll 挂起"),
+       "开始后首次轮询已在途");
+    click(doc, "perf-stop");
+    ok(await waitFor(() => /已停止/.test(doc.getElementById("perf-state").textContent),
+                     3000, "停止生效"),
+       "停止后状态行为「已停止」");
+    const pollsBeforeLate = callsOf(calls, "perf_poll").length;
+    // 在停止之后放行那条在途 poll，回包仍是「运行中」。
+    gate.resolve({ running: true, seq: 1, samples: [] });
+    await sleep(200);
+    ok(/已停止/.test(doc.getElementById("perf-state").textContent),
+       "迟到的 running=true 回包不把界面翻回监控中");
+    ok(doc.getElementById("perf-start").disabled === false,
+       "迟到回包后「开始」按钮仍可点（未被诈尸续约重新禁用）");
+    ok(callsOf(calls, "perf_poll").length === pollsBeforeLate,
+       "迟到回包不续出新的轮询链");
     window.close();
   }
 

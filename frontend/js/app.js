@@ -4530,6 +4530,10 @@
 
   let perfRunning = false;
   let perfTimer = null;             // 轮询定时器
+  // 会话代数：每次 start/stop 自增。在途 perf_poll 回包如果 epoch 已变（说明期间
+  // 用户点了停止或重新开始），就丢弃其 running 字段、也不续约轮询链——否则旧回包
+  // 会把已停的界面翻回「运行中」，或续出一条本不该存在的轮询链（见 perfPollOnce）。
+  let perfEpoch = 0;
   // serial -> {samples, seq, info, running}。多设备同时监控时每台一份，
   // 各设备的游标（seq）彼此独立：某台掉线重连不会让另一台重复拉取。
   let perfSessions = new Map();
@@ -5512,6 +5516,7 @@
   async function perfPollOnce() {
     perfTimer = null;
     if (!hasApi()) return;
+    const epoch = perfEpoch;   // 记录本次轮询属于哪一代会话
     // 同 pollOnce：续约必须无条件发生。perfIngest 里要做排序 / 画图 / 阈值判定，
     // 任何一个采样点结构异常抛错，都会让曲线永久停在那一帧（界面还显示"采集中"，
     // 用户以为设备卡了，实际是前端轮询链断了）。
@@ -5519,6 +5524,9 @@
       const cursor = perfCursor();
       const res = await callApi(api.perf_poll(
         Object.keys(cursor).length ? cursor : 0));
+      // 在途回包期间若点了停止/重开（epoch 已变）：丢弃这次结果，绝不据此改
+      // 运行状态或续约。否则在 stopPerf 之后的旧回包会把界面翻回「运行中」。
+      if (epoch !== perfEpoch) return;
       if (res) {
         if (res.info && res.info.serial) perfInfo = res.info;
         perfIngest(res);
@@ -5545,7 +5553,9 @@
           + "（采样仍在后台继续，曲线可能缺几个点）", "err", "");
       } catch (_) { /* 提示本身失败也不能中断轮询 */ }
     } finally {
-      if (perfRunning) perfTimer = setTimeout(perfPollOnce, PERF_POLL_MS);
+      // 只在会话代数没变时才续约：stopPerf 会让 epoch 自增，那条链必须在这里
+      // 终止，不能因为在途回包晚到而「诈尸」续出新的轮询。
+      if (epoch === perfEpoch && perfRunning) perfTimer = setTimeout(perfPollOnce, PERF_POLL_MS);
     }
   }
 
@@ -5791,6 +5801,11 @@
   async function startPerf() {
     const list = checkedDevices();
     if (!list.length) { showToast("warn", "请先在左侧勾选至少一台受控设备"); return; }
+    // 自增会话代数：让任何在途的旧轮询回包失效。并在 await 之前就把 running
+    // 置位——否则 perf_start 要 1~2s 才返回，这期间「开始」按钮仍可点，双击会
+    // 连发两次 perf_start，后端重建会话把第一次掐掉，界面状态错乱。
+    const epoch = ++perfEpoch;
+    setPerfRunning(true);
     const ms = Math.min(10000, Math.max(200, parseInt(els.perfInterval.value, 10) || 1000));
     els.perfInterval.value = String(ms);
     perfSessions = new Map();
@@ -5806,8 +5821,11 @@
     const res = await callApi(api.perf_start(
       null, ms, perfPkg));
     markBtnBusy(els.perfStart, false);
+    // 期间又触发了 stop / 另一次 start：本次结果已过期，丢弃。
+    if (epoch !== perfEpoch) return;
     if (!res || res.ok === false) {
       const why = (res && (res.error || res.reason)) || "未知原因";
+      setPerfRunning(false);   // 回滚 await 前的置位，恢复「开始」按钮
       setPerfState("启动失败", "err", why);
       showToast("err", "性能监控启动失败：" + why);
       return;
@@ -5840,6 +5858,9 @@
   }
 
   async function stopPerf() {
+    // 先自增代数：让此刻在途的 perf_poll 回包全部失效，避免它晚到把已停界面
+    // 翻回「运行中」。setPerfRunning(false) 也会掐断已排队的轮询定时器。
+    ++perfEpoch;
     markBtnBusy(els.perfStop, true);
     await callApi(api.perf_stop());
     setPerfRunning(false);

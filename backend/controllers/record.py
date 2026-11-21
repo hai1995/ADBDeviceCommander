@@ -1607,8 +1607,27 @@ class RecordMixin:
             except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 res = {"error": str(ex)}
             finally:
+                # 与 mirror_stop 在同一把锁下「复位启动标记 + 取出被要求停止的实例」：
+                # _start_one_mirror 同步等首帧最长 6s，期间 mirror_stop 可能已进来
+                # 标记了停请求却摘不到对象（还没登记）。这里登记完成后复查，命中
+                # 就把刚起来的对象拿出来，锁外停掉，避免投屏在用户点停止后继续占用
+                # 播放器 / adb / screenrecord。
                 with self._mirror_lock:
                     self._mirror_starting.discard(s)
+                    stop_requested = s in self._mirror_stopreq
+                    if stop_requested:
+                        self._mirror_stopreq.discard(s)
+                        stopped_m = (self._mirror_pipes.pop(s, None)
+                                     or self._mirror_snaps.pop(s, None))
+                    else:
+                        stopped_m = None
+                if stop_requested:
+                    with contextlib.suppress(Exception):
+                        if stopped_m is not None:
+                            stopped_m.stop()
+            if stop_requested:
+                # 用户已明确要求停止：这次启动当作取消，别报「已开启投屏」。
+                continue
             if res.get("mode"):
                 started.append({"serial": s, "mode": res["mode"],
                                 "frame_url": res.get("frame_url") or ""})
@@ -1632,6 +1651,13 @@ class RecordMixin:
         """停止备用投屏（管道 / 低帧率预览），不含 scrcpy 窗口（由用户自己关）。"""
         targets = self._target_serials(serial)
         stopped = []
+        # 启动窗口内（_start_one_mirror 同步等首帧）设备还没进表，mirror_stop
+        # 单看表会漏掉它们。持锁把「正在启动」的目标记进 stopreq：start 登记
+        # 成功后会复查该标记并立刻停掉刚起来的实例（见 mirror_start 的 finally）。
+        with self._mirror_lock:
+            for s in self._mirror_starting:
+                if not targets or s in targets:
+                    self._mirror_stopreq.add(s)
         for s, m in list(self._mirror_pipes.items()):
             if targets and s not in targets:
                 continue

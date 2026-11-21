@@ -74,6 +74,10 @@ class WebApiBase:
         # 的话，连点两次「投屏」会各走一遍启动流程（scrcpy 那边已修过同一个
         # 坑，这里当时漏了）。
         self._mirror_starting = set()
+        # 「启动中又被要求停止」的设备：mirror_stop 在锁内记录，mirror_start
+        # 登记成功后复查——覆盖「点投屏后 6s 内点停止，此时投屏对象还没进表」
+        # 的窗口（与 scrcpy 的 per-serial 关闭标记同一个坑）。
+        self._mirror_stopreq = set()
         self._mirror_lock = threading.Lock()
         # 性能监控：可同时监控多台受控设备（用于横向对比），上限 PERF_MAX_DEVICES。
         # 每台一条独立采样线程 + 一份环形缓冲，前端按 serial 分色画多线。
