@@ -298,7 +298,7 @@ def _write_crash_log(title, exc_type, exc, tb):
             # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
             # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
             path = unique_path(os.path.join(d, f"crash_{stamp}.log"))
-            with open(path, "w", encoding="utf-8") as f:
+            with open(long_path(path), "w", encoding="utf-8") as f:
                 f.write(text)
             return path
         except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值

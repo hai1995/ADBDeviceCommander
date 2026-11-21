@@ -791,6 +791,13 @@ class SnapMirror:
                 self._stop.wait(wait)      # stop() 会提前唤醒
             if self._stop.is_set():
                 break
+        # 链路断了（拔线/离线/连抓失败）时把帧服务里的最后一帧也清掉，否则
+        # 前端 <img src=frame_url> 会一直显示那张冻结的旧画面，用户以为设备
+        # 屏幕本来就没变。stop() 主动停止时已 drop（且下面回调也不发），这里
+        # 再 drop 一次是幂等的，只补上「线程自己 break 退出」这一条路径。
+        if not self._stop.is_set():
+            with contextlib.suppress(Exception):
+                self.server.drop(self.serial)
         # 主动停止不是中断：不再回调 on_status，避免刚提示「已停止投屏」
         # 又紧跟一条红色「投屏已中断」（原因见 PipeMirror._emit 的说明）。
         if self.on_status and not self._stop.is_set():

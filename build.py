@@ -812,14 +812,18 @@ def main(argv=None) -> int:
     copied = copy_side_files(target)
     print("[4/4] 已拷贝同目录文件：{}".format("、".join(copied)))
 
-    # 6) 产物完整性自检（仅告警）：确认 exe 与「可编辑同目录文件」都确实落盘。
-    # 核对 exe 本体是否落盘，避免发出缺文件的残包。
-    # 这里自动核对一遍，缺项直接提示，避免发出残包。
+    # 6) 产物完整性自检：确认 exe 与运行时依赖确实落盘。
+    # 这里是发布前的最后一道闸门——发现缺 exe / 体积异常 / onedir 缺依赖时
+    # 必须**中止并失败**，不能只打警告：此前残包会被 CI 当成成功上传为 Release，
+    # 用户下载解压后根本打不开，且全程无人报错。自检失败的代价是构建变红，
+    # 远好过把不能运行的包发到用户手里。
     problems = verify_dist(target, args.mode, exe)
     if problems:
-        print(f"[警告] 产物完整性自检发现 {len(problems):d} 项问题：")
+        print(f"[错误] 产物完整性自检发现 {len(problems):d} 项问题，中止发布：",
+              file=sys.stderr)
         for _p in problems:
-            print(f"        - {_p}")
+            print(f"        - {_p}", file=sys.stderr)
+        return 6
 
     if args.zip:
         make_source_zip(ROOT, args.dist_dir)

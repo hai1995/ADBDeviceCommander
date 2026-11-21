@@ -7531,3 +7531,47 @@ eval）均确认无问题。
 **验证**：预解析等价性 + deque 淘汰语义专项脚本通过；前端 perf 5 套测试
 （tooltip 19 / multi_device 18 / range_stats 35 / alerts 9 / tab 68）全过；
 全量 Python 1618 passed / 1 skipped、前端 **101 文件 0 失败**、ruff 全仓全绿。
+
+---
+
+## 第七十一轮：更新流程 / 投屏截图 / 配置持久化 三向审查
+
+三个只读 agent 并行审查（更新流程完整性、投屏截图剪贴板音频链路、配置持久化
+与文件系统边界），逐条验证后修复 6 项、暂缓 2 项高风险项。
+
+**修复（6 项）**：
+1. **[中] 截图临时文件永久堆积**：`save_file=False` 的截图写 TEMP（前缀
+   `adc_shot_`），screen_service 注释承诺「随启动清理」却从未实现——不在
+   `DEFAULT_PREFIXES`、正常路径也没人删。`core/tmpfiles.py` 新增 `SHOT_PREFIX`
+   并纳入 `DEFAULT_PREFIXES`，由 `boot_sweep` 兑现承诺。补专项测试。
+2. **[中] 镜像断链残留冻结帧**：`SnapMirror._loop` 连抓失败 break 后没清帧，
+   前端 `<img>` 一直显示旧画面。`_loop` 退出时（非主动 stop）drop 该 serial 的
+   帧；stop() 路径原有 drop 幂等。断链测试加 `get_frame is None` 断言。
+3. **[中] 残包被当正常 Release 发布**：`build.py main()` 的 verify_dist 此前只
+   打警告仍 return 0，CI 再把缺 exe 的 zip 上传为 Release。改为自检失败返回
+   专用码 6 并中止出包。补 `test_main_aborts_when_integrity_check_fails`。
+4. **[低] host 白名单尾点口径不一致**：`controller._host_allowed` 未去尾点，
+   与 `update.py feed_url_allowed` 不一致——feed 配 `github.com.` 时「检查更新」
+   放行、「打开下载页」被误拒。`host` 和 `extra` 两侧都加 `.rstrip('.')`。补测试。
+5. **[低] 崩溃日志长路径半修**：`main.py` 崩溃日志 `open(path)` 未套 long_path，
+   装在前缀 >240 字符目录时写不进——同函数 makedirs 已套，属遗漏。补上。
+6. **[低] 配置临时文件名不统一**：`ensure_prefs_file`/`_migrate_legacy_file` 用
+   固定 `config.json.tmp`，而 `_atomic_write` 用 uuid 唯一名；多实例首启争抢
+   固定名会一方 replace 失败。两处改 uuid 唯一名，与原子写策略一致。
+
+**暂缓（2 项，需用户确认/高风险，未改）**：
+- **[中] 麦克风 `MicRecorder._chunks` 无界累积**：长时间电脑麦克风录音（约
+  10MB/分钟）常驻内存，stop 时 join 翻倍。根治需改「边采边写 WAV + 回填 RIFF
+  头」，涉及 Windows waveIn 回调与文件 I/O 并发重构，且会动到大量以 `_chunks`
+  断言的现有测试；该路径是电脑麦克风（与用户主诉的录屏 native 路径无关），
+  收益真实但改动面大，本轮不动，留作后续专项。
+- **[中] 多实例并发写 config 丢失更新 / 无单实例锁**：`threading.Lock` 只护进程
+  内，两实例各自 load→merge→replace 会后者覆盖前者。根治要加 Win32
+  `CreateMutex` 单实例并激活旧窗口——这是产品行为变更（从允许多开改为单开），
+  需用户确认，本轮不擅自改。
+
+**验证**：新增 3 项测试（截图清理 / 构建中止 / host 尾点）+ 断链测试加断言；
+host 尾点专项 8 项、相关专项 32 项通过；全量 **1621 passed / 1 skipped**；
+ruff 全仓全绿。其余方向（版本比较含跨年/单双位月日、下载落地由
+浏览器完成不适用、白名单绕过各形式、normalize 健壮性、FrameServer 随机端口、
+剪贴板 PNG 上限、背压、配置值边界、主入口注入面、前后端常量一致性）均确认无问题。

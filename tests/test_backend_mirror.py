@@ -465,6 +465,8 @@ def test_snap_gives_up_after_consecutive_grab_failures(monkeypatch):
         assert m.grabs == 1 + svc.SNAP_MAX_FAILS, (
             "放弃之后不该再抓帧：首帧 1 次 + 连续失败 %d 次就该收手（实际 %d 次）"
             % (svc.SNAP_MAX_FAILS, m.grabs))
+        assert srv.get_frame("S1") is None, (
+            "断链后必须清掉最后一帧，否则前端 <img> 一直显示冻结旧画面")
     finally:
         m.stop()
         srv.stop()

@@ -39,13 +39,14 @@ VIEW_PREFIX = "adb_view_"
 UPLOAD_PREFIX = "adb_up_"
 DEVAUDIO_PREFIX = "adb_devaudio_"
 SCRCPY_LOG_PREFIX = "adc_scrcpy_"
+SHOT_PREFIX = "adc_shot_"     # 关闭「自动保存文件」时的截图（仅预览/剪贴板用，见 screen_service）
 # 同源录制（mf_capture_service）在系统 TEMP 里的共享工作目录前缀。
 # 放在 core 层作为单一来源：cleanup 与创建两处都用它，避免前缀漂移导致
 # 「建了却没人清」的 TEMP 堆积。它不在 DEFAULT_PREFIXES —— 那是文件前缀，
 # 工作目录是目录，清理走专门的 sweep_workdirs（shutil.rmtree 递归）。
 MF_WORKDIR_PREFIX = "adc_mf_"
 DEFAULT_PREFIXES = (VIEW_PREFIX, UPLOAD_PREFIX, DEVAUDIO_PREFIX,
-                    SCRCPY_LOG_PREFIX)
+                    SCRCPY_LOG_PREFIX, SHOT_PREFIX)
 
 
 def _candidates(directory, prefixes):

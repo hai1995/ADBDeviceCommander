@@ -332,6 +332,21 @@ def test_update_open_reports_browser_failure(api, monkeypatch):
     assert "打开浏览器失败" in res["reason"]
 
 
+def test_host_allowed_strips_trailing_dot_consistently():
+    """带尾点的绝对 FQDN（DNS 合法）必须与 feed 校验同口径放行。
+
+    update.py 的 feed_url_allowed 用 rstrip('.')，controller._host_allowed 此前
+    没有——于是 feed 配 https://github.com./ 时「检查更新」放行、「打开下载页」
+    却被白名单误拒。extra（来自 feed 的 hostname）也要去尾点，判定才一致。
+    """
+    from backend.controller import _host_allowed
+    assert _host_allowed("https://github.com./hai1995/ADBDeviceCommander") is True
+    assert _host_allowed("https://github.com/x/y", extra=("intra.example.com.",)) is True
+    # 非白名单仍拒绝，去尾点没有放宽安全边界
+    assert _host_allowed("https://github.com.evil.com/x") is False
+    assert _host_allowed("https://evil.com/x", extra=("github.com.",)) is False
+
+
 def test_update_open_does_not_claim_success_when_browser_refuses(api, monkeypatch):
     """webbrowser.open 返回 False（但不抛）时不能说「已打开」。
 

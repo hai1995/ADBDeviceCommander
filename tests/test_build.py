@@ -744,6 +744,34 @@ def test_win_package_name_matches_update_asset_suffix():
     assert build.win_package_name().startswith("ADBDeviceCommander_v")
 
 
+def test_main_aborts_when_integrity_check_fails(monkeypatch, tmp_path, capsys):
+    """产物完整性自检不通过必须以失败码中止，绝不打包发布残包。
+
+    此前 verify_dist 只打警告、main 仍 return 0，CI 再把 zip 当成功上传——
+    用户下载到一个没有 exe（或体积异常）的包，解压后根本打不开。
+    """
+    exe_name = build.APP_NAME + (".exe" if os.name == "nt" else "")
+    staged = tmp_path / "build" / "dist_stage"
+    staged.mkdir(parents=True)
+    (staged / exe_name).write_bytes(b"MZ" * (2 * 1024 * 1024))
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "_file_locked", lambda p: False)
+    monkeypatch.setattr(build, "run_pyinstaller", lambda args, dry: (0, ""))
+    # 模拟自检发现残包（真实场景：打包收尾竞态 / exe 被误删）
+    monkeypatch.setattr(build, "verify_dist",
+                        lambda *a, **k: ["主程序缺失： simulated"])
+    packaged = []
+    monkeypatch.setattr(build, "make_win_package",
+                        lambda *a, **k: packaged.append(1))
+    rc = build.main(["--onefile", "--no-deps", "--package",
+                     "--work-dir", str(tmp_path / "build"),
+                     "--dist-dir", str(tmp_path / "dist")])
+    assert rc == 6, "自检失败应返回专用失败码，实际 %r" % rc
+    assert packaged == [], "自检失败时绝不能继续打 zip"
+    assert "中止发布" in capsys.readouterr().err
+
+
 def test_verify_dist_ok(tmp_path):
     target = tmp_path / "dist"
     target.mkdir()

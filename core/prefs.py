@@ -436,7 +436,10 @@ def ensure_prefs_file() -> str:
     lp = long_path(p)
     if os.path.exists(lp):
         return p
-    tmp = p + ".tmp"
+    import uuid
+    # 唯一临时名（与 _atomic_write 同策略）：多实例首次启动同时补建时，固定
+    # 的 config.json.tmp 会被两方争抢、一方 os.replace 因 tmp 已被移走而失败。
+    tmp = f"{p}.{uuid.uuid4().hex[:8]}.tmp"
     ltmp = long_path(tmp)
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
@@ -566,7 +569,10 @@ def _migrate_legacy_file():
     clean, _w = sanitize_prefs(_migrate_keys(data))
     try:
         import json
-        tmp = p_new + ".tmp"
+        import uuid
+        # 与 _atomic_write / ensure_prefs_file 一致用唯一临时名，避免多实例
+        # 同时迁移旧配置时争抢固定 .tmp。
+        tmp = f"{p_new}.{uuid.uuid4().hex[:8]}.tmp"
         ltmp = long_path(tmp)
         with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)

@@ -100,11 +100,14 @@ def _host_allowed(url: str, extra=()) -> bool:
         return False
     if p.scheme not in ("http", "https"):
         return False
-    host = (p.hostname or "").lower()
+    # 去尾点：DNS 合法绝对 FQDN（如 github.com.）与 feed_url_allowed 的判定
+    # 必须一致，否则「检查更新」放行、打开下载页却被白名单误拒。
+    host = (p.hostname or "").lower().rstrip(".")
     if not host:
         return False
     for h in tuple(_UPDATE_HOSTS) + tuple(extra):
-        h = (h or "").lower().strip()
+        # extra 来自 feed 的 hostname，同样要去尾点，才能和上面 host 的判定一致
+        h = (h or "").lower().strip().rstrip(".")
         if h and (host == h or host.endswith("." + h)):
             return True
     return False

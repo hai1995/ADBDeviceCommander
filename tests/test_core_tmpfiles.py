@@ -145,6 +145,21 @@ def test_boot_sweep_covers_scrcpy_logs(tmp_path):
     assert os.path.exists(keep)
 
 
+def test_boot_sweep_covers_shot_preview(tmp_path):
+    """关闭「自动保存文件」时的截图也纳入启动清理。
+
+    screen_service 注释承诺这些 adc_shot_*.png「随程序退出/启动被清理」，但它们
+    既不在保存目录、正常路径也没人主动删；此前不在 DEFAULT_PREFIXES 里，等于
+    永久堆积在 %TEMP%（每张数 MB，关掉自动保存反复截图会越积越多）。
+    """
+    shot = _mk(tmp_path, "adc_shot_A1_112133_1.png", age_s=7200)
+    keep = _mk(tmp_path, "screenshot_A1_112133_1.png", age_s=7200)  # 保存目录那种，前缀不同
+    stat = tmpfiles.boot_sweep(min_age_s=3600.0, directory=str(tmp_path))
+    assert stat["removed"] == 1, stat
+    assert not os.path.exists(shot), "预览截图应被启动清理"
+    assert os.path.exists(keep), "非预览前缀的文件不能动"
+
+
 def _mk_workdir(dirp, name, age_s=0):
     """造一个带 .tmp.mp4 中间态的工作目录，并可选地回拨 mtime。"""
     d = os.path.join(str(dirp), name)
