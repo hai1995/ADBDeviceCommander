@@ -483,7 +483,11 @@ class MicRecorder:
         self.channels = channels
         self.rate = rate
         self.sample_bits = sample_bits
+        # _chunks 只在「不经 start() 的构造」（单测）里作为兜底使用；正常录音
+        # 路径由 _wav_fp 流式写盘，PCM 不堆在内存里（见 _append_audio_locked）。
         self._chunks = []
+        self._wav_fp = None          # 已打开的 WAV 落盘句柄（流式写入）
+        self._data_bytes = 0         # 已写入的 data 段字节数（回填 WAV 头用）
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._running = False
@@ -560,7 +564,7 @@ class MicRecorder:
             n = hdr.dwBytesRecorded
             if n and hdr.lpData:
                 with self._lock:
-                    self._chunks.append(ctypes.string_at(hdr.lpData, n))
+                    self._append_audio_locked(ctypes.string_at(hdr.lpData, n))
                     # 标记这块已收集：stop() 排空缓冲区时据此跳过，避免重复叠加（重影）
                     self._collected.add(int(hdr.lpData or 0))
             if not self._stop.is_set():
@@ -637,6 +641,8 @@ class MicRecorder:
         self._path = unique_path(os.path.join(save_dir, f"mic_{ts}.wav"))
         self._chunks = []
         self._collected = set()
+        self._wav_fp = None
+        self._data_bytes = 0
         self._stop.clear()
         try:
             self._open()
@@ -646,6 +652,15 @@ class MicRecorder:
             # 录音软件都拿不到设备 —— 而界面上只有一句「无法开始录音」，
             # 重启程序才恢复。_running 仍为 False，stop() 不会代劳。
             self._release_device()
+            raise
+        # 必须在 _open() 成功后建头：_open() 会按实际打开的格式降级
+        # self.channels / self.rate（见那里），头部参数以实际值为准。
+        # 若建头失败（只读盘 / 路径被占用），同样要释放已开的麦克风句柄。
+        try:
+            self._open_wav_stream()
+        except Exception:
+            self._release_device()
+            self._close_wav_stream(remove=True)
             raise
         self._running = True
         return True, self._path
@@ -696,8 +711,63 @@ class MicRecorder:
             winmm.waveInClose(hwi)
         self._wavein = None
 
+    # ---- 流式落盘（根治 _chunks 无界累积）--------------------------------
+    # 背景：44100Hz / 2ch / 16bit ≈ 172 KB/s，录 10 分钟就往 _chunks 堆 ~100MB，
+    # 1 小时 >600MB；stop() 的 b"".join 还要再复制一份，峰值翻倍 → 长录屏 + 麦克风
+    # 直接把内存吃满。改为边录边写文件：内存里只留极小的文件写缓冲，与录制时长无关。
+    def _open_wav_stream(self):
+        """打开目标 WAV 并写入 44 字节占位头（RIFF/data 长度先填 0，收尾回填）。
+
+        必须在 _open() 之后调用：_open() 会按实际打开的格式降级 channels/rate，
+        头部只能用实际的格式写，否则播放器按错误参数解码（音高/时长全错）。
+        """
+        import struct
+        block_align = self.channels * (self.sample_bits // 8)
+        f = open(long_path(self._path), "wb")
+        try:
+            f.write(b"RIFF")
+            f.write(struct.pack("<I", 0))        # 占位：36 + data size
+            f.write(b"WAVEfmt ")
+            f.write(struct.pack("<IHHIIHH", 16, 1, self.channels, self.rate,
+                                self.rate * block_align, block_align,
+                                self.sample_bits))
+            f.write(b"data")
+            f.write(struct.pack("<I", 0))        # 占位：data size
+            f.flush()
+        except Exception:
+            with contextlib.suppress(Exception):
+                f.close()
+            raise
+        self._wav_fp = f
+        self._data_bytes = 0
+
+    def _append_audio_locked(self, data):
+        """写入一段 PCM（调用方须持 self._lock）。
+
+        有流式句柄就直接写文件并累加字节数；没有（绕过 start() 的构造 / 单测）
+        则维持老的 _chunks 行为，保证既有测试与调用方式不变。
+        """
+        if not data:
+            return
+        fp = getattr(self, "_wav_fp", None)
+        if fp is not None:
+            fp.write(data)
+            self._data_bytes += len(data)
+        else:
+            self._chunks.append(data)
+
+    def _close_wav_stream(self, remove=False):
+        """关闭流式句柄；remove=True 时连占位文件一起删（启动失败清理用）。"""
+        fp = getattr(self, "_wav_fp", None)
+        self._wav_fp = None
+        if fp is not None:
+            with contextlib.suppress(Exception):
+                fp.close()
+        if remove and self._path:
+            _silent_remove(self._path)
+
     def _drain_buffers(self):
-        """停止后把各缓冲区里已录到的残余数据（dwBytesRecorded）并入 _chunks。
+        """停止后把各缓冲区里已录到的残余数据（dwBytesRecorded）写入落盘流。
 
         waveInReset 会让未回调完的缓冲区直接失效，reset 之前必须先把残余数据取走。
         已由 WIM_DATA 回调收集过的缓冲区（记在 _collected）跳过，否则同一段音频会被
@@ -713,20 +783,52 @@ class MicRecorder:
                 n = hdr.dwBytesRecorded
                 if n and hdr.lpData:
                     with self._lock:
-                        self._chunks.append(ctypes.string_at(hdr.lpData, n))
+                        self._append_audio_locked(ctypes.string_at(hdr.lpData, n))
                         collected.add(int(hdr.lpData or 0))
             except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 continue
 
     def _write_wav(self):
+        """收尾：把 data 长度回填到 WAV 头并关闭文件；无流式句柄时回退老逻辑。
+
+        流式路径下 PCM 已经在录制过程中逐块写进文件，这里绝不再 b"".join 整段数据
+        —— 那正是无界累积的根源。只需按 block_align 对齐截断尾部、回填两个长度字段。
+        """
+        import struct
+        block_align = self.channels * (self.sample_bits // 8)
+        fp = getattr(self, "_wav_fp", None)
+        if fp is not None:
+            with self._lock:
+                # 按 block_align 对齐：尾部不足一帧的字节会让部分播放器判损坏
+                size = self._data_bytes
+                if block_align > 1 and size % block_align:
+                    size -= size % block_align
+                try:
+                    fp.flush()
+                    fp.seek(4)
+                    fp.write(struct.pack("<I", 36 + size))   # RIFF size @ 偏移 4
+                    # WAV 44 字节头布局：RIFF(4)+size(4)+WAVEfmt (8)
+                    # + fmt body pack<IHHIIHH>(20) + data(4) → data size @ 偏移 40
+                    fp.seek(40)
+                    fp.write(struct.pack("<I", size))
+                    fp.flush()
+                finally:
+                    with contextlib.suppress(Exception):
+                        fp.close()
+                    self._wav_fp = None
+            # 截断掉未对齐的尾部字节，保证文件实际长度与头部声明一致
+            if size < self._data_bytes:
+                with contextlib.suppress(Exception):
+                    with open(long_path(self._path), "r+b") as tf:
+                        tf.truncate(44 + size)
+            return
+
+        # 回退路径：无流式句柄（绕过 start() 的构造 / 单测）时维持老的整块写。
         with self._lock:
             data = b"".join(self._chunks)
         self._chunks = []
-        # 按 block_align 对齐：奇数长度字节会让部分播放器判为损坏文件
-        block_align = self.channels * (self.sample_bits // 8)
         if block_align > 1 and len(data) % block_align:
             data = data[:-(len(data) % block_align)]
-        import struct
         size = len(data)
         with open(long_path(self._path), "wb") as f:
             f.write(b"RIFF")

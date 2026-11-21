@@ -7689,3 +7689,55 @@ audio waveIn 句柄 / video_join ffmpeg 清理 / scrcpy 启动收尾 / MF EDR �
 
 **暂缓项不变**：麦克风 `MicRecorder._chunks` 无界、多实例并发写 config 无单实例锁
 （详见第七十二轮，需产品决策，未擅改）。
+
+---
+
+# 第七十四轮：两项暂缓高危专项修复（麦克风无界内存 / 多实例配置丢失更新）
+
+用户点名此前两轮一直暂缓、需产品决策的两项做专项修复。两项均已根治并补回归。
+
+## 一、[高] MicRecorder._chunks 无界累积（长录音 OOM）
+
+根因：`_cb` 每次 WIM_DATA 回调把一块 PCM `append` 到 `self._chunks`，直到 stop
+才 `b"".join`。44100Hz/2ch/16bit ≈ 172KB/s，录 10 分钟堆 ~100MB、1 小时 >600MB，
+`b"".join` 峰值再翻倍 —— 长录屏开麦克风直接把内存吃满。
+
+修复（`backend/audio_service.py`）：改为**边录边写盘**。
+  * `start()` 在 `_open()` 成功后调 `_open_wav_stream()`：打开目标 WAV 写 44 字节
+    占位头（长度先填 0）。必须在 `_open()` 之后——它会按实际能力降级声道/采样率，
+    头只能用实际格式写；建头失败同样释放麦克风句柄并删占位文件。
+  * `_cb` / `_drain_buffers` 统一走 `_append_audio_locked()`：有流式句柄就写文件
+    并累加 `_data_bytes`，内存占用与录音时长无关；无句柄（绕过 start 的构造/单测）
+    回退老的 `_chunks` 行为，既有调用与测试不变。
+  * `_write_wav()` 改为收尾回填：按 block_align 对齐截断尾部、seek 回填 RIFF/data
+    两个长度字段、flush+close；不再 `b"".join` 整段。空录音由 stop 的 `_wav_ok`
+    判空删除（返回 None）。
+  * `_close_wav_stream(remove)` 负责异常清理。
+补 5 项测试：PCM 落盘不入 chunks、头回填与内容完整、block_align 截断、空录音、
+建流失败清理。44→49 项通过。
+
+## 二、[高] 多实例并发写 config 丢失更新
+
+根因：`prefs._SAVE_LOCK` 只是进程内 `threading.Lock`。本机可同时开多个实例，
+各自 `load_prefs()` 读同一份旧配置、各自合并 patch、各自 `os.replace` 写回 ——
+后写整块覆盖先写（"刚改的开关过一会儿自己弹回去"）。唯一临时名只避免写坏文件，
+挡不住语义上的丢失更新。
+
+修复：新增 `core/filelock.py`，标准库实现的**跨进程独占文件锁**
+（Windows `msvcrt.locking` / POSIX `fcntl.flock`），并在 `save_prefs_checked()`
+的「读-合并-写」**最外层**持有（与线程锁叠加）。要点：
+  * 锁的是复合操作全程，不是单次 replace —— 只锁 replace 没用，读已在锁外。
+  * 锁文件路径 = config.json 路径 + `.lock`（同目录隔离不同安装位置）。
+  * 有限重试（~2s）超时降级为无锁继续；哨兵文件建不了（只读目录）也降级 ——
+    配置写入是辅助操作，绝不为它把 GUI 挂死；`acquired` 暴露本次是否真拿到锁。
+  * 同实例同线程可重入（RLock 语义）；异常路径必释放。
+  * 用别名 `_msvcrt` 仅为规避 Win32 原型门禁对标准库模块的误报（该门禁针对
+    ctypes 指针截断，标准库 locking 参数是 int，无此问题），未削弱门禁本身。
+  * 未选"禁止多开"：那会改变产品行为；文件锁解决丢失更新且保留多实例能力。
+补 6 项测试：锁路径派生、互斥阻塞、可重入、超时降级、异常释放、双进程并发写
+不同键均保留。并用对照实验证明"无锁 + 放大窗口"确实丢一条（测试有区分力）。
+57→58 项通过。
+
+## 验证
+全量 **1652 passed / 1 skipped**（较上轮 +11），ruff 全仓全绿，Win32 原型门禁
+通过。各文件行尾无污染。

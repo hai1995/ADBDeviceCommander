@@ -979,3 +979,97 @@ def test_ffmpeg_exe_finds_bundled_in_meipass(monkeypatch, tmp_path):
     monkeypatch.setattr(fb.sys, "executable", str(tmp_path / "app.exe"))
     assert fb.ffmpeg_exe() == str(fake)
     assert fb.ffmpeg_source() == "bundled"
+
+
+# ---------------------------------------------------------------------------
+# MicRecorder 流式写盘：根治 _chunks 无界累积（长录音 OOM）
+# ---------------------------------------------------------------------------
+def _streaming_recorder(tmp_path, channels=2, rate=44100, bits=16):
+    """构造一个「已打开流式落盘」的 recorder（不碰真实声卡）。"""
+    mr = _bare_recorder()
+    mr.channels, mr.rate, mr.sample_bits = channels, rate, bits
+    mr._path = str(tmp_path / "mic_stream.wav")
+    mr._open_wav_stream()
+    return mr
+
+
+def test_streaming_writes_pcm_to_disk_not_chunks(tmp_path):
+    """PCM 必须边录边落盘，_chunks 不再累积（否则长录音内存无界增长）。"""
+    mr = _streaming_recorder(tmp_path)
+    frame = b"\x11\x22\x33\x44" * 256          # 1024B，block_align=4 的整数倍
+    total = 0
+    for _ in range(200):                        # 模拟 200 次 WIM_DATA 回调
+        with mr._lock:
+            mr._append_audio_locked(frame)
+        total += len(frame)
+        assert mr._chunks == [], "流式路径不得往 _chunks 累积（内存会无界增长）"
+    assert mr._data_bytes == total
+    # 数据已交给文件缓冲区（不占 _chunks、不随录音时长增长）；flush 后落盘可见
+    import os
+    mr._wav_fp.flush()
+    assert os.path.getsize(mr._path) == 44 + total
+    mr._write_wav()
+
+
+def test_streaming_wav_header_backfilled_and_content_intact(tmp_path):
+    """收尾后 WAV 头的 RIFF/data 长度要按实际字节回填，音频内容原样保留。"""
+    import backend.audio_service as au
+    mr = _streaming_recorder(tmp_path)
+    frame = b"\x00\x01" * 512                   # 1024B
+    with mr._lock:
+        mr._append_audio_locked(frame)
+        mr._append_audio_locked(frame)
+    mr._write_wav()
+    raw = (tmp_path / "mic_stream.wav").read_bytes()
+    assert raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
+    assert struct.unpack("<I", raw[4:8])[0] == 36 + 2048
+    assert struct.unpack("<I", raw[40:44])[0] == 2048
+    assert raw[44:] == frame + frame, "PCM 内容必须与写入顺序一致"
+    assert au._wav_ok(mr._path) is True, "流式写出的 WAV 必须是可播放的合法文件"
+
+
+def test_streaming_trims_unaligned_tail(tmp_path):
+    """尾部不足一个采样帧的字节要截掉，保证文件长度与头声明一致。"""
+    mr = _streaming_recorder(tmp_path)
+    with mr._lock:
+        mr._append_audio_locked(b"\x01" * 4097)   # block_align=4，余 1 字节
+    mr._write_wav()
+    raw = (tmp_path / "mic_stream.wav").read_bytes()
+    assert struct.unpack("<I", raw[40:44])[0] == 4096
+    assert len(raw) == 44 + 4096, "未对齐的尾部字节必须截断"
+
+
+def test_streaming_empty_recording_is_removed(tmp_path):
+    """流式路径下没录到数据时，收尾应产出 0 长度头的 WAV（由 stop 判空删除）。"""
+    import backend.audio_service as au
+    mr = _streaming_recorder(tmp_path)
+    mr._write_wav()
+    assert au._wav_ok(mr._path) is False, "空录音不能通过 _wav_ok（stop 据此返回 None）"
+
+
+def test_start_failure_removes_partial_wav(tmp_path, monkeypatch):
+    """_open_wav_stream 失败时要释放麦克风句柄并删掉占位文件，不留残片。"""
+    import backend.audio_service as au
+
+    # 构造一个干净的、走完整 start 的 recorder：_open 用替身，建流时抛异常
+    mr2 = _bare_recorder()
+    mr2._stop = threading.Event()
+    mr2._path = str(tmp_path / "fail.wav")
+    opened = []
+
+    def fake_open():
+        opened.append(True)
+        mr2._wavein = 0x1234
+        mr2._winmm = _FakeWinMM()
+        mr2._hdrs = []
+
+    def boom():
+        raise OSError("磁盘只读，无法创建 WAV")
+
+    monkeypatch.setattr(mr2, "_open", fake_open)
+    monkeypatch.setattr(mr2, "_open_wav_stream", boom)
+    with pytest.raises(OSError):
+        mr2.start(str(tmp_path))
+    assert opened, "_open 应已执行"
+    assert mr2._wavein is None, "建流失败也必须释放麦克风句柄"
+    assert not (tmp_path / "fail.wav").exists(), "不得留下空占位文件"

@@ -880,3 +880,73 @@ def test_atomic_write_fsyncs_before_rename(tmp_path, monkeypatch):
     assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
     # 临时文件不能留在目录里
     assert [p.name for p in tmp_path.iterdir()] == ["config.json"]
+
+
+# ---------------------------------------------------------------------------
+# 多实例并发写 config：跨进程文件锁消除丢失更新
+# ---------------------------------------------------------------------------
+def _concurrent_write_worker(cfg_path, key, value, barrier_path, delay):
+    """子进程入口（顶层函数，可 pickle）：等栅栏后写一条偏好。
+
+    通过环境变量之外的参数传入路径；覆盖本进程 prefs_path 指向共享 config。
+    栅栏用「轮询一个标记文件」实现，避免跨进程传 multiprocessing.Event 在
+    spawn 模式下的复杂度。
+    """
+    import time as _t
+    import core.prefs as p
+    p.prefs_path = lambda: cfg_path
+    # 放大「读-合并-写」窗口：在真正落盘前暂停。这样无锁时两个进程都会先读到
+    # 同一份旧配置、各自合并、后写的整块覆盖先写的（必然丢一条）；有文件锁时
+    # 整体串行，两条写入都会保留。若无这段延迟，写入太快可能碰巧不触发竞态，
+    # 测试就失去区分力。
+    real_atomic = p._atomic_write
+
+    def slow_atomic(prefs):
+        _t.sleep(0.15)
+        return real_atomic(prefs)
+
+    p._atomic_write = slow_atomic
+    # 等主进程放下标记：让两个进程尽量同时进入「读-合并-写」
+    deadline = _t.monotonic() + 10
+    while not os.path.exists(barrier_path) and _t.monotonic() < deadline:
+        _t.sleep(0.005)
+    _t.sleep(delay)
+    p.save_prefs({key: value})
+
+
+def test_concurrent_processes_do_not_lose_updates(monkeypatch, tmp_path):
+    """两个独立进程同时写不同键，最终两个键都必须在（丢失更新被消除）。
+
+    回归：_SAVE_LOCK 只是进程内 threading.Lock，挡不住两个进程各自 load 同一份
+    旧配置、合并各自 patch、后写的整块覆盖先写的 —— 用户表现为「刚改的开关过
+    一会儿自己弹回去」。文件锁把跨进程的读-合并-写整体串行化后，两键都应落盘。
+    """
+    import multiprocessing as mp
+    import time
+
+    cfg = str(tmp_path / "config.json")
+    barrier = str(tmp_path / "go")
+    monkeypatch.setattr(prefs, "prefs_path", lambda: cfg)
+    prefs.save_prefs({"save_dir": "seed"})
+    # 起始内容：只有 save_dir
+    assert "cmd_filter" not in prefs.load_prefs() and "adb_dir" not in prefs.load_prefs()
+
+    ctx = mp.get_context("spawn")
+    procs = [
+        ctx.Process(target=_concurrent_write_worker,
+                    args=(cfg, "cmd_filter", "kw-A", barrier, 0.0)),
+        ctx.Process(target=_concurrent_write_worker,
+                    args=(cfg, "adb_dir", "dir-B", barrier, 0.0)),
+    ]
+    for pr in procs:
+        pr.start()
+    with open(barrier, "w"):
+        pass
+    for pr in procs:
+        pr.join(15)
+        assert pr.exitcode == 0, f"子进程异常退出：{pr.exitcode}"
+
+    final = prefs.load_prefs()
+    assert final.get("cmd_filter") == "kw-A", f"进程 A 的写入丢失：{final}"
+    assert final.get("adb_dir") == "dir-B", f"进程 B 的写入丢失：{final}"
+    assert final.get("save_dir") == "seed", "无关字段不应被并发写破坏"

@@ -73,6 +73,7 @@ import sys
 import threading
 
 from core.constants import PROJECT_ROOT, resource_path
+from core.filelock import exclusive_file_lock, lock_path_for
 from core.longpath import long_path, path_isdir, path_isfile
 
 # save_prefs 的「读-合并-写」整体互斥锁（见 save_prefs 的说明）。
@@ -699,9 +700,16 @@ def save_prefs_checked(patch: dict):
     # patch 同样清洗：非法值纠正后再合并（而不是原样写进文件）
     clean_patch, _w = sanitize_prefs(patch)
     with _SAVE_LOCK:
-        prefs = load_prefs()
-        prefs.update(clean_patch)
-        return prefs, bool(_atomic_write(prefs))
+        # 跨进程独占：本机可同时开多个实例，各自 load 同一份旧配置、合并不同
+        # patch、各自 os.replace —— 后写的整块覆盖先写的（丢失更新：刚改的开关
+        # 过一会儿自己弹回去）。线程锁只管本进程，这里必须再加文件锁把多个
+        # 进程的「读-合并-写」整体串行化。锁路径由 config.json 派生，不同安装
+        # 位置互不干扰；拿不到锁（只读目录 / 极端竞争超时）时降级无锁继续，
+        # 与引入本机制前行为一致，绝不因配置写入把界面挂死。
+        with exclusive_file_lock(lock_path_for(prefs_path())):
+            prefs = load_prefs()
+            prefs.update(clean_patch)
+            return prefs, bool(_atomic_write(prefs))
 
 
 def save_prefs(patch: dict) -> dict:
