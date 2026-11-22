@@ -1039,6 +1039,25 @@ def test_streaming_trims_unaligned_tail(tmp_path):
     assert len(raw) == 44 + 4096, "未对齐的尾部字节必须截断"
 
 
+def test_streaming_wav_header_clamps_32bit_size(tmp_path):
+    """单场录音 data 逼近/超过 4GB 时，头字段必须 clamp，不能 struct.error。
+
+    回归：RIFF/data 长度是 32 位无符号。data=0xFFFFFFFF 时 36+size 溢出，
+    struct.pack("<I") 抛 struct.error，被上层吞掉后误报「没录到声音」并留下
+    头未回填的坏 wav。取临界值验证两个字段都被 clamp 到上限、头合法。
+    """
+    mr = _streaming_recorder(tmp_path)
+    with mr._lock:
+        mr._data_bytes = 0xFFFFFFFF      # 正好上限，block_align=4 已对齐
+    mr._write_wav()                       # 不应抛 struct.error
+    raw = (tmp_path / "mic_stream.wav").read_bytes()
+    # data 被 block_align=4 对齐：0xFFFFFFFF → 0xFFFFFFFC；RIFF = 36+size 也
+    # 一并 clamp 到上限（未 clamp 会溢出 struct.error）。
+    aligned = 0xFFFFFFFF - (0xFFFFFFFF % 4)
+    assert struct.unpack("<I", raw[40:44])[0] == aligned      # data size
+    assert struct.unpack("<I", raw[4:8])[0] == 0xFFFFFFFF     # RIFF size clamp
+
+
 def test_streaming_empty_recording_is_removed(tmp_path):
     """流式路径下没录到数据时，收尾应产出 0 长度头的 WAV（由 stop 判空删除）。"""
     import backend.audio_service as au

@@ -782,13 +782,19 @@ class MicRecorder:
             collected = self._collected = set()
         for hdr, _buf in getattr(self, "_hdrs", []):
             try:
-                if int(hdr.lpData or 0) in collected:
-                    continue
+                # 判重与写入必须同锁：waveInStop 前已排队的 WIM_DATA 回调可能
+                # 晚于本次 drain 执行。旧实现在锁外查 collected，若回调恰在
+                # 「查完→拿锁」之间 append+add 同一 buffer，drain 会再写一次，
+                # 成片音频重影/音量翻倍。把判重挪进同一把锁，与回调的
+                # _append_audio_locked+add 形成原子序列。
                 n = hdr.dwBytesRecorded
                 if n and hdr.lpData:
                     with self._lock:
+                        key = int(hdr.lpData or 0)
+                        if key in collected:
+                            continue
                         self._append_audio_locked(ctypes.string_at(hdr.lpData, n))
-                        collected.add(int(hdr.lpData or 0))
+                        collected.add(key)
             except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 continue
 
@@ -799,6 +805,12 @@ class MicRecorder:
         —— 那正是无界累积的根源。只需按 block_align 对齐截断尾部、回填两个长度字段。
         """
         import struct
+        # WAV 头两个长度字段都是 32 位无符号（最大 0xFFFFFFFF）。单场录音
+        # 超过约 4GB（≈6.8 小时的 44.1k/16bit/双声道）时，struct.pack("<I")
+        # 会抛 struct.error：旧实现没兜住，被上层吞掉后误报「没录到声音」，
+        # 还留下一个头没回填的坏 wav。clamp 到上限保证头始终合法可解析——
+        # 超出部分播放器读不到，但至少不是损坏文件（超长录音本就该分段）。
+        size_cap = 0xFFFFFFFF
         block_align = self.channels * (self.sample_bits // 8)
         fp = getattr(self, "_wav_fp", None)
         if fp is not None:
@@ -807,10 +819,13 @@ class MicRecorder:
                 size = self._data_bytes
                 if block_align > 1 and size % block_align:
                     size -= size % block_align
+                # RIFF size = 36 + data size，同样不能溢出 32 位。
+                riff_size = min(size_cap, 36 + size)
+                size = min(size_cap, size)
                 try:
                     fp.flush()
                     fp.seek(4)
-                    fp.write(struct.pack("<I", 36 + size))   # RIFF size @ 偏移 4
+                    fp.write(struct.pack("<I", riff_size))   # RIFF size @ 偏移 4
                     # WAV 44 字节头布局：RIFF(4)+size(4)+WAVEfmt (8)
                     # + fmt body pack<IHHIIHH>(20) + data(4) → data size @ 偏移 40
                     fp.seek(40)
@@ -834,9 +849,11 @@ class MicRecorder:
         if block_align > 1 and len(data) % block_align:
             data = data[:-(len(data) % block_align)]
         size = len(data)
+        riff_size = min(size_cap, 36 + size)
+        size = min(size_cap, size)
         with open(long_path(self._path), "wb") as f:
             f.write(b"RIFF")
-            f.write(struct.pack("<I", 36 + size))
+            f.write(struct.pack("<I", riff_size))
             f.write(b"WAVEfmt ")
             f.write(struct.pack("<IHHIIHH", 16, 1, self.channels, self.rate,
                                 self.rate * block_align, block_align,

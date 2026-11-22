@@ -1059,6 +1059,13 @@ def evaluate_alerts(samples, thresholds=None):
 def _fmt(v, unit=""):
     if v is None:
         return "--"
+    if isinstance(v, float) and not math.isfinite(v):
+        # 阈值配置链（parse_thresholds / build_thresholds）在报错文案里格式化
+        # 用户值：config.json 的 "fps<999…"（float→inf）或 UI 传 1e999/"nan"
+        # 都会走到这里。round(inf) 抛 OverflowError、round(nan) 抛 ValueError，
+        # 而 controllers/perf.py 的 _perf_thresholds() 未包裹 parse，异常直达
+        # js_api → 启动期阈值全部静默失效。非有限值直接原样显示即可。
+        return f"{v}{unit}"
     if isinstance(v, float) and abs(v - round(v)) < 1e-9:
         return f"{int(round(v)):d}{unit}"
     return f"{v:.1f}{unit}"

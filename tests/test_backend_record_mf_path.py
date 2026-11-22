@@ -83,6 +83,31 @@ def test_start_goes_mf_when_available(monkeypatch, tmp_path):
     assert any(c[0] == "start_all" for c in fake.calls)
 
 
+def test_start_mf_partial_failure_is_reported(monkeypatch, tmp_path):
+    """多台录制部分设备失败时要逐台点名提示，不能只播「已开始」。
+
+    回归：start_all 只要有一台成功就返回 ok=True，失败设备被丢弃（firsts
+    里没有它）。旧实现这里只播成功提示，用户以为全录上了，事后才发现少了
+    设备素材。
+    """
+    api = _api(monkeypatch, tmp_path)
+    api._target_serials = lambda serial=None: ["SER1", "SER2"]
+    statuses = []
+    api._push_status = lambda level, text, *a, **k: statuses.append((level, text))
+
+    class PartialFake(FakeMFCapture):
+        def start_all(self, serials, save_dir, stems, sizes, endpoint):
+            # 只 SER1 成功；SER2 首帧超时失败
+            self.started = {"SER1": f"{save_dir}\\tmp_SER1.mp4"}
+            return True, "", dict(self.started)
+
+    api.mf_capture = PartialFake(available=True)
+    res = api.screen_record_start(serial=None, with_mic=True, save_dir=str(tmp_path))
+    assert res["ok"] is True, "至少一台成功即视为启动成功"
+    errs = [t for lvl, t in statuses if lvl == "err" and "SER2" in t]
+    assert errs, "失败设备 SER2 必须有点名提示，实际状态: %r" % statuses
+
+
 def test_start_without_mic_never_uses_mf(monkeypatch, tmp_path):
     """未勾麦克风时绝不能走 MF：native 会无条件采麦克风 → 偷偷录音。
 

@@ -482,7 +482,10 @@ class FileMixin:
                               safe_name(os.path.basename(name or ""))))
         try:
             with open(long_path(tmp), "wb") as f:
-                f.write(base64.b64decode(b64 or ""))
+                # validate=True：默认会静默丢弃非法字符，桥接直调/自动化脚本
+                # 传入带脏字符的 b64 时落盘内容被悄悄改变却报「上传成功」。
+                # 前端取的是 dataURL 逗号后的纯 base64（无空白/换行），不受影响。
+                f.write(base64.b64decode(b64 or "", validate=True))
         except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             self._push_status("err", f"⚠ 解码上传文件失败：{e}")
             if use_progress:

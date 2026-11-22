@@ -925,7 +925,7 @@ def test_upload_stream_stops_promptly_when_cancelled(monkeypatch):
     # 调用前先放好取消标记，再让 register 不清标记（模拟「传输已开始后才取消」）。
     svc._cancelled.add("t3")
 
-    def register_no_clear(tid, proc, cleanup=()):
+    def register_no_clear(tid, proc, cleanup=(), preserve_cancel=False):
         with svc._transfer_lock:
             svc._transfers[tid] = {"proc": proc, "cleanup": tuple(cleanup)}
     svc.register_transfer = register_no_clear
@@ -968,6 +968,91 @@ def test_download_stream_reports_progress(monkeypatch, tmp_path):
         "S", "/sdcard/a.bin", str(tmp_path), progress=seen.append, task_id="d1")
     assert err is None and path, (path, err)
     assert 30 in seen and seen[-1] == 100, seen
+
+
+def test_register_transfer_preserves_cancel_on_retry():
+    """同一 task 的 -p 回退重试不能清掉用户刚点的取消标记。
+    
+    回归：register_transfer 旧实现无条件 discard 取消标记。老 adb 不认 -p
+    时 upload/download 会二次 register，若用户在两次 attempt 间隙点取消，
+    标记被清、取消被吞、传输继续跑。
+    """
+    svc = FileService()
+    svc.register_transfer("t", "p1")
+    svc.cancel_transfer("t")
+    assert svc.is_cancelled("t") is True
+    # 重试登记保留取消标记
+    svc.register_transfer("t", "p2", preserve_cancel=True)
+    assert svc.is_cancelled("t") is True, "重试不能吞掉取消"
+    # 全新任务（不带 preserve_cancel）才清标记
+    svc.register_transfer("t2", "p3")
+    svc.cancel_transfer("t2")
+    svc.register_transfer("t2", "p4")
+    assert svc.is_cancelled("t2") is False, "新任务应清掉旧取消标记"
+
+
+def test_download_stream_cleans_partial_on_pull_failure(monkeypatch, tmp_path):
+    """adb pull 写出半成品后失败，不能把残缺文件当完整成品留在保存目录。
+    
+    回归：设备中途断开 / pull 非 0 时，adb 已写了部分字节到落地文件，旧实现
+    直接 return None, reason，残缺文件残留（只有用户主动取消才清理）。
+    """
+    import io
+
+    landed = str(tmp_path / "a.bin")
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            self.stdout = io.StringIO("adb: error: device offline\r")
+            self.returncode = 1
+            # 模拟 adb 已写了部分字节
+            with open(landed, "wb") as f:
+                f.write(b"partial")
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc(*a, **kw))
+    svc = FileService()
+    path, err = svc.download_stream("S", "/sdcard/a.bin", str(tmp_path), task_id="d1")
+    assert path is None and err, (path, err)
+    assert not os.path.exists(landed), "失败后半成品必须删除"
+
+
+def test_download_stream_keeps_preexisting_file_on_failure(monkeypatch, tmp_path):
+    """下载前就存在的同名文件，失败清理时绝不能误删。"""
+    import io
+
+    landed = str(tmp_path / "a.bin")
+    with open(landed, "wb") as f:
+        f.write(b"old-but-valid")
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            self.stdout = io.StringIO("adb: error: device offline\r")
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(fs_mod.subprocess, "Popen", lambda *a, **kw: FakeProc(*a, **kw))
+    svc = FileService()
+    path, err = svc.download_stream("S", "/sdcard/a.bin", str(tmp_path), task_id="d2")
+    assert path is None and err
+    with open(landed, "rb") as f:
+        assert f.read() == b"old-but-valid", "下载前已有的文件不能被清理掉"
 
 
 def test_upload_stream_progress_from_file_size_when_adb_buffers(monkeypatch):

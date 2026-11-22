@@ -166,12 +166,19 @@ class FileService:
         self._transfers = {}
         self._cancelled = set()
 
-    def register_transfer(self, task_id, proc, cleanup=()):
-        """登记一个正在运行的 adb 进程，供随后取消。cleanup 是取消时要删的本地半成品路径。"""
+    def register_transfer(self, task_id, proc, cleanup=(), preserve_cancel=False):
+        """登记一个正在运行的 adb 进程，供随后取消。cleanup 是取消时要删的本地半成品路径。
+
+        preserve_cancel=True 用于「-p 被拒→去掉 -p 重试」这类同一任务的连续
+        尝试：两次 attempt 之间用户可能点了取消，若重试时无条件 discard 取消
+        标记，取消会被吞掉、传输继续跑。首次登记（preserve_cancel=False）仍
+        清掉上一次任务的残留标记。
+        """
         if not task_id:
             return
         with self._transfer_lock:
-            self._cancelled.discard(task_id)   # 同一 task_id 重试：清掉上次的取消标记
+            if not preserve_cancel:
+                self._cancelled.discard(task_id)   # 新任务：清掉上次的取消标记
             self._transfers[task_id] = {"proc": proc, "cleanup": tuple(cleanup)}
 
     def unregister_transfer(self, task_id):
@@ -356,11 +363,12 @@ class FileService:
         if rejected:
             ok, err = self._push_once(
                 serial, local, remote, progress, timeout, idle_timeout,
-                task_id=task_id, cleanup=cleanup, with_p=False)[1:]
+                task_id=task_id, cleanup=cleanup, with_p=False,
+                preserve_cancel=True)[1:]
         return ok, err
 
     def _push_once(self, serial, local, remote, progress, timeout, idle_timeout,
-                   task_id=None, cleanup=(), with_p=True):
+                   task_id=None, cleanup=(), with_p=True, preserve_cancel=False):
         """执行一次 adb push；返回 (rejected_p_flag, ok, err)。
 
         rejected_p_flag 仅在「命令因 adb 不认 -p 而失败」时为真，供上层据此回退；
@@ -375,7 +383,7 @@ class FileService:
             **adb_popen_kwargs())
         # 登记进程供取消；cleanup 是取消时要删的本地中转文件（push 没有半成品
         # 落地文件，通常为空；下载走 download_stream 时才传）。
-        self.register_transfer(task_id, proc, cleanup)
+        self.register_transfer(task_id, proc, cleanup, preserve_cancel)
         last = [-1]                # 用容器以便读线程和主线程共享推进
         # [低危加固] 输出缓冲定长：老 ROM / 错误重试会刷屏，且每次输出都刷新
         # idle 让 60s 空闲超时失效。无界 list 在 600s 里可涨到数十万元素并每字符
@@ -533,11 +541,27 @@ class FileService:
         # cancel 时删除的半成品：adb 可能已开始写原名 / 净化名两处
         raw_local = os.path.join(local_dir, base)
         safe_local = os.path.join(local_dir, safe_name(base))
+        # 下载前就已存在的同名文件绝不能删（用户可能故意留了个旧版对照）。
+        # 只清理「本次尝试新产生」的半成品：adb 中途断开/超时/非 0 返回时，
+        # 它已经往落地文件写了部分字节，旧实现直接 return，残留残缺文件被
+        # 误认为完整成品。cancel 路径由 cancel_transfer 的 cleanup 负责。
+        pre_existing = {p for p in (raw_local, safe_local)
+                        if os.path.exists(long_path(p))}
+
+        def _drop_partial():
+            for p in (raw_local, safe_local):
+                if p in pre_existing:
+                    continue
+                with contextlib.suppress(Exception):
+                    if os.path.exists(long_path(p)):
+                        os.remove(long_path(p))
+
         # 老版本 adb 不认 -p：先照常试，若明确是参数被拒则去掉 -p 重来。
         for with_p in (True, False):
             cancelled, rejected, reason, last = self._pull_once(
                 serial, remote, local_dir, progress, timeout, idle_timeout,
-                task_id, (raw_local, safe_local), with_p)
+                task_id, (raw_local, safe_local), with_p,
+                preserve_cancel=(with_p is False))
             if cancelled:
                 return None, "已取消"
             if reason is None:      # 成功
@@ -546,12 +570,19 @@ class FileService:
                         progress(100)
                 return self._finalize_download(local_dir, base)
             if rejected:            # 老 adb 不认 -p，去掉后重试一次
+                # 重试前清掉这次不认 -p 的尝试可能写下的部分字节，避免与
+                # 下一次 pull 的内容叠加（adb 未必会先截断）。
+                _drop_partial()
                 continue
+            # 明确失败（设备断开 / 卡住 / 超时 / pull 非 0）：清半成品。
+            _drop_partial()
             return None, reason
+        _drop_partial()
         return None, "下载失败"
 
     def _pull_once(self, serial, remote, local_dir, progress, timeout,
-                   idle_timeout, task_id, cleanup, with_p=True):
+                   idle_timeout, task_id, cleanup, with_p=True,
+                   preserve_cancel=False):
         """执行一次 adb pull；返回 (cancelled, rejected_p, reason, last_pct)。
 
         reason 为 None 表示成功；rejected_p 为真表示老 adb 不认 -p（可重试）。
@@ -563,7 +594,7 @@ class FileService:
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             **adb_popen_kwargs())
-        self.register_transfer(task_id, proc, cleanup)
+        self.register_transfer(task_id, proc, cleanup, preserve_cancel)
         last = [-1]
         # 输出缓冲定长（同 upload_stream）：刷屏设备的无界累积会形成内存/CPU DoS。
         chunks = collections.deque(maxlen=4096)

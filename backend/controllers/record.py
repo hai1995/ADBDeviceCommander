@@ -143,6 +143,15 @@ class RecordMixin:
                     started_caps += 1
             if started_caps:
                 self._push_status("info", "已同步开始 logcat 抓取（全部缓冲区 + 全部级别，随录屏停止）")
+        # 部分设备失败：start_all 只要有一台成功就返回 ok=True，失败设备的
+        # 原因被丢弃（firsts 里没有它）。旧实现这里只播「✓ 已开始」，用户以
+        # 为全录上了，事后才发现少了设备素材。逐台点名失败的 serial。
+        failed = [s for s in serials if s not in firsts]
+        if failed:
+            self._push_status(
+                "err", "⚠ 同源录制：{} 台设备未能开始（{}），这几台本次没有视频；"
+                       "其余设备正常录制中".format(
+                           len(failed), "、".join(failed)))
         self._push_status(
             "ok", "✓ 已开始同源录制（H264 画面 + 麦克风语音由系统媒体基础直接合成带声 MP4）")
         return {"ok": True, "mic": None, "ts": sess_ts,

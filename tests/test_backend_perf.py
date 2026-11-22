@@ -542,6 +542,27 @@ def test_default_threshold_expr_roundtrips():
     assert svc.format_thresholds(th) == expr
 
 
+def test_fmt_handles_nonfinite_values():
+    """阈值错误文案格式化 inf/NaN 不能抛 OverflowError/ValueError。
+    
+    回归：config.json 的 "fps<999..."（float→inf）或 UI 传 1e999/"nan"，
+    报范围错误时调用 _fmt()，round(inf) 抛 OverflowError，异常直达 js_api，
+    启动期阈值全部静默失效。非有限值应原样显示。
+    """
+    assert svc._fmt(float("inf")) == "inf"
+    assert svc._fmt(float("-inf")) == "-inf"
+    assert svc._fmt(float("nan")) == "nan"
+    assert svc._fmt(float("inf"), "%") == "inf%"
+
+
+def test_parse_and_build_thresholds_nonfinite_ok():
+    """超长数字串 / inf 阈值应安全返回错误文案，不崩溃。"""
+    th, errs = svc.parse_thresholds("fps<" + "9" * 309)
+    assert errs and "fps" not in th
+    th, errs = svc.build_thresholds({"fps": float("inf")})
+    assert errs and "fps" not in th
+
+
 def test_parse_thresholds_empty_means_builtin():
     th, errs = svc.parse_thresholds("")
     assert th == svc.DEFAULT_THRESHOLDS and errs == []
