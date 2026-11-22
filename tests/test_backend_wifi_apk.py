@@ -124,6 +124,30 @@ def test_wifi_connect_normalizes_and_remembers(api, monkeypatch):
     assert any("已连接" in t for t in _status_texts(api))
 
 
+def test_wifi_connect_refresh_waits_for_busy_device_scan(api, monkeypatch):
+    """连接成功后刷新设备列表必须 wait=True，别因自动轮询占着互斥被丢掉。
+
+    回归：refresh(adb, verbose, wait=False) 在 _busy 被自动轮询占用时立即放弃，
+    只推一条「请稍后再点刷新」——但用户刚连上 WiFi 并没有点刷新，表现是
+    「提示已连接，列表却迟迟不出新设备」。wait=True 会等上一轮结束再刷。
+    """
+    def fake_run(cmd, **kw):
+        return _R("", "connected to 192.168.1.23:5555")
+
+    _patch_run(monkeypatch, fake_run)
+    spawns = []
+    monkeypatch.setattr(api.workers, "spawn",
+                        lambda key, fn, *a, **k: spawns.append((key, a, k)) or None)
+
+    res = api.wifi_connect("192.168.1.23")
+    assert res["ok"] is True
+    refresh_calls = [args for key, args, _ in spawns if key == "refresh_wifi"]
+    assert refresh_calls, "连接成功后应触发设备列表刷新"
+    # refresh(adb, verbose, wait)：第三个位置参数必须是 True
+    assert len(refresh_calls[0]) >= 3 and refresh_calls[0][2] is True, \
+        "刷新必须 wait=True，否则撞上自动轮询时本次刷新被静默丢弃"
+
+
 def test_wifi_connect_ignores_background_polling_calls(api, monkeypatch):
     """后台轮询并发发 `adb devices -l` 时，连接命令依然要能被正确断言。
 

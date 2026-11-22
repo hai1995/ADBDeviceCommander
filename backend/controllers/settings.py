@@ -286,8 +286,11 @@ class SettingsMixin:
         # 能让已就绪的设备马上出现在左侧列表里。key 独立于常规刷新（refresh）：
         # 那个 key 被自动刷新循环与手动刷新共用，撞上就会「复用存活线程」而这次
         # 刷新被静默吞掉——表现是「提示已连接，但左边列表里没有这台设备」。
+        # wait=True：若此刻自动轮询正占着刷新互斥（adb 卡顿重试可达 ~21s），
+        # 默认 wait=False 会立刻放弃，只推一条「请稍后再点刷新」——但用户刚连上
+        # WiFi 并没有点刷新，结果就是「提示已连接，列表却迟迟不出新设备」。
         self.workers.spawn("refresh_wifi", self.devices.refresh,
-                           self._adb_argv(), True)
+                           self._adb_argv(), True, True)
         return {"ok": True, "address": addr, "message": "连接成功",
                 "recent": recent}
 
@@ -331,8 +334,9 @@ class SettingsMixin:
             self._push_status("err", f"✗ 断开失败（{addr}）：{text[:160]}", toast=True)
             return {"ok": False, "reason": text[:160] or "adb 拒绝断开"}
         self._push_status("ok", f"✓ 已断开无线设备：{addr}", toast=True)
+        # wait=True：与连接成功同因——别因自动轮询占着互斥而让这次列表刷新被丢掉。
         self.workers.spawn("refresh_wifi", self.devices.refresh,
-                           self._adb_argv(), True)
+                           self._adb_argv(), True, True)
         return {"ok": True, "address": addr}
 
     def _device_ip(self, serial):

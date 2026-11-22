@@ -4079,6 +4079,44 @@ def test_import_commands_normalizes_numeric_id(monkeypatch):
     assert ids.count("1") == 1, ids
 
 
+def test_import_commands_normalizes_bad_delay(monkeypatch):
+    """导入的手写 json 里非数字 delay 不能让执行时 int() 抛错中断整批命令。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    res = api.import_commands([{
+        "id": "u_bad_delay", "name": "坏间隔",
+        "commands": [
+            {"command": "adb shell date", "delay": "500ms"},
+            {"command": "adb shell uptime", "delay": -3},
+            {"command": "adb shell id", "delay": "abc"},
+        ],
+    }])
+    assert res["ok"] is True, res
+    cmd = next(c for c in api.state.commands if c.get("id") == "u_bad_delay")
+    delays = [e["delay"] for e in cmd["commands"]]
+    assert delays == [0, 0, 0], delays   # 坏值全部归零，非负
+    # 合法的 delay 不能被误伤
+    res2 = api.import_commands([{
+        "id": "u_ok_delay", "name": "正常间隔",
+        "commands": [{"command": "adb shell date", "delay": 250}],
+    }])
+    assert res2["ok"] is True
+    ok_cmd = next(c for c in api.state.commands if c.get("id") == "u_ok_delay")
+    assert ok_cmd["commands"][0]["delay"] == 250
+
+
+def test_save_commands_dedupes_ids_in_memory(monkeypatch):
+    """保存的命令若含重复 id，内存态必须去重，否则点第二张卡片跑第一条。"""
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    api.save_commands([
+        {"id": "dup", "name": "卡片一", "commands": [{"command": "echo A"}]},
+        {"id": "dup", "name": "卡片二", "commands": [{"command": "echo B"}]},
+    ])
+    ids = [c.get("id") for c in api.state.commands if not c.get("builtin")]
+    assert len(ids) == len(set(ids)), ids   # 内存态 id 全局唯一
+
+
 def test_save_commands_tolerates_empty_payload(monkeypatch):
     """commands 为 None 时不能「写成功却抛 TypeError」。
 

@@ -78,7 +78,12 @@ class UpdateMixin:
             self._update_busy = True
         self.bus.push("update_state", {"running": True})
         try:
-            self.workers.spawn("update", self._do_update_check,
+            # 用匿名 key：去重已由上面的 _update_busy 闸门完成，这里若再用命名
+            # key "update" 会形成第二道闸门，且两道闸门的释放时机不同步——
+            # _do_update_check 的 finally 先清 _update_busy（线程还没真正结束），
+            # 此窗口内新请求过了 busy 闸门却被 spawn 因「同名线程存活」去重吞掉，
+            # 而旧线程不会再重置 busy → _update_busy 永久 True，更新检查从此失效。
+            self.workers.spawn(None, self._do_update_check,
                                self._update_feed(), force)
         except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             # 线程起不来（线程数耗尽 / 内存告急）：_update_busy 已置位、

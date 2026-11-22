@@ -156,6 +156,64 @@ def test_update_check_rejects_after_shutdown(api):
     assert api.update_check(True) == {"ok": False, "reason": "shutting_down"}
 
 
+def test_update_check_uses_anonymous_worker(api, monkeypatch):
+    """检查更新必须用匿名 worker，否则会和 _update_busy 形成两道不同步的闸门。
+
+    回归：命名 key "update" 时，_do_update_check 的 finally 先清 _update_busy
+    （线程还没真正结束），此窗口内第二次检查过了 busy 闸门却被 spawn 因同名
+    线程存活去重吞掉，而旧线程不会再重置 busy → 更新检查永久失效、按钮转圈。
+    去重已由 _update_busy 完成，spawn 这里必须是 None（每次都新建）。
+    """
+    keys = []
+    real_spawn = api.workers.spawn
+
+    def spy(key, fn, *a, **kw):
+        keys.append(key)
+        return real_spawn(key, fn, *a, **kw)
+
+    monkeypatch.setattr(api.workers, "spawn", spy)
+    monkeypatch.setattr(ctrl.updater, "check", _fake_check(OK_LATEST))
+    api.update_check(True)
+    _wait_done(api)
+    assert keys and keys[0] is None, "检查更新不应使用会被去重的命名 worker key"
+
+
+def test_update_check_recovers_when_previous_thread_still_finishing(api, monkeypatch):
+    """上一轮检查清了 busy 但线程仍在收尾时，新一轮必须真正启动，不能永久卡死。
+
+    用真实 Workers 复现：第一次 check 在返回值后，_do_update_check 的 finally
+    清 busy，但通过阻塞其后的 push/status 让线程保持存活；此刻第二次检查过了
+    busy 闸门。若用命名 key，第二次 spawn 会被去重且没人再清 busy → 永久 True。
+    """
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    second_check = threading.Event()
+
+    def slow_check(current, feed=None, opener=None, timeout=None):
+        if not entered.is_set():
+            entered.set()
+            release.wait(3)          # 第一次检查：卡住直到测试放行
+            return OK_LATEST
+        second_check.set()           # 第二次检查真的跑起来了
+        return OK_LATEST
+
+    monkeypatch.setattr(ctrl.updater, "check", slow_check)
+    api.update_check(True)           # 第一次：worker 进入 slow_check 并阻塞
+    assert entered.wait(2), "第一次检查应已开始"
+
+    # 直接推进到「_update_busy 已被 finally 清空、线程仍未结束」的窗口：
+    # 手动模拟 finally（真实场景由 _do_update_check 完成），保持线程存活。
+    with api._update_lock:
+        api._update_busy = False
+    res = api.update_check(True)     # 第二次：应真正启动新线程
+    release.set()
+    assert res["ok"] is True
+    assert second_check.wait(2), "第二次检查必须真正执行，不能被 worker 去重吞掉"
+    _wait(lambda: api._update_busy is False, 3)
+
+
 # --------------------------------------------------------------------------- #
 # 结果广播
 # --------------------------------------------------------------------------- #

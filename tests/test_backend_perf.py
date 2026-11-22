@@ -502,6 +502,19 @@ def test_evaluate_alerts_accepts_custom_thresholds():
     assert len(got) == 1 and got[0]["ratio"] == pytest.approx(100.0)
 
 
+def test_chart_tooltip_escapes_series_name():
+    """对比报告的 ECharts tooltip 以 innerHTML 渲染 seriesName（设备型号），
+    必须做 HTML 转义，否则型号含 <img onerror> 时打开报告即执行脚本。
+    """
+    evil = '<img src=x onerror="alert(1)">'
+    opts = [{"tooltip": {}, "series": [{"name": evil, "data": []}]}]
+    html = svc._echarts_script(opts, ["%"], "ec")
+    # JS 端必须有转义函数，且 tooltip 拼 seriesName 时调用它
+    assert "function eh" in html
+    assert "eh(p.seriesName)" in html
+    assert "&lt;" in html and "&#39;" in html
+
+
 def test_report_alert_card_escapes_rule_and_marks_level():
     html = svc.build_report_html(_alert_samples(), {"serial": "A1"})
     assert "阈值告警" in html

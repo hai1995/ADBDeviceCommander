@@ -89,6 +89,9 @@ def test_graceful_kill_waits_before_term_and_skips_term_if_dead(monkeypatch):
                                   "stdout": "4321\n" if alive else ""})()
         if "ps" in cmd:
             return type("R", (), {"returncode": 0, "stdout": ""})()
+        if "kill" in cmd and "-0" in cmd:
+            # 新实现用 kill -0 探测这个 PID 是否还活着：进程已退出 → 非0
+            return type("R", (), {"returncode": 1, "stdout": ""})()
         return type("R", (), {"returncode": 0, "stdout": ""})()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -109,8 +112,33 @@ def test_graceful_kill_sends_term_only_when_still_alive(monkeypatch):
     monkeypatch.setattr(dp.time, "sleep", lambda s: None)
 
     assert dp.kill_device_process("adb", "A1", "tinycap", wait=0.6) is True
-    sigs = [c[5] for c in calls if "kill" in c]
+    sigs = [c[5] for c in calls if "kill" in c and "-0" not in c]
     assert sigs == ["-INT", "-TERM"], sigs
+
+def test_graceful_kill_uses_pid_probe_not_name_relookup(monkeypatch):
+    """补 -TERM 前必须探测原 PID 本身（kill -0），不能按名字重查。
+    
+    回归：0.6s 收尾窗口里原 PID 可能退出并被复用。旧实现按名字重查到
+    「还有一个同名进程」就对旧 PID 补刀，可能误杀复用后的无辜进程。
+    新实现只用 kill -0 问原 PID，pidof/按名查找只该发生一次（定位时）。
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "pidof" in cmd or "ps" in cmd:
+            return type("R", (), {"returncode": 0, "stdout": "4321\n"})()
+        # kill -0 说原 PID 还活着
+        return type("R", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(dp.time, "sleep", lambda s: None)
+    assert dp.kill_device_process("adb", "A1", "screenrecord", wait=0.6) is True
+    # 定位进程（pidof/ps）只应发生一次；补刀前没有第二次按名查找
+    locators = [c for c in calls if "pidof" in c or "ps" in c]
+    assert len(locators) == 1, locators
+    assert any("kill" in c and "-0" in c for c in calls), "应用 kill -0 探测原 PID"
+
 
 def test_device_pid_ignores_pidof_error_text(monkeypatch):
     """`pidof: not found` 打在 stdout 时不能把 "pidof:" 当成 PID。

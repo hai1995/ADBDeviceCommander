@@ -150,6 +150,24 @@ def test_pick_asset_ignores_broken_entries():
     assert update.pick_asset([]) == {}
 
 
+def test_pick_asset_rejects_non_string_url():
+    """browser_download_url 为非字符串（dict/list）时不能入选。
+
+    自建 feed 手写 json 可能把 url 写成对象；旧逻辑只判真值就让它入选并把
+    url 赋成 dict，最终 update_open 的 (url).strip() 抛 AttributeError。
+    """
+    got = update.pick_asset([
+        {"name": "a_win64.zip", "browser_download_url": {"href": "https://x/a.zip"}},
+        {"name": "b.zip", "browser_download_url": ["https://x/b.zip"]},
+    ])
+    assert got == {}, "非字符串 url 必须整条跳过"
+    # 正常的字符串 url 仍要能选中（确认不是把类型判断写反）
+    got = update.pick_asset([
+        {"name": "a_win64.zip", "browser_download_url": "https://x/a.zip"},
+    ])
+    assert got["url"] == "https://x/a.zip"
+
+
 # --------------------------------------------------------------------------- #
 # 归一化
 # --------------------------------------------------------------------------- #

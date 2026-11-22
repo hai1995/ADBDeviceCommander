@@ -156,8 +156,12 @@ def pick_asset(assets, prefer: str = ASSET_SUFFIX) -> dict:
     """
     if not isinstance(assets, list):
         return {}
+    # browser_download_url 必须是字符串：自建 feed 可能被写成 dict/list，
+    # 仅判真值会让它入选并赋给 url，随后 update_open 的 .strip() 抛 AttributeError。
     cands = [a for a in assets
-             if isinstance(a, dict) and a.get("browser_download_url")]
+             if isinstance(a, dict)
+             and isinstance(a.get("browser_download_url"), str)
+             and a.get("browser_download_url")]
     picks = (
         lambda n: n.endswith(prefer.lower()),
         lambda n: n.endswith(".zip"),

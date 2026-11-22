@@ -738,36 +738,40 @@ def _launch(args, api, url, _T0=None):
     import webview
     _MARK("webview_imported")
 
-    window = webview.create_window(
-        "ADB 设备指令台",
-        url=url,
-        js_api=api,
-        width=1380,
-        height=880,
-        min_size=(980, 620),
-        # 与前端画布同色（frontend/css/app.css 的 --bg #0b0f14）：
-        # 窗口未渲染出内容前的底色不再闪一下旧灰，启动观感与界面一致。
-        background_color="#0b0f14",
-        maximized=True,   # 启动时即最大化（创建时直接置窗体状态，避免先小窗再放大）
-    )
-    _MARK("window_created")
-
-    # 窗口「真正显示」与「页面 DOM 就绪」两个时间点：启动慢时用来区分是
-    # WebView2 运行时初始化慢（window_created → shown 很长），还是页面渲染慢
-    # （shown → loaded）。没有这两点，日志停在 window_created，无法定位。
-    with contextlib.suppress(Exception):
-        window.events.shown += lambda: _MARK("window_shown")
-        window.events.loaded += lambda: _MARK("dom_loaded")
-
-    # 采用原生标题栏：启动即最大化（maximized=True），用户可随时用原生标题栏
-    # 的「还原」按钮将窗口缩小为可自由调整的大小——不再需要自绘标题栏与
-    # Win32 拖拽（相关遗留代码已随 v2026.0908.2228 清理，见 README）。
-    # 配色用 DWM 属性改成与界面同色（core/win_theme.py），既保留系统的窗口
-    # 行为（贴边分屏 / 双击最大化 / 高 DPI），又不让浅色标题栏压在深色界面上。
-
-    # 窗口生命周期：webview.start() 在全部窗口关闭后返回，这里兜底做优雅收尾
-    # （杀 PowerShell 会话、停自动轮询线程），避免残留后台进程。
+    window = None
+    # create_window 也纳入 try：WebView2 / CLR 可能在「建窗口」这一步就抛
+    # （MOTW 标记的 DLL、DPI 初始化失败等）。早前它在 try 之外，这条失败路径
+    # 既走不到中文自救弹窗，也跳过了 finally 的 api.shutdown()，残留后台线程。
     try:
+        window = webview.create_window(
+            "ADB 设备指令台",
+            url=url,
+            js_api=api,
+            width=1380,
+            height=880,
+            min_size=(980, 620),
+            # 与前端画布同色（frontend/css/app.css 的 --bg #0b0f14）：
+            # 窗口未渲染出内容前的底色不再闪一下旧灰，启动观感与界面一致。
+            background_color="#0b0f14",
+            maximized=True,   # 启动时即最大化（创建时直接置窗体状态，避免先小窗再放大）
+        )
+        _MARK("window_created")
+
+        # 窗口「真正显示」与「页面 DOM 就绪」两个时间点：启动慢时用来区分是
+        # WebView2 运行时初始化慢（window_created → shown 很长），还是页面渲染慢
+        # （shown → loaded）。没有这两点，日志停在 window_created，无法定位。
+        with contextlib.suppress(Exception):
+            window.events.shown += lambda: _MARK("window_shown")
+            window.events.loaded += lambda: _MARK("dom_loaded")
+
+        # 采用原生标题栏：启动即最大化（maximized=True），用户可随时用原生标题栏
+        # 的「还原」按钮将窗口缩小为可自由调整的大小——不再需要自绘标题栏与
+        # Win32 拖拽（相关遗留代码已随 v2026.0908.2228 清理，见 README）。
+        # 配色用 DWM 属性改成与界面同色（core/win_theme.py），既保留系统的窗口
+        # 行为（贴边分屏 / 双击最大化 / 高 DPI），又不让浅色标题栏压在深色界面上。
+
+        # 窗口生命周期：webview.start() 在全部窗口关闭后返回，这里兜底做优雅收尾
+        # （杀 PowerShell 会话、停自动轮询线程），避免残留后台进程。
         # start(func=...) 会在 GUI 循环起来后另开一个线程执行 func：那一刻窗口
         # 才真正存在，正好用来套用深色标题栏（见 _theme_window）。
         webview.start(debug=args.debug, func=_theme_window, args=(window,))

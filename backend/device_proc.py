@@ -27,6 +27,22 @@ def _run(cmd, timeout=10):
         subprocess.run(cmd, **adb_kwargs(timeout))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
 
 
+def _pid_alive(adb, serial, pid):
+    """用 `kill -0 <pid>` 判断**这个 PID 本身**是否还活着。
+
+    不能用 device_pid() 按名字重查：0.6s 的收尾窗口里原进程可能已退出、PID 被
+    内核复用给别的进程，按名字查到「还有一个同名进程」就对旧 PID 补 -TERM，
+    可能砍到复用后的无辜进程。kill -0 只问信号能不能发给这个号，精准得多。
+    """
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "shell", "kill", "-0", str(pid)],
+            check=False, **adb_kwargs(5))
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001  探测失败按「不存活」处理，跳过补刀更安全
+        return False
+
+
 def _pick_pid(line):
     """从 `ps` 的一行里挑出 PID（挑不到返回 None）。
 
@@ -112,8 +128,9 @@ def kill_device_process(adb, serial, name, wait=0.6, match=None,
         _run([adb, "-s", serial, "shell", "kill", "-INT", pid])
         if wait:
             time.sleep(wait)          # 等它把收尾信息写完并自行退出
-        # 只在确实还活着时补 -TERM；已退出就别再补刀（补了反而可能砍在收尾中途）
-        if device_pid(adb, serial, name, match):
+        # 只在**这个 PID 本身**确实还活着时补 -TERM：按名字重查会把 PID 复用后
+        # 的无辜进程当成「还活着」，对旧号补刀就是误杀（见 _pid_alive）。
+        if _pid_alive(adb, serial, pid):
             _run([adb, "-s", serial, "shell", "kill", "-TERM", pid])
         return True
     if not fallback_name_kill:

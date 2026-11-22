@@ -23,6 +23,7 @@ from backend.controller import (
     unique_path,
     uuid,
 )
+from core.commands import ensure_unique_ids
 from core.constants import is_usable
 from core.longpath import long_path
 
@@ -78,6 +79,10 @@ class CommandMixin:
                 c = dict(c)
                 c.pop("builtin", None)
                 user_cmds.append(c)
+        # 前端/导入可能带来重复 id：run_command 按 id 取第一条，重复会让
+        # 「点第二张卡片跑第一条命令」。load 路径有 ensure_unique_ids 兜底，
+        # 但那是下次启动才生效——当次会话必须在这里同步修好。
+        ensure_unique_ids(user_cmds)
         self.state.commands = merge_builtins(user_cmds)
         # 用 user_cmds 的长度而不是 len(commands)：commands 为 None 时后者
         # 直接 TypeError —— 而此刻文件其实已经写成功了，用户看到的是一条
@@ -318,6 +323,10 @@ class CommandMixin:
             cc = c if isinstance(c, dict) else vars(c)
             cc = dict(cc); cc.pop("builtin", None)
             user_cmds.append(cc)
+        # 导入的命令可能带非数字 delay（int() 会在执行时抛 ValueError），
+        # 也可能与已有命令同 id（点第二条跑第一条）。这里就地归一当次会话。
+        ensure_unique_ids(user_cmds)
+        self._normalize_delays(user_cmds)
         self.state.commands = merge_builtins(user_cmds)
         self._push_status("ok", f"✓ 已导入命令（新增 {added:d} 条，共 {len(merged):d} 条用户命令）")
         return {"ok": True, "added": added, "total": len(merged)}
@@ -336,6 +345,30 @@ class CommandMixin:
         if isinstance(raw_id, (int, float)) and not isinstance(raw_id, bool):
             return str(raw_id)
         return ""
+
+    @staticmethod
+    def _normalize_delays(cmds):
+        """把每条命令的 delay 规整成非负 int（原地），避免执行时 int() 抛错。
+
+        导入的手写 json 里 delay 可能是 "500ms" / "abc" / 负数 / None；
+        _execute 用 int(delay) 做 Start-Sleep 的毫秒数，坏值会抛 ValueError
+        中断整批命令（连后续设备都不跑）。load 路径的 normalize_commands 会
+        处理，但导入的当次会话绕过了它，故在这里就地兜底。
+        """
+        for c in cmds:
+            if not isinstance(c, dict):
+                continue
+            entries = c.get("commands")
+            if not isinstance(entries, list):
+                continue
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                try:
+                    d = int(e.get("delay", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    d = 0
+                e["delay"] = max(0, d)
 
     def load_commands(self):
         """返回当前完整命令列表（用户命令 + 内置默认，已 merge_builtins 归一化）。

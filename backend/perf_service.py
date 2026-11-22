@@ -1613,6 +1613,9 @@ def _echarts_script(options, units, prefix):
         'O.forEach(function(o,i){{var el=document.getElementById("{}"+i);'
         'if(el)bad(el,"ECharts 未加载（脚本被拦截或浏览器版本过旧）");}});'
         'return;}}'
+        'function eh(x){{return String(x).replace(/&/g,"&amp;")'
+        '.replace(/</g,"&lt;").replace(/>/g,"&gt;")'
+        '.replace(/"/g,"&quot;").replace(/\'/g,"&#39;");}}'
         'O.forEach(function(o,i){{'
         'var el=document.getElementById("{}"+i);if(!el)return;'
         'var u=U[i]||"";'
@@ -1620,7 +1623,9 @@ def _echarts_script(options, units, prefix):
         'if(!ps||!ps.length)return "";'
         'var s=hm(ps[0].value[0]);'
         'ps.forEach(function(p){{var v=p.value[1];'
-        's+="<br>"+p.marker+" "+p.seriesName+": "'
+        # seriesName 来自设备型号（设备端可控），tooltip 以 innerHTML 渲染，
+        # 必须转义，否则 <img onerror> 之类会在打开报告时执行（file:// 下亦可执行）。
+        's+="<br>"+p.marker+" "+eh(p.seriesName)+": "'
         '+(v==null?"—":(+v).toFixed(1))+u;}});'
         'return s;}};'
         'try{{var c=echarts.init(el,null,{{renderer:"canvas"}});'
