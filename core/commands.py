@@ -530,6 +530,10 @@ def _write_json_atomic(path, data):
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            # 与 prefs._atomic_write 一致：replace 前先 fsync，避免断电留下
+            # 空文件 / 半截 JSON（那会让整份命令库下次启动回退到内置默认）。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(ltmp, lpath)
         return True
     except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值

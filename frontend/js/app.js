@@ -6393,6 +6393,30 @@
     if (t.staleTimer) { clearTimeout(t.staleTimer); t.staleTimer = null; }
     t.stale = false;
   }
+  /* 队列容量上限：done/failed/cancelled 不自动回收，加上 renderUploadQueue
+     每次进度都全量重建 DOM，长期不点「清除已完成」或批量拖文件时，队列对象
+     与 DOM 节点无上限累积、O(N²) 抖动。这里在每次新建任务前淘汰最旧的已结束
+     项（在途的 reading/uploading/downloading 一律保留），并把上限封到常量，
+     至少留一批历史供「失败重试/免重选」，超出部分静默丢弃最旧的。
+     同时释放 task.file（原始 File 可能很大）与 staleTimer，避免内存滞留。 */
+  const UPLOAD_QUEUE_MAX = 200;
+  function trimUploadQueue() {
+    const ids = Object.keys(uploadTasks);
+    if (ids.length <= UPLOAD_QUEUE_MAX) return;
+    const settled = ids.filter((id) => {
+      const s = uploadTasks[id].status;
+      return s === "done" || s === "failed" || s === "cancelled";
+    });
+    const overflow = ids.length - UPLOAD_QUEUE_MAX;
+    if (settled.length < overflow) return;  // 在途项占满：不动，避免误删正在传的
+    settled.sort((a, b) => (uploadTasks[a].startedAt || 0) - (uploadTasks[b].startedAt || 0));
+    for (let i = 0; i < overflow; i++) {
+      const t = uploadTasks[settled[i]];
+      clearUploadStale(t);
+      t.file = null;
+      delete uploadTasks[settled[i]];
+    }
+  }
   function touchUploadStale(id) {
     const t = uploadTasks[id];
     if (!t) return;
@@ -6538,6 +6562,7 @@
     let n = 0;
     let big = 0;
     accepted.forEach((f) => {
+      trimUploadQueue();
       const id = newUploadTaskId();
       uploadTasks[id] = {
         id, name: f.name || "未命名", size: f.size || 0, file: f,
@@ -6584,6 +6609,7 @@
     }
     const items = r.items || [];
     items.forEach((it) => {
+      trimUploadQueue();
       uploadTasks[it.task_id] = {
         id: it.task_id, name: it.name || "未命名", size: it.size || 0,
         file: null, localPath: it.path || "",
@@ -6624,6 +6650,7 @@
      返回 task_id 供调用方按需等待；下载完成/取消由 file_download 事件定稿。 */
   function startDownload(remote, name, dir) {
     if (!fileSerial) { pushStatus("warn", "⚠ 请先勾选设备后再下载"); return ""; }
+    trimUploadQueue();
     uploadSeq += 1;
     const id = "d" + Date.now().toString(36) + "_" + uploadSeq;
     uploadTasks[id] = {

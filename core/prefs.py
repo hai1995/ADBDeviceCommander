@@ -288,7 +288,18 @@ def _as_int(v, default, lo, hi):
         # 链（启动 → load_prefs → 各控制器）没有任何兜底，一个写在 config.json
         # 里的上标数字就能让程序启动即崩，且报错只有一句 invalid literal。
         # 全角数字（'１２'）isdecimal 仍为 True，int() 也认，属于合法输入。
-        n = int(s) if s.isdecimal() else None
+        # 但 Python 3.11+ 对十进制位数有 int_max_str_digits 上限（默认 4300），
+        # config.json 里一个 "9"*5000 这样的超长串 isdecimal 仍为 True，直接
+        # int() 会抛 ValueError —— 启动链（sanitize→load→boot）没有任何兜底，
+        # 界面就卡在「连接中」。这里吞掉该异常并回退默认，不影响带前导零
+        # （"0001"）或全角等其它合法数字的原语义。
+        if s.isdecimal():
+            try:
+                n = int(s)
+            except ValueError:      # 超过 int_max_str_digits 的超长数字串
+                n = None
+        else:
+            n = None
     if isinstance(n, bool) or not isinstance(n, int):
         return default
     if n < lo or n > hi:
@@ -445,6 +456,9 @@ def ensure_prefs_file() -> str:
     try:
         with open(ltmp, "w", encoding="utf-8") as f:
             f.write(default_prefs_json())
+            # 与 _atomic_write 一致：replace 前先 fsync，避免断电留下空 config
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(ltmp, lp)
     except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):
@@ -577,6 +591,9 @@ def _migrate_legacy_file():
         ltmp = long_path(tmp)
         with open(ltmp, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
+            # 与 _atomic_write 一致：replace 前先 fsync，避免断电留下空/半截配置
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(ltmp, lp_new)
     except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
         with contextlib.suppress(Exception):

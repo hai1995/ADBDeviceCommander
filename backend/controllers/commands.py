@@ -74,10 +74,28 @@ class CommandMixin:
         # 同步内存态：用户命令并入内置默认，保持与 boot 后一致，使后续
         # run_command / 点击计数基于最新列表（state.commands 是 run_command 的来源）。
         user_cmds = []
-        for c in (commands or []):
+        seen_ids = set()
+        for idx, c in enumerate(commands or []):
             if isinstance(c, dict):
                 c = dict(c)
                 c.pop("builtin", None)
+                # id 必须是可哈希的非空 str：ensure_unique_ids / merge_builtins
+                # 都把 id 塞进 set（`cid not in used` / `{c.get("id")}`），
+                # 若前端/手工 json 传来 list/dict 型 id 会抛 TypeError:
+                # unhashable，而此刻文件已写成功 → RPC 报错但磁盘已改，状态
+                # 不一致。按与导入路径同一规则归一（数字→串、其它→空串）。
+                if not isinstance(c.get("id"), str):
+                    c["id"] = self._norm_cmd_id(c.get("id"))
+                # ensure_unique_ids 只处理「非空重复 id」，空串会被 continue 跳过，
+                # 于是多条 list/dict/空 id 命令会共用 ""、run_command 全命中第一条。
+                # 这里在归一阶段就补一个稳定唯一 id（与 normalize_commands 的
+                # autoN 风格一致），后续 ensure_unique_ids 再管非空重复。
+                if not c.get("id") or c["id"] in seen_ids:
+                    auto = f"auto{idx + 1:d}"
+                    while auto in seen_ids:
+                        auto += "_"
+                    c["id"] = auto
+                seen_ids.add(c["id"])
                 user_cmds.append(c)
         # 前端/导入可能带来重复 id：run_command 按 id 取第一条，重复会让
         # 「点第二张卡片跑第一条命令」。load 路径有 ensure_unique_ids 兜底，

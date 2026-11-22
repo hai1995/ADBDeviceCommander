@@ -262,6 +262,31 @@ def _show_native_error(title, lines, url=None):
 # 异常统一落盘为 crash_*.log（程序目录，不可写时退回系统临时目录），主线程
 # 的致命崩溃再补一个原生弹窗提示日志位置。钩子本身保证绝不二次抛异常。
 # ---------------------------------------------------------------------------
+# 崩溃日志最多保留的份数：一个反复崩溃的后台循环（设备掉线/超时重连）会在
+# 短时间内写出成百上千份 crash_*.log，无轮转会填满程序目录/临时目录磁盘。
+# 保留最近若干份足够排查根因（最先炸的那份最有价值，但前面的几份也在窗口内）。
+CRASH_LOG_KEEP = 20
+
+
+def _prune_crash_logs(directory):
+    """只保留 directory 下最近 CRASH_LOG_KEEP 份 crash_*.log，删掉更旧的。
+
+    失败一律静默：这是崩溃兜底路径，清理再出错也不能反过来干扰崩溃处理。
+    """
+    with contextlib.suppress(Exception):
+        names = [n for n in os.listdir(long_path(directory))
+                 if n.startswith("crash_") and n.endswith(".log")]
+        if len(names) <= CRASH_LOG_KEEP:
+            return
+        # 按修改时间升序，删最旧的；mtime 相同再按名字保证顺序稳定。
+        named = [(os.path.getmtime(long_path(os.path.join(directory, n))), n)
+                 for n in names]
+        named.sort()
+        for _mtime, n in named[:len(named) - CRASH_LOG_KEEP]:
+            with contextlib.suppress(Exception):
+                os.remove(long_path(os.path.join(directory, n)))
+
+
 def _write_crash_log(title, exc_type, exc, tb):
     """把一次未捕获异常写入 crash_<时间戳>.log，返回日志路径（失败返回 None）。"""
     try:
@@ -298,8 +323,14 @@ def _write_crash_log(title, exc_type, exc, tb):
             # 多个线程在同一秒里相继崩溃很常见（一个坏循环会连着炸），秒级
             # 时间戳会让后一份把前一份覆盖掉 —— 而最先炸的那一份才带根因。
             path = unique_path(os.path.join(d, f"crash_{stamp}.log"))
-            with open(long_path(path), "w", encoding="utf-8") as f:
+            # backslashreplace：异常消息/traceback 可能含 lone surrogate
+            # （Windows 文件名 surrogateescape 很常见）。默认 errors=strict
+            # 会让 f.write 抛 UnicodeEncodeError，被下面 except 吞掉后回落
+            # 临时目录同样失败 —— 最需要日志的崩溃场景反而日志全丢。
+            with open(long_path(path), "w", encoding="utf-8",
+                      errors="backslashreplace") as f:
                 f.write(text)
+            _prune_crash_logs(d)
             return path
         except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
             continue

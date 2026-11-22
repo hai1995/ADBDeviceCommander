@@ -4117,6 +4117,26 @@ def test_save_commands_dedupes_ids_in_memory(monkeypatch):
     assert len(ids) == len(set(ids)), ids   # 内存态 id 全局唯一
 
 
+def test_save_commands_normalizes_unhashable_ids(monkeypatch):
+    """list/dict 型 id 不能让保存抛 TypeError（文件已写却报失败、状态不一致）。
+
+    回归：ensure_unique_ids / merge_builtins 都把 id 塞进 set 做成员判断，
+    非 str 的 list/dict id 会触发 TypeError: unhashable type。前端/手工 json
+    可能带来这类脏数据，必须在内存同步前按导入路径同一规则归一。
+    """
+    api = _make_api()
+    patch_ctrl(monkeypatch, "save_user_commands", lambda cmds: (True, None))
+    res = api.save_commands([
+        {"id": ["bad"], "name": "列表 id", "commands": [{"command": "echo A"}]},
+        {"id": {"k": 1}, "name": "字典 id", "commands": [{"command": "echo B"}]},
+        {"id": 7, "name": "数字 id", "commands": [{"command": "echo C"}]},
+    ])
+    assert res["ok"] is True, res
+    ids = [c.get("id") for c in api.state.commands if not c.get("builtin")]
+    assert all(isinstance(i, str) for i in ids), ids   # 全部归一为 str
+    assert len(ids) == len(set(ids)), ids              # 且唯一
+
+
 def test_save_commands_tolerates_empty_payload(monkeypatch):
     """commands 为 None 时不能「写成功却抛 TypeError」。
 

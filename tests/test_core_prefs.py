@@ -798,6 +798,25 @@ def test_sanitize_accepts_fullwidth_digits():
     assert warnings == []
 
 
+def test_sanitize_tolerates_overlong_digit_string():
+    """Python 3.11+ 的 int_max_str_digits 上限不能让启动崩溃。
+
+    回归：config.json 里 wifi_port = "9"*5000 时，s.isdecimal() 为 True，
+    直接 int(s) 抛 ValueError（超过 4300 位默认上限）。sanitize→load→boot
+    调用链无兜底，界面卡在「连接中」。应安全回退默认值并给出告警。
+    """
+    clean, warnings = prefs.sanitize_prefs({"wifi_port": "9" * 5000})
+    assert clean["wifi_port"] == prefs.PREFS_DEFAULTS["wifi_port"]
+    assert any("wifi_port" in w for w in warnings)
+
+
+def test_sanitize_keeps_leading_zero_digits():
+    """超长串保护不能误伤合法的前导零数字（如 "000008080" → 8080）。"""
+    clean, warnings = prefs.sanitize_prefs({"wifi_port": "000008080"})
+    assert clean["wifi_port"] == 8080
+    assert warnings == []
+
+
 def test_sanitize_only_warns_when_value_really_invalid():
     """「写法不同」不该报错，「真的认不出」才提示。
 
