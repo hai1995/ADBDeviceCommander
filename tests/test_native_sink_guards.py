@@ -143,3 +143,43 @@ def test_drain_audio_fills_silence_even_without_any_audio_sample():
     assert "last_end > 0" not in fin
     assert "SILENCE_CAP_HNS" in fin          # 防长录制静音 OOM
     assert "MIN_FRAMES" in fin               # 保底 >=2 个 AAC 帧
+
+
+# --- 本轮：构建指纹 + Finalize 诊断 + 补静音封顶/duration ----------------
+
+def test_native_exposes_build_fingerprint():
+    """native 必须导出构建指纹，供日志/真机确认 DLL 是否重新编译。"""
+    src = _cpp()
+    assert "const char* const kBuildId" in src
+    assert 'extern "C" const char* adc_build_id(void)' in src
+    # 导出必须在头文件声明（ctypes 侧才知道有这个符号）
+    hdr = open(os.path.join(ROOT, "native", "adc_mf_sink.h"),
+               "r", encoding="utf-8").read()
+    assert "ADC_API const char* adc_build_id(void);" in hdr
+
+
+def test_finalize_failure_carries_stream_stats():
+    """Finalize 失败必须带 v/a/d 统计，区分视频缺 header 还是音频缺 esds。"""
+    src = _cpp()
+    cw = src[src.index("HRESULT close_writer(bool publish)"):
+             src.index("std::string out_dir_, stem_;")]
+    assert 'set_error(hr, "SinkWriter::Finalize 失败")' in cw
+    assert "append_error_stats(video_bytes_, audio_frames_, dropped_)" in cw
+    # append_error_stats 本身要把 a= 帧数写进错误文本
+    ae = src[src.index("static void append_error_stats"):
+             src.index("extern \"C\" int adc_last_error")]
+    assert "a=%lldF" in ae and "v=%lldB" in ae
+
+
+def test_silence_fill_capped_unconditionally_and_duration_matches_frames():
+    """补静音必须无条件封顶（防中途停麦 OOM），且 duration 与帧数一致。"""
+    src = _cpp()
+    fin = src[src.index("int drain_audio()"):
+              src.index("int finalize(std::string& published)")]
+    # 封顶不能只在 no_audio_at_all 分支——中途有音频后停掉同样会 OOM
+    assert "if (fill > SILENCE_CAP_HNS) fill = SILENCE_CAP_HNS;" in fin
+    assert "if (no_audio_at_all && fill > SILENCE_CAP_HNS)" not in fin
+    # duration 按实际帧数算，不能再塞墙钟差 fill
+    assert "LONGLONG dur = (LONGLONG)frames * 10000000LL / arate_;" in fin
+    assert "AudioBlock b{silence, anchor, dur};" in fin
+    assert "AudioBlock b{silence, anchor, fill};" not in fin

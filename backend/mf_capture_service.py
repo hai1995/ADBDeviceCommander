@@ -389,6 +389,14 @@ class MFCaptureService:
     def error(self):
         return self.native.error
 
+    @property
+    def build_id(self):
+        """native DLL 构建指纹（老 DLL 返回空串），供启动日志自证版本。"""
+        try:
+            return self.native.build_id()
+        except Exception:  # noqa: BLE001  测试替身/老封装无此接口时降级为空
+            return ""
+
     def start_all(self, serials, save_dir, stems, sizes, mic_endpoint=None):
         """启动全部设备会话；任一失败撤销全部，返回 (ok, 原因, 首路径映射)。
 

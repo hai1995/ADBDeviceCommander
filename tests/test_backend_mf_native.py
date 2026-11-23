@@ -152,6 +152,57 @@ def test_mf_native_unavailable_on_non_windows(monkeypatch):
     assert "Windows" in n.error
 
 
+# ------------------------- build_id 构建指纹 ----------------------------
+
+def test_build_id_returns_empty_when_unavailable():
+    """DLL 不可用时构建指纹为空，绝不抛异常。"""
+    n = mn.MFNative()
+    assert n.available is False
+    assert n.build_id() == ""
+
+
+def test_build_id_reads_stamp_from_lib():
+    """新 DLL：从 adc_build_id() 读到构建指纹。"""
+    n = mn.MFNative()
+    n._lib = type("Lib", (), {
+        "adc_build_id": staticmethod(lambda: b"mf-20261123-esdsdiag-v4"),
+    })()
+    assert n.build_id() == "mf-20261123-esdsdiag-v4"
+
+
+def test_build_id_tolerates_old_dll_without_symbol():
+    """老 DLL 没有 adc_build_id 导出：build_id 返回空串，不能 AttributeError。"""
+    n = mn.MFNative()
+    n._lib = object()  # 无任何 adc_build_id 属性
+    assert n.build_id() == ""
+
+
+def test_build_id_tolerates_stamp_exception():
+    """adc_build_id 调用异常时降级为空串，诊断信息不影响主流程。"""
+    n = mn.MFNative()
+
+    def boom():
+        raise RuntimeError("导出调用失败")
+
+    n._lib = type("Lib", (), {"adc_build_id": staticmethod(boom)})()
+    assert n.build_id() == ""
+
+
+def test_service_build_id_passthrough():
+    """MFCaptureService.build_id 透传 native 指纹；替身无接口时降级为空。"""
+    class WithStamp:
+        def build_id(self):
+            return "mf-v4"
+
+    class WithoutStamp:
+        pass
+
+    svc = mcs.MFCaptureService(native=WithStamp())
+    assert svc.build_id == "mf-v4"
+    svc2 = mcs.MFCaptureService(native=WithoutStamp())
+    assert svc2.build_id == ""
+
+
 # ------------------------- MFCaptureService 编排 -------------------------
 
 def test_service_unavailable_returns_reason(monkeypatch):

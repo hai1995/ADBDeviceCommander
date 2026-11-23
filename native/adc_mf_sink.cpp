@@ -59,6 +59,13 @@
 
 #define IF_FAILED_RETURN(hr, msg) do { HRESULT __hr = (hr); if (FAILED(__hr)) { set_error(__hr, msg); return __hr; } } while (0)
 
+/* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
+ * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
+ * 重新 cmake --build + cmake --install 才会生效。 */
+static const char* const kBuildId = "mf-20261123-esdsdiag-v4";
+
+extern "C" const char* adc_build_id(void) { return kBuildId; }
+
 static std::mutex g_err_mtx;
 static std::string g_last_error;
 
@@ -71,6 +78,15 @@ static void set_error(HRESULT hr, const char* what) {
 static void set_error_text(const char* what) {
     std::lock_guard<std::mutex> lk(g_err_mtx);
     g_last_error = what ? what : "未知错误";
+}
+/* [诊断] 把会话统计追加到末次错误文本，供真机日志区分「视频流缺 SPS/PPS」
+ * 还是「音频流缺 esds」：0xC00D4A45 两者都会报，光看 HRESULT 无法定位。
+ * a=0 说明 AAC 流一个样本都没写进去（音频链问题）；v=0 说明视频流没样本。 */
+static void append_error_stats(long long vb, long long af, long long dr) {
+    char buf[160];
+    _snprintf_s(buf, sizeof(buf), " [诊断 v=%lldB a=%lldF d=%lld]", vb, af, dr);
+    std::lock_guard<std::mutex> lk(g_err_mtx);
+    g_last_error += buf;
 }
 
 extern "C" int adc_last_error(char* out, int out_cap) {
@@ -637,7 +653,10 @@ public:
         if (anchor <= 0) anchor = stop_t - 2000000LL;   // 异常兜底，约 0.2s
         LONGLONG fill = stop_t - anchor;
         const LONGLONG SILENCE_CAP_HNS = 2 * 10000000LL;
-        if (no_audio_at_all && fill > SILENCE_CAP_HNS) fill = SILENCE_CAP_HNS;
+        // [修复-本轮] 上限判断不再限于 no_audio_at_all：中途曾有音频但音频在
+        // 结束前很早就停了（设备热切换/被占用）时，last_end 停在很早，fill 可达
+        // 整段录制时长 → frames*nb 巨大 → 一次性分配上百 MB 静音 → OOM。统一封顶。
+        if (fill > SILENCE_CAP_HNS) fill = SILENCE_CAP_HNS;
         if (fill > 0) {
             const int pcm_bits = 16;   // 与采集转换、SetInputMediaType 一致
             size_t frames = (size_t)(fill * arate_ / 10000000LL);
@@ -647,7 +666,11 @@ public:
             size_t nb = frames * (size_t)(ach_ * pcm_bits / 8);
             if (nb > 0) {
                 std::vector<unsigned char> silence(nb, 0);
-                AudioBlock b{silence, anchor, fill};
+                // [修复-本轮] duration 必须与实际帧数一致：原实现塞入 fill（墙钟
+                // 差），而 fill 已被封顶/帧数被 MIN_FRAMES 抬高，二者不再相等。
+                // duration 与实际样本数不符会让 AAC MFT / sink 时间轴错乱。
+                LONGLONG dur = (LONGLONG)frames * 10000000LL / arate_;
+                AudioBlock b{silence, anchor, dur};
                 write_audio_block(b);
                 audio_frames_ += (LONGLONG)frames;
             }
@@ -877,7 +900,13 @@ private:
         HRESULT hr = S_OK;
         if (writing_) { hr = writer_->Finalize(); writing_ = false; }
         writer_->Release(); writer_ = nullptr;
-        if (FAILED(hr)) { set_error(hr, "SinkWriter::Finalize 失败"); return hr; }
+        if (FAILED(hr)) {
+            set_error(hr, "SinkWriter::Finalize 失败");
+            // [诊断] 带上本段统计：a=0 → 音频流缺 esds；v=0 → 视频流缺 header。
+            // 0xC00D4A45 两种根因 HRESULT 相同，这里是真机唯一定位线索。
+            append_error_stats(video_bytes_, audio_frames_, dropped_);
+            return hr;
+        }
         if (publish && !tmp_files_.empty()) {
             std::string tmp = tmp_files_.back();
             std::string final = tmp;

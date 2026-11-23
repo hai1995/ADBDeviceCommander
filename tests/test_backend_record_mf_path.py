@@ -23,14 +23,19 @@ class FakeSession:
 
 
 class FakeMFCapture:
-    def __init__(self, available=True):
+    def __init__(self, available=True, build_id="mf-test-build"):
         self._available = available
+        self._build_id = build_id
         self.calls = []
         self.started = {}
 
     @property
     def available(self):
         return self._available
+
+    @property
+    def build_id(self):
+        return self._build_id
 
     def start_all(self, serials, save_dir, stems, sizes, endpoint):
         self.calls.append(("start_all", list(serials), save_dir))
@@ -71,6 +76,29 @@ def test_mf_usable_gate(monkeypatch, tmp_path):
     assert api._mf_usable() is True
     api.mf_capture = FakeMFCapture(available=False)
     assert api._mf_usable() is False
+
+
+def test_start_shows_native_build_id(monkeypatch, tmp_path):
+    """启动成功提示必须带 native 构建指纹，供日志确认 DLL 是否重新编译。"""
+    api = _api(monkeypatch, tmp_path)
+    statuses = []
+    api._push_status = lambda level, text, *a, **k: statuses.append((level, text))
+    api.mf_capture = FakeMFCapture(available=True, build_id="mf-20261123-esdsdiag-v4")
+    api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
+    oks = [t for lvl, t in statuses if lvl == "ok" and "同源录制" in t]
+    assert oks and "mf-20261123-esdsdiag-v4" in oks[-1], (
+        f"启动提示应带构建指纹，实际: {oks}")
+
+
+def test_start_warns_when_build_id_missing(monkeypatch, tmp_path):
+    """老 DLL（无构建指纹）必须给出重编译提示，避免拿旧 DLL 反复测。"""
+    api = _api(monkeypatch, tmp_path)
+    statuses = []
+    api._push_status = lambda level, text, *a, **k: statuses.append((level, text))
+    api.mf_capture = FakeMFCapture(available=True, build_id="")
+    api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
+    oks = [t for lvl, t in statuses if lvl == "ok" and "同源录制" in t]
+    assert oks and "重新编译" in oks[-1], f"应提示重编译 dll，实际: {oks}"
 
 
 def test_start_goes_mf_when_available(monkeypatch, tmp_path):

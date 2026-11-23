@@ -212,6 +212,12 @@ class MFNative:
         lib.adc_init.argtypes = []; lib.adc_init.restype = i
         lib.adc_shutdown.argtypes = []; lib.adc_shutdown.restype = None
         lib.adc_last_error.argtypes = [ctypes.c_char_p, i]; lib.adc_last_error.restype = i
+        # [构建指纹] 可选符号：老 DLL 没有 adc_build_id， getattr 取不到就跳过，
+        # 绝不能像必需符号那样直接取属性（AttributeError 会让整个 DLL 判定不可用）。
+        _stamp = getattr(lib, "adc_build_id", None)
+        if _stamp is not None:
+            _stamp.argtypes = []
+            _stamp.restype = ctypes.c_char_p
         lib.adc_mic_start.argtypes = [ctypes.c_wchar_p, i, i, i]; lib.adc_mic_start.restype = i
         lib.adc_mic_stop.argtypes = []; lib.adc_mic_stop.restype = None
         lib.adc_mic_format.argtypes = [ctypes.POINTER(i)] * 3; lib.adc_mic_format.restype = i
@@ -250,6 +256,23 @@ class MFNative:
         with __import__("contextlib").suppress(Exception):
             self._lib.adc_last_error(buf, len(buf))
         return buf.value.decode("utf-8", "replace").strip()
+
+    def build_id(self):
+        """返回 native DLL 的构建指纹；老 DLL（无此导出）返回空串。
+
+        不抛异常、不要求 worker：这是纯静态串，可在任意线程读取。调用方在
+        启动日志里显示它，用于确认「0xC00D4A45 三根因修复」是否已编译进 DLL。
+        """
+        if not self.available:
+            return ""
+        stamp = getattr(self._lib, "adc_build_id", None)
+        if stamp is None:
+            return ""
+        try:
+            raw = stamp()
+            return (raw or b"").decode("utf-8", "replace").strip() if isinstance(raw, bytes) else ""
+        except Exception:  # noqa: BLE001  诊断信息，绝不因它打断录制
+            return ""
 
     # ---- 便捷调用（都经 worker 线程；调用方持有 worker）----------------
     def mic_start(self, endpoint_id, rate, bits, channels):

@@ -155,8 +155,16 @@ class RecordMixin:
                 "err", "⚠ 同源录制：{} 台设备未能开始（{}），这几台本次没有视频；"
                        "其余设备正常录制中".format(
                            len(failed), "、".join(failed)))
+        # [诊断] 附上 native DLL 构建指纹：0xC00D4A45 的多轮修复都在 native C++，
+        # 必须重新编译 DLL 才生效。老 DLL 无此导出时 build_id 为空，给出明确
+        # 提示，避免用户拿旧 DLL 反复测试却以为修复没用。
+        with contextlib.suppress(Exception):
+            bid = self.mf_capture.build_id or ""
+        native_tag = (f"，native 构建 {bid}" if bid else
+                      "，native 构建未知(旧DLL? 0xC00D4A45 修复需重新编译 dll)")
         self._push_status(
-            "ok", "✓ 已开始同源录制（H264 画面 + 麦克风语音由系统媒体基础直接合成带声 MP4）")
+            "ok", "✓ 已开始同源录制（H264 画面 + 麦克风语音由系统媒体基础直接合成带声 MP4"
+                  f"{native_tag}）")
         return {"ok": True, "mic": None, "ts": sess_ts,
                 "started": self._rec_session["video_start_host"]}
 

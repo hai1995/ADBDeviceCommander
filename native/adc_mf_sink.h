@@ -44,6 +44,12 @@ ADC_API void adc_shutdown(void);
 /* 把上一次失败的可读描述写入 out（UTF-8），返回实际写入字节数。线程安全。 */
 ADC_API int adc_last_error(char* out, int out_cap);
 
+/* [构建指纹] 返回本 DLL 编译期固定的版本串（UTF-8，静态内存，勿释放）。
+ * Python 在「已开始同源录制」提示里显示它：native 改动必须重新编译 DLL
+ * 才生效，日志里核对本串即可一眼确认运行的是新 DLL 还是旧 DLL。
+ * 老版本 DLL 没有此导出，Python 侧必须按「可选符号」容错。 */
+ADC_API const char* adc_build_id(void);
+
 /* ---- 麦克风（全局单例，native 内部 WASAPI 线程）---------------------- */
 
 /* 启动采集。

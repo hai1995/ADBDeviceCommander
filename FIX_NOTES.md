@@ -7812,3 +7812,45 @@ work_dir=None 旧行为回归）。改 3 处既有测试替身/断言以适配�
 **边界**：EDR 是黑盒启发式检测，无 Windows SDK / 无亚信环境无法真机验证；
 本轮确认的是文件布局与删除时机在行为链路上已与已验证有效的 MF A 方案对齐。
 成品可播性、moov 布局、以及 EDR 是否仍误报，仍需用户真机打包后反复验证。
+
+## 第 N+4 轮：同源录制 0xC00D4A45 第三次复现 —— 构建指纹 + 自诊断（打破盲修循环）
+
+真机第三次原样复现 `同源合成失败：SinkWriter::Finalize 失败（HRESULT 0xC00D4A45）`，
+logcat 3796 行 / 486KB，最终仅 1 个文件（logcat），**无视频成品**。
+
+**关键诊断（本轮最重要结论）**：`0xC00D4A45` 官方含义是「MP4 sink 无法生成有效的
+stsd/esds header」——视频流缺 SPS/PPS 或音频 AAC 流没实际编码出样本，两者 HRESULT
+完全相同。第 N+2 轮的三根因修复（float32→PCM16 / 无音频补静音 / 采样率校验）**全部
+在 native/adc_mf_sink.cpp（改了 128 行）**，必须用 MSVC 重新编译出
+`backend/adc_mf_sink.dll` 才生效；仓库内**没有编译产物**，build.py 打包时只从
+backend/ 拷现成 dll。用户日志显示「已开始同源录制」成功（dll 确实加载了），但
+**无法证明它是 N+2 之后重编译的**。同一错误连续三轮原样复现，最大嫌疑是运行的
+仍是旧 DLL —— 前两轮的 native 修复从未真正进入测试包。
+
+**修复（让下一次真机测试能一锤定音）**：
+1. **native 构建指纹**：新增 `adc_build_id()` 导出（字符串常量 `kBuildId`，
+   本轮 `mf-20261123-esdsdiag-v4`），头文件声明；约定今后每次改 native 语义都
+   更新此串。Python `MFNative.build_id()` 读取它——**按可选符号处理**：用 getattr
+   取符号，老 DLL 没有该导出时返回空串，绝不 AttributeError 把老 DLL 判成不可用；
+   调用异常也降级空串。`MFCaptureService.build_id` 透传（替身无接口降级空）。
+   `controllers/record.py` 启动提示附上指纹；老 DLL 无指纹时明确提示
+   「native 构建未知(旧DLL? 0xC00D4A45 修复需重新编译 dll)」。
+   用户下次日志里「已开始同源录制」一行会直接显示构建串，Admin 一眼确认版本。
+2. **Finalize 失败自诊断**：native `append_error_stats()` 把 `v=视频字节 a=音频帧
+   d=丢弃` 拼进错误文本。下次再报 0xC00D4A45，`a=0` 即音频流缺 esds、`v=0`
+   即视频流缺 header，不用再猜根因。
+3. **两个真实缺陷（审查确认，顺带修）**：
+   - 补静音封顶 `fill > SILENCE_CAP_HNS` 此前只在 `no_audio_at_all` 分支生效；
+     中途曾有音频但音频提前停（热切换/占用）时 fill 可达整段时长 → 分配数百 MB
+     静音 OOM。改为无条件封顶。
+   - 补静音 sample 的 duration 原填墙钟差 `fill`，封顶/帧数保底后与实际帧数不符，
+     会让 AAC MFT / sink 时间轴错乱。改为按实际帧数 `frames*1e7/arate` 计算。
+
+**验证**：新增守卫/容错/提示测试 13 项，相关 57 项全绿。全量见推送前汇总。
+
+**给用户的操作要点（关键）**：本轮改了 native C++，**必须**
+`cmake --build native/build --config Release && cmake --install native/build --prefix backend`
+重新编译并把新 dll 打进包，否则改动不生效。下次真机日志请核对「已开始同源录制」
+一行的构建指纹是否为 `mf-20261123-esdsdiag-v4`；若报 0xC00D4A45，请把带
+`[诊断 v=.. a=.. d=..]` 的整行发来，据此定位视频流还是音频流。
+native C++ 在 Linux 沙箱无 Windows SDK 无法编译验证，仍需真机确认。
