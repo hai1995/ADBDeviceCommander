@@ -233,42 +233,44 @@ def test_finalize_failure_carries_stream_stats():
     call = cw[cw.index("append_error_stats("):]
     call = call[:call.index(");") + 2]
     for tok in ("vws_", "aws_", "vwf_", "awf_", "vlhr_", "alhr_",
-                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_", "vtc_"):
+                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_", "video_frame_count_"):
         assert tok in call, f"诊断调用缺少 {tok}"
     # append_error_stats 本身要把分路字段写进错误文本
     ae = src[src.index("static void append_error_stats"):
              src.index("extern \"C\" int adc_last_error")]
     for key in ("a=%lldF", "v=%lldB", "vws=%lld", "aws=%lld",
                 "vlhr=0x%08X", "alhr=0x%08X", "aac=%dHz/%dch/%dbit",
-                "sps=%dB", "seqh=%dB", "vtc=%lld"):
+                "sps=%dB", "seqh=%dB", "vfc=%lld"):
         assert key in ae, f"诊断文本缺少字段 {key}"
 
 
-def test_video_sample_timestamps_are_monotonic():
-    """[0xC00D4A45 视频根因回归] 视频 sample 时间戳必须单调不重叠。
+def test_video_uses_frame_index_clock():
+    """[0xC00D4A45 视频根因·v10 根治回归] 视频时间戳必须用帧序号合成时钟。
 
-    v8 真机诊断 vws=4/vwf=339/vlhr=0x8000FFFF 而音频 aws=1340/awf=0：
-    视频 dur 用名义帧长(33ms)、ts 用批到达 QPC，突发到达使 ts 相同或倒退，
-    后帧 ts < 前帧 ts+dur → MP4 sink 以 E_UNEXPECTED 拒帧 → Finalize 缺 header。
-    修复：视频 rel_ts 钳制到 >= last_video_end_，仅成功写入后推进游标。
+    v8/v9 真机诊断(vws=4→49, vwf=339→298, vtc=45, 音频 awf=0 全成功)证明：
+    视频 ts 用 QPC 到达时刻会被 adb 突发/卡顿污染——后帧重叠或向前 gap 都会让
+    MP4 sink 以 E_UNEXPECTED(0x8000FFFF) 拒帧并进入 sticky 错误态。钳制只修重叠
+    修不了向前跳跃(v9 仍失败 298)。视频 347 帧÷30fps=11.57s 与音频 11.58s 吻合，
+    证明源帧数正常、问题纯在时间戳。根治：第 N 帧 ts=N×名义帧长，绝对均匀单调。
     """
     src = _cpp()
     ps = src[src.index("void push_sample(DWORD stream, bool audio"):
              src.index("// 段临时文件名")]
-    # 必须有针对视频流(!audio)的单调钳制
+    # 视频流(!audio)时间戳必须由帧序号 × dur 合成，而非 QPC 到达时刻
     assert "if (!audio) {" in ps
-    assert "if (rel_ts < last_video_end_) {" in ps
-    # 钳制分支把 rel_ts 抬到 last_video_end_ 并计数
-    clamp = ps[ps.index("if (rel_ts < last_video_end_) {"):
-               ps.index("sample->SetSampleTime(rel_ts)")]
-    assert "rel_ts = last_video_end_;" in clamp
-    assert "++vtc_;" in clamp
-    # 仅成功写入的视频帧才推进游标（失败帧不占位）
-    assert "if (!audio && SUCCEEDED(hr)) last_video_end_ = rel_ts + dur;" in ps
-    # 切段必须归零：新 MP4 时间轴从 0 开始
+    vc = ps[ps.index("if (!audio) {"):
+            ps.index("sample->SetSampleTime(rel_ts)")]
+    assert "rel_ts = (LONGLONG)video_frame_count_ * dur;" in vc
+    assert "++video_frame_count_;" in vc
+    # v9 的钳制方案必须彻底移除（无 last_video_end_/vtc_ 残留）
+    assert "last_video_end_" not in src, "钳制方案已弃用：修不了向前 gap，不能留残留"
+    assert "vtc_" not in src
+    # 音频路不得被帧号时钟影响：仍用传入的 ts（含 seg_start 换算）
+    assert "sample->SetSampleTime(rel_ts);" in ps
+    # 切段必须归零：新 MP4 帧号从 0 开始
     ew = src[src.index("HRESULT ensure_writer(std::string& first_tmp_out)"):
              src.index("HRESULT config_video_stream()")]
-    assert "last_video_end_ = 0;" in ew
+    assert "video_frame_count_ = 0;" in ew
 
 
 def test_write_sample_stats_are_per_stream():

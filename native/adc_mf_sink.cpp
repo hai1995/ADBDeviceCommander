@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261123-vtsguard-v9";
+static const char* const kBuildId = "mf-20261123-frameclock-v10";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -90,18 +90,18 @@ static void append_error_stats(long long vb, long long af, long long dr,
                                long long vws, long long aws, long long vwf, long long awf,
                                HRESULT vlhr, HRESULT alhr, int ar, int ac, int ab,
                                int sps, int pps, int seqh, int flt, int ovf, int uns,
-                               long long vtc) {
+                               long long vfc) {
     char buf[720];
     _snprintf_s(buf, sizeof(buf),
         " [诊断 v=%lldB a=%lldF d=%lld | vws=%lld vwf=%lld vlhr=0x%08X | "
         "aws=%lld awf=%lld alhr=0x%08X | aac=%dHz/%dch/%dbit | sps=%dB pps=%dB seqh=%dB | "
-        "f32=%d ovf=%d uns=%d vtc=%lld]",
+        "f32=%d ovf=%d uns=%d vfc=%lld]",
         vb, af, dr,
         vws, vwf, (unsigned int)vlhr,
         aws, awf, (unsigned int)alhr,
         ar, ac, ab,
         sps, pps, seqh,
-        flt, ovf, uns, vtc);
+        flt, ovf, uns, vfc);
     std::lock_guard<std::mutex> lk(g_err_mtx);
     g_last_error += buf;
 }
@@ -526,7 +526,7 @@ public:
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
           seg_no_(0), seg_start_hns_(0),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
-          last_audio_end_(0), last_video_end_(0), vtc_(0),
+          last_audio_end_(0), video_frame_count_(0),
           vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
           diag_sps_(0), diag_pps_(0), diag_seqh_(0) {}
 
@@ -798,24 +798,23 @@ private:
         // 时长错乱。上一段残留、采集早于 writer 创建的块可能为负，clamp 到 0。
         LONGLONG rel_ts = ts - seg_start_hns_;
         if (rel_ts < 0) rel_ts = 0;
-        // [修复-真机 0xC00D4A45 视频根因] H264 ES 无时间戳，video 按 sample 到达
-        // 时刻打 QPC，但 dur 固定用名义帧长。screenrecord 经 adb/64KB chunk 传输后
-        // 会突发到达：一批帧挤在几乎同一时刻，rel_ts 相同或倒退，而每帧 dur=33ms，
-        // 后一帧 ts < 前一帧 ts+dur → 时间戳重叠。MP4 sink 对视频流要求严格单调
-        // 不重叠，重叠帧被以 E_UNEXPECTED(0x8000FFFF) 拒绝；实证 vws=4/vwf=339、
-        // 音频 aws=1340/awf=0 全成功。钳制到上一帧结束时刻，保证 ts>=last_video_end_，
-        // 与音频路 last_audio_end_ 同思路。vtc_ 统计钳制次数供真机确认修复生效。
-        // 仅对视频流做（audio 的 dur 按实际样本数算、本就自洽，不能扰乱其时间轴）。
+        // [修复-真机 0xC00D4A45 视频根因·v10 根治] H264 裸流本身无时间戳，v8/v9 曾
+        // 用 sample 到达的 QPC 时刻打 ts：adb/64KB chunk 传输会突发到达(多帧挤同一
+        // 时刻→重叠)，卡顿后又留下巨大向前 gap(discontinuity)。MP4 sink 要求视频流
+        // 时间戳严格单调、等间隔、无 gap，两类异常都会触发 E_UNEXPECTED(0x8000FFFF)
+        // 并使 sink 进入 sticky 错误态(首错后全失败)。
+        // v9 实证：钳制(vtc=45)虽把 vws 从 4 救到 49，但只能修"向后重叠"、修不了
+        // "向前跳跃"，仍有 vwf=298 连续失败；而音频 aws=1158/awf=0 全程成功(其 dur
+        // 按实际样本数算、时间轴自洽)。视频 347 帧÷30fps=11.57s 与音频 11.58s 仅差
+        // 0.013s，证明 screenrecord 是稳定 30fps、帧数完全正常，问题纯粹在时间戳。
+        // 根治：视频改用「帧序号 × 名义帧长」合成时钟——第 N 帧 ts = N*(1e7/fps)，
+        // 绝对均匀单调、无重叠无 gap，彻底不依赖不可靠的 QPC 到达时刻。
+        // 音频路保持原样(真实 QPC + 按样本数的 dur，已验证自洽，不能扰乱)。
         if (!audio) {
-            if (rel_ts < last_video_end_) {
-                rel_ts = last_video_end_;
-                ++vtc_;
-            }
+            rel_ts = (LONGLONG)video_frame_count_ * dur;
+            ++video_frame_count_;
         }
         sample->SetSampleTime(rel_ts); sample->SetSampleDuration(dur);
-        HRESULT hr = writer_->WriteSample(stream, sample);
-        // 仅视频、且成功写入后才推进单调游标：失败帧不占位，避免错误传播。
-        if (!audio && SUCCEEDED(hr)) last_video_end_ = rel_ts + dur;
         sample->Release();
         // [诊断 v8] 按流分别统计：哪一路 WriteSample 真正被 sink 接受。
         // 用调用方传入的 audio 标志判断，不依赖 stream id 数值（可能为 0）。
@@ -862,9 +861,9 @@ private:
         IF_FAILED_RETURN(writer_->BeginWriting(), "BeginWriting 失败");
         writing_ = true;
         seg_start_hns_ = qpc_now_hns();
-        // 新段是独立 MP4，视频时间戳从 0 重新起算，单调游标必须归零，
-        // 否则上段末尾的 last_video_end_ 会让新段首帧被钳制到很大的值。
-        last_video_end_ = 0;
+        // 新段是独立 MP4，视频帧序号时钟从 0 重新起算，
+        // 否则上段的帧序号会让新段首帧时间戳从很大的值开始。
+        video_frame_count_ = 0;
         return S_OK;
     }
 
@@ -980,7 +979,7 @@ private:
                                vws_, aws_, vwf_, awf_, vlhr_, alhr_,
                                arate_, ach_, abits_,
                                diag_sps_, diag_pps_, diag_seqh_,
-                               uns ? 0 : 1, overflow_.load() ? 1 : 0, uns, vtc_);
+                               uns ? 0 : 1, overflow_.load() ? 1 : 0, uns, video_frame_count_);
             return hr;
         }
         if (publish && !tmp_files_.empty()) {
@@ -1035,11 +1034,10 @@ private:
     std::mutex audio_q_mtx_;
     std::atomic<bool> overflow_{false}, mic_stopped_{false};
     LONGLONG last_audio_end_;   // 已写入音频的最后结束时刻（100ns，QPC 时基）
-    // [修复-视频时间戳重叠] 已写入视频的最后结束时刻（相对本段起点）。视频 dur 用
-    // 名义帧长而 ts 用批到达时刻，突发到达会让 ts 重叠 → sink 拒帧 → 0xC00D4A45。
-    // 每帧 ts 钳制到 >= 本值，保证同流严格单调不重叠。切段时归零（新 MP4 时间轴）。
-    LONGLONG last_video_end_;
-    long long vtc_;             // 视频时间戳钳制次数（诊断：>0 说明重叠确实发生）
+    // [修复-视频时间戳 v10] 视频帧序号：ts = 帧序号 × 名义帧长。H264 裸流无时间戳，
+    // 用帧序号合成恒定帧率时钟，彻底避免 QPC 到达时刻的突发重叠/向前 gap 触发
+    // MP4 sink 的 E_UNEXPECTED → Finalize 0xC00D4A45。切段时归零（新 MP4 时间轴）。
+    long long video_frame_count_;
     // 视频 SPS/PPS 缓存：采集线程(write_video)写，worker 线程(config_video_stream)读。
     std::vector<unsigned char> sps_, pps_;
     std::mutex seq_mtx_;
