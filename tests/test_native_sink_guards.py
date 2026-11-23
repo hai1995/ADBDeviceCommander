@@ -91,6 +91,30 @@ def test_lazy_create_guards():
     assert "if (!writer_) return S_OK;" in rotate, "writer 未建时 seg_start=0 不得误触发切段"
 
 
+def test_half_writer_tmp_not_published():
+    """[产物完整性回归] writer 已建但未 BeginWriting 时不得发布无 moov 的半成品。
+
+    ensure_writer 在 BeginWriting 之前失败(AAC 编码器不可用等)会留下 writer_+
+    tmp_files_ 条目但 writing_=false。旧 close_writer 跳过 Finalize 却仍发布 tmp
+    并让 finalize 报假成功。修复:捕获 was_writing,未就绪则删 tmp + 报错 return。
+    """
+    src = _cpp()
+    cw = src[src.index("HRESULT close_writer(bool publish)"):
+             src.index("std::string out_dir_, stem_;")]
+    # 必须在 Finalize 把 writing_ 置回 false 之前捕获原始状态
+    capture = cw.index("const bool was_writing = writing_;")
+    finalize = cw.index("if (writing_) { hr = writer_->Finalize(); writing_ = false; }")
+    assert capture < finalize
+    # 发布前必须用 was_writing 守卫；未就绪时删磁盘 tmp + 报错 + return
+    guard = cw.index("if (!was_writing) {")
+    release = cw.index("published_.push_back(final);")
+    assert guard < release, "was_writing 守卫必须位于发布动作之前"
+    block = cw[guard:cw.index("std::string final = tmp;", guard)]
+    assert "DeleteFileW(wt)" in block, "半成品 tmp 必须从磁盘删除"
+    assert "tmp_files_.pop_back()" in block
+    assert "return E_FAIL;" in block, "半成品不得走成功发布路径"
+
+
 def test_finalize_reports_no_video_frame():
     """全程无 SPS/PPS（writer 从未创建）必须报错，不能报成功但无产物。"""
     src = _cpp()

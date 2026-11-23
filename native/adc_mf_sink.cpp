@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261123-lockguard-v6";
+static const char* const kBuildId = "mf-20261123-halfwriter-v7";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -918,6 +918,11 @@ private:
     HRESULT close_writer(bool publish) {
         if (!writer_) return S_OK;
         HRESULT hr = S_OK;
+        // [修复-半成品发布] Finalize 会把 writing_ 置回 false，先捕获"本段是否
+        // 真正进入过 writing"。ensure_writer 在 BeginWriting 之前失败(AAC 编码器
+        // 不可用/流配置失败)时 writer 已建、tmp 已入列、磁盘 tmp 已生成，但从未
+        // BeginWriting —— 该 tmp 无 moov、不可播放，绝不能当成功产物发布。
+        const bool was_writing = writing_;
         if (writing_) { hr = writer_->Finalize(); writing_ = false; }
         writer_->Release(); writer_ = nullptr;
         if (FAILED(hr)) {
@@ -929,6 +934,15 @@ private:
         }
         if (publish && !tmp_files_.empty()) {
             std::string tmp = tmp_files_.back();
+            if (!was_writing) {
+                // 半成品：删磁盘 tmp、出列并报错，避免发布损坏 MP4 且 finalize 假成功。
+                wchar_t wt[2048];
+                MultiByteToWideChar(CP_UTF8, 0, tmp.c_str(), -1, wt, 2048);
+                DeleteFileW(wt);
+                tmp_files_.pop_back();
+                set_error(E_FAIL, "录制段未完成初始化（未能进入 writing 状态），已丢弃半成品");
+                return E_FAIL;
+            }
             std::string final = tmp;
             size_t p = final.find(".tmp.mp4");
             if (p != std::string::npos) final.replace(p, std::string(".tmp.mp4").size(), ".mp4");
