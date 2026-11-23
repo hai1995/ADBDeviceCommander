@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261123-halfwriter-v7";
+static const char* const kBuildId = "mf-20261123-diagsplit-v8";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -81,12 +81,26 @@ static void set_error_text(const char* what) {
     std::lock_guard<std::mutex> lk(g_err_mtx);
     g_last_error = what ? what : "未知错误";
 }
-/* [诊断] 把会话统计追加到末次错误文本，供真机日志区分「视频流缺 SPS/PPS」
- * 还是「音频流缺 esds」：0xC00D4A45 两者都会报，光看 HRESULT 无法定位。
- * a=0 说明 AAC 流一个样本都没写进去（音频链问题）；v=0 说明视频流没样本。 */
-static void append_error_stats(long long vb, long long af, long long dr) {
-    char buf[160];
-    _snprintf_s(buf, sizeof(buf), " [诊断 v=%lldB a=%lldF d=%lld]", vb, af, dr);
+/* [诊断 v8] 0xC00D4A45 分路定位：把每路 WriteSample 实际成功数、各自最后一次
+ * HRESULT、AAC 真实配置、SPS/PPS/seq-header 长度、float32 转换状态全写进错误文本。
+ * 关键区别：a=是"尝试写入的 PCM 采样帧"，而 aws=是 AAC 流真正 WriteSample 成功的
+ * 次数 —— 若 aws=0 说明 AAC 编码链一个样本都没被 sink 接受（esds 根因在音频）；
+ * vws=0 则是视频流（avcC 根因）。两者区分后即可一锤定音，不再盲修。 */
+static void append_error_stats(long long vb, long long af, long long dr,
+                               long long vws, long long aws, long long vwf, long long awf,
+                               HRESULT vlhr, HRESULT alhr, int ar, int ac, int ab,
+                               int sps, int pps, int seqh, int flt, int ovf, int uns) {
+    char buf[640];
+    _snprintf_s(buf, sizeof(buf),
+        " [诊断 v=%lldB a=%lldF d=%lld | vws=%lld vwf=%lld vlhr=0x%08X | "
+        "aws=%lld awf=%lld alhr=0x%08X | aac=%dHz/%dch/%dbit | sps=%dB pps=%dB seqh=%dB | "
+        "f32=%d ovf=%d uns=%d]",
+        vb, af, dr,
+        vws, vwf, (unsigned int)vlhr,
+        aws, awf, (unsigned int)alhr,
+        ar, ac, ab,
+        sps, pps, seqh,
+        flt, ovf, uns);
     std::lock_guard<std::mutex> lk(g_err_mtx);
     g_last_error += buf;
 }
@@ -511,7 +525,9 @@ public:
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
           seg_no_(0), seg_start_hns_(0),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
-          last_audio_end_(0) {}
+          last_audio_end_(0),
+          vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
+          diag_sps_(0), diag_pps_(0), diag_seqh_(0) {}
 
     ~RecordSession() { unsubscribe_(); close_writer(false); }
 
@@ -754,13 +770,13 @@ private:
         std::vector<unsigned char> sample = to_length_prefixed(au);
         LONGLONG ts = qpc_now_hns();
         LONGLONG dur = 10000000LL * fps_den_ / fps_num_;   // 名义帧率估算
-        push_sample(vstream_, sample.data(), (UINT32)sample.size(), ts, dur);
+        push_sample(vstream_, false, sample.data(), (UINT32)sample.size(), ts, dur);
     }
     void write_audio_block(const AudioBlock& blk) {
         if (!writer_ || !writing_ || blk.pcm.empty()) return;
-        push_sample(astream_, blk.pcm.data(), (UINT32)blk.pcm.size(), blk.ts_hns, blk.dur_hns);
+        push_sample(astream_, true, blk.pcm.data(), (UINT32)blk.pcm.size(), blk.ts_hns, blk.dur_hns);
     }
-    void push_sample(DWORD stream, const unsigned char* data, UINT32 len, LONGLONG ts, LONGLONG dur) {
+    void push_sample(DWORD stream, bool audio, const unsigned char* data, UINT32 len, LONGLONG ts, LONGLONG dur) {
         if (!writer_ || !writing_) return;
         IMFSample* sample = nullptr;
         if (FAILED(MFCreateSample(&sample))) { dropped_++; return; }
@@ -784,6 +800,14 @@ private:
         sample->SetSampleTime(rel_ts); sample->SetSampleDuration(dur);
         HRESULT hr = writer_->WriteSample(stream, sample);
         sample->Release();
+        // [诊断 v8] 按流分别统计：哪一路 WriteSample 真正被 sink 接受。
+        // 用调用方传入的 audio 标志判断，不依赖 stream id 数值（可能为 0）。
+        // 只记计数，不改变原有 Failed 时的 set_error + dropped_ 行为。
+        if (audio) {
+            if (SUCCEEDED(hr)) { ++aws_; alhr_ = hr; } else { ++awf_; alhr_ = hr; }
+        } else {
+            if (SUCCEEDED(hr)) { ++vws_; vlhr_ = hr; } else { ++vwf_; vlhr_ = hr; }
+        }
         if (FAILED(hr)) { set_error(hr, "WriteSample 失败"); dropped_++; }
     }
 
@@ -849,6 +873,9 @@ private:
                 return E_FAIL;
             }
             std::vector<unsigned char> hdr = make_seq_header(sps_, pps_);
+            diag_sps_ = (int)sps_.size();
+            diag_pps_ = (int)pps_.size();
+            diag_seqh_ = (int)hdr.size();
             IF_FAILED_RETURN(vin->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
                                           hdr.data(), (UINT32)hdr.size()),
                              "设置 MF_MT_MPEG_SEQUENCE_HEADER 失败");
@@ -927,9 +954,13 @@ private:
         writer_->Release(); writer_ = nullptr;
         if (FAILED(hr)) {
             set_error(hr, "SinkWriter::Finalize 失败");
-            // [诊断] 带上本段统计：a=0 → 音频流缺 esds；v=0 → 视频流缺 header。
-            // 0xC00D4A45 两种根因 HRESULT 相同，这里是真机唯一定位线索。
-            append_error_stats(video_bytes_, audio_frames_, dropped_);
+            // [诊断 v8] 分路定位 0xC00D4A45：看 aws/vws 谁没被 sink 接受。
+            const int uns = g_audio.unsupported_src() ? 1 : 0;
+            append_error_stats(video_bytes_, audio_frames_, dropped_,
+                               vws_, aws_, vwf_, awf_, vlhr_, alhr_,
+                               arate_, ach_, abits_,
+                               diag_sps_, diag_pps_, diag_seqh_,
+                               uns ? 0 : 1, overflow_.load() ? 1 : 0, uns);
             return hr;
         }
         if (publish && !tmp_files_.empty()) {
@@ -974,6 +1005,11 @@ private:
     static const int SEGMENT_SECONDS_ = 170;   // 与 core.constants.REC_SEGMENT_S 一致
     std::vector<std::string> tmp_files_, published_;
     long long video_bytes_, audio_frames_, dropped_;
+    // [诊断 v8] 分路写入统计：vws/aws=各路 WriteSample 成功数；vwf/awf=失败数；
+    // vlhr/alhr=各路最后一次 HRESULT。0xC00D4A45 据此判断是哪一路没喂进 sink。
+    long long vws_, aws_, vwf_, awf_;
+    HRESULT vlhr_, alhr_;
+    int diag_sps_, diag_pps_, diag_seqh_;   // 诊断：注入 sink 的 sequence header 长度
     int queue_peak_ms_;
     std::deque<AudioBlock> audio_q_;
     std::mutex audio_q_mtx_;

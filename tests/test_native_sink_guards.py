@@ -224,16 +224,40 @@ def test_native_exposes_build_fingerprint():
 
 
 def test_finalize_failure_carries_stream_stats():
-    """Finalize 失败必须带 v/a/d 统计，区分视频缺 header 还是音频缺 esds。"""
+    """Finalize 失败必须带分路诊断，定位 0xC00D4A45 到底缺哪路的 header。"""
     src = _cpp()
     cw = src[src.index("HRESULT close_writer(bool publish)"):
              src.index("std::string out_dir_, stem_;")]
     assert 'set_error(hr, "SinkWriter::Finalize 失败")' in cw
-    assert "append_error_stats(video_bytes_, audio_frames_, dropped_)" in cw
-    # append_error_stats 本身要把 a= 帧数写进错误文本
+    # [诊断 v8] 调用必须传入每路 WriteSample 成功/失败计数、HRESULT、AAC 配置、seq header 长度
+    call = cw[cw.index("append_error_stats("):]
+    call = call[:call.index(");") + 2]
+    for tok in ("vws_", "aws_", "vwf_", "awf_", "vlhr_", "alhr_",
+                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_"):
+        assert tok in call, f"诊断调用缺少 {tok}"
+    # append_error_stats 本身要把分路字段写进错误文本
     ae = src[src.index("static void append_error_stats"):
              src.index("extern \"C\" int adc_last_error")]
-    assert "a=%lldF" in ae and "v=%lldB" in ae
+    for key in ("a=%lldF", "v=%lldB", "vws=%lld", "aws=%lld",
+                "vlhr=0x%08X", "alhr=0x%08X", "aac=%dHz/%dch/%dbit",
+                "sps=%dB", "seqh=%dB"):
+        assert key in ae, f"诊断文本缺少字段 {key}"
+
+
+def test_write_sample_stats_are_per_stream():
+    """[诊断回归] 每路 WriteSample 成功/失败必须分开计数，且不依赖 stream id 数值。"""
+    src = _cpp()
+    ps = src[src.index("void push_sample(DWORD stream, bool audio"):
+             src.index("// 段临时文件名")]
+    # 新签名带 audio 标志
+    assert "void push_sample(DWORD stream, bool audio," in ps
+    # 按 audio 标志分别记成功/失败与最后 HRESULT
+    assert "if (audio) {" in ps
+    assert "++aws_; alhr_ = hr" in ps and "++vws_; vlhr_ = hr" in ps
+    assert "++awf_; alhr_ = hr" in ps and "++vwf_; vlhr_ = hr" in ps
+    # 两个调用点都传了 audio 标志
+    assert "push_sample(vstream_, false," in src
+    assert "push_sample(astream_, true," in src
 
 
 def test_silence_fill_capped_unconditionally_and_duration_matches_frames():
