@@ -40,6 +40,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <objbase.h>
+#include <mmreg.h>       // WAVEFORMATEXTENSIBLE（SubFormat GUID 的权威偏移来源）
 #include <string>
 #include <vector>
 #include <deque>
@@ -48,6 +49,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <cstddef>       // offsetof
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -62,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261123-esdsdiag-v4";
+static const char* const kBuildId = "mf-20261123-floatguid-v5";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -222,18 +224,30 @@ static const LONGLONG AUDIO_QUEUE_LIMIT_HNS = 5 * 10000000LL;   // 5s 上限
  * 模式 GetMixFormat 默认返回 32-bit float。旧实现把 float32 原始字节当成
  * PCM/32bit 喂给 AAC 编码器，WriteSample 失败被静默计 dropped_，音频流全程
  * 0 sample → sink 生成不了 esds(AudioSpecificConfig) box → Finalize 报
- * 0xC00D4A45。这里用数值常量判断源格式，避免新增 mmreg/ksmedia 头文件依赖。 */
+ * 0xC00D4A45。这里用数值常量判断源格式，避免新增 ksmedia 头文件依赖。
+ *
+ * [二次修复-静音] WAVE_FORMAT_EXTENSIBLE 的 SubFormat(GUID) 并非紧跟在
+ * WAVEFORMATEX 之后，中间还隔着 Samples(WORD) + dwChannelMask(DWORD) 共 6 字节：
+ *   offsetof(WAVEFORMATEXTENSIBLE, SubFormat) == 24（packed）/ 28（默认对齐）
+ * 旧代码用 `f + sizeof(WAVEFORMATEX)`(=18) 读 GUID，实际读到的是 Samples 和
+ * dwChannelMask 的字节，memcmp 永不命中。后果：现代 Windows 共享模式最常见的
+ * "EXTENSIBLE + 32-bit IEEE float" 被误判成「不支持的位深」→ 全程静音，上一轮
+ * 的 float32→PCM16 转换形同虚设。改用 offsetof 精确定位，并把 cbSize 下限按
+ * SDK 文档规定的 22 字节校验（旧值 sizeof(GUID)=16 过宽，可能越过缓冲区读）。 */
 static bool is_ieee_float_format(const WAVEFORMATEX* f) {
     if (!f) return false;
     if (f->wFormatTag == 0x0003 /* WAVE_FORMAT_IEEE_FLOAT */) return true;
     if (f->wFormatTag == 0xFFFE /* WAVE_FORMAT_EXTENSIBLE */ &&
-        f->cbSize >= sizeof(GUID)) {
+        f->cbSize >= 22 /* SDK: WAVE_FORMAT_EXTENSIBLE 的 cbSize 至少 22 */) {
         // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = {00000003-0000-0010-8000-00AA00389B71}
         static const GUID k_float_sub = {
             0x00000003, 0x0000, 0x0010,
             {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+        // SubFormat 相对结构起点有 Samples(2B)+dwChannelMask(4B) 的前缀，绝不能拿
+        // WAVEFORMATEX 结构本身的大小当偏移：那会读在 Samples/mask 上，永远匹配不到 GUID。
         const GUID* sub = reinterpret_cast<const GUID*>(
-            reinterpret_cast<const BYTE*>(f) + sizeof(WAVEFORMATEX));
+            reinterpret_cast<const BYTE*>(f)
+            + offsetof(WAVEFORMATEXTENSIBLE, SubFormat));
         if (memcmp(sub, &k_float_sub, sizeof(GUID)) == 0) return true;
     }
     return false;

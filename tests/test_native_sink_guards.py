@@ -115,6 +115,27 @@ def test_wasapi_float_converted_to_pcm16():
     assert "src_bits == 16" in loop
 
 
+def test_wasapi_float_guid_offset_is_correct():
+    """[静音回归] EXTENSIBLE 的 SubFormat 必须用 offsetof 定位，cbSize 下限 22。
+
+    真机/现代 Windows 共享模式默认返回 WAVE_FORMAT_EXTENSIBLE + 32-bit float。
+    旧实现把 GUID 从 `f + sizeof(WAVEFORMATEX)`(=18) 读，实际落在 Samples/mask
+    上，memcmp 永不命中 → float32 被误判为不支持 → 全程静音，上一轮的
+    float32→PCM16 修复从未生效。此处静态锁定正确偏移，防止回退。
+    """
+    src = _cpp()
+    fn = src[src.index("static bool is_ieee_float_format"):
+             src.index("/* float32 [-1,1]")]
+    # 用权威 offsetof 定位 SubFormat，而不是 sizeof(WAVEFORMATEX)
+    assert "offsetof(WAVEFORMATEXTENSIBLE, SubFormat)" in fn
+    assert "sizeof(WAVEFORMATEX)" not in fn, (
+        "不能用 WAVEFORMATEX 的大小当 SubFormat 偏移：它前面还有 Samples+mask")
+    # cbSize 下限按 SDK 文档 >=22，不是 sizeof(GUID)=16
+    assert "f->cbSize >= 22" in fn
+    # 需要 mmreg.h / cstddef 提供类型与 offsetof
+    assert "#include <mmreg.h>" in src and "#include <cstddef>" in src
+
+
 def test_mic_format_reports_pcm16():
     """回读给 Python 的麦克风格式必须报告 16-bit（与采集写入、AAC 输入一致）。"""
     src = _cpp()
