@@ -432,6 +432,19 @@ class MFCaptureService:
             worker.stop()
             self.native.worker = None
             return False, f"麦克风格式非法（{mic_fmt}），无法建音频流", {}
+        # [修复-0xC00D4A45 第三根因] 系统 AAC 编码器只接受 44100/48000 Hz、
+        # 1/2/6 声道。WASAPI mix format 若为 96000/192000 等或非常规声道数，
+        # SetInputMediaType/WriteSample 会失败 → 音频流 0 sample → Finalize
+        # 生成不了 esds box 报 0xC00D4A45。与其静默录出无声坏片，不如启动前
+        # 明确拒绝并给出可读原因（native 已把位深统一为 16，这里只校验 rate/ch）。
+        mic_rate, _mic_bits, mic_ch = mic_fmt
+        if mic_rate not in (44100, 48000) or mic_ch not in (1, 2, 6):
+            self._stop_mic()
+            worker.stop()
+            self.native.worker = None
+            return False, (
+                f"麦克风格式 {mic_rate}Hz/{mic_ch}声道 超出系统 AAC 编码器支持范围"
+                "（44.1/48kHz、1/2/6 声道），请在系统声音设置里把输入设备改为 48kHz 后重试"), {}
         # [EDR 误报缓解] 建系统 TEMP 工作目录：native 的所有 .tmp.mp4 写入、
         # 改名、取消删除都落这里，用户保存目录不再出现勒索特征文件操作。
         # 所有设备会话共享一个目录（stem 不同天然隔离）；收尾不删，留待下次

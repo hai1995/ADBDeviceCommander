@@ -7741,3 +7741,34 @@ audio waveIn 句柄 / video_join ffmpeg 清理 / scrcpy 启动收尾 / MF EDR �
 ## 验证
 全量 **1652 passed / 1 skipped**（较上轮 +11），ruff 全仓全绿，Win32 原型门禁
 通过。各文件行尾无污染。
+
+## 第 N+2 轮：同源录制再报 `0xC00D4A45`（音频流缺 esds header）三根因
+
+真机长录屏收尾再次报 `SinkWriter::Finalize 失败（0xC00D4A45）`。视频流的 SPS/PPS
+header 上一轮已修（writer 延迟创建），这次复现只可能来自**音频流**：MP4 sink 为 AAC
+流生成 `esds`(AudioSpecificConfig) box 依赖 AAC 编码器实际编码出的样本；音频流全程
+0 sample 时 Finalize 拿不到 header → `0xC00D4A45`（"required headers were not
+provided to the sink"）。静态审查定位三条相互叠加的根因：
+
+1. **[高] WASAPI float32 字节当 PCM 喂 AAC 编码器。** 微软文档明确 AAC MFT 输入只接受
+   `MFAudioFormat_PCM`/16-bit（44.1/48kHz，1/2/6ch）；而 WASAPI 共享模式
+   `GetMixFormat` 默认返回 32-bit IEEE float。原实现回读 `bits_=32` 后声明
+   subtype=PCM，把 float32 原始字节按 32-bit 整型 PCM 写入 → WriteSample 全失败，
+   又被 `push_sample` 静默计成 `dropped_` → 音频流 0 sample。
+   修复（`native/adc_mf_sink.cpp`）：新增 `is_ieee_float_format` / `float32_to_pcm16`，
+   采集循环按源格式把 float32 转成 PCM16（clamp + NaN 兜底），16-bit 设备原样拷贝，
+   不支持的位深静音降级并置诊断位；`mic_format`/回读统一对外报告 16-bit；
+   `config_audio_stream` 输入流固定 PCM16、输出流补 `MF_MT_AAC_PAYLOAD_TYPE=0`
+   与 16-bit 属性，消除 esds 生成的歧义。
+2. **[高] 补静音被正值门控跳过。** `drain_audio` 旧逻辑仅当 `last_audio_end_ > 0`
+   才补尾部静音；"全程无音频块"（无声/设备占用）时该值恒 0，兜底静音被整体跳过，
+   AAC 流一个 sample 都没有。修复：无音频时从段起点补保底静音 ≥2 个 AAC 帧
+   （2048 samples），并设 2s 上限防长录制静音 OOM。
+3. **[中] 采样率/声道超范围未拦截。** WASAPI mix 若为 96000Hz 或非 1/2/6 声道，
+   AAC 编码器同样拒绝 → 0 sample。修复（`backend/mf_capture_service.py`）：启动前
+   校验 mic_format 落在 44.1/48kHz、1/2/6 声道，否则给可读提示并停 worker/mic，
+   不静默录出坏片。
+
+补 8 项测试（native 静态守卫 4 + Python 4）：float→PCM16 转换分支、格式回读 16-bit、
+AAC payload/PCM16 流配置、无音频也补静音、96000Hz/4 声道拒绝。全量
+**1677 passed / 1 skipped**（+5）。AAC 可播性与 moov 布局仍按 README 在真机确认。

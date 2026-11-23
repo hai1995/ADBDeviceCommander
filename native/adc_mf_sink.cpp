@@ -201,6 +201,46 @@ struct AudioBlock {
 };
 static const LONGLONG AUDIO_QUEUE_LIMIT_HNS = 5 * 10000000LL;   // 5s 上限
 
+/* [修复-0xC00D4A45] 判断 WASAPI mix format 是否为 IEEE float。
+ * Windows AAC 编码器的输入只接受 MFAudioFormat_PCM / 16-bit；但 WASAPI 共享
+ * 模式 GetMixFormat 默认返回 32-bit float。旧实现把 float32 原始字节当成
+ * PCM/32bit 喂给 AAC 编码器，WriteSample 失败被静默计 dropped_，音频流全程
+ * 0 sample → sink 生成不了 esds(AudioSpecificConfig) box → Finalize 报
+ * 0xC00D4A45。这里用数值常量判断源格式，避免新增 mmreg/ksmedia 头文件依赖。 */
+static bool is_ieee_float_format(const WAVEFORMATEX* f) {
+    if (!f) return false;
+    if (f->wFormatTag == 0x0003 /* WAVE_FORMAT_IEEE_FLOAT */) return true;
+    if (f->wFormatTag == 0xFFFE /* WAVE_FORMAT_EXTENSIBLE */ &&
+        f->cbSize >= sizeof(GUID)) {
+        // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = {00000003-0000-0010-8000-00AA00389B71}
+        static const GUID k_float_sub = {
+            0x00000003, 0x0000, 0x0010,
+            {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+        const GUID* sub = reinterpret_cast<const GUID*>(
+            reinterpret_cast<const BYTE*>(f) + sizeof(WAVEFORMATEX));
+        if (memcmp(sub, &k_float_sub, sizeof(GUID)) == 0) return true;
+    }
+    return false;
+}
+
+/* float32 [-1,1] → 16-bit PCM，clamp 防溢出并兼治 NaN。
+ * 输出写进 out（交错声道，小端），样本数 = frames * channels。 */
+static void float32_to_pcm16(const BYTE* src, size_t frames, int channels,
+                             std::vector<unsigned char>& out) {
+    size_t count = frames * (size_t)channels;
+    out.resize(count * 2);
+    const float* s = reinterpret_cast<const float*>(src);
+    for (size_t i = 0; i < count; ++i) {
+        float v = s[i];
+        // NaN 时 (v > -1.0f) 为 false → 落入 -1.0f 分支；顺带 clamp 下界。
+        short iv;
+        if (!(v > -1.0f)) iv = -32768;
+        else if (v > 1.0f) iv = 32767;
+        else iv = (short)(v < 0 ? v * 32768.0f : v * 32767.0f);
+        memcpy(out.data() + i * 2, &iv, 2);
+    }
+}
+
 /* 订阅者：每个 RecordSession 一个，采集到的 PCM 广播给所有订阅者。 */
 class AudioSink {
 public:
@@ -250,6 +290,8 @@ public:
         *r = rate_; *b = bits_; *c = channels_; return 0;
     }
     int device_events() const { return device_events_.load(); }
+    // 诊断：采集到 AAC 编码器不支持的源位深（已静音降级，不会让 Finalize 失败）
+    bool unsupported_src() const { return unsupported_src_.load(); }
 
     void subscribe(AudioSink* s) { std::lock_guard<std::mutex> lk(subs_mtx_); subs_.push_back(s); }
     void unsubscribe(AudioSink* s) {
@@ -311,7 +353,10 @@ private:
                     if (SUCCEEDED(tmpc->GetMixFormat(&f)) && f) {
                         {
                             std::lock_guard<std::mutex> lk(fmt_mtx_);
-                            rate_ = f->nSamplesPerSec; bits_ = f->wBitsPerSample; channels_ = f->nChannels;
+                            // [修复-0xC00D4A45] 对外统一报告 16-bit PCM：采集线程
+                            // 会把 float32 mix 转成 PCM16 再写入 AAC 编码器，Python
+                            // 用这里回读的格式建会话音频流，必须与写入样本一致。
+                            rate_ = f->nSamplesPerSec; bits_ = 16; channels_ = f->nChannels;
                         }
                         fmt_ready_.store(true);   // 唤醒等待中的 format()
                         CoTaskMemFree(f);
@@ -338,14 +383,23 @@ private:
         hr = client->GetMixFormat(&fmt);
         if (FAILED(hr)) { client->Release(); return hr; }
 
-        // 目标格式必须与 mix format 一致；这是"格式不一致显式转换/上报"的策略：
-        // 不引第三方重采样，回读真实格式并要求用它建会话，绝不静默接受不一致。
+        // [修复-0xC00D4A45] 记住 WASAPI mix format 的真实位深/类型，采集时把
+        // float32 转成 PCM16 再写入 AAC 编码器；对外只报告 16-bit PCM。
+        // 原实现把 float32 原始字节按 bits_(=32) 打包，声明 subtype=PCM，
+        // AAC MFT 拒绝 32-bit 整型 PCM → WriteSample 全失败被吞成 dropped_ →
+        // 音频流 0 sample → sink 生成不了 esds box → Finalize 报 0xC00D4A45。
+        const bool src_float = is_ieee_float_format(fmt);
+        const int src_bits = (int)fmt->wBitsPerSample;
+        const int src_channels = (int)fmt->nChannels;
+        const UINT32 src_align = (UINT32)(src_channels * src_bits / 8);
         {
             std::lock_guard<std::mutex> lk(fmt_mtx_);
-            rate_ = fmt->nSamplesPerSec; bits_ = fmt->wBitsPerSample; channels_ = fmt->nChannels;
+            rate_ = fmt->nSamplesPerSec; bits_ = 16; channels_ = src_channels;
         }
         fmt_ready_.store(true);   // 唤醒等待中的 format()
         REFERENCE_TIME dur = 10000000; // 1s 缓冲（共享模式）
+        // IAudioClient::Initialize 仍必须用设备原始 mix format（float32 等），
+        // 转换只发生在 publish 前，不影响 WASAPI 采集本身。
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                 dur, 0, fmt, nullptr);
         CoTaskMemFree(fmt);
@@ -357,7 +411,6 @@ private:
         client->SetEventHandle(evt);
         client->Start();
 
-        UINT32 align = (UINT32)(channels_ * bits_ / 8);
         while (!stop_.load()) {
             DWORD wait = WaitForSingleObject(evt, 200);
             if (wait == WAIT_TIMEOUT) continue;   // 每 200ms 回到循环，外层可重查设备
@@ -368,9 +421,20 @@ private:
                 AudioBlock blk;
                 blk.ts_hns = qpc_now_hns();
                 blk.dur_hns = (LONGLONG)n * 10000000LL / rate_;
-                size_t nb = (size_t)n * align;
-                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) blk.pcm.assign(nb, 0);
-                else blk.pcm.assign(data, data + nb);
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                    // 静音帧：直接产出 PCM16 全零（2 字节/样本）
+                    blk.pcm.assign((size_t)n * (size_t)src_channels * 2, 0);
+                } else if (src_float && src_bits == 32) {
+                    float32_to_pcm16(data, n, src_channels, blk.pcm);
+                } else if (src_bits == 16) {
+                    // 设备本来就是 16-bit PCM：原样拷贝
+                    blk.pcm.assign(data, data + (size_t)n * src_align);
+                } else {
+                    // 其它位深（24/32-bit 整型等）：本编码器不支持的源，
+                    // 静音代替并计数，绝不把错位深的字节喂给 AAC 触发 Finalize 失败。
+                    unsupported_src_.store(true);
+                    blk.pcm.assign((size_t)n * (size_t)src_channels * 2, 0);
+                }
                 cap->ReleaseBuffer(n);
                 publish(blk);   // 广播：每个订阅会话自行判 5s 上限
             }
@@ -387,6 +451,7 @@ private:
     int want_rate_, want_bits_, want_ch_;
     int rate_, bits_, channels_;
     std::atomic<bool> fmt_ready_{false};   // 采集线程是否已回读到真实 mix format
+    std::atomic<bool> unsupported_src_{false};  // 出现 AAC 不支持的源位深（诊断）
     std::mutex fmt_mtx_;
     std::atomic<int> device_events_;
     std::vector<AudioSink*> subs_;
@@ -545,7 +610,8 @@ public:
         while (!audio_q_.empty()) {
             AudioBlock blk = std::move(audio_q_.front()); audio_q_.pop_front();
             write_audio_block(blk);
-            audio_frames_ += (LONGLONG)(blk.pcm.size() / (size_t)(ach_ * abits_ / 8));
+            // 采集端已统一转 PCM16，帧数按 16-bit block align 统计（与写入格式一致）
+            audio_frames_ += (LONGLONG)(blk.pcm.size() / (size_t)(ach_ * 16 / 8));
             LONGLONG this_end = blk.ts_hns + blk.dur_hns;
             if (this_end > last_audio_end_) last_audio_end_ = this_end;
         }
@@ -557,17 +623,31 @@ public:
         // 把队列里剩的正常写入并 close_writer 发布成可播放 MP4。丢块数由 dropped_
         // 统计暴露（stats），用户保住视频远比"因几秒音频积压整段报废"重要。
         drain_audio_queued();
-        // [NEEDS-VERIFY] 补静音：把音轨尾部补到视频 stop 时刻；SinkWriter 不支持
-        // 运行中改 sample 时间戳，这里只在尾部追加静音 sample，不改已写入的 ts。
+        // [修复-0xC00D4A45 第二根因] 旧实现对 last_audio_end_ 正值门控，导致
+        // "全程没有任何音频块写入"(麦克风设备无声/被占用)时该值恒为 0，
+        // 补静音被整体跳过 → AAC 流一个 sample 都没有 → sink 生成不了 esds
+        // → Finalize 报 0xC00D4A45。改为：从未写入音频时从段起点补一段保底
+        // 静音，确保 AAC 编码器至少编码出 1 帧、产出 header。
+        // 上限 2s：长录制全程无声时若一路补到 stop 会分配数百 MB 静音而 OOM；
+        // 保底 2s 足以让音轨可播放、拿到 esds，音轨内容本就是静音，无损体验。
         LONGLONG last_end = last_audio_end_;
         LONGLONG stop_t = qpc_now_hns();
-        if (stop_t > last_end && last_end > 0) {
-            LONGLONG fill = stop_t - last_end;
+        const bool no_audio_at_all = (last_end <= 0);
+        LONGLONG anchor = no_audio_at_all ? seg_start_hns_ : last_end;
+        if (anchor <= 0) anchor = stop_t - 2000000LL;   // 异常兜底，约 0.2s
+        LONGLONG fill = stop_t - anchor;
+        const LONGLONG SILENCE_CAP_HNS = 2 * 10000000LL;
+        if (no_audio_at_all && fill > SILENCE_CAP_HNS) fill = SILENCE_CAP_HNS;
+        if (fill > 0) {
+            const int pcm_bits = 16;   // 与采集转换、SetInputMediaType 一致
             size_t frames = (size_t)(fill * arate_ / 10000000LL);
-            size_t nb = frames * (size_t)(ach_ * abits_ / 8);
+            // AAC 一帧 1024 samples：保底 2 帧，确保 MFT 输出音频样本与 header。
+            const size_t MIN_FRAMES = 2048;
+            if (frames < MIN_FRAMES) frames = MIN_FRAMES;
+            size_t nb = frames * (size_t)(ach_ * pcm_bits / 8);
             if (nb > 0) {
                 std::vector<unsigned char> silence(nb, 0);
-                AudioBlock b{silence, last_end, fill};
+                AudioBlock b{silence, anchor, fill};
                 write_audio_block(b);
                 audio_frames_ += (LONGLONG)frames;
             }
@@ -753,20 +833,26 @@ private:
         aout->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
         aout->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ach_);
         aout->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, arate_);
-        aout->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000 / 8);
+        aout->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        aout->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 128000 / 8);
+        // [修复-0xC00D4A45] 显式声明 raw AAC payload（值必须为 0）。MP4 sink
+        // 据此生成 esds(AudioSpecificConfig) box；缺省虽默认 0，但真机部分
+        // sink 实现下缺失该属性导致 Finalize 拿不到 header 报错，明确设置消除歧义。
+        aout->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
         IF_FAILED_RETURN(writer_->AddStream(aout, &astream_), "AddStream(audio/AAC) 失败");
 
-        IMFMediaType* ain = nullptr;    // 输入格式：WASAPI 采集的 PCM
+        IMFMediaType* ain = nullptr;    // 输入格式：采集线程已统一转成 16-bit PCM
         IF_FAILED_RETURN(MFCreateMediaType(&ain), "MFCreateMediaType(audio PCM) 失败");
+        const int pcm_bits = 16;   // AAC MFT 输入硬性要求 16-bit PCM，与采集转换一致
         ain->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         ain->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
         ain->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ach_);
         ain->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, arate_);
-        ain->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, abits_);
-        ain->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, ach_ * abits_ / 8);
-        ain->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, arate_ * ach_ * abits_ / 8);
+        ain->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, pcm_bits);
+        ain->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, ach_ * pcm_bits / 8);
+        ain->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, arate_ * ach_ * pcm_bits / 8);
         IF_FAILED_RETURN(writer_->SetInputMediaType(astream_, ain, nullptr),
-                         "SetInputMediaType(audio/PCM) 失败（系统 AAC 编码器不可用/格式不支持）");
+                         "SetInputMediaType(audio/PCM16) 失败（系统 AAC 编码器不可用/格式不支持）");
         ain->Release(); aout->Release();
         return S_OK;
     }

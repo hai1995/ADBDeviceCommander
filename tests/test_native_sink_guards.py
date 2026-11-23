@@ -98,3 +98,48 @@ def test_finalize_reports_no_video_frame():
               src.index("void discard()")]
     assert "未收到有效 H264 视频帧" in fin
     assert "if (!writer_ && published_.empty())" in fin
+
+
+# --- 0xC00D4A45 音频流 header 缺失（float32→PCM16 + AAC 流配置）----------
+
+def test_wasapi_float_converted_to_pcm16():
+    """WASAPI 的 float32 mix 必须转成 PCM16 再喂 AAC（否则 WriteSample 全失败）。"""
+    src = _cpp()
+    assert "static bool is_ieee_float_format" in src
+    assert "static void float32_to_pcm16" in src
+    # 采集循环里必须同时具备 float32 转换分支和 16-bit PCM 原样分支
+    loop = src[src.index("HRESULT capture_until_change"):
+               src.index("std::atomic<bool> running_, stop_;")]
+    assert "src_float && src_bits == 32" in loop
+    assert "float32_to_pcm16(data, n, src_channels, blk.pcm)" in loop
+    assert "src_bits == 16" in loop
+
+
+def test_mic_format_reports_pcm16():
+    """回读给 Python 的麦克风格式必须报告 16-bit（与采集写入、AAC 输入一致）。"""
+    src = _cpp()
+    assert "rate_ = f->nSamplesPerSec; bits_ = 16; channels_ = f->nChannels;" in src
+    assert "rate_ = fmt->nSamplesPerSec; bits_ = 16; channels_ = src_channels;" in src
+
+
+def test_aac_stream_declares_payload_type_and_pcm16_input():
+    """AAC 输出流声明 raw payload + 16-bit，输入流固定 PCM16（AAC MFT 硬性要求）。"""
+    src = _cpp()
+    cfg = src[src.index("HRESULT config_audio_stream()"):
+              src.index("HRESULT check_rotate()")]
+    assert "MF_MT_AUDIO_BITS_PER_SAMPLE, 16" in cfg
+    assert "MF_MT_AAC_PAYLOAD_TYPE, 0" in cfg
+    assert "MFAudioFormat_PCM" in cfg
+    assert "const int pcm_bits = 16" in cfg
+
+
+def test_drain_audio_fills_silence_even_without_any_audio_sample():
+    """全程无音频块时也必须补保底静音，确保 AAC 产出 esds header。"""
+    src = _cpp()
+    fin = src[src.index("int drain_audio()"):
+              src.index("int finalize(std::string& published)")]
+    assert "no_audio_at_all" in fin
+    # 旧的 last_end > 0 致命门控必须移除
+    assert "last_end > 0" not in fin
+    assert "SILENCE_CAP_HNS" in fin          # 防长录制静音 OOM
+    assert "MIN_FRAMES" in fin               # 保底 >=2 个 AAC 帧

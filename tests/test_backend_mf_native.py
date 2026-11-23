@@ -248,6 +248,29 @@ def test_mic_format_exception_becomes_reason(monkeypatch):
     assert "读取麦克风格式失败" in reason
 
 
+def test_unsupported_aac_sample_rate_rejected():
+    """96000Hz 等 AAC 不支持的采样率必须启动前拒绝，避免 Finalize 0xC00D4A45。"""
+    fake = FakeNative(available=True)
+    fake.mic = (96000, 16, 2)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "AAC 编码器支持范围" in reason
+    assert not any(c[0] == "session_create" for c in fake.calls)
+    assert any(c[0] == "mic_stop" for c in fake.calls)
+
+
+def test_unsupported_aac_channels_rejected():
+    """非 1/2/6 声道必须启动前拒绝（AAC MFT 不支持，会导致音频流 0 sample）。"""
+    fake = FakeNative(available=True)
+    fake.mic = (48000, 16, 4)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "AAC 编码器支持范围" in reason
+    assert not any(c[0] == "session_create" for c in fake.calls)
+
+
 def test_write_video_error_is_reported(monkeypatch):
     """native session_write_video 报错必须上报，不能吞成假成功。
 
