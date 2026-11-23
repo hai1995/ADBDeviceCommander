@@ -289,6 +289,26 @@ def test_write_sample_stats_are_per_stream():
     assert "push_sample(astream_, true," in src
 
 
+def test_write_sample_is_called_and_hr_declared():
+    """[编译回归] push_sample 必须声明 hr 且真正调用 WriteSample。
+
+    v10 首次提交曾误删 `HRESULT hr = writer_->WriteSample(...)` 整行：导致
+    CI 编译报 error C2065 'hr' undeclared identifier(C2065@827-842)，且 sample
+    从未写入 sink。静态文本守卫锁定 hr 声明→WriteSample→使用的完整链路。
+    """
+    src = _cpp()
+    ps = src[src.index("void push_sample(DWORD stream, bool audio"):
+             src.index("// 段临时文件名")]
+    # hr 必须声明且由 WriteSample 赋值
+    assert "HRESULT hr = writer_->WriteSample(stream, sample);" in ps
+    decl = ps.index("HRESULT hr = writer_->WriteSample(stream, sample);")
+    # 声明必须在使用它的分路统计之前
+    use = ps.index("if (SUCCEEDED(hr)) { ++aws_")
+    assert decl < use, "hr 声明必须早于分路统计使用"
+    # WriteSample 调用必须存在（sample 真正写进 sink）
+    assert ps.count("WriteSample(stream, sample)") == 1
+
+
 def test_silence_fill_capped_unconditionally_and_duration_matches_frames():
     """补静音必须无条件封顶（防中途停麦 OOM），且 duration 与帧数一致。"""
     src = _cpp()

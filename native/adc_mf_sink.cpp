@@ -815,6 +815,8 @@ private:
             ++video_frame_count_;
         }
         sample->SetSampleTime(rel_ts); sample->SetSampleDuration(dur);
+        // 必须真正把 sample 写进 sink；hr 供下方分路统计与错误上报使用。
+        HRESULT hr = writer_->WriteSample(stream, sample);
         sample->Release();
         // [诊断 v8] 按流分别统计：哪一路 WriteSample 真正被 sink 接受。
         // 用调用方传入的 audio 标志判断，不依赖 stream id 数值（可能为 0）。
