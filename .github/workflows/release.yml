@@ -250,10 +250,18 @@ jobs:
             throw "编译后未找到 backend/adc_mf_sink.dll"
           }
 
+      # 产物自证闸门：读取刚编出的 DLL 内的构建指纹，与源码 kBuildId 比对。
+      # 不一致 = CMake 缓存命中旧目标 / install 拷了陈旧 dll → 立即失败、不发版。
+      # 这一步专门防「native 修复改了却没进包、用户反复测到老错误」（真机三次
+      # 原样复现 0xC00D4A45 的根因假设）。校验失败时 ci 变红，绝不出残包。
+      - name: 校验 native DLL 构建指纹（防止旧 DLL 混进产物）
+        run: python tools/check_native_dll.py
+
       - name: 构建（exe + 分发 zip + 源码 zip）
         # 单文件模式（--onefile）：分发件里只有**一个** exe，同事双击即用。
         # 显式写出这个开关，让发版命令自解释（默认值改了也不误读）。
-        run: python build.py --onefile --package --zip
+        # --require-native：缺 dll 时 build.py 直接失败，绝不静默打出无扩展残包。
+        run: python build.py --onefile --package --zip --require-native
 
       - name: 生成 SHA256 校验和
         shell: pwsh

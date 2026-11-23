@@ -713,6 +713,10 @@ def main(argv=None) -> int:
     ap.add_argument("--package", action="store_true",
                     help="exe 打完后，额外产出「双击即用」的 Windows 分发 zip"
                          "（ADBDeviceCommander_v<版本>_win64.zip）")
+    ap.add_argument("--require-native", action="store_true",
+                    help="要求 backend/adc_mf_sink.dll 必须存在（CI 发版闸门）："
+                         "缺失即中止打包，绝不静默产出「无同源录制扩展」的包。"
+                         "开发态默认不加此开关，缺 dll 时仍可回退 ffmpeg 打包。")
     ap.set_defaults(clean=True)
     args = ap.parse_args(argv)
 
@@ -747,6 +751,25 @@ def main(argv=None) -> int:
         zp = make_source_zip(ROOT, args.dist_dir)
         print(f"\n源码分发包完成：{zp}")
         return 0
+
+    # [CI 发版闸门] --require-native：产物必须带上同源录制 native 扩展。
+    # 开发态默认关闭（缺 dll 回退 ffmpeg 仍能打包）；CI 的 release.yml / build.yml
+    # 在构建命令里显式打开——一旦 native 编译步骤没产出 dll，这里直接失败，绝不
+    # 静默打出一个「点开录屏就退化、用户却毫不知情」的残包。
+    if getattr(args, "require_native", False) and bundled_native_dll() is None:
+        print("[错误] 本次构建要求 native 扩展（--require-native），但 "
+              "backend/adc_mf_sink.dll 不存在。\n"
+              "        同源录制的 native 扩展由 native/CMakeLists.txt 编译产生，"
+              "请先执行：\n"
+              "          cmake -S native -B native/build -A x64\n"
+              "          cmake --build native/build --config Release\n"
+              "          cmake --install native/build --prefix backend\n"
+              "        CI 场景请检查「编译同源录制 native 扩展」这一步是否成功。",
+              file=sys.stderr)
+        return 7
+    native_dll = bundled_native_dll()
+    if native_dll is not None:
+        print(f"[native] 将嵌入同源录制扩展：{native_dll.name}")
 
     # 清理构建缓存（__pycache__ / .pytest_cache）：删了会自动再生，
     # 但留着会让源码分发 zip 白胖几 MB。

@@ -869,3 +869,49 @@ def test_no_native_dll_still_builds(monkeypatch):
     add_binaries = [args[i + 1] for i, x in enumerate(args) if x == "--add-binary"]
     assert not any("adc_mf_sink" in a for a in add_binaries), add_binaries
     assert not any("ffmpeg" in a.lower() for a in add_binaries), add_binaries
+
+
+# ---------------------------------------------------------------------------
+# CI 发版闸门 --require-native：缺 dll 绝不静默打出无扩展残包
+# ---------------------------------------------------------------------------
+def test_require_native_aborts_when_dll_missing(monkeypatch, capsys):
+    """CI 打开 --require-native 后，缺 dll 必须以专用码 7 中止，且不启动打包。"""
+    called = []
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "bundled_native_dll", lambda: None)
+    monkeypatch.setattr(build, "run_pyinstaller",
+                        lambda args, dry: called.append(args) or (0, ""))
+
+    rc = build.main(["--no-deps", "--require-native"])
+    assert rc == 7, "缺 native 应返回专用失败码 7，实际 %r" % rc
+    assert called == [], "闸门失败时绝不能启动 PyInstaller"
+    err = capsys.readouterr().err
+    assert "adc_mf_sink.dll" in err and "cmake" in err
+
+
+def test_require_native_passes_when_dll_present(monkeypatch, tmp_path):
+    """有 dll 时 --require-native 正常打包，且 dll 被 --add-binary 嵌入。"""
+    fake = tmp_path / "adc_mf_sink.dll"
+    fake.write_bytes(b"fake")
+    seen = []
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "bundled_native_dll", lambda: fake)
+    monkeypatch.setattr(build, "_file_locked", lambda p: False)
+    monkeypatch.setattr(build, "run_pyinstaller",
+                        lambda args, dry: seen.append(args) or (0, ""))
+
+    rc = build.main(["--no-deps", "--require-native", "--dry-run"])
+    assert rc == 0
+    add_binaries = [seen[0][i + 1] for i, x in enumerate(seen[0]) if x == "--add-binary"]
+    assert any("adc_mf_sink" in a for a in add_binaries), add_binaries
+
+
+def test_require_native_skipped_for_zip_only(monkeypatch):
+    """--zip-only 只打源码包，不需要 native，闸门应豁免。"""
+    monkeypatch.setattr(build, "check_sources", lambda: [])
+    monkeypatch.setattr(build, "clean_junk", lambda root: [])
+    monkeypatch.setattr(build, "bundled_native_dll", lambda: None)
+    monkeypatch.setattr(build, "make_source_zip", lambda *a, **k: "ok")
+    assert build.main(["--zip-only", "--require-native"]) == 0

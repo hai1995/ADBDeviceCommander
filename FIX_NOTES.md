@@ -7854,3 +7854,42 @@ backend/ 拷现成 dll。用户日志显示「已开始同源录制」成功（d
 一行的构建指纹是否为 `mf-20261123-esdsdiag-v4`；若报 0xC00D4A45，请把带
 `[诊断 v=.. a=.. d=..]` 的整行发来，据此定位视频流还是音频流。
 native C++ 在 Linux 沙箱无 Windows SDK 无法编译验证，仍需真机确认。
+
+## 第 N+5 轮：CI 产物自证闸门 —— 让 release 产物必定带上最新 native 修复
+
+**用户关键事实**：用户只从 GitHub Release 下载 exe、执行 release 工作流后直接下
+产物，**从不本地编译**。上一轮 N+4 给的建议「本地 cmake 重新编译 dll」对用户完全
+无效。查 GitHub 实况：最新 release `v2026.1123.0338`（commit `fe86d05`，基于
+`468c3e3`）的 notes 只有设备分段 A 方案 + 三根因修复两条，**不含 N+4 的
+`f9a4286`**（构建指纹/诊断/OOM）——用户下载的 exe 里根本没有指纹功能，日志不显示
+指纹是必然的。同一错误反复复现的真正风险是：native 修复改了，**却无法证明它进了
+产物**。
+
+**根因（配置层）**：CI 里其实每版都跑 native 编译（build.yml/release.yml 都有 cmake
+三步），但有两处致命薄弱点：
+1. **编译产物从不被校验**：CMake 缓存命中旧目标 / install 拷了陈旧 dll / 有人改
+   工作流漏掉编译步骤，产物都会带旧 DLL 静默发出，用户反复测到早已修复的错误。
+2. **build.py 缺 dll 时静默降级**：`bundled_native_dll()` 返回 None 时只打警告照常
+   打包，产出一个「点开录屏就退化、用户毫不知情」的残包。
+
+**修复（全部固化进 CI，不依赖任何本地手工操作）**：
+1. `tools/check_native_dll.py`（新增，纯标准库）：从 `native/adc_mf_sink.cpp` 正则
+   解析源码 `kBuildId`，ctypes 加载 `backend/adc_mf_sink.dll` 调 `adc_build_id()` 读
+   DLL 内指纹，两者必须一致；老 DLL（无符号）/ 加载失败 / 读不到一律判失败。
+   导出 `verify()` 纯函数供单测用假 loader 覆盖全分支。
+2. 两个工作流（build.yml + release.yml）windows job 在 native 编译后新增一步
+   「校验 native DLL 构建指纹」`python tools/check_native_dll.py` —— 不一致即 ci
+   变红、不发版。
+3. 两个工作流构建命令加 `--require-native`；`build.py` 新增该开关：缺 dll 直接返回
+   退出码 7 中止打包（`--zip-only` 豁免），绝不静默产出无同源录制扩展的残包。
+4. 新增 `tests/test_ci_native_gate.py`：把「cmake 三步 + 产物存在性 + 指纹校验 +
+   --require-native」锁进 YAML 守卫，将来改工作流漏掉任何一步立即变红。
+   新增 `tests/test_check_native_dll.py`（15 项）、`tests/test_build.py` 补 3 项。
+
+**效果**：用户今后只需在 GitHub 点一次 release → CI 自动编译最新 native → 指纹
+自证 DLL 就是当前源码 → 缺 dll 直接失败 → 产物必定带最新修复。下次真机日志若仍
+报 0xC00D4A45，可先看「已开始同源录制」一行的构建指纹是否为源码当前 kBuildId：
+一致则说明跑的是新 DLL（此时带 `[诊断 v/a/d]` 的信息可定位视频/音频流）；若日志
+无指纹或提示旧 DLL，则是打包链路问题，ci 闸门本应提前拦下。
+
+**验证**：新增/改动测试相关 76 项全绿，ruff / pyflakes 全绿；全量见推送前汇总。
