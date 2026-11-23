@@ -233,15 +233,42 @@ def test_finalize_failure_carries_stream_stats():
     call = cw[cw.index("append_error_stats("):]
     call = call[:call.index(");") + 2]
     for tok in ("vws_", "aws_", "vwf_", "awf_", "vlhr_", "alhr_",
-                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_"):
+                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_", "vtc_"):
         assert tok in call, f"诊断调用缺少 {tok}"
     # append_error_stats 本身要把分路字段写进错误文本
     ae = src[src.index("static void append_error_stats"):
              src.index("extern \"C\" int adc_last_error")]
     for key in ("a=%lldF", "v=%lldB", "vws=%lld", "aws=%lld",
                 "vlhr=0x%08X", "alhr=0x%08X", "aac=%dHz/%dch/%dbit",
-                "sps=%dB", "seqh=%dB"):
+                "sps=%dB", "seqh=%dB", "vtc=%lld"):
         assert key in ae, f"诊断文本缺少字段 {key}"
+
+
+def test_video_sample_timestamps_are_monotonic():
+    """[0xC00D4A45 视频根因回归] 视频 sample 时间戳必须单调不重叠。
+
+    v8 真机诊断 vws=4/vwf=339/vlhr=0x8000FFFF 而音频 aws=1340/awf=0：
+    视频 dur 用名义帧长(33ms)、ts 用批到达 QPC，突发到达使 ts 相同或倒退，
+    后帧 ts < 前帧 ts+dur → MP4 sink 以 E_UNEXPECTED 拒帧 → Finalize 缺 header。
+    修复：视频 rel_ts 钳制到 >= last_video_end_，仅成功写入后推进游标。
+    """
+    src = _cpp()
+    ps = src[src.index("void push_sample(DWORD stream, bool audio"):
+             src.index("// 段临时文件名")]
+    # 必须有针对视频流(!audio)的单调钳制
+    assert "if (!audio) {" in ps
+    assert "if (rel_ts < last_video_end_) {" in ps
+    # 钳制分支把 rel_ts 抬到 last_video_end_ 并计数
+    clamp = ps[ps.index("if (rel_ts < last_video_end_) {"):
+               ps.index("sample->SetSampleTime(rel_ts)")]
+    assert "rel_ts = last_video_end_;" in clamp
+    assert "++vtc_;" in clamp
+    # 仅成功写入的视频帧才推进游标（失败帧不占位）
+    assert "if (!audio && SUCCEEDED(hr)) last_video_end_ = rel_ts + dur;" in ps
+    # 切段必须归零：新 MP4 时间轴从 0 开始
+    ew = src[src.index("HRESULT ensure_writer(std::string& first_tmp_out)"):
+             src.index("HRESULT config_video_stream()")]
+    assert "last_video_end_ = 0;" in ew
 
 
 def test_write_sample_stats_are_per_stream():
