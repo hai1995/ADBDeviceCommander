@@ -27,6 +27,7 @@ import zipfile
 import itertools
 import datetime
 import tempfile
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from core.constants import (
     VERSION, AUTO_REFRESH_MS, REC_DEATH_CHECK_S, adb_kwargs, safe_name, program_dir,
@@ -195,6 +196,7 @@ __all__ = [
     "resource_path",
     "root_intent",
     "safe_name",
+    "shutil",
     "save_click_deltas",
     "save_prefs",
     "save_prefs_checked",

@@ -1993,7 +1993,10 @@ def test_screen_record_stop_reports_saved_once(monkeypatch, tmp_path):
     api = _make_api()
     assert api.screen_record_start(None, save_dir=str(tmp_path))["ok"] is True
     vpath = api._rec_session["videos"]["A1"]
-    assert vpath.startswith(str(tmp_path)) and vpath.endswith(".mp4"), vpath
+    assert vpath.endswith(".mp4"), vpath
+    # [EDR A 方案] 录制中会话登记的是 TEMP 工作目录里的中间路径（不落程序目录），
+    # 成品在收尾时才 copy 回 save_dir。两者文件名相同。
+    vname = os.path.basename(vpath)
 
     assert api.screen_record_stop() == {"ok": True}
     api.workers.shutdown(timeout=2.0)
@@ -2002,7 +2005,9 @@ def test_screen_record_stop_reports_saved_once(monkeypatch, tmp_path):
     hits = [p["text"] for p in events.get("status", [])
             if "✓ 录屏已保存" in (p.get("text") or "")]
     assert len(hits) == 1, "同一条已保存提示不该报两次：%r" % hits
-    assert vpath in hits[0], hits
+    # 提示里给用户看的必须是回拷到保存目录后的路径，不是 TEMP 工作目录路径。
+    assert str(tmp_path) in hits[0] and vname in hits[0], hits
+    assert (tmp_path / vname).exists(), "成品应回拷到用户保存目录"
     # tool 通道不应再重复播报同一件事
     dup = [p for p in events.get("tool", [])
            if "已保存" in (p.get("text") or "")]
@@ -2086,7 +2091,8 @@ def _mux_stop_session(monkeypatch, tmp_path, serials=("A1",)):
         lambda serials, dead, vm, dm, pretaken=None: {
             s: ([str(p)], None) for s, p in videos.items()})
     monkeypatch.setattr(
-        api, "_merge_device_segments", lambda s, vs: (None, 0, []))
+        api, "_merge_device_segments",
+        lambda s, vs, work_dir=None: (None, 0, []))
     return api, videos, mic
 
 

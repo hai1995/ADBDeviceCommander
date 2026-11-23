@@ -7772,3 +7772,43 @@ provided to the sink"）。静态审查定位三条相互叠加的根因：
 补 8 项测试（native 静态守卫 4 + Python 4）：float→PCM16 转换分支、格式回读 16-bit、
 AAC payload/PCM16 流配置、无音频也补静音、96000Hz/4 声道拒绝。全量
 **1677 passed / 1 skipped**（+5）。AAC 可播性与 moov 布局仍按 README 在真机确认。
+
+## 第 N+3 轮：设备分段录屏收尾被亚信 EDR 拦截杀进程（A 方案补漏）
+
+真机反馈：录屏十多分钟（screenrecord 自动分 5 段），最终合成视频已生成，
+但程序逐个删除中间段、删到第 2 段时被亚信「未授权文件加密」拦截杀进程；
+且分段 mp4 直接落在程序运行目录。用户怀疑与落盘位置有关——判断正确。
+
+**根因：A 方案只做了同源录制 MF，设备分段路径整条漏掉。** 第六十五/六十七轮
+建立 A 方案（系统 TEMP 工作目录 + 成品回拷 + 收尾零删除 + 下次启动 sweep）
+时，`mf_capture_service` 已收敛到 `adc_mf_` 工作目录，但设备分段录屏
+（`screen_service.VideoRecorder` → `controllers/record.py`）仍把每段 mp4 直接
+`adb pull` 到用户保存目录（常是程序安装目录），收尾 `_merge_device_segments`
+`for p in used: os.remove(...)` 批量删段，之后还有合成删原始视频 / mic wav、
+打包删源等多处 os.remove。这正是勒索行为检测盯的「用户目录写高熵 MP4 →
+改名 → 批量删」序列。
+
+**修复（对称 MF 的 A 方案）**：
+1. `core/tmpfiles.py`：新增 `SEG_WORKDIR_PREFIX = "adc_seg_"`，
+   `WORKDIR_PREFIXES` 统一两种前缀；`sweep_workdirs` 支持 `prefixes` 参数、
+   默认清理全部工作目录前缀（MF + 设备分段），下次启动一并后台清。
+2. `backend/controllers/record.py`：
+   - `_screen_record_start_locked`：建 `adc_seg_` TEMP 工作目录存 `sess["work_dir"]`，
+     screenrecord 分段与麦克风 wav 的落盘目标改为工作目录；mkdtemp 失败退回 save_dir。
+   - 新增 `_in_work_dir` / `_remove_intermediate` / `_publish_product` 三个助手：
+     工作目录内的中间产物收尾不删（延迟到下次启动）、成品用 shutil.copy2 跨卷
+     回拷到保存目录并走 unique_path 防覆盖。
+   - `_merge_device_segments` / 合成删原始视频 / 删 mic wav / 取消路径 / 打包删源
+     全部接 work_dir 开关：work_dir 非空则跳过删除；为空保留旧行为（零回归）。
+   - 成品在合成循环内即回拷，提示与 rec_files 用对外路径（不暴露 TEMP）。
+   - `sess["work_dir"]` 全程作开关——测试替身构造的 sess 无此键，行为完全不变。
+3. `backend/controller.py`：re-export `shutil`。
+
+**验证**：补 6 项专项测试（test_record_seg_edr_workdir.py）：分段落 TEMP、
+成品回拷、收尾零删除、取消延迟、下次启动 sweep、5 段批量删不执行（含
+work_dir=None 旧行为回归）。改 3 处既有测试替身/断言以适配新的对外路径语义。
+全量 **1685 passed / 1 skipped**；ruff / pyflakes / 前端 101 用例 0 失败。
+
+**边界**：EDR 是黑盒启发式检测，无 Windows SDK / 无亚信环境无法真机验证；
+本轮确认的是文件布局与删除时机在行为链路上已与已验证有效的 MF A 方案对齐。
+成品可播性、moov 布局、以及 EDR 是否仍误报，仍需用户真机打包后反复验证。

@@ -45,6 +45,13 @@ SHOT_PREFIX = "adc_shot_"     # 关闭「自动保存文件」时的截图（仅
 # 「建了却没人清」的 TEMP 堆积。它不在 DEFAULT_PREFIXES —— 那是文件前缀，
 # 工作目录是目录，清理走专门的 sweep_workdirs（shutil.rmtree 递归）。
 MF_WORKDIR_PREFIX = "adc_mf_"
+# 设备分段录屏（screenrecord 自动分段 → controllers/record.py）在系统 TEMP 里的
+# 工作目录前缀。与 MF 同源录制同样属于 A 方案：分段落 TEMP、成片回拷保存目录、
+# 收尾零删除、遗留目录下次启动清理。两种前缀都由 sweep_workdirs 统一清理。
+SEG_WORKDIR_PREFIX = "adc_seg_"
+# 所有「录制工作目录」前缀：sweep_workdirs 的默认清理集合。集中在一处，新增
+# 录制路径时只需加在这里，不会出现「建了工作目录却没人清」的 TEMP 堆积。
+WORKDIR_PREFIXES = (MF_WORKDIR_PREFIX, SEG_WORKDIR_PREFIX)
 DEFAULT_PREFIXES = (VIEW_PREFIX, UPLOAD_PREFIX, DEVAUDIO_PREFIX,
                     SCRCPY_LOG_PREFIX, SHOT_PREFIX)
 
@@ -129,11 +136,14 @@ def boot_sweep(min_age_s=3600.0, directory=None, now=None):
                  min_age_s=min_age_s, directory=directory, now=now)
 
 
-def sweep_workdirs(min_age_s=60.0, directory=None, now=None):
-    """启动时清理上一轮同源录制遗留在 TEMP 的工作目录（递归删整个目录）。
+def sweep_workdirs(min_age_s=60.0, directory=None, now=None,
+                   prefixes=None):
+    """启动时清理上一轮录制遗留在 TEMP 的工作目录（递归删整个目录）。
 
-    与 ``sweep``（只删普通文件）分开：这些是 ``mkdtemp(prefix=adc_mf_)`` 建的
-    **目录**，里面是 native 的 .tmp.mp4 中间态，须用 ``shutil.rmtree`` 递归删。
+    与 ``sweep``（只删普通文件）分开：这些是 ``mkdtemp(prefix=adc_mf_ /
+    adc_seg_)`` 建的**目录**，里面是分段的 .tmp.mp4 / mp4 中间态，须用
+    ``shutil.rmtree`` 递归删。默认清理**所有**录制工作目录前缀（MF 同源录制
+    + 设备分段录屏），见 WORKDIR_PREFIXES。
 
     为什么存在：EDR 误报缓解把收尾的集中 rmtree 从「点停止」移到了「下次启动」
     （见 backend.mf_capture_service._drop_work_dir）。停止瞬间不再批量删除，遗留
@@ -141,7 +151,7 @@ def sweep_workdirs(min_age_s=60.0, directory=None, now=None):
     MP4 → 改名"的勒索特征序列挨在一起。
 
     保守策略（延续本模块「宁可留，也不误删」）：
-      * 只碰名字以 MF_WORKDIR_PREFIX 开头、**真实目录且非符号链接**的直接子项；
+      * 只碰名字以 WORKDIR_PREFIXES 之一开头、**真实目录且非符号链接**的直接子项；
       * ``min_age_s`` 宽限跳过刚生成的目录 —— 多开实例时另一个可能正在录制，
         其工作目录 mtime 会因分片/音频写入保持新鲜，不会被误删；
       * 单个目录删除失败（被占用 / 权限）只计数跳过，不影响其它目录，不抛异常。
@@ -150,13 +160,14 @@ def sweep_workdirs(min_age_s=60.0, directory=None, now=None):
     """
     d = directory or tempfile.gettempdir()
     t = time.time() if now is None else float(now)
+    prefixes = tuple(WORKDIR_PREFIXES if prefixes is None else prefixes)
     stats = {"removed": 0, "failed": 0, "kept": 0, "scanned": 0}
     try:
         names = os.listdir(d)
     except Exception:  # noqa: BLE001  TEMP 不可列举时静默跳过
         return stats
     for name in names:
-        if not name.startswith(MF_WORKDIR_PREFIX):
+        if not any(name.startswith(p) for p in prefixes if p):
             continue
         path = os.path.join(d, name)
         try:

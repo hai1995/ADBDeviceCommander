@@ -21,14 +21,17 @@ from backend.controller import (
     probe_player,
     safe_name,
     scrcpy_probe_info,
+    shutil,
+    tempfile,
     time,
     zipfile,
 )
 from backend.screen_service import device_clock
 from backend.video_join import join_segments
-from core.constants import LOGCAT_COVERAGE_WARN_S
+from core.constants import LOGCAT_COVERAGE_WARN_S, unique_path
 from core.logcat import read_time_bounds
 from core.longpath import long_path, path_exists, path_isfile
+from core.tmpfiles import SEG_WORKDIR_PREFIX
 
 
 def _fmt_span(sec):
@@ -340,8 +343,16 @@ class RecordMixin:
             return {"ok": False, "reason": "no_device"}
         save_dir = save_dir or self._default_save_dir()
         sess_ts = time.strftime("%Y%m%d_%H%M%S")
+        # [EDR 误报缓解 A 方案] 在系统 TEMP 建录制工作目录：screenrecord 分段、
+        # 麦克风 wav 等高熵中间产物全部落这里，用户保存目录（常是程序安装目录）
+        # 不再出现「写高熵 MP4 → 批量改名/删除」的勒索特征序列。成品只在收尾
+        # 成功后 copy 回 save_dir；工作目录收尾不删，下次启动由 sweep_workdirs
+        # 后台清理（与同源录制 MF 对称）。mkdtemp 失败时退回 save_dir 老行为。
+        work_dir = None
+        with contextlib.suppress(Exception):
+            work_dir = tempfile.mkdtemp(prefix=SEG_WORKDIR_PREFIX)
         self._rec_session = {
-            "ts": sess_ts, "dir": save_dir,
+            "ts": sess_ts, "dir": save_dir, "work_dir": work_dir,
             # 会话开始的本机时刻：收尾校验「配套 logcat 有没有晚于录制起点启动」
             # 的基准（见 _logcat_coverage_notes）。
             "start_host": time.time(),
@@ -355,8 +366,10 @@ class RecordMixin:
             "pointer_location_prev": {},
             "show_touches_prev": {},
         }
+        # 麦克风 wav 落到工作目录（有则），避免高熵音频直接写用户保存目录。
+        mic_dir = self._rec_session.get("work_dir") or save_dir
         if with_mic:
-            ok, p = self._mic_start(save_dir)
+            ok, p = self._mic_start(mic_dir)
             if ok:
                 self._rec_session["mic_path"] = p
                 self._rec_session["mic_started"] = True
@@ -424,7 +437,9 @@ class RecordMixin:
             # 冒到 screen_record_start 的兜底，把整场半启动会话撤销掉。并行化
             # 只改「等多久」，不改这条失败语义。
             t_start = time.time()   # 视频真正开始录的时刻（Popen 发起前）
-            ok, local = self.video.start(s, save_dir, extra_name=sess_ts)
+            # [EDR A 方案] 分段 mp4 pull 到 TEMP 工作目录而非用户保存目录。
+            pull_dir = self._rec_session.get("work_dir") or save_dir
+            ok, local = self.video.start(s, pull_dir, extra_name=sess_ts)
             return s, {"da_tried": da_tried, "da": da, "da_err": da_err,
                        "remote": remote, "ok": ok, "local": local,
                        "t_start": t_start}
@@ -582,6 +597,8 @@ class RecordMixin:
             with contextlib.suppress(Exception):
                 self.logcat_capture.stop(s, zip_on_stop=False)
         self._restore_overlays(sess)
+        # [EDR A 方案] 半启动撤销不在撤销瞬间删工作目录（其中可能已有拉回的分段），
+        # 丢弃引用、留待下次启动 sweep_workdirs 后台清理，收尾零删除。
         self._rec_session = {}
 
     def _enable_overlay(self, serial, key, prev_field):
@@ -848,6 +865,13 @@ class RecordMixin:
                 except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                     break
                 time.sleep(0.1)
+        # [EDR A 方案] 工作目录里的分段 / wav 不在取消瞬间删除（批量删高熵 MP4
+        # 同样触发亚信），留待下次启动 sweep_workdirs 清理；只删用户保存目录里
+        # 的 logcat txt。取消语义不变（本次产物不保留），只是删除被推迟。
+        work_dir = sess.get("work_dir")
+        if work_dir:
+            candidates = [p for p in candidates
+                          if not self._in_work_dir(p, work_dir)]
         return self._delete_files(candidates)
 
     @staticmethod
@@ -879,6 +903,64 @@ class RecordMixin:
             except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 kept.append(p)
         return removed, kept, len(seen)
+
+    @staticmethod
+    def _in_work_dir(path, work_dir):
+        """路径是否位于录制工作目录内（跨盘安全）。
+
+        work_dir 为空 / 路径不在其中时返回 False。用它区分「工作目录里的中间
+        产物」（收尾不删、留待下次启动）与「用户保存目录里的文件」（照常处理）。
+        """
+        if not work_dir or not path:
+            return False
+        try:
+            p = os.path.normcase(os.path.abspath(path))
+            w = os.path.normcase(os.path.abspath(work_dir))
+            return os.path.commonpath([p, w]) == w
+        except (ValueError, OSError):
+            return False
+
+    @staticmethod
+    def _remove_intermediate(path, work_dir):
+        """删一个中间产物；位于工作目录内时**跳过**（延迟到下次启动清理）。
+
+        [EDR A 方案] 收尾瞬间对高熵 MP4 的批量 os.remove 是亚信「未授权文件
+        加密」勒索检测的直接触发点（用户实测删到第 2 段就被杀）。工作目录在
+        系统 TEMP，EDR 天然高容忍；留在那里由下次启动的 sweep_workdirs 后台
+        递归删除，那时无活跃录制会话、不与写/改名动作相邻。work_dir 为空
+        （mkdtemp 失败 / 测试替身）时退回立即删除，行为与 A 方案前一致。
+        """
+        if RecordMixin._in_work_dir(path, work_dir):
+            return False
+        with contextlib.suppress(Exception):
+            if path and path_exists(path):
+                os.remove(long_path(path))
+                return True
+        return False
+
+    @staticmethod
+    def _publish_product(path, work_dir, save_dir):
+        """把工作目录里的成品 copy 回用户保存目录，返回对外路径。
+
+        * 不在工作目录内（测试替身 / 老行为）：原样返回，零副作用；
+        * 在工作目录内但未落盘：返回原路径（上层 path_exists 会过滤，不误报成功）；
+        * 跨卷安全用 shutil.copy2；与项目其它产物一致走 unique_path 防覆盖；
+        * 用后缀 .zip 一并占位，避免成品与后续打包 zip 抢同一 basename。
+        """
+        if not RecordMixin._in_work_dir(path, work_dir):
+            return path
+        if not path_isfile(path):
+            return path
+        try:
+            os.makedirs(long_path(save_dir), exist_ok=True)
+            dst = unique_path(os.path.join(save_dir, os.path.basename(path)),
+                              suffixes=(".zip",))
+            if os.path.normcase(os.path.abspath(dst)) != os.path.normcase(
+                    os.path.abspath(path)):
+                shutil.copy2(long_path(path), long_path(dst))
+            return dst
+        except Exception:  # noqa: BLE001  回拷失败保留 TEMP 路径，由上层统一上报
+            return path
 
     def _session_teardown(self, sess):
         """录屏会话收尾主体（须在持有 _rec_lock 时调用；异常由调用方兜底）。
@@ -916,10 +998,13 @@ class RecordMixin:
         # 自动分段是**实现手段**，不是用户要的东西：先把多段合并成一个完整 mp4，
         # 再走下面的音频合成 / 打包。合并失败时保持分段原样（见
         # _merge_device_segments：宁可给 N 个能播的段，也不给一个坏成片）。
+        # [EDR A 方案] 工作目录（有则为系统 TEMP）：分段/合成中间产物的删除全部
+        # 延迟到下次启动；成品在收尾末尾回拷到用户保存目录。
+        work_dir = sess.get("work_dir")
         merged_segs = {}
         for s in list(local_videos.keys()):
             one, n_used, _skipped = self._merge_device_segments(
-                s, local_videos[s])
+                s, local_videos[s], work_dir=work_dir)
             if one:
                 local_videos[s] = [one]
                 if n_used > 1:
@@ -977,16 +1062,15 @@ class RecordMixin:
                         ".mp4") else (vlocal + ".final.mp4")
                     merged = ffmpeg_mux(vlocal, audios, final)
                     if merged:
-                        self._push_status("ok", f"✓ 已合成音视频: {merged}")
-                        rec_files.append(merged)
-                        # 合成成功：原始无声视频已无用，删掉。用户反馈目录里同时留着
-                        # record_*.mp4 与 *_final.mp4 两份太冗余；成片是 ffmpeg 重新
-                        # 封装出的 final，删原始段不影响成片，也不影响打包（打包用的是
-                        # rec_files 里的 final）。合成失败时走 else 分支保留原视频。
-                        with contextlib.suppress(Exception):
-                            if path_exists(vlocal):
-                                os.remove(long_path(vlocal))
-                                cleaned_sources += 1
+                        # [EDR A 方案] 成品从工作目录回拷到用户保存目录，提示与
+                        # 产物都用对外路径（不暴露 TEMP）。work_dir=None 时原样返回。
+                        pub = self._publish_product(merged, work_dir, sess["dir"])
+                        self._push_status("ok", f"✓ 已合成音视频: {pub}")
+                        rec_files.append(pub)
+                        # 合成成功：原始无声视频已无用。老行为是直接删；A 方案下
+                        # 它位于工作目录（TEMP），交给下次启动统一清理，收尾零删除。
+                        if self._remove_intermediate(vlocal, work_dir):
+                            cleaned_sources += 1
                         if uses_mic:
                             mic_consumed_ok = True
                     else:
@@ -994,17 +1078,19 @@ class RecordMixin:
                         # 「内置 ffmpeg 无法运行」只是其中一种，音频为空、ffmpeg 异常
                         # 同样会走到这里。
                         why = "" if _have_ffmpeg() else "（内置 ffmpeg 无法运行）"
+                        pub = self._publish_product(vlocal, work_dir, sess["dir"])
                         self._push_toast(
-                            "warn", f"⚠ 合成音视频失败{why}，原始视频已保存（无音轨）: {vlocal}")
-                        if path_exists(vlocal):
-                            rec_files.append(vlocal)
+                            "warn", f"⚠ 合成音视频失败{why}，原始视频已保存（无音轨）: {pub}")
+                        if path_exists(pub):
+                            rec_files.append(pub)
                         if uses_mic:
                             # 留着 wav：用户装好 ffmpeg 后还能拿它重试合成。
                             mic_merge_failed = True
                 else:
-                    self._push_status("ok", f"✓ 录屏已保存: {vlocal}")
-                    if path_exists(vlocal):
-                        rec_files.append(vlocal)
+                    pub = self._publish_product(vlocal, work_dir, sess["dir"])
+                    self._push_status("ok", f"✓ 录屏已保存: {pub}")
+                    if path_exists(pub):
+                        rec_files.append(pub)
         if mic_lost:
             # 空录音（麦克风被占用 / 全程静音 / 无录音权限）现在会返回 None 并删除坏文件，
             # 这里明确告诉用户「为什么没有声音」，否则用户只看到成片没音轨。
@@ -1022,10 +1108,8 @@ class RecordMixin:
         # 但它是整场共用的一条，只要有一台设备合成失败就得留着（供事后重试），
         # 只有所有用到它的合成都成功，才在这里删。
         if mic_path and mic_consumed_ok and not mic_merge_failed:
-            with contextlib.suppress(Exception):
-                if path_exists(mic_path):
-                    os.remove(long_path(mic_path))
-                    cleaned_sources += 1
+            if self._remove_intermediate(mic_path, work_dir):
+                cleaned_sources += 1
         if cleaned_sources:
             self._push_status(
                 "info",
@@ -1065,7 +1149,8 @@ class RecordMixin:
         zpath = None
         if sess.get("with_zip") and rec_files:
             z = os.path.join(sess["dir"], "rec_{}.zip".format(sess["ts"]))
-            if self._zip_paths(rec_files, z):
+            # A 方案：打包后不删源（成品已回拷到保存目录，删除又构成可疑序列）。
+            if self._zip_paths(rec_files, z, cleanup=not bool(work_dir)):
                 zpath = z
                 self._push_status("ok", f"✓ 录制产物已打包: {zpath}")
             else:
@@ -1207,8 +1292,12 @@ class RecordMixin:
             return stem[:i]
         return stem
 
-    def _merge_device_segments(self, serial, vlist):
+    def _merge_device_segments(self, serial, vlist, work_dir=None):
         """把一台设备的多段录像合并为一个完整 mp4。
+
+        work_dir 非空（系统 TEMP 工作目录）时，并入成片的中间段**不立即删除**
+        （见 _remove_intermediate），留待下次启动 sweep_workdirs 后台清理 ——
+        这是 A 方案避开亚信勒索特征批量删的关键。work_dir=None 时保留旧行为。
 
         返回 (成品路径或 None, 参与合并的段数, 未并进成片的残缺段列表)。
 
@@ -1245,10 +1334,9 @@ class RecordMixin:
             # 打包时体积也白翻一倍。
             for p in used:
                 if p and p != merged:
-                    # 长路径安全：中间段删除失败会被静默吞掉 → 目录里留着
-                    # 「3 个分段 + 1 个成片」，用户第一反应是「哪几个是最终版」。
-                    with contextlib.suppress(Exception):
-                        os.remove(long_path(p))
+                    # [EDR A 方案] 工作目录内的段不立即删（下次启动统一清理），
+                    # 避开"点停止瞬间批量删高熵 MP4"的勒索特征序列。
+                    self._remove_intermediate(p, work_dir)
             want = stem + ".mp4"
             try:
                 os.replace(long_path(merged), long_path(want))
@@ -1386,12 +1474,16 @@ class RecordMixin:
         return zipfile.ZIP_DEFLATED
 
     @staticmethod
-    def _zip_paths(paths, zip_path):
+    def _zip_paths(paths, zip_path, cleanup=True):
         """把若干文件打包为一个 zip（以文件名作条目）。失败返回 None。
 
         打包**完整写出成功后**清理源文件（仅清理本次实际写入 zip 的普通文件，
         目录 / zip 自身 / 写入失败未进包的文件都不会被删）——与 README 承诺的
         「打包完成后清理刚打包的源文件（仅删打包所覆盖的文件）」保持一致。
+
+        cleanup=False（EDR A 方案）：打包后不删源文件。工作目录模式下成品已
+        copy 到用户保存目录，打包源若是那份 copy，删除它又构成"删高熵 MP4"
+        的可疑动作；不删、留待下次启动连同工作目录一起清理，收尾零删除。
         """
         written = []
         lzip = long_path(zip_path)
@@ -1421,9 +1513,10 @@ class RecordMixin:
                 if os.path.exists(lzip):
                     os.remove(lzip)
             return None
-        for p in written:
-            with contextlib.suppress(Exception):
-                os.remove(long_path(p))
+        if cleanup:
+            for p in written:
+                with contextlib.suppress(Exception):
+                    os.remove(long_path(p))
         return zip_path
 
     def _scrcpy_pref_path(self):
