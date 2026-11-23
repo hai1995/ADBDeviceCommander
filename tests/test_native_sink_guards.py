@@ -115,6 +115,26 @@ def test_wasapi_float_converted_to_pcm16():
     assert "src_bits == 16" in loop
 
 
+def test_push_sample_discards_on_lock_failure():
+    """[数据完整性回归] IMFMediaBuffer Lock 失败必须丢弃本块，禁止写未初始化内存。
+
+    旧实现 `if (SUCCEEDED(Lock) && dst) {memcpy...}` 在 Lock 失败时跳过 memcpy，
+    却仍 SetCurrentLength(len)+AddBuffer+WriteSample —— 把未初始化的堆内存写进
+    音视频流。改为 Lock 失败即释放并 dropped_++ return。
+    """
+    src = _cpp()
+    fn = src[src.index("void push_sample("):
+             src.index("// 段临时文件名")]
+    # 必须显式判断 Lock 失败，且失败分支里 Release 后直接 return
+    assert "FAILED(buf->Lock(&dst, nullptr, nullptr)) || !dst" in fn
+    fail_pos = fn.index("FAILED(buf->Lock(&dst, nullptr, nullptr)) || !dst")
+    ret_pos = fn.index("buf->Release(); sample->Release(); dropped_++; return;")
+    assert fail_pos < ret_pos, "Lock 失败分支必须 Release 后立即 return"
+    # memcpy/Unlock/SetCurrentLength 只能在成功分支（return 之后）执行
+    memcpy_pos = fn.index("memcpy(dst, data, len);")
+    assert ret_pos < memcpy_pos, "拷贝必须发生在失败分支 return 之后"
+
+
 def test_wasapi_float_guid_offset_is_correct():
     """[静音回归] EXTENSIBLE 的 SubFormat 必须用 offsetof 定位，cbSize 下限 22。
 

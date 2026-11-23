@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261123-floatguid-v5";
+static const char* const kBuildId = "mf-20261123-lockguard-v6";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -767,7 +767,13 @@ private:
         IMFMediaBuffer* buf = nullptr;
         if (FAILED(MFCreateMemoryBuffer(len, &buf))) { sample->Release(); dropped_++; return; }
         BYTE* dst = nullptr;
-        if (SUCCEEDED(buf->Lock(&dst, nullptr, nullptr)) && dst) { memcpy(dst, data, len); buf->Unlock(); }
+        // [修复-未初始化内存] Lock 失败或拿不到写指针时,绝不能把未初始化的 buffer
+        // 当有效 sample 写进 MP4(否则向音视频流写入随机字节、污染产物)。丢弃本块。
+        if (FAILED(buf->Lock(&dst, nullptr, nullptr)) || !dst) {
+            buf->Release(); sample->Release(); dropped_++; return;
+        }
+        memcpy(dst, data, len);
+        buf->Unlock();
         buf->SetCurrentLength(len);
         sample->AddBuffer(buf); buf->Release();
         // [修复] 每段是独立 MP4，sample 时间戳必须相对本段起点（seg_start_hns_），
