@@ -671,7 +671,6 @@ def test_both_return_codes_defined_in_cpp():
     assert "static const int ADC_ROTATE_PENDING = 1;" in src, (
         "C++ 必须定义 ADC_ROTATE_PENDING=1")
     # Python 侧须有对应定义，两边严格对齐
-    import inspect
     import backend.mf_native as mn
     assert mn.ADC_OK == 0 and mn.ADC_ROTATE_PENDING == 1, (
         "Python 返回码须与 C++ 对齐：ADC_OK=0, ADC_ROTATE_PENDING=1")
