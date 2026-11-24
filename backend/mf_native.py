@@ -39,8 +39,16 @@ _SC4 = b"\x00\x00\x00\x01"
 #   超 1 分钟。修复：超时 drain 可在队列中被撤销（见 call(cancelable)），超时值
 #   放宽到 10s 减少误报，二者配合从根上消除僵尸堆积。finalize 仍给 60s（含
 #   SinkWriter::Finalize 编码器 flush + 文件改名，长录制/多段本就慢）。
+#   [v18·write_video 超时] 真机 1min+ 录制仍报"写入 H264 流失败：MF worker 调用超时
+#   （15s 未返回）"，但 native 指纹已是 v17——说明新的超时点已从 drain 转移到
+#   write_video 本身。根因：native drain_audio_queued 一次 swap 走全部积压音频块
+#   (5s≈234 块)逐块同步 AAC 编码，累计可达 15s+，而这段无上限批量编码就嵌在
+#   write_video() 内部。根治在 native 分批排空(kAudioDrainBatchMax=48)；这里把
+#   write_video 从默认 15s 放宽到 30s 作兜底——宁可多等也别把慢速设备的正常帧
+#   误判成致命失败/提前终止录制。30s 仍在 finalize 60s 之内，不影响收尾判定。
 DRAIN_CALL_TIMEOUT_S = 10.0
 FINALIZE_CALL_TIMEOUT_S = 60.0
+VIDEO_WRITE_CALL_TIMEOUT_S = 30.0
 
 
 class MFNativeError(RuntimeError):
@@ -330,7 +338,10 @@ class MFNative:
 
     def session_write_video(self, h, data):
         buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
-        rc = self.worker.call(self._lib.adc_session_write_video, h, buf, len(data))
+        # [修复-收尾慢·v18] 用独立的 write_video 超时（30s），不再走默认 15s：
+        # 15s 会被 native 内部一次无上限的积压音频排空顶过，误报致命失败。
+        rc = self.worker.call(self._lib.adc_session_write_video, h, buf, len(data),
+                              timeout=VIDEO_WRITE_CALL_TIMEOUT_S)
         if rc != ADC_OK:
             raise MFNativeError(self.last_error())
 

@@ -842,3 +842,16 @@ def test_drain_loop_never_records_fatal_error():
     # 不得再因失败计数 break（旧 DRAIN_FAIL_STREAK_LIMIT 逻辑已废除）
     assert "DRAIN_FAIL_STREAK_LIMIT" not in loop_src
     assert "break" not in loop_src, "drain 超时不得永久停止排空"
+
+
+def test_write_video_has_independent_timeout():
+    """[收尾慢根因回归·v18] write_video 须用独立放宽的超时，不走默认 15s。
+
+    真机 v17 包仍报"写入 H264 流失败：MF worker 调用超时（15s 未返回）"，超时
+    点已从 drain 转移到 write_video 本身。兜底修复须定义专用常量并在调用中传入。
+    """
+    assert hasattr(mn, "VIDEO_WRITE_CALL_TIMEOUT_S"), "须定义 write_video 专用超时常量"
+    assert mn.VIDEO_WRITE_CALL_TIMEOUT_S == 30.0, "write_video 超时应放宽到 30s"
+    src = _code_without_docstring(mn.MFNative.session_write_video)
+    assert "timeout=VIDEO_WRITE_CALL_TIMEOUT_S" in src, (
+        "session_write_video 须传入专用超时，不再用默认 15s")

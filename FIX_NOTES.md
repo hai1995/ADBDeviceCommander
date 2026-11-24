@@ -8123,3 +8123,50 @@ native 守卫 33，全量 **1740 passed, 1 skipped**。真机 release 后确认�
 `mf-20261124-drain-v17`；预期收尾明显加快、不再出现"音频排空失败"误报，且
 v16 的音画同步修复一并生效。Linux 沙箱无 Windows SDK，native 部分依赖 CI
 编译 + 真机确认；本轮主修复在 Python 层，可用单测完整覆盖。
+
+## 1min+ 录制仍报"写入 H264 流失败 / MF worker 调用超时 15s"（v18，构建指纹 mf-20261124-drain-v18）
+
+**现象**：真机 1 分多钟录制，native 指纹已是 `mf-20261124-drain-v17`（确认 v16/v17
+整包已生效），但收尾仍失败、耗时 1 分钟以上，日志：
+
+```
+⚠ 收尾提示：写入 H264 流失败：MF worker 调用超时（15s 未返回）
+✓ 录屏已完成：1 个文件已保存到 D:\BUG
+```
+
+**与 v17 的关键区别**：v17 修复前超时点是"音频排空失败"(drain，5s/15s)；v17 后
+drain 已变为尽力而为、可取消、不再致命，但超时点**转移到了 write_video 本身**
+（错误文案变成"写入 H264 流失败"，超时值是默认 15s）。这说明瓶颈已从 Python 侧
+的 drain 调用转到了 native 内部。
+
+**根因（物证 + 代码链）**：
+1. v17 让超时的 drain task 在 worker 队列里被跳过（cancelable），代价是：被 cancel
+   的那一轮**不再真的排空音频**。高负载/screenrecord H264 输出稀疏时，write_video
+   调用少、定时 drain 又频繁超时被取消 → 音频队列持续积压到 `AUDIO_QUEUE_LIMIT_HNS`
+   = 5s 上限（48kHz/1024 ≈ 47 块/s × 5s ≈ 234 块）。`stats` 里 `queue_peak_ms`
+   与 `dropped_` 会反映这一点。
+2. `drain_audio_queued()` 旧实现 `batch.swap(audio_q_)` **一次拿走全部 234 块**，
+   然后在锁外逐块 `write_audio_block` → `push_sample` → 同步 `MF SinkWriter::WriteSample`
+   （AAC 编码，每块数~数十 ms）。234 块累计可达 15s+。
+3. 这段无上限批量编码**就嵌在 `write_video()` 第一行（第 607 行 `drain_audio_queued()`）**。
+   Python `session_write_video` 走默认 `MFWorker.call(timeout=15s)`，于是这帧的
+   write_video 被顶过 15s → 抛 `MF worker 调用超时（15s 未返回）` → `_read_loop`
+   记 `_error="写入 H264 流失败：…"` 并置停止 → 录制提前终止；收尾 finalize 还要
+   再啃剩余积压 + 补静音 + 文件改名 → 总耗时 1 分钟以上。
+
+**修复（v18）**：
+- **native `drain_audio_queued()` 加批上限**（治本）：`static const size_t
+  kAudioDrainBatchMax = 48`（≈1s 音频），每次最多取 48 块写，剩余留在 `audio_q_`
+  等下次 tick。单次 drain/write_video 耗时有了硬上界，绝无可能顶过 15s。返回本批
+  块数。生产 ~47 块/s，排空上限 5×48=240 块/s，正常绝不积压。
+- **native `drain_audio()` 循环排空至空**：`while (drain_audio_queued() > 0) {}`，
+  分批不能导致 finalize 尾部丢音频；循环全在 worker 线程内、无额外队列往返。
+- **Python `session_write_video` 独立超时 30s**（兜底）：新增 `VIDEO_WRITE_CALL_TIMEOUT_S
+  = 30.0`，不再走默认 15s。native 分批是根治，这里保证慢速设备偶发卡顿也"宁可多等
+  也别误判致命失败/提前终止录制"；30s 仍在 finalize 60s 之内。
+- 构建指纹 → `mf-20261124-drain-v18`，真机据此确认整包（含分批排空）已生效。
+
+**验证**：native 守卫新增 3 项（批上限/循环排空/指纹 v18），backend 专项新增 1 项
+（write_video 独立 30s 超时）。Linux 沙箱无 Windows SDK，native 部分依赖 CI 编译 +
+真机 release 验证。预期：长录制不再出现"写入 H264 流失败"误报、收尾不再拖 1 分钟；
+若仍积压，音频完整性由 finalize 循环排空兜底。

@@ -67,7 +67,7 @@
 // v17: native 录制逻辑未变（v10~v16 全部保留）；本轮修复在 Python worker 队列
 // 层（超时 drain 撤销 + 排空容错 + 放宽 drain 超时），升指纹仅为让真机日志能
 // 明确显示"已换成含本轮修复的整包"，避免再次拿旧 exe 验证。
-static const char* const kBuildId = "mf-20261124-drain-v17";
+static const char* const kBuildId = "mf-20261124-drain-v18";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -672,7 +672,7 @@ public:
     /* 只把队列里已有的音频块写入 writer（不补静音）。由 write_video 高频
      * 调用，也由 finalize 在补静音前调用一次。写完后 last_audio_end_ 记录
      * 最后一块的结束时刻，供补静音使用。 */
-    void drain_audio_queued() {
+    size_t drain_audio_queued() {
         // [修复-收尾慢/排空超时] 关键：绝不能持 audio_q_mtx_ 做 WriteSample。
         // 旧实现在锁内逐块 write_audio_block（内含同步的 MF SinkWriter::WriteSample
         // → AAC 编码），高负载下单次可达数十毫秒；持锁期间 WASAPI 采集线程 on_audio
@@ -680,7 +680,16 @@ public:
         // → Python 报"MF worker 调用超时"并停止排空，同时 finalize 排队 → 收尾变慢。
         // 修复：持锁只做 O(1) 的 buffer swap（拿走全部待写块），立即释放锁，再在锁外
         // 逐块 WriteSample。采集线程入队与编码解耦，锁竞争降到最低。块顺序/时间戳不变。
-        std::deque<AudioBlock> batch;   // 类型须与 audio_q_ 一致，swap 才能编译
+        // [修复-收尾慢·v18] 单次排空必须再有"批上限"：v17 让超时 drain 可取消后，高负载
+        // 下被 cancel 的 drain 不再执行 → 音频队列积压到 5s 上限(~234 块)。旧实现一次
+        // swap 走全部并逐块同步 AAC WriteSample(每块数~数十 ms)，234 块累计可达 15s+，
+        // 直接把 write_video() 内部这次 drain 顶过 15s → Python 误报"写入 H264 流失败"、
+        // 录制提前终止、收尾 finalize 再啃剩余积压 → 耗时 1min+。每批封顶使单次调用耗时
+        // 有硬上界；剩余块留队列，由 200ms 定时器/后续视频帧分批追上(生产 ~47 块/s，
+        // 排空上限 5×48=240 块/s 绰绰有余)。finalize 内循环排空至空，绝不丢音频。
+        // 返回本批写出的块数：>0 表示队列可能还有残留，finalize 据此继续排空。
+        static const size_t kAudioDrainBatchMax = 48;   // ≈1s 音频 @48kHz/1024
+        std::deque<AudioBlock> batch;   // 类型须与 audio_q_ 一致
         {
             std::lock_guard<std::mutex> lk(audio_q_mtx_);
             // [修复-真机 overflow] 删除 `if (overflow_.load()) return;`：overflow_ 现在
@@ -689,9 +698,18 @@ public:
             // 队列里剩下的块正常写入。
             // [修复-首段延迟创建] writer 未建（等 SPS/PPS）时不取块：write_audio_block
             // 会因 !writer_ 静默丢弃导致开头音频丢失；留在有界队列，下个 tick 再写。
-            if (!writer_) return;
-            batch.swap(audio_q_);      // 一次性拿走全部待写块，锁内只做指针交换
-            queued_hns_ = 0;           // 队列已空，累计时长归零（与 on_audio 同锁维护）
+            if (!writer_) return 0;
+            // [修复-收尾慢·v18] 只取有界的一批，剩余留在 audio_q_ 等待后续 tick。
+            size_t n = (audio_q_.size() < kAudioDrainBatchMax)
+                           ? audio_q_.size() : kAudioDrainBatchMax;
+            LONGLONG batch_hns = 0;
+            for (size_t i = 0; i < n; ++i) {
+                batch_hns += audio_q_.front().dur_hns;
+                batch.push_back(std::move(audio_q_.front()));
+                audio_q_.pop_front();
+            }
+            queued_hns_ -= batch_hns;   // 只减去本批移出的时长，剩余仍计入队列上限
+            if (queued_hns_ < 0) queued_hns_ = 0;
         }
         // 锁外执行同步编码；audio_frames_ / last_audio_end_ 只由 worker 线程访问，无竞态。
         for (const AudioBlock& blk : batch) {
@@ -705,6 +723,7 @@ public:
             // (ts<seg_start) 不属于任何视频帧，计入会系统性抬高观测帧长(v15 的 bug)。
             if (blk.ts_hns >= seg_start_hns_) sync_audio_hns_ += blk.dur_hns;
         }
+        return batch.size();   // [修复-收尾慢·v18] 供 finalize 判断是否还有残留
     }
 
     /* 最终排空 + 补静音到 stop 时刻（不改已有时间戳）。 */
@@ -712,7 +731,10 @@ public:
         // [修复-真机 overflow] 移除 overflow 致命分支：即使中途丢过音频块，也要
         // 把队列里剩的正常写入并 close_writer 发布成可播放 MP4。丢块数由 dropped_
         // 统计暴露（stats），用户保住视频远比"因几秒音频积压整段报废"重要。
-        drain_audio_queued();
+        // [修复-收尾慢·v18] drain_audio_queued 现在每批封顶 48 块，这里必须循环排空
+        // 至队列见底（返回 0），否则积压的几百块音频会被留在队列里、成片尾部缺音轨。
+        // 循环完全在 worker 线程内、无额外队列往返，每批耗时有上界，不拖慢 finalize。
+        while (drain_audio_queued() > 0) {}
         // [修复-0xC00D4A45 第二根因] 旧实现对 last_audio_end_ 正值门控，导致
         // "全程没有任何音频块写入"(麦克风设备无声/被占用)时该值恒为 0，
         // 补静音被整体跳过 → AAC 流一个 sample 都没有 → sink 生成不了 esds

@@ -83,9 +83,9 @@ def test_writer_creation_driven_by_sps_pps_in_write_video():
 def test_lazy_create_guards():
     """延迟创建的配套守护：drain/check_rotate 在 writer 未建时不得误处理。"""
     src = _cpp()
-    drain = src[src.index("void drain_audio_queued()"):
+    drain = src[src.index("size_t drain_audio_queued()"):
                 src.index("/* 最终排空 + 补静音")]
-    assert "if (!writer_) return;" in drain, "writer 未建时不 pop 音频块，避免开头音频丢失"
+    assert "if (!writer_) return 0;" in drain, "writer 未建时不 pop 音频块，避免开头音频丢失"
     rotate = src[src.index("HRESULT check_rotate()"):
                  src.index("HRESULT close_writer(bool publish)")]
     assert "if (!writer_) return S_OK;" in rotate, "writer 未建时 seg_start=0 不得误触发切段"
@@ -452,24 +452,25 @@ def test_audio_write_sample_outside_queue_lock():
     旧实现持 audio_q_mtx_ 逐块 write_audio_block（内含同步的 SinkWriter::WriteSample
     → AAC 编码）。高负载下单次 WriteSample 慢 → 持锁期间 WASAPI 采集线程 on_audio
     入队被堵 → worker 队列 drain 堆积 → 某次排空卡满 15s → Python 报"MF worker 调用
-    超时"并永久停止排空，同时 finalize 排队 → 收尾变慢。修复：持锁只 swap 出整批，
-    锁外逐块编码。此守卫锁定"锁内无 WriteSample、写入在锁外"。
+    超时"并永久停止排空，同时 finalize 排队 → 收尾变慢。修复：持锁只做有界的取块
+    (v14 swap 整批 → v18 批上限取块)，锁外逐块编码。此守卫锁定"锁内无 WriteSample、
+    写入在锁外"。
     """
     src = _cpp()
-    fn = src[src.index("void drain_audio_queued()"):
+    fn = src[src.index("size_t drain_audio_queued()"):
              src.index("/* 最终排空 + 补静音")]
-    # 锁的生命周期：必须用独立作用域把 lock_guard 夹起来，且在 swap 后立即出作用域
+    code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
+    # 锁的生命周期：必须用独立作用域把 lock_guard 夹起来，取块后立即出作用域
     assert "std::deque<AudioBlock> batch;" in fn, "须用与 audio_q_ 同类型的 batch 承接"
-    assert "batch.swap(audio_q_);" in fn, "持锁只做 O(1) swap，不能逐块 WriteSample"
-    # 关键顺序：swap 在前，写入循环在后；且锁作用域 } 夹在两者之间
-    swap_at = fn.index("batch.swap(audio_q_)")
-    # 找到 swap 之后、写入循环之前的第一个闭合大括号（锁作用域结束）
-    write_at = fn.index("write_audio_block(blk)")
-    scope_end = fn.index("\n        }", swap_at)   # swap 所在 lock_guard 作用域的结束
-    assert swap_at < scope_end < write_at, (
-        "必须先在锁内 swap、再出锁作用域、最后在锁外 WriteSample")
+    assert "kAudioDrainBatchMax" in code, "取块须受批上限约束（v18）"
+    # 关键顺序：锁内取块（pop_front）在前，写入循环在后；锁作用域 } 夹在两者之间
+    take_at = code.index("audio_q_.pop_front()")
+    write_at = code.index("write_audio_block(blk)")
+    scope_end = code.index("\n        }", take_at)   # 取块所在 lock_guard 作用域的结束
+    assert take_at < scope_end < write_at, (
+        "必须先在锁内取块、再出锁作用域、最后在锁外 WriteSample")
     # write_audio_block 调用必须只有一处（在锁外循环里），不能残留在锁内
-    assert fn.count("write_audio_block(blk)") == 1
+    assert code.count("write_audio_block(blk)") == 1
 
 
 def test_audio_queue_queued_hns_is_o1():
@@ -546,7 +547,7 @@ def test_sync_audio_excludes_pre_roll_before_segment_start():
     """
     src = _cpp()
     # drain 中按 ts 过滤累加
-    drain = src[src.index("void drain_audio_queued()"):src.index("int drain_audio()")]
+    drain = src[src.index("size_t drain_audio_queued()"):src.index("int drain_audio()")]
     code = "\n".join(ln.split("//")[0] for ln in drain.splitlines())
     assert "blk.ts_hns >= seg_start_hns_" in code, "必须按采集时刻过滤前置音频"
     assert "sync_audio_hns_ += blk.dur_hns" in code, "只累加同步段音频时长"
@@ -565,3 +566,43 @@ def test_video_clock_reset_on_segment_rotation():
     assert "video_ts_hns_ = 0;" in src, "切段重置累加时间戳"
     assert "video_frame_dur_hns_ = 10000000LL * fps_den_ / fps_num_;" in src, "切段重置帧长为名义值"
 
+
+
+def test_audio_drain_has_batch_cap():
+    """[收尾慢根因回归·v18] 单次音频排空必须有批上限，杜绝 write_video 超时。
+
+    v17 只把超时 drain 变可取消，但被 cancel 的 drain 不再执行 → 队列积压到 5s
+    上限(~234 块)；native 一次 swap 走全部逐块同步 AAC 编码累计 15s+，嵌在
+    write_video 内部顶过 15s 超时 → 误报"写入 H264 流失败"。修复必须：
+    1) drain_audio_queued 每批封顶(批上限常量)；2) 剩余留在队列而非一次清空；
+    3) 返回本批块数供 finalize 判断残留。
+    """
+    src = _cpp()
+    fn = src[src.index("size_t drain_audio_queued()"):src.index("int drain_audio()")]
+    code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
+    # 签名返回块数（供 finalize 循环判定）
+    assert "size_t drain_audio_queued()" in src, "排空函数须返回本批块数"
+    assert "return batch.size()" in code, "须返回本批处理数"
+    # 批上限常量 + 按上限截断取块
+    assert "kAudioDrainBatchMax" in code, "须有单次排空批上限常量"
+    assert "kAudioDrainBatchMax = 48" in code, "批上限须为有界值(48)"
+    assert "audio_q_.size() < kAudioDrainBatchMax" in code, "取块数须受批上限约束"
+    # 不得再一次性 swap 全队列（那样批上限形同虚设）
+    assert "batch.swap(audio_q_)" not in code, "禁止一次 swap 全部积压块"
+    # 剩余时长仍计入队列水位（不能清零）
+    assert "queued_hns_ -= batch_hns" in code, "只减去本批移出的时长"
+
+
+def test_finalize_drains_all_batches():
+    """[收尾慢根因回归·v18] finalize 必须循环排空至队列见底，不能只跑一批。"""
+    src = _cpp()
+    fn = src[src.index("int drain_audio()"):src.index("int finalize(")]
+    code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
+    assert "while (drain_audio_queued() > 0)" in code, (
+        "finalize 须循环排空所有批次，否则尾部积压音频丢失")
+
+
+def test_build_id_v18():
+    """native 指纹升到 v18，真机据此确认整包(含分批排空)已生效。"""
+    src = _cpp()
+    assert 'kBuildId = "mf-20261124-drain-v18"' in src, "native 指纹须为 v18"
