@@ -272,29 +272,29 @@ def test_video_stream_sets_input_media_type():
 
 
 def test_video_uses_frame_index_clock():
-    """[0xC00D4A45 视频根因·v10 根治回归] 视频时间戳必须用帧序号合成时钟。
+    """[视频时间戳回归] 视频 ts 绝不用 QPC 到达时刻；保留 v8/v9 历史约束。
 
     v8/v9 真机诊断(vws=4→49, vwf=339→298, vtc=45, 音频 awf=0 全成功)证明：
     视频 ts 用 QPC 到达时刻会被 adb 突发/卡顿污染——后帧重叠或向前 gap 都会让
-    MP4 sink 以 E_UNEXPECTED(0x8000FFFF) 拒帧并进入 sticky 错误态。钳制只修重叠
-    修不了向前跳跃(v9 仍失败 298)。视频 347 帧÷30fps=11.57s 与音频 11.58s 吻合，
-    证明源帧数正常、问题纯在时间戳。根治：第 N 帧 ts=N×名义帧长，绝对均匀单调。
+    MP4 sink 以 E_UNEXPECTED(0x8000FFFF) 拒帧并进入 sticky 错误态。v10 的帧号
+    主钟解决了单调性，v15 在其上叠加音频时长校准解决音画不同步（见另两个守卫）。
+    本守卫锁定：视频仍走独立分支、不用 QPC 到达时刻、无 v9 钳制残留、切段归零。
     """
     src = _cpp()
     ps = src[src.index("void push_sample(DWORD stream, bool audio"):
              src.index("// 段临时文件名")]
-    # 视频流(!audio)时间戳必须由帧序号 × dur 合成，而非 QPC 到达时刻
+    # 视频流(!audio)有独立分支，时间戳不用传入的 QPC 到达时刻 ts
     assert "if (!audio) {" in ps
     vc = ps[ps.index("if (!audio) {"):
             ps.index("sample->SetSampleTime(rel_ts)")]
-    assert "rel_ts = (LONGLONG)video_frame_count_ * dur;" in vc
+    assert "rel_ts = video_ts_hns_;" in vc, "视频 ts 来自累加器，不用 QPC 到达时刻"
     assert "++video_frame_count_;" in vc
     # v9 的钳制方案必须彻底移除（无 last_video_end_/vtc_ 残留）
     assert "last_video_end_" not in src, "钳制方案已弃用：修不了向前 gap，不能留残留"
     assert "vtc_" not in src
-    # 音频路不得被帧号时钟影响：仍用传入的 ts（含 seg_start 换算）
+    # 音频路不得被视频校准影响：仍用传入的 ts（含 seg_start 换算）
     assert "sample->SetSampleTime(rel_ts);" in ps
-    # 切段必须归零：新 MP4 帧号从 0 开始
+    # 切段必须归零：新 MP4 时间轴从 0 开始
     ew = src[src.index("HRESULT ensure_writer(std::string& first_tmp_out)"):
              src.index("HRESULT config_video_stream()")]
     assert "video_frame_count_ = 0;" in ew
@@ -489,4 +489,57 @@ def test_audio_queue_queued_hns_is_o1():
     # 成员声明与构造函数初始化都要有
     assert "LONGLONG queued_hns_;" in src
     assert "queued_hns_(0)" in src
+
+
+def test_video_timestamp_is_cumulative_not_framecount_times_fixed():
+    """[音画不同步回归·v15] 视频 ts 必须累加式，不能用帧号×固定帧长。
+
+    根因物证：成品 mp4 视频 459 帧=15.300s(硬编码30fps)、音频 735×1024/48000
+    =15.680s，真实帧率 29.27fps，视频时间轴短 2.4% 且随录制累积 → 声音快画面慢。
+    修复：video_ts_hns_ 累加式 + video_frame_dur_hns_ 校准。此守卫禁止回退到旧式。
+    """
+    src = _cpp()
+    # 旧式「帧号×固定帧长」必须彻底消失
+    assert "video_frame_count_ * dur" not in src, "禁止回退到帧号×固定帧长"
+    # 累加式时间戳与校准帧长成员必须存在并初始化
+    assert "LONGLONG video_ts_hns_;" in src
+    assert "LONGLONG video_frame_dur_hns_;" in src
+    assert "video_ts_hns_(0)" in src
+    # 累加动作：video_ts_hns_ += video_frame_dur_hns_
+    assert "video_ts_hns_ += video_frame_dur_hns_;" in src
+    # rel_ts 取自累加器，而非帧号乘算
+    assert "rel_ts = video_ts_hns_;" in src
+    # sample duration 用校准帧长（与时间戳步进一致）
+    assert "dur = video_frame_dur_hns_;" in src
+
+
+def test_video_frame_dur_calibrated_from_audio_sample_count():
+    """[音画不同步回归·v15] 帧长观测源必须是音频样本数，且有钳制+步长限制。
+
+    用音频样本数(audio_frames_/arate_)做观测源，不受 adb 传输抖动污染；
+    钳制帧长在 [名义×0.7, 名义×1.4] 且每帧步长 ≤ 名义/50，保证时间戳严格
+    单调、平滑渐变，避免触发 sink 的 E_UNEXPECTED sticky 错误。
+    """
+    src = _cpp()
+    fn = src[src.index("void push_sample("):src.index("void push_sample(") + 3500]
+    code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
+    # 观测源 = 音频样本数换算的真实时长（禁止用 QPC 到达时刻做观测）
+    assert "audio_frames_" in code and "arate_" in code, "须以音频样本数为观测源"
+    assert "audio_real" in code
+    assert "observed = audio_real / video_frame_count_" in code
+    # 钳制上下界 + 步长限制（sink 单调性保证）
+    assert "nominal * 7 / 10" in code, "帧长下限钳制"
+    assert "nominal * 14 / 10" in code, "帧长上限钳制"
+    assert "LONGLONG step = nominal / 50;" in code, "每帧步长限制"
+    assert "video_frame_dur_hns_ += delta;" in code, "渐进校准而非跳变"
+    # 冷启动保护：前几帧音频未写入时不校准
+    assert "video_frame_count_ >= 5" in code
+
+
+def test_video_clock_reset_on_segment_rotation():
+    """[音画不同步回归·v15] 切段时累加时钟/帧长必须重置，否则新段首帧时间戳错乱。"""
+    src = _cpp()
+    # 找到 ensure_writer 里 seg_start_hns_ 赋值附近的重置块
+    assert "video_ts_hns_ = 0;" in src, "切段重置累加时间戳"
+    assert "video_frame_dur_hns_ = 10000000LL * fps_den_ / fps_num_;" in src, "切段重置帧长为名义值"
 

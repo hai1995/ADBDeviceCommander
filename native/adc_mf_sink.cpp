@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261124-drain-v14";
+static const char* const kBuildId = "mf-20261124-avsync-v15";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -540,6 +540,7 @@ public:
           seg_no_(0), seg_start_hns_(0),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
           queued_hns_(0), last_audio_end_(0), video_frame_count_(0),
+          video_ts_hns_(0), video_frame_dur_hns_(10000000LL * (fps_den > 0 ? fps_den : 1) / (fps_num > 0 ? fps_num : 30)),
           vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
           diag_vsim_(S_OK),
           diag_sps_(0), diag_pps_(0), diag_seqh_(0) {}
@@ -837,20 +838,39 @@ private:
         // 时长错乱。上一段残留、采集早于 writer 创建的块可能为负，clamp 到 0。
         LONGLONG rel_ts = ts - seg_start_hns_;
         if (rel_ts < 0) rel_ts = 0;
-        // [修复-真机 0xC00D4A45 视频根因·v10 根治] H264 裸流本身无时间戳，v8/v9 曾
-        // 用 sample 到达的 QPC 时刻打 ts：adb/64KB chunk 传输会突发到达(多帧挤同一
-        // 时刻→重叠)，卡顿后又留下巨大向前 gap(discontinuity)。MP4 sink 要求视频流
-        // 时间戳严格单调、等间隔、无 gap，两类异常都会触发 E_UNEXPECTED(0x8000FFFF)
-        // 并使 sink 进入 sticky 错误态(首错后全失败)。
-        // v9 实证：钳制(vtc=45)虽把 vws 从 4 救到 49，但只能修"向后重叠"、修不了
-        // "向前跳跃"，仍有 vwf=298 连续失败；而音频 aws=1158/awf=0 全程成功(其 dur
-        // 按实际样本数算、时间轴自洽)。视频 347 帧÷30fps=11.57s 与音频 11.58s 仅差
-        // 0.013s，证明 screenrecord 是稳定 30fps、帧数完全正常，问题纯粹在时间戳。
-        // 根治：视频改用「帧序号 × 名义帧长」合成时钟——第 N 帧 ts = N*(1e7/fps)，
-        // 绝对均匀单调、无重叠无 gap，彻底不依赖不可靠的 QPC 到达时刻。
-        // 音频路保持原样(真实 QPC + 按样本数的 dur，已验证自洽，不能扰乱)。
+        // [视频时间戳 v15] 累加式主钟 + 音频真实时长校准，解决"声音快画面慢"。
+        // 背景：H264 裸流无时间戳，v10 用「帧号×固定33.33ms」合成时间轴，虽然严格
+        // 单调无 gap(满足 sink)，但真机实测屏幕录制真实帧率约 29.27fps 而非 30，
+        // 导致视频时间轴比音频真实墙钟短 2.4%，且偏差随录制时长线性累积(15s 差
+        // 0.38s)——表现就是"声音快、画面慢"。成品 ffprobe 物证：视频 459 帧=15.300s
+        // (硬编码30fps)、音频 735×1024/48000=15.680s，差 0.38s，坐实此因。
+        // 修复：视频 ts 改为累加式(video_ts_hns_ += 当前帧长)，每帧用音频已写入的
+        // 真实时长 A=audio_frames_×(1e7/arate_) 观测实时帧长 observed=A/N(N=已写帧数)，
+        // 对帧长做步长受限的渐进校准。要点：
+        //   1) 观测源用音频样本数(独立 WASAPI 采集，不受 adb 传输抖动污染)，比 QPC
+        //      到达时刻可靠得多——本地模拟 ±80ms 抖动下仍收敛到 ±5ms，用 QPC 则过冲近 1s；
+        //   2) 帧长钳制在 [名义×0.7, 名义×1.4]、每帧调整步长 ≤ 名义/50，保证时间戳
+        //      严格单调、平滑渐变(33.33→34.15ms)，绝不产生重叠/向前 gap 触发 sink 的
+        //      E_UNEXPECTED(0x8000FFFF) sticky 错误(v8/v9 的教训)；
+        //   3) 音频路完全不动(真实 QPC + 按样本数 dur，已验证自洽)。
+        // 校准有短暂滞后(音频每 200ms drain 一次)，只影响收敛速度不影响终值。
         if (!audio) {
-            rel_ts = (LONGLONG)video_frame_count_ * dur;
+            const LONGLONG nominal = 10000000LL * fps_den_ / fps_num_;
+            if (video_frame_count_ >= 5 && audio_frames_ > 0 && arate_ > 0) {
+                // 音频已覆盖的真实时长(100ns)，由写入样本数换算——无抖动标尺
+                LONGLONG audio_real = (LONGLONG)((long double)audio_frames_ * 10000000.0L / arate_);
+                LONGLONG observed = audio_real / video_frame_count_;  // 实测平均帧长
+                if (observed < nominal * 7 / 10) observed = nominal * 7 / 10;
+                if (observed > nominal * 14 / 10) observed = nominal * 14 / 10;
+                LONGLONG step = nominal / 50;
+                LONGLONG delta = observed - video_frame_dur_hns_;
+                if (delta > step) delta = step;
+                if (delta < -step) delta = -step;
+                video_frame_dur_hns_ += delta;
+            }
+            rel_ts = video_ts_hns_;
+            dur = video_frame_dur_hns_;         // sample duration 同步为校准帧长
+            video_ts_hns_ += video_frame_dur_hns_;
             ++video_frame_count_;
         }
         sample->SetSampleTime(rel_ts); sample->SetSampleDuration(dur);
@@ -902,9 +922,11 @@ private:
         IF_FAILED_RETURN(writer_->BeginWriting(), "BeginWriting 失败");
         writing_ = true;
         seg_start_hns_ = qpc_now_hns();
-        // 新段是独立 MP4，视频帧序号时钟从 0 重新起算，
-        // 否则上段的帧序号会让新段首帧时间戳从很大的值开始。
+        // 新段是独立 MP4，视频时间轴从 0 重新起算，
+        // 否则上段的帧号/累加时间戳会让新段首帧时间戳从很大的值开始。
         video_frame_count_ = 0;
+        video_ts_hns_ = 0;
+        video_frame_dur_hns_ = 10000000LL * fps_den_ / fps_num_;
         return S_OK;
     }
 
@@ -1100,10 +1122,15 @@ private:
     std::vector<std::vector<unsigned char>> pending_au_;
     std::atomic<bool> overflow_{false}, mic_stopped_{false};
     LONGLONG last_audio_end_;   // 已写入音频的最后结束时刻（100ns，QPC 时基）
-    // [修复-视频时间戳 v10] 视频帧序号：ts = 帧序号 × 名义帧长。H264 裸流无时间戳，
-    // 用帧序号合成恒定帧率时钟，彻底避免 QPC 到达时刻的突发重叠/向前 gap 触发
-    // MP4 sink 的 E_UNEXPECTED → Finalize 0xC00D4A45。切段时归零（新 MP4 时间轴）。
+    // [视频时间戳 v15] 帧号主钟 + 音频真实时长校准。H264 裸流无时间戳，且屏幕录制
+    // 真实帧率随设备/负载漂移（真机实测 29.27fps，非硬编码的 30fps）。v10 用
+    // 帧号×固定33.33ms 合成时间轴 → 视频比音频短 2.4% 且随录制时长线性累积，
+    // 表现为"声音快、画面慢"。v15 改为累加式时间戳 + 用音频样本时长做观测源
+    // 实时校准每帧帧长：既保持严格单调等间隔(sink 要求)，又让视频时间轴收敛到
+    // 音频真实时长。切段时全部归零/重置（每段独立 MP4）。
     long long video_frame_count_;
+    LONGLONG video_ts_hns_;        // 累加式视频时间戳(相对段起点,100ns)
+    LONGLONG video_frame_dur_hns_; // 校准后的当前帧长(100ns), 初值=名义帧长
     // 视频 SPS/PPS 缓存：采集线程(write_video)写，worker 线程(config_video_stream)读。
     std::vector<unsigned char> sps_, pps_;
     std::mutex seq_mtx_;
