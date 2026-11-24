@@ -641,3 +641,85 @@ def test_worker_stop_drains_queued_calls():
     assert not queued.is_alive(), "排队的 call 不能被悬挂"
     # 哨兵在排队 call 之后入队：FIFO 保证它先被正常执行，stop 不丢弃在途调用。
     assert queued_result.get("exc") is None, "排队的 call 应被正常执行而非被丢弃"
+
+
+# ---------------- 第六轮：分级超时 + 排空容错（收尾慢修复） --------------
+def test_graded_call_timeouts():
+    """[收尾慢回归·v14] drain 用短超时、finalize 用长超时，不能都是 15s 默认值。
+
+    drain 高频调用卡住要尽快失败让上层重试；finalize 含编码器 flush，长录制本就慢，
+    必须给足时间，否则误报"合成失败"。常量值本身也要满足 finalize > drain。
+    """
+    assert mn.DRAIN_CALL_TIMEOUT_S < mn.FINALIZE_CALL_TIMEOUT_S
+    assert mn.DRAIN_CALL_TIMEOUT_S <= 6, "drain 卡住应尽快失败"
+    assert mn.FINALIZE_CALL_TIMEOUT_S >= 30, "finalize 要给编码器 flush 留足时间"
+    # 便捷方法必须真的把常量传给 call（防止定义了却没用）
+    import inspect
+    drain_src = inspect.getsource(mn.MFNative.session_drain_audio)
+    fin_src = inspect.getsource(mn.MFNative.session_finalize)
+    assert "DRAIN_CALL_TIMEOUT_S" in drain_src
+    assert "FINALIZE_CALL_TIMEOUT_S" in fin_src
+
+
+def test_drain_loop_survives_transient_timeout(monkeypatch):
+    """[排空超时回归·v14] 单次 drain 超时不能永久停掉排空。
+
+    旧实现一次异常就 break：高负载下偶发一次超时，剩余整段录制音频队列无人排空
+    → overflow/音频丢失。修复为连续失败计数，成功即清零；这里用替身让前 2 次
+    drain 抛超时、第 3 次恢复，断言后续仍持续 drain 且未记错误。
+    """
+    import time as _t
+    fake = FakeNative(available=True)
+    state = {"n": 0}
+
+    orig_drain = fake.session_drain_audio
+
+    def flaky_drain(h):
+        state["n"] += 1
+        if state["n"] in (1, 2):
+            raise mn.MFNativeError("MF worker 调用超时（5s 未返回）")
+        return orig_drain(h)
+
+    fake.session_drain_audio = flaky_drain
+    monkeypatch.setattr(mcs.subprocess, "Popen",
+                        lambda cmd, **kw: FakeProc([b"\x00\x00\x00\x01\x65" + b"\xaa" * 16]))
+    monkeypatch.setattr(mcs, "AUDIO_DRAIN_INTERVAL_S", 0.01)
+
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True, reason
+    _t.sleep(0.12)
+    # 经历 2 次超时后仍继续 drain（成功清零），不会被永久停掉
+    drains = state["n"]
+    assert drains > 2, f"偶发超时后应继续排空，实际调用 {drains} 次"
+    # 首错不应被记（连续失败未达阈值）——从 session 的 _error 读取
+    sess = svc._sessions["s1"]
+    assert "排空失败" not in sess._error, f"偶发超时不应上报：{sess._error}"
+    svc.stop_all()
+
+
+def test_drain_loop_stops_after_consecutive_failures(monkeypatch):
+    """[排空超时容错·v14] 连续失败达阈值才停排空并上报，避免死循环空转。"""
+    import time as _t
+    fake = FakeNative(available=True)
+    state = {"n": 0}
+
+    def always_fail(h):
+        state["n"] += 1
+        raise mn.MFNativeError("MF worker 调用超时（5s 未返回）")
+
+    fake.session_drain_audio = always_fail
+    monkeypatch.setattr(mcs.subprocess, "Popen",
+                        lambda cmd, **kw: FakeProc([b"\x00\x00\x00\x01\x65" + b"\xaa" * 16]))
+    monkeypatch.setattr(mcs, "AUDIO_DRAIN_INTERVAL_S", 0.01)
+
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True, reason
+    _t.sleep(0.12)
+    sess = svc._sessions["s1"]
+    assert "排空失败" in sess._error, "连续失败应上报首错"
+    stopped_at = state["n"]
+    _t.sleep(0.06)
+    assert state["n"] == stopped_at, "达阈值后应停止 drain，不再空转"
+    svc.stop_all()

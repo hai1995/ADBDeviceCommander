@@ -31,6 +31,14 @@ ADC_OK = 0
 _SC3 = b"\x00\x00\x01"
 _SC4 = b"\x00\x00\x00\x01"
 
+# [修复-收尾慢] 分级调用超时（秒，经 MFWorker.call）：
+#   drain 是每 200ms 一次的高频维护调用，卡住要尽快失败让上层重试，不能和
+#   finalize 抢 15s 默认超时——否则高负载下一次 drain 卡满 15s，定时器超时后
+#   上层以为 worker 死了。finalize 含 SinkWriter::Finalize（AAC/H264 编码器 flush）
+#   与文件改名，长录制/多段时本就慢，给足 60s 避免误报"合成失败"。
+DRAIN_CALL_TIMEOUT_S = 5.0
+FINALIZE_CALL_TIMEOUT_S = 60.0
+
 
 class MFNativeError(RuntimeError):
     """native 调用失败（带 HRESULT / 可读原因）。"""
@@ -312,11 +320,13 @@ class MFNative:
         定时器每 200ms 调用一次，使音频写入与视频帧解耦。视频流稀疏/中断时，
         视频帧驱动不到 drain，靠这个定时器保证音频持续写入、队列不积压。
         """
-        return self.worker.call(self._lib.adc_session_drain_audio, h)
+        return self.worker.call(self._lib.adc_session_drain_audio, h,
+                                timeout=DRAIN_CALL_TIMEOUT_S)
 
     def session_finalize(self, h):
         out = ctypes.create_string_buffer(8192)
-        rc = self.worker.call(self._lib.adc_session_finalize, h, out, len(out))
+        rc = self.worker.call(self._lib.adc_session_finalize, h, out, len(out),
+                              timeout=FINALIZE_CALL_TIMEOUT_S)
         if rc != ADC_OK:
             raise MFNativeError(self.last_error())
         pub = out.value.decode("utf-8", "replace")

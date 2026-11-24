@@ -7958,3 +7958,46 @@ moov/avcC/esds 且 mdat 中能查到 AnnexB 起始码。
 真机 release 后日志指纹应为 `mf-20261124-annexb-v13`；花屏应消失、画面清晰。
 若仍有零星马赛克，下一嫌疑是 IDR 帧未设 `MFSampleExtension_CleanPoint`
 （默认 FALSE，影响 stss 关键帧表与 seek），本轮未改以避免引入未验证变量。
+
+---
+
+## 2026-11-24 · v14：录制稍长收尾慢 + "音频排空失败：MF worker 调用超时（15s）"
+
+**现象**：v13 真机画面已正常；录制时间稍长时收尾明显变慢，偶发
+`⚠ 收尾提示：音频排空失败：MF worker 调用超时（15s 未返回）`，但 MP4 仍落盘。
+
+**根因（代码链路实证，三处叠加）**：
+
+1. **持锁做同步编码（主因）**：`drain_audio_queued()` 持有 `audio_q_mtx_`
+   逐块 `write_audio_block`（内含同步 `SinkWriter::WriteSample` → AAC 编码）。
+   录制越长，worker 队列里排队的 drain/finalize 调用越多、单次编码越慢；
+   持锁期间 WASAPI 采集线程 `on_audio` 被堵在锁外 → 入队延迟，形成恶性循环：
+   worker 队列 drain 堆积 → 某次 drain 卡满 `MFWorker.call` 默认 15s →
+   上层报"调用超时" → finalize 继续排队 → 收尾越来越慢。
+2. **一次超时即永久停排空**：`mf_capture_service._drain_loop` 原实现 `except`
+   里记首错后直接 `break`。偶发一次抖动就把整个排空定时器关掉，剩余录制里
+   音频队列彻底无人排空 → 后续 finalize 要补写堆积块，进一步拖慢收尾。
+   15s 这个值是 FIX_NOTES 早前为防止"worker 假死导致界面卡住"加的兜底，
+   如今反成高负载下的误报源。
+3. **O(n) 队列遍历**：`on_audio` 每次入队都 `for (auto& b : audio_q_)` 求累计
+   时长，长录制队列积压时采集线程被遍历拖慢，放大锁竞争。
+
+**修复**（构建指纹 `mf-20261124-drain-v14`，不改变任何字节/时间戳语义）：
+
+- `native/adc_mf_sink.cpp`：
+  - `drain_audio_queued()` 持锁只做 `batch.swap(audio_q_)`（O(1) 拿走整批），
+    立即出锁作用域，再在锁外逐块 `WriteSample`。采集入队与编码解耦。
+  - 新增成员 `queued_hns_`，`on_audio` 入队 += / drain 归零，overflow 判定
+    从 O(n) 遍历改为 O(1)，语义完全等价。
+  - batch 类型用 `std::deque<AudioBlock>` 与 `audio_q_` 一致（否则 swap 编译失败）。
+- `backend/mf_native.py`：分级超时——`DRAIN_CALL_TIMEOUT_S=5`（drain 卡住尽快
+  失败让上层重试）、`FINALIZE_CALL_TIMEOUT_S=60`（编码器 flush 给足时间，
+  避免长录制多段 Finalize 误报"合成失败"）；便捷方法实际把常量传给 `call`。
+- `backend/mf_capture_service.py`：`_drain_loop` 改连续失败计数
+  （`DRAIN_FAIL_STREAK_LIMIT=3`），成功即清零，仅连续失败达阈值才上报退出；
+  单次超时给 worker 下一个 tick 恢复的机会。
+
+**验证**：native 守卫 27→29、backend MF 专项 29→32、全量 1732 passed, 1 skipped。
+真机 release 后日志指纹应为 `mf-20261124-drain-v14`；预期收尾明显加快，
+且不再出现 15s 排空超时提示。Linux 沙箱无 Windows SDK，native 部分仍依赖
+CI 编译 + 真机确认。

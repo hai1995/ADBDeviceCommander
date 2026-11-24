@@ -444,3 +444,49 @@ def test_annexb_nal_scan_does_not_truncate_tail_bytes():
     # 3/4 字节起始码判断都要有独立的长度守卫，避免越界读
     assert "end + 3 <= len && p[end] == 0 && p[end+1] == 0 && p[end+2] == 1" in code
     assert "end + 4 <= len && p[end] == 0 && p[end+1] == 0 &&" in code
+
+
+def test_audio_write_sample_outside_queue_lock():
+    """[收尾慢/排空超时回归·v14] WriteSample 必须在音频队列锁外执行。
+
+    旧实现持 audio_q_mtx_ 逐块 write_audio_block（内含同步的 SinkWriter::WriteSample
+    → AAC 编码）。高负载下单次 WriteSample 慢 → 持锁期间 WASAPI 采集线程 on_audio
+    入队被堵 → worker 队列 drain 堆积 → 某次排空卡满 15s → Python 报"MF worker 调用
+    超时"并永久停止排空，同时 finalize 排队 → 收尾变慢。修复：持锁只 swap 出整批，
+    锁外逐块编码。此守卫锁定"锁内无 WriteSample、写入在锁外"。
+    """
+    src = _cpp()
+    fn = src[src.index("void drain_audio_queued()"):
+             src.index("/* 最终排空 + 补静音")]
+    # 锁的生命周期：必须用独立作用域把 lock_guard 夹起来，且在 swap 后立即出作用域
+    assert "std::deque<AudioBlock> batch;" in fn, "须用与 audio_q_ 同类型的 batch 承接"
+    assert "batch.swap(audio_q_);" in fn, "持锁只做 O(1) swap，不能逐块 WriteSample"
+    # 关键顺序：swap 在前，写入循环在后；且锁作用域 } 夹在两者之间
+    swap_at = fn.index("batch.swap(audio_q_)")
+    # 找到 swap 之后、写入循环之前的第一个闭合大括号（锁作用域结束）
+    write_at = fn.index("write_audio_block(blk)")
+    scope_end = fn.index("\n        }", swap_at)   # swap 所在 lock_guard 作用域的结束
+    assert swap_at < scope_end < write_at, (
+        "必须先在锁内 swap、再出锁作用域、最后在锁外 WriteSample")
+    # write_audio_block 调用必须只有一处（在锁外循环里），不能残留在锁内
+    assert fn.count("write_audio_block(blk)") == 1
+
+
+def test_audio_queue_queued_hns_is_o1():
+    """[收尾慢回归·v14] audio_q_ 累计时长必须 O(1) 维护，禁止每次遍历整个队列。
+
+    旧实现 on_audio 每次入队都 `for (auto& b : audio_q_) queued += b.dur_hns`，
+    长录制队列积压时采集线程被 O(n) 遍历拖慢。修复为成员 queued_hns_：入队 +=、
+    drain 归零。此守卫锁定该累计值存在且无残留遍历。
+    """
+    src = _cpp()
+    fn = src[src.index("void on_audio(const AudioBlock& blk) override"):
+             src.index("int write_video(")]
+    code_lines = [ln.split("//")[0] for ln in fn.splitlines()]
+    code = "\n".join(code_lines)
+    assert "queued_hns_" in code, "须用累计时长成员，避免 O(n) 遍历"
+    assert "for (const auto& b : audio_q_)" not in code, "禁止回退到 O(n) 遍历队列"
+    # 成员声明与构造函数初始化都要有
+    assert "LONGLONG queued_hns_;" in src
+    assert "queued_hns_(0)" in src
+

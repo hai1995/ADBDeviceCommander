@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261124-annexb-v13";
+static const char* const kBuildId = "mf-20261124-drain-v14";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -539,7 +539,7 @@ public:
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
           seg_no_(0), seg_start_hns_(0),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
-          last_audio_end_(0), video_frame_count_(0),
+          queued_hns_(0), last_audio_end_(0), video_frame_count_(0),
           vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
           diag_vsim_(S_OK),
           diag_sps_(0), diag_pps_(0), diag_seqh_(0) {}
@@ -567,8 +567,11 @@ public:
     void on_audio(const AudioBlock& blk) override {
         std::lock_guard<std::mutex> lk(audio_q_mtx_);
         if (finalized_ || discarded_) return;
-        LONGLONG queued = 0;
-        for (const auto& b : audio_q_) queued += b.dur_hns;
+        // [修复-收尾慢] 队列累计时长用原子计数维护，O(1)；原实现每次回调遍历
+        // 整个 audio_q_ 求和，长录制队列积压时采集线程被 O(n) 遍历拖慢，入队
+        // 竞争 audio_q_mtx_ 的时间变长，间接放大 drain 锁竞争。语义完全等价：
+        // 入队 +=，drain 移出 -=，overflow 判定用同一个累计值。
+        LONGLONG queued = queued_hns_;
         if (queued + blk.dur_hns > AUDIO_QUEUE_LIMIT_HNS) {
             // [修复-真机 overflow] 原实现置 overflow_=true 并让 finalize 直接失败，
             // 结果是整段视频报废（.tmp 不发布、无 moov、无法播放）——为了几秒钟
@@ -581,7 +584,8 @@ public:
             return;
         }
         audio_q_.push_back(blk);
-        LONGLONG peak = (queued + blk.dur_hns) / 10000;
+        queued_hns_ = queued + blk.dur_hns;
+        LONGLONG peak = queued_hns_ / 10000;
         if (peak > queue_peak_ms_) queue_peak_ms_ = (int)peak;
     }
 
@@ -664,17 +668,28 @@ public:
      * 调用，也由 finalize 在补静音前调用一次。写完后 last_audio_end_ 记录
      * 最后一块的结束时刻，供补静音使用。 */
     void drain_audio_queued() {
-        // [修复-真机 overflow] 删除 `if (overflow_.load()) return;`：overflow_ 现在
-        // 只是"曾丢过音频块"的诊断标记，不能再阻断排空，否则队列里已入队的音频会
-        // 永远留在内存、收尾也写不进成片。丢弃策略在 on_audio 已完成，这里只管把
-        // 队列里剩下的块正常写入。
-        std::lock_guard<std::mutex> lk(audio_q_mtx_);
-        // [修复-首段延迟创建] 首段 writer 尚未建立（在等 SPS/PPS）时不要 pop 音频块：
-        // write_audio_block 会因 !writer_ 静默丢弃，导致录制开头的音频丢失。保留在
-        // 有界队列里，writer 一建好（收到 SPS/PPS 后）下一个 drain tick 即写入。
-        if (!writer_) return;
-        while (!audio_q_.empty()) {
-            AudioBlock blk = std::move(audio_q_.front()); audio_q_.pop_front();
+        // [修复-收尾慢/排空超时] 关键：绝不能持 audio_q_mtx_ 做 WriteSample。
+        // 旧实现在锁内逐块 write_audio_block（内含同步的 MF SinkWriter::WriteSample
+        // → AAC 编码），高负载下单次可达数十毫秒；持锁期间 WASAPI 采集线程 on_audio
+        // 被堵在锁外 → 入队延迟 → worker 队列里的 drain 调用堆积 → 某次排空卡满 15s
+        // → Python 报"MF worker 调用超时"并停止排空，同时 finalize 排队 → 收尾变慢。
+        // 修复：持锁只做 O(1) 的 buffer swap（拿走全部待写块），立即释放锁，再在锁外
+        // 逐块 WriteSample。采集线程入队与编码解耦，锁竞争降到最低。块顺序/时间戳不变。
+        std::deque<AudioBlock> batch;   // 类型须与 audio_q_ 一致，swap 才能编译
+        {
+            std::lock_guard<std::mutex> lk(audio_q_mtx_);
+            // [修复-真机 overflow] 删除 `if (overflow_.load()) return;`：overflow_ 现在
+            // 只是"曾丢过音频块"的诊断标记，不能再阻断排空，否则队列里已入队的音频会
+            // 永远留在内存、收尾也写不进成片。丢弃策略在 on_audio 已完成，这里只管把
+            // 队列里剩下的块正常写入。
+            // [修复-首段延迟创建] writer 未建（等 SPS/PPS）时不取块：write_audio_block
+            // 会因 !writer_ 静默丢弃导致开头音频丢失；留在有界队列，下个 tick 再写。
+            if (!writer_) return;
+            batch.swap(audio_q_);      // 一次性拿走全部待写块，锁内只做指针交换
+            queued_hns_ = 0;           // 队列已空，累计时长归零（与 on_audio 同锁维护）
+        }
+        // 锁外执行同步编码；audio_frames_ / last_audio_end_ 只由 worker 线程访问，无竞态。
+        for (const AudioBlock& blk : batch) {
             write_audio_block(blk);
             // 采集端已统一转 PCM16，帧数按 16-bit block align 统计（与写入格式一致）
             audio_frames_ += (LONGLONG)(blk.pcm.size() / (size_t)(ach_ * 16 / 8));
@@ -1077,6 +1092,9 @@ private:
     int queue_peak_ms_;
     std::deque<AudioBlock> audio_q_;
     std::mutex audio_q_mtx_;
+    // [修复-收尾慢] 与 audio_q_ 同锁维护的累计时长(100ns)：on_audio 入队时 +=，
+    // drain 移出时归零。用于把 overflow 判定从 O(n) 遍历降为 O(1)。
+    LONGLONG queued_hns_;
     // [根因修复 v12] 跨 native 调用累积的当前 AU 的 NAL。Python 每次只送一条
     // AnnexB NAL，一帧的 SEI/VCL 常跨多次调用，必须攒齐再写成一个完整 sample。
     std::vector<std::vector<unsigned char>> pending_au_;
