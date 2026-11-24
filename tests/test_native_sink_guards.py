@@ -81,14 +81,15 @@ def test_writer_creation_driven_by_sps_pps_in_write_video():
 
 
 def test_lazy_create_guards():
-    """延迟创建的配套守护：drain/check_rotate 在 writer 未建时不得误处理。"""
+    """延迟创建的配套守护：drain/should_rotate 在 writer 未建时不得误处理。"""
     src = _cpp()
     drain = src[src.index("size_t drain_audio_queued()"):
                 src.index("/* 最终排空 + 补静音")]
     assert "if (!writer_) return 0;" in drain, "writer 未建时不 pop 音频块，避免开头音频丢失"
-    rotate = src[src.index("HRESULT check_rotate()"):
+    rotate = src[src.index("bool should_rotate()"):
                  src.index("HRESULT close_writer(bool publish)")]
-    assert "if (!writer_) return S_OK;" in rotate, "writer 未建时 seg_start=0 不得误触发切段"
+    assert "if (!writer_ || rotate_pending_) return false;" in rotate, (
+        "writer 未建时 seg_start=0 不得误触发切段")
 
 
 def test_half_writer_tmp_not_published():
@@ -191,7 +192,7 @@ def test_aac_stream_declares_payload_type_and_pcm16_input():
     """AAC 输出流声明 raw payload + 16-bit，输入流固定 PCM16（AAC MFT 硬性要求）。"""
     src = _cpp()
     cfg = src[src.index("HRESULT config_audio_stream()"):
-              src.index("HRESULT check_rotate()")]
+              src.index("bool should_rotate()")]
     assert "MF_MT_AUDIO_BITS_PER_SAMPLE, 16" in cfg
     assert "MF_MT_AAC_PAYLOAD_TYPE, 0" in cfg
     assert "MFAudioFormat_PCM" in cfg
@@ -613,7 +614,45 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v19():
-    """native 指纹升到 v19，真机据此确认整包(含 finalize 死循环修复)已生效。"""
+def test_build_id_v20():
+    """native 指纹升到 v20，真机据此确认整包(含切段移出临界路径)已生效。"""
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v19"' in src, "native 指纹须为 v19"
+    assert 'kBuildId = "mf-20261124-drain-v20"' in src, "native 指纹须为 v20"
+
+
+def test_rotate_is_pulled_out_of_write_video():
+    """[收尾慢根治回归·v20] 重量切段不得再在 write_video 内同步执行。
+
+    3min+ 录制跨 170s 阈值，旧 check_rotate 在 write_video 的 30s worker 调用内
+    同步做 Finalize+WRITE_THROUGH 刷盘+重建 SinkWriter → 超时"写入 H264 流失败"。
+    v20：write_video 只返回 ADC_ROTATE_PENDING 请求，Python 显式调 adc_session_rotate。
+    """
+    src = _cpp()
+    # write_video 末尾只返回轻量信号，不再直接调重量切段
+    wv = src[src.index("int write_video("):src.index("int mark_mic_stop()")]
+    wv_code = "\n".join(ln.split("//")[0] for ln in wv.splitlines())
+    assert "return should_rotate() ? ADC_ROTATE_PENDING : ADC_OK;" in wv_code, (
+        "write_video 只返回切段请求信号")
+    assert "check_rotate" not in wv_code, "write_video 不得再同步执行重量切段"
+    # 存在独立的请求/执行两段 + C ABI 导出
+    assert "bool should_rotate()" in src, "须有轻量的切段请求判定"
+    assert "rotate_pending_" in src, "须有 pending 标志防重复请求"
+    assert "HRESULT do_rotate()" in src, "须有独立的重量切段执行函数"
+    assert "extern \"C\" int adc_session_rotate(long long h)" in src, "须导出切段 ABI"
+    assert "ADC_ROTATE_PENDING = 1" in src, "须定义切段请求返回码"
+
+
+def test_move_file_write_through_removed():
+    """[收尾慢根治回归·v20] 原子发布不得用 MOVEFILE_WRITE_THROUGH 强制刷盘。
+
+    同卷改名是元数据操作、天然原子；WRITE_THROUGH 却强制把几十~上百 MB tmp
+    刷到物理盘，慢盘/EDR 扫描下可达数十秒，是切段与收尾卡顿元凶。
+    """
+    src = _cpp()
+    cw = src[src.index("HRESULT close_writer(bool publish)"):
+             src.index("std::string out_dir_, stem_;")]
+    code = "\n".join(ln.split("//")[0] for ln in cw.splitlines())
+    assert "MoveFileExW(wt, wf, MOVEFILE_REPLACE_EXISTING)" in code, (
+        "原子发布只需 MOVEFILE_REPLACE_EXISTING")
+    assert "MOVEFILE_WRITE_THROUGH" not in code, "禁止 WRITE_THROUGH 强制刷盘"
+

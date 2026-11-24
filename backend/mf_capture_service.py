@@ -207,8 +207,15 @@ class MFCaptureSession:
                     # 记录，不能被 suppress 吞成"假成功"——否则 finalize 出一个
                     # 缺帧/无音视频还向用户报成功。首错为准，并置停止标志。
                     try:
-                        self.native.session_write_video(self._handle, nal)
+                        need_rotate = self.native.session_write_video(self._handle, nal)
                         self._stats["bytes"] += len(nal)
+                        # [收尾慢根治 v20] native 到 170s 分段阈值只回"请求"信号，
+                        # 重量切段（Finalize+刷盘+重建）在这里用独立 120s 超时显式
+                        # 执行，不再挤占 write_video 的 30s 预算。老 DLL 不会返回
+                        # True（其内部仍同步切段），此分支自动跳过，向后兼容。
+                        if need_rotate:
+                            self.native.session_rotate(self._handle)
+                            self._stats["rotations"] = self._stats.get("rotations", 0) + 1
                     except Exception as ex:  # noqa: BLE001
                         self._error = self._error or f"写入 H264 流失败：{ex}"
                         self._stop.set()

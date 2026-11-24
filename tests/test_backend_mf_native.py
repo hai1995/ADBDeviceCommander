@@ -855,3 +855,32 @@ def test_write_video_has_independent_timeout():
     src = _code_without_docstring(mn.MFNative.session_write_video)
     assert "timeout=VIDEO_WRITE_CALL_TIMEOUT_S" in src, (
         "session_write_video 须传入专用超时，不再用默认 15s")
+
+
+def test_rotate_signal_and_independent_call():
+    """[收尾慢根治回归·v20] write_video 透传切段信号 + session_rotate 独立长超时。"""
+    assert mn.ADC_ROTATE_PENDING == 1, "须定义切段请求返回码"
+    assert mn.ROTATE_CALL_TIMEOUT_S == 120.0, "切段重量操作须有独立长超时"
+    # session_write_video 必须把 PENDING 信号透传为 True，而非当成错误抛出
+    wv = _code_without_docstring(mn.MFNative.session_write_video)
+    assert "rc == ADC_ROTATE_PENDING" in wv, "须识别切段请求返回码"
+    assert "return True" in wv, "须透传切段请求给调用方"
+    # session_rotate 存在、可选符号容错、用独立超时
+    assert hasattr(mn.MFNative, "session_rotate"), "须提供 session_rotate"
+    rot = _code_without_docstring(mn.MFNative.session_rotate)
+    assert 'getattr(self._lib, "adc_session_rotate", None)' in rot, "老 DLL 缺符号须 no-op"
+    assert "timeout=ROTATE_CALL_TIMEOUT_S" in rot, "切段须用独立长超时"
+    # 符号绑定须为可选（缺符号不判定 DLL 不可用）
+    bind = mn.MFNative._bind_signatures
+    import inspect
+    bind_src = inspect.getsource(bind)
+    assert 'getattr(lib, "adc_session_rotate", None)' in bind_src, "符号绑定须可选"
+
+
+def test_read_loop_drives_rotate_on_signal():
+    """[收尾慢根治回归·v20] _read_loop 收到切段信号须显式调 session_rotate。"""
+    loop = _code_without_docstring(mcs.MFCaptureSession._read_loop)
+    assert "need_rotate = self.native.session_write_video" in loop, "须接收 write_video 返回信号"
+    assert "if need_rotate:" in loop, "须判断切段请求"
+    assert "self.native.session_rotate(self._handle)" in loop, "须显式驱动重量切段"
+    assert '"rotations"' in loop, "须统计切段次数供诊断"

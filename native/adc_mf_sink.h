@@ -82,8 +82,15 @@ ADC_API long long adc_session_create(const char* out_dir_utf8,
 
 /* 喂入一段裸 H.264 ES（annex-B：00 00 00 01 / 00 00 01 起始码）。
  * native 负责：起始码→length-prefixed、SPS/PPS 提取、按 AU 切分并打 QPC 时间戳。
- * 返回 0 成功；非 0 为 HRESULT。 */
+ * 返回 0 成功；非 0 为 HRESULT；特殊返回 ADC_ROTATE_PENDING(1) 表示"该切段了，
+ * 请调用 adc_session_rotate"——新 DLL 用此把切段的重量操作移出 write 临界路径。 */
 ADC_API int adc_session_write_video(long long handle, const unsigned char* data, int len);
+
+/* [收尾慢根治 v20] 执行分段旋转：Finalize 当前段 → 原子发布 → 重建 SinkWriter。
+ * 重量操作（Finalize + 刷盘 + MFT 初始化）从高频 write_video 的 30s 预算里移出，
+ * 由 Python 收到 ADC_ROTATE_PENDING 后显式调用，给独立长超时。必须在 worker 线程。
+ * 返回 0 成功；非 0 为 HRESULT。老 DLL 无此符号，Python 按可选符号容错。 */
+ADC_API int adc_session_rotate(long long handle);
 
 /* 通知该会话"麦克风已停"：worker 会把音频队列排空并补齐静音到 stop 时刻，
  * 之后不再接受音频，但视频仍可继续写入，直到 adc_session_finalize。 */

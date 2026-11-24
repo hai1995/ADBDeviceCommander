@@ -8206,3 +8206,47 @@ drain 已变为尽力而为、可取消、不再致命，但超时点**转移到
 **验证**：守卫测试更新（有界循环 + 先退订 + 指纹 v19），专项与全量须通过。
 Linux 沙箱无 Windows SDK，native 部分依赖 CI 编译 + 真机 release 验证。真机请确认
 日志指纹变为 `mf-20261124-drain-v19`；预期 finalize 不再卡 60s、收尾恢复正常。
+
+## 运行日志加时间戳 + 3min+ 长录制切段超时根治（v20，指纹 mf-20261124-drain-v20）
+
+### 需求一：运行日志每行带时间戳
+- `frontend/js/app.js`：新增 `logStamp()`（本地 `[HH:MM:SS]`），`pushStatus` 里给
+  状态日志行（#status）与顶栏跑马灯都加时间戳前缀；toast / 告警弹窗保留原文
+  （瞬时提示带戳冗余）。所有经 pushStatus 的行（含后端推送的"正在启动/设备失联/
+  收尾提示/录屏已完成"）自动带时间，便于判断各阶段耗时与先后顺序。
+- 新增前端守卫 `tests/frontend/log_timestamp.test.cjs`（8 项）；适配
+  `status_ticker_modal.test.cjs` 两处精确匹配改为子串匹配（时间戳是前缀）。
+
+### 需求二：收尾慢 + "写入 H264 流失败 30s" 根治
+**现象**：v19 包、3min+ 录制、期间设备两次失联重连，报"写入 H264 流失败：
+MF worker 调用超时（30s 未返回）"，收尾很久。这是超时点第 4 次转移
+（drain→write15s→finalize60s→write30s），说明是架构问题而非单点参数。
+
+**根因（Plan agent + 代码链双重确认）**：
+1. 3 分钟录制跨过 native `SEGMENT_SECONDS_=170` 分段阈值。旧 `check_rotate()`
+   在 `write_video()` 末尾**同步执行**：`close_writer(true)`（含 `SinkWriter::Finalize()`
+   + `MoveFileExW(...MOVEFILE_WRITE_THROUGH)` 强制把几十~上百 MB tmp 刷到物理盘）
+   + `ensure_writer()`（重建整个 SinkWriter / AAC MFT）。慢盘 + 设备重连导致的
+   IO 竞争下，这一次 write_video 调用可达数十秒 → 顶过 30s 超时 → 误报失败。
+2. `MOVEFILE_WRITE_THROUGH` 本身就是元凶：同卷 rename 本是毫秒级元数据操作，
+   它却强制刷盘；EDR 实时扫描下尤甚。
+3. 系统性病根：重量操作（切段/Finalize）与高频 write/drain 共用单 FIFO worker，
+   调超时只会让超时点继续转移。
+
+**修复（v20）**：
+- **native**：`write_video` 末尾改为 `return should_rotate() ? ADC_ROTATE_PENDING : ADC_OK`，
+  到点只置 `rotate_pending_`、返回请求信号，不再同步做重量切段；新增 `do_rotate()`
+  （Finalize+发布+重建）经 public 转发 `rotate_segment()` 由新 ABI `adc_session_rotate`
+  显式调用。`close_writer` 去掉 `MOVEFILE_WRITE_THROUGH`（仅留 MOVEFILE_REPLACE_EXISTING，
+  残留 tmp 由 sweep_workdirs 兜底）。新增 `ADC_ROTATE_PENDING=1` 返回码（不与 HRESULT 冲突）。
+- **Python**：`session_write_video` 把 PENDING 透传为 True；新增 `session_rotate`（独立
+  120s 超时）；`adc_session_rotate` 按**可选符号**绑定，老 DLL 无此符号时 write_video
+  仍走内部切段旧行为（返回 0，永不返回 PENDING），完美向后兼容。`_read_loop` 收到
+  True 才显式调 session_rotate 并记 `stats['rotations']`。
+- 指纹 → `mf-20261124-drain-v20`。v10~v19 其余修复全保留。
+
+**验证**：native 守卫新增 2 项（切段移出临界路径 / 去 WRITE_THROUGH）、backend 新增
+2 项（PENDING 信号 + 独立超时 + read_loop 驱动）、前端新增 8 项时间戳守卫；全量
+Python 1748 passed、前端 102 个 cjs 全绿。Linux 沙箱无 Windows SDK，native 由 CI
+编译 + 指纹自证闸门保证进产物。真机请确认日志指纹 `mf-20261124-drain-v20`，预期
+每行状态带 `[HH:MM:SS]`，3min+ 长录制切段不再顶超时、收尾明显加快。

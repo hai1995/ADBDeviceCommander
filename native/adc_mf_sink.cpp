@@ -67,9 +67,17 @@
 // v17: native 录制逻辑未变（v10~v16 全部保留）；本轮修复在 Python worker 队列
 // 层（超时 drain 撤销 + 排空容错 + 放宽 drain 超时），升指纹仅为让真机日志能
 // 明确显示"已换成含本轮修复的整包"，避免再次拿旧 exe 验证。
-static const char* const kBuildId = "mf-20261124-drain-v19";
+// v20: 分段旋转的重量操作（Finalize+刷盘+重建 SinkWriter）从 write_video 的
+// 30s 临界路径移出，改由 Python 收到 ADC_ROTATE_PENDING 后显式调用 adc_session_rotate
+// （独立长超时）；close_writer 去掉 WRITE_THROUGH 强制刷盘。根治 3min+ 长录制
+// 跨 170s 分段时 write_video 超时（真机"写入 H264 流失败 30s"元凶）。
+static const char* const kBuildId = "mf-20261124-drain-v20";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
+
+// [收尾慢根治 v20] write_video 的特殊返回：该切段了，请调用 adc_session_rotate。
+// 用小正整数，绝不与 HRESULT（0x8xxxxxxx 高位为 1，转成 int 为负）冲突。
+static const int ADC_ROTATE_PENDING = 1;
 
 static std::mutex g_err_mtx;
 static std::string g_last_error;
@@ -540,7 +548,7 @@ public:
           fps_num_(fps_num > 0 ? fps_num : 30), fps_den_(fps_den > 0 ? fps_den : 1),
           arate_(arate), abits_(abits), ach_(ach),
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
-          seg_no_(0), seg_start_hns_(0),
+          seg_no_(0), seg_start_hns_(0), rotate_pending_(false),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
           queued_hns_(0), last_audio_end_(0), video_frame_count_(0),
           video_ts_hns_(0), video_frame_dur_hns_(10000000LL * (fps_den > 0 ? fps_den : 1) / (fps_num > 0 ? fps_num : 30)),
@@ -655,10 +663,15 @@ public:
         // NAL，一帧的 AUD/SEI/VCL 常跨多次调用，旧实现把 SEI 等纯非 VCL 单独
         // 写成样本，sink 收到无效 AU 后进入 sticky 错误态。改为跨调用累积，
         // 只在 AU 边界 / 切段 / 收尾冲刷（见 flush_pending_au 调用点）。
-        return check_rotate();
+        // [收尾慢根治 v20] 不再在此同步做重量切段，只返回"请求切段"信号。
+        return should_rotate() ? ADC_ROTATE_PENDING : ADC_OK;
     }
 
     int mark_mic_stop() { mic_stopped_.store(true); return 0; }
+
+    // [收尾慢根治 v20] public 转发：供 C ABI adc_session_rotate 调用（do_rotate
+    // 本身在 private 区，全局函数无权访问，必须经本 public 方法转发）。
+    HRESULT rotate_segment() { return do_rotate(); }
 
     // [修复-真机 overflow] 音频队列的排空不能再只靠 write_video 驱动：
     // 真机上 screenrecord 的 H264 流可能长时间稀疏甚至中断（录制 1min+ 只写出
@@ -1064,19 +1077,30 @@ private:
         return S_OK;
     }
 
-    HRESULT check_rotate() {
+    // [收尾慢根治 v20] 到点只"请求"切段，不做重量操作。write_video 因此恢复
+    // 轻量（每帧有界），不再被 Finalize+刷盘+重建 SinkWriter 顶过 30s 超时。
+    // 重量操作交给 Python 收到 ADC_ROTATE_PENDING 后显式调 do_rotate()（独立长超时）。
+    bool should_rotate() {
         // [修复-首段延迟创建] writer 未建立（仍在等 SPS/PPS）时 seg_start_hns_
         // 尚为 0，此刻做差会得到巨大的伪经过时间而误触发切段。首段还没开始写，
-        // 无需切段，直接返回。
-        if (!writer_) return S_OK;
+        // 无需切段。
+        if (!writer_ || rotate_pending_) return false;
         LONGLONG seg_limit = (LONGLONG)SEGMENT_SECONDS_ * 10000000LL;
-        if (qpc_now_hns() - seg_start_hns_ < seg_limit) return S_OK;
-        // 段切换：先停音频并入队静止（音频由订阅广播继续，我不在此 drain），
-        // Finalize 当前段并原子发布，再开新段。
-        HRESULT hr = close_writer(true);
+        if (qpc_now_hns() - seg_start_hns_ < seg_limit) return false;
+        rotate_pending_ = true;   // 只置位一次，避免每帧都返回 PENDING 刷屏
+        return true;
+    }
+
+    // [收尾慢根治 v20] 真正的分段旋转：Finalize 当前段→原子发布→重建 writer。
+    // 由 adc_session_rotate 经 worker 线程显式调用，超时预算独立于 write_video。
+    HRESULT do_rotate() {
+        if (!rotate_pending_) return S_OK;   // 无待处理请求（幂等）
+        HRESULT hr = close_writer(true);     // 内部 flush_pending_au + Finalize + 发布
         if (FAILED(hr)) return hr;
         std::string dummy;
-        return ensure_writer(dummy);
+        hr = ensure_writer(dummy);           // 重建新段 SinkWriter，重置 seg_start_hns_
+        if (SUCCEEDED(hr)) rotate_pending_ = false;
+        return hr;
     }
 
     HRESULT close_writer(bool publish) {
@@ -1121,7 +1145,12 @@ private:
             wchar_t wt[2048], wf[2048];
             MultiByteToWideChar(CP_UTF8, 0, tmp.c_str(), -1, wt, 2048);
             MultiByteToWideChar(CP_UTF8, 0, final.c_str(), -1, wf, 2048);
-            if (!MoveFileExW(wt, wf, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            // [收尾慢根治 v20] 去掉 MOVEFILE_WRITE_THROUGH：它是同卷改名却强制把
+            // 几十~上百 MB 的 tmp 刷到物理盘，在慢盘/EDR 实时扫描下可达数十秒，
+            // 是切段与收尾卡顿的元凶。同卷 rename 本身是元数据操作、天然原子，
+            // MOVEFILE_REPLACE_EXISTING 已足够；崩溃残留的 tmp 由下次启动
+            // core.tmpfiles.sweep_workdirs 兜底清理，无需用 WRITE_THROUGH 换。
+            if (!MoveFileExW(wt, wf, MOVEFILE_REPLACE_EXISTING)) {
                 HRESULT eh = HRESULT_FROM_WIN32(GetLastError());
                 set_error(eh, "原子发布临时文件失败");
                 return eh;
@@ -1143,6 +1172,9 @@ private:
     // 线程写入 —— 必须是原子，否则数据竞争（未定义行为）。
     std::atomic<bool> finalized_{false}, discarded_{false};
     LONGLONG seg_start_hns_;
+    // [收尾慢根治 v20] 到分段阈值时由 should_rotate 置位，Python 调 do_rotate 执行
+    // 重量切段后清除。只由 worker 线程读写（write_video/rotate 都在 worker），无竞态。
+    bool rotate_pending_;
     static const int SEGMENT_SECONDS_ = 170;   // 与 core.constants.REC_SEGMENT_S 一致
     std::vector<std::string> tmp_files_, published_;
     long long video_bytes_, audio_frames_, dropped_;
@@ -1210,6 +1242,14 @@ extern "C" int adc_session_write_video(long long h, const unsigned char* data, i
     RecordSession* s = find_session(h);
     if (!s) { set_error_text("会话句柄无效"); return E_INVALIDARG; }
     return s->write_video(data, len);
+}
+// [收尾慢根治 v20] Python 收到 write_video 的 ADC_ROTATE_PENDING 后显式调用，
+// 在独立（长超时）worker 调用里完成 Finalize+刷盘+重建，不占用 write 的 30s 预算。
+extern "C" int adc_session_rotate(long long h) {
+    RecordSession* s = find_session(h);
+    if (!s) { set_error_text("会话句柄无效"); return E_INVALIDARG; }
+    HRESULT hr = s->rotate_segment();   // public 转发（do_rotate 在 private 区）
+    return (int)hr;
 }
 extern "C" int adc_session_mark_mic_stop(long long h) {
     RecordSession* s = find_session(h);

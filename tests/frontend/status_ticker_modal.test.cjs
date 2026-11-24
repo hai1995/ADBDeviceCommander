@@ -80,7 +80,8 @@ const modalOpen = (doc) => !doc.getElementById("status-modal").classList.contain
     ]);
     const doc = window.document;
     ok(await waitFor(() => statusLines(doc).length >= 2, 4000, "状态行就绪"), "状态行写入 #status");
-    ok(statusLines(doc).includes("已保存截图 A1.png"), "#status 含最新一条状态文本");
+    // 状态行现在带 [HH:MM:SS] 时间戳前缀，用子串匹配原文
+    ok(statusLines(doc).some((s) => s.indexOf("已保存截图 A1.png") >= 0), "#status 含最新一条状态文本");
     ok(await waitFor(() => tickerText(doc).indexOf("刷新完成") >= 0, 4000, "跑马灯刷新"),
        "跑马灯文本包含最近状态");
     ok(tickerText(doc).indexOf("已保存截图") >= 0, "跑马灯带最新一条（不只是第一条）");
@@ -102,7 +103,7 @@ const modalOpen = (doc) => !doc.getElementById("status-modal").classList.contain
     ok(modalOpen(doc) === false, "初始为关闭状态");
     click(doc.getElementById("status-ticker"));
     ok(modalOpen(doc), "点击跑马灯 → 弹窗打开");
-    ok(statusLines(doc).includes("已跳过 root 切换"), "弹窗复用同一份 #status（含全部历史）");
+    ok(statusLines(doc).some((s) => s.indexOf("已跳过 root 切换") >= 0), "弹窗复用同一份 #status（含全部历史）");
 
     click(doc.getElementById("status-modal-close"));
     ok(modalOpen(doc) === false, "点 × → 关闭");

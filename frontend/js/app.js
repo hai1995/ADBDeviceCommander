@@ -478,12 +478,24 @@
     range.deleteContents();
     return over;
   }
+  /* 运行日志时间戳：每条状态行前面挂 [HH:MM:SS]（本地 24 小时制）。
+     长录制收尾常跨分钟、又夹杂设备失联/重连事件，没有时间根本无法判断
+     「哪一步卡了多久 / 先后是否颠倒」。只加在状态日志行与顶栏跑马灯；
+     toast / 弹窗用原文（瞬时提示带时间戳反而冗余）。
+     用固定宽度的两位补零，对齐后扫读更快；毫秒对分钟级收尾无意义，省去。 */
+  function logStamp() {
+    const d = new Date();
+    const p2 = (n) => (n < 10 ? "0" + n : String(n));
+    return "[" + p2(d.getHours()) + ":" + p2(d.getMinutes()) + ":" + p2(d.getSeconds()) + "] ";
+  }
+
   const pushStatus = (type, text, opts) => {
     // 状态信息只有一处 DOM（弹窗里的 #status）；顶栏跑马灯是它的概览投影。
     const cls = type === "err" ? "err" : type === "warn" ? "warn"
              : type === "ok" ? "ok" : type === "info" ? "info" : "dim";
-    pushLine(els.status, text, cls);
-    pushTicker(text, cls);
+    const stamped = logStamp() + (text == null ? "" : String(text));
+    pushLine(els.status, stamped, cls);
+    pushTicker(stamped, cls);
     // 高优先级提示语：错误级一律弹 toast；后端显式 toast 标记的警告也弹
     if (type === "err" || (opts && opts.toast)) showToast(type, text);
     // 关键告警：**不点就不消失**的弹窗。与 toast 并存 —— toast 负责「此刻在看屏幕」

@@ -26,6 +26,9 @@ from core.longpath import path_isfile
 # ---- 错误码：与 native adc_mf_sink.h 对齐 -------------------------------
 RPC_E_CHANGED_MODE = 0x80010106
 ADC_OK = 0
+# [收尾慢根治 v20] write_video 的特殊返回：该切段了，请调用 session_rotate。
+# 与 native 的 ADC_ROTATE_PENDING 对齐（小正整数，不与 HRESULT 冲突）。
+ADC_ROTATE_PENDING = 1
 
 # annex-B 起始码
 _SC3 = b"\x00\x00\x01"
@@ -46,9 +49,15 @@ _SC4 = b"\x00\x00\x00\x01"
 #   write_video() 内部。根治在 native 分批排空(kAudioDrainBatchMax=48)；这里把
 #   write_video 从默认 15s 放宽到 30s 作兜底——宁可多等也别把慢速设备的正常帧
 #   误判成致命失败/提前终止录制。30s 仍在 finalize 60s 之内，不影响收尾判定。
+#   [v20·切段独立超时] 3min+ 录制跨 170s 分段阈值时，native 旧实现在 write_video
+#   内同步做 Finalize+WRITE_THROUGH 刷盘+重建 SinkWriter（重量，可达数十秒），
+#   30s write 预算不够 → 误报"写入 H264 流失败"。根治：native 到点只返回
+#   ADC_ROTATE_PENDING 请求，Python 显式调 session_rotate 做重量切段，用本独立
+#   长超时（120s，覆盖慢盘/EDR 扫描）；write_video 因此恢复轻量、30s 绰绰有余。
 DRAIN_CALL_TIMEOUT_S = 10.0
 FINALIZE_CALL_TIMEOUT_S = 60.0
 VIDEO_WRITE_CALL_TIMEOUT_S = 30.0
+ROTATE_CALL_TIMEOUT_S = 120.0
 
 
 class MFNativeError(RuntimeError):
@@ -263,6 +272,12 @@ class MFNative:
             ctypes.c_char_p, i]
         lib.adc_session_create.restype = ll
         lib.adc_session_write_video.argtypes = [ll, U8P, i]; lib.adc_session_write_video.restype = i
+        # [收尾慢根治 v20] 可选符号：老 DLL 没有 adc_session_rotate。缺它时
+        # write_video 沿用"内部同步切段"旧行为（返回 0），Python 不会收到 PENDING、
+        # 也不会调用本符号——完美向后兼容，无需因缺符号判定整个 DLL 不可用。
+        _rotate = getattr(lib, "adc_session_rotate", None)
+        if _rotate is not None:
+            _rotate.argtypes = [ll]; _rotate.restype = i
         lib.adc_session_mark_mic_stop.argtypes = [ll]; lib.adc_session_mark_mic_stop.restype = i
         lib.adc_session_drain_audio.argtypes = [ll]; lib.adc_session_drain_audio.restype = i
         lib.adc_session_finalize.argtypes = [ll, ctypes.c_char_p, i]; lib.adc_session_finalize.restype = i
@@ -337,11 +352,34 @@ class MFNative:
         return h, first.value.decode("utf-8", "replace")
 
     def session_write_video(self, h, data):
+        """写入一条 NAL；返回 True 表示 native 请求分段旋转（须尽快调 session_rotate）。
+
+        [收尾慢根治 v20] 老 DLL 的 write_video 到阈值会在内部同步切段后返回 0，
+        新 DLL 则只返回 ADC_ROTATE_PENDING=1、把重量切段交给 session_rotate。
+        本方法把该信号透传给调用方（_read_loop），后者据此显式驱动切段。
+        """
         buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
         # [修复-收尾慢·v18] 用独立的 write_video 超时（30s），不再走默认 15s：
         # 15s 会被 native 内部一次无上限的积压音频排空顶过，误报致命失败。
         rc = self.worker.call(self._lib.adc_session_write_video, h, buf, len(data),
                               timeout=VIDEO_WRITE_CALL_TIMEOUT_S)
+        if rc == ADC_ROTATE_PENDING:
+            return True
+        if rc != ADC_OK:
+            raise MFNativeError(self.last_error())
+        return False
+
+    def session_rotate(self, h):
+        """[收尾慢根治 v20] 执行分段旋转（Finalize 当前段+发布+重建 writer）。
+
+        仅在 write_video 返回 ROTATE_PENDING 后调用。重量操作走独立的 120s 超时，
+        不再占用高频 write_video 的 30s 预算。老 DLL 无此符号：调用方须先以
+        hasattr/native 能力探测，或直接 suppress（老 DLL 不会返回 PENDING，
+        因此本方法永远不会被触发）。"""
+        rot = getattr(self._lib, "adc_session_rotate", None)
+        if rot is None:            # 老 DLL：无独立切段能力，no-op（其 write_video 已内部切段）
+            return
+        rc = self.worker.call(rot, h, timeout=ROTATE_CALL_TIMEOUT_S)
         if rc != ADC_OK:
             raise MFNativeError(self.last_error())
 
