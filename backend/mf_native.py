@@ -31,12 +31,15 @@ ADC_OK = 0
 _SC3 = b"\x00\x00\x01"
 _SC4 = b"\x00\x00\x00\x01"
 
-# [修复-收尾慢] 分级调用超时（秒，经 MFWorker.call）：
-#   drain 是每 200ms 一次的高频维护调用，卡住要尽快失败让上层重试，不能和
-#   finalize 抢 15s 默认超时——否则高负载下一次 drain 卡满 15s，定时器超时后
-#   上层以为 worker 死了。finalize 含 SinkWriter::Finalize（AAC/H264 编码器 flush）
-#   与文件改名，长录制/多段时本就慢，给足 60s 避免误报"合成失败"。
-DRAIN_CALL_TIMEOUT_S = 5.0
+# [修复-收尾慢/僵尸task] 分级调用超时（秒，经 MFWorker.call）：
+#   v14 曾把 drain 从 15s 降到 5s，想"卡住尽快失败重试"。但真机 3 分钟长录制
+#   实证：高负载下单 worker 被海量 write_video 占满，drain 排队 >5s 是常态，
+#   5s 太激进 → 大量 drain 被误判超时。而旧 call() 超时后 task 仍留在 worker
+#   队列执行（僵尸），每次重试又堆一个，僵尸占满 worker → finalize 排队 → 收尾
+#   超 1 分钟。修复：超时 drain 可在队列中被撤销（见 call(cancelable)），超时值
+#   放宽到 10s 减少误报，二者配合从根上消除僵尸堆积。finalize 仍给 60s（含
+#   SinkWriter::Finalize 编码器 flush + 文件改名，长录制/多段本就慢）。
+DRAIN_CALL_TIMEOUT_S = 10.0
 FINALIZE_CALL_TIMEOUT_S = 60.0
 
 
@@ -122,10 +125,17 @@ class MFWorker:
                     break
                 fn, args, done = item
                 try:
+                    # [修复-僵尸task] 若调用方已超时放弃且标记可撤销，跳过执行。
+                    # 旧实现无条件执行超时 task：drain 每 200ms 投一次、高负载下
+                    # 频繁 5s 超时，每次超时都留下一个僵尸 drain 占住 worker，
+                    # 堆积后 finalize 排到队尾 → 收尾超 1 分钟。跳过即可根治。
+                    if done.get("cancelled"):
+                        continue
                     done["value"] = fn(*args)
                 except BaseException as ex:  # noqa: BLE001  跨线程传回调用方
                     done["error"] = ex
                 finally:
+                    # cancelled 分支也 set，避免任何仍在等的路径悬挂（无害）。
                     done["event"].set()
         finally:
             # 无论正常哨兵退出、超时退出还是异常，都唤醒所有仍在等的 caller。
@@ -133,17 +143,27 @@ class MFWorker:
             with __import__("contextlib").suppress(Exception):
                 lib.adc_shutdown()
 
-    def call(self, fn, *args, timeout=15.0):
+    def call(self, fn, *args, timeout=15.0, cancelable=False):
         """在 worker 线程执行 fn(*args)，同步等结果。
 
         timeout 兜底：万一 worker 异常死亡（native 崩溃、adc_shutdown 卡死），
         也绝不让调用方无限期挂着——这是界面「停在停止中」的根因之一。
+
+        cancelable=True（仅用于高频 drain 等可丢弃的维护调用）：超时后给 task
+        打 cancelled 标记，worker 出队时会跳过、不执行。避免超时 task 变僵尸
+        堆积占住 worker，拖垮收尾的 finalize。普通调用（write/finalize）不传，
+        语义不变——它们超时是致命错误，也不能被静默丢弃。
         """
         if self._thread is None or not self._thread.is_alive():
             raise MFNativeError("MF worker 未启动")
-        done = {"event": threading.Event(), "value": None, "error": None}
+        done = {"event": threading.Event(), "value": None, "error": None,
+                "cancelled": False}
         self._q.put((fn, args, done))
         if not done["event"].wait(timeout):
+            if cancelable:
+                # 打标即可：worker 若还没取到该 task 会跳过；若已在执行则正常跑完
+                # （native 不可中途打断，但只有一个在途，影响有限）。
+                done["cancelled"] = True
             raise MFNativeError(f"MF worker 调用超时（{timeout:g}s 未返回）")
         if done["error"] is not None:
             raise done["error"]
@@ -320,8 +340,11 @@ class MFNative:
         定时器每 200ms 调用一次，使音频写入与视频帧解耦。视频流稀疏/中断时，
         视频帧驱动不到 drain，靠这个定时器保证音频持续写入、队列不积压。
         """
+        # cancelable=True：drain 是每 200ms 的尽力维护调用，超时即弃、不留僵尸
+        # 占住 worker（否则堆积拖垮收尾 finalize）。音频完整性由 finalize 内部
+        # 的 drain_audio() 兜底保证。
         return self.worker.call(self._lib.adc_session_drain_audio, h,
-                                timeout=DRAIN_CALL_TIMEOUT_S)
+                                timeout=DRAIN_CALL_TIMEOUT_S, cancelable=True)
 
     def session_finalize(self, h):
         out = ctypes.create_string_buffer(8192)

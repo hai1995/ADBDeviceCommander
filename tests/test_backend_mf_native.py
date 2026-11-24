@@ -606,6 +606,53 @@ def test_worker_call_timeout_raises_instead_of_hanging():
     w.stop()
 
 
+def test_cancelable_timeout_skips_zombie_task():
+    """[收尾慢回归·v17] cancelable 调用超时后，僵尸 task 不得在 worker 中执行。
+
+    根因：旧 call() 超时只让调用方抛错，task 仍留在队列被 worker 执行。长录制
+    下 drain 每 200ms 一次、频繁超时，每次超时都堆一个僵尸 drain 占住 worker，
+    堆积后收尾的 finalize 排到队尾 → 收尾超 1 分钟。修复：cancelable=True 的
+    调用超时后打 cancelled 标记，worker 出队时跳过。这里用阻塞 fn 占住 worker，
+    排队一个 cancelable 调用使其超时，放行后断言它从未真正执行。
+    """
+    import threading as _th
+
+    lib = _BlockingLib()
+    w = mn.MFWorker(lib)
+    w.start()
+    lib._gate.clear()
+    blocker = _th.Thread(target=lambda: _call_and_catch(w, lib.block_forever, timeout=5))
+    blocker.start()
+    assert lib._gate.wait(2), "blocker 应已占用 worker"
+
+    executed = []
+    def would_be_zombie():
+        executed.append(1)
+        return 1
+
+    # 排队一个 cancelable 调用，超时（0.3s）后被标记跳过
+    result = {}
+    zt = _th.Thread(target=lambda: result.setdefault(
+        "exc", _call_and_catch_cancelable(w, would_be_zombie, 0.3)))
+    zt.start()
+    zt.join(1.5)
+    assert isinstance(result.get("exc"), mn.MFNativeError), "cancelable 超时也应抛错"
+    lib.release.set()                     # 放行 blocker，worker 继续消费队列
+    blocker.join(3)
+    import time as _t
+    _t.sleep(0.2)                         # 给 worker 时间跑到那个被标记的 task
+    assert not executed, "超时 cancelable task 不得被执行（僵尸应被跳过）"
+    w.stop()
+
+
+def _call_and_catch_cancelable(worker, fn, timeout):
+    try:
+        worker.call(fn, timeout=timeout, cancelable=True)
+    except Exception as e:  # noqa: BLE001
+        return e
+    return None
+
+
 def _call_and_catch(worker, fn, timeout):
     try:
         worker.call(fn, timeout=timeout)
@@ -645,13 +692,15 @@ def test_worker_stop_drains_queued_calls():
 
 # ---------------- 第六轮：分级超时 + 排空容错（收尾慢修复） --------------
 def test_graded_call_timeouts():
-    """[收尾慢回归·v14] drain 用短超时、finalize 用长超时，不能都是 15s 默认值。
+    """[收尾慢回归·v14/v17] drain 用中等超时、finalize 用长超时，不能都是 15s 默认值。
 
-    drain 高频调用卡住要尽快失败让上层重试；finalize 含编码器 flush，长录制本就慢，
-    必须给足时间，否则误报"合成失败"。常量值本身也要满足 finalize > drain。
+    v14 曾把 drain 压到 5s，真机 3 分钟长录制实证太激进：worker 被海量 write_video
+    占满时 drain 排队 >5s 是常态，被误判超时堆积僵尸。v17 放宽到 10s，并要求
+    cancelable=True（超时 task 可撤销、不留僵尸）。finalize 含编码器 flush，长录制
+    本就慢，给足 60s 避免误报"合成失败"。
     """
     assert mn.DRAIN_CALL_TIMEOUT_S < mn.FINALIZE_CALL_TIMEOUT_S
-    assert mn.DRAIN_CALL_TIMEOUT_S <= 6, "drain 卡住应尽快失败"
+    assert 8 <= mn.DRAIN_CALL_TIMEOUT_S <= 15, "drain 超时过短会误报、过长会拖慢发现卡死"
     assert mn.FINALIZE_CALL_TIMEOUT_S >= 30, "finalize 要给编码器 flush 留足时间"
     # 便捷方法必须真的把常量传给 call（防止定义了却没用）
     import inspect
@@ -659,6 +708,8 @@ def test_graded_call_timeouts():
     fin_src = inspect.getsource(mn.MFNative.session_finalize)
     assert "DRAIN_CALL_TIMEOUT_S" in drain_src
     assert "FINALIZE_CALL_TIMEOUT_S" in fin_src
+    # v17 关键：drain 必须 cancelable，超时不留僵尸拖垮收尾
+    assert "cancelable=True" in drain_src
 
 
 def test_drain_loop_survives_transient_timeout(monkeypatch):
@@ -692,21 +743,27 @@ def test_drain_loop_survives_transient_timeout(monkeypatch):
     # 经历 2 次超时后仍继续 drain（成功清零），不会被永久停掉
     drains = state["n"]
     assert drains > 2, f"偶发超时后应继续排空，实际调用 {drains} 次"
-    # 首错不应被记（连续失败未达阈值）——从 session 的 _error 读取
+    # v17：任何次数的 drain 超时都不写入 _error（收尾不得误报失败）
     sess = svc._sessions["s1"]
-    assert "排空失败" not in sess._error, f"偶发超时不应上报：{sess._error}"
+    assert "排空失败" not in sess._error, f"drain 超时不应上报致命错误：{sess._error}"
     svc.stop_all()
 
 
-def test_drain_loop_stops_after_consecutive_failures(monkeypatch):
-    """[排空超时容错·v14] 连续失败达阈值才停排空并上报，避免死循环空转。"""
+def test_drain_loop_never_stops_on_persistent_timeout(monkeypatch):
+    """[排空容错·v17] 即使持续超时也不永久停排空、不记致命错误。
+
+    v14 旧行为：连续 3 次超时 → break + 记 _error → 剩余录制音频无人排空
+    （native 队列 overflow 丢失）且收尾误报失败。真机 3 分钟长录制触发此路径。
+    v17：超时只丢本轮、下个 tick 继续；_error 始终为空；连续失败数只进 stats
+    作诊断。真正失败由 finalize 裁决（worker 真死时 finalize 自身会超时上报）。
+    """
     import time as _t
     fake = FakeNative(available=True)
     state = {"n": 0}
 
     def always_fail(h):
         state["n"] += 1
-        raise mn.MFNativeError("MF worker 调用超时（5s 未返回）")
+        raise mn.MFNativeError("MF worker 调用超时（10s 未返回）")
 
     fake.session_drain_audio = always_fail
     monkeypatch.setattr(mcs.subprocess, "Popen",
@@ -716,10 +773,72 @@ def test_drain_loop_stops_after_consecutive_failures(monkeypatch):
     svc = mcs.MFCaptureService(native=fake)
     ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
     assert ok is True, reason
-    _t.sleep(0.12)
+    _t.sleep(0.15)
     sess = svc._sessions["s1"]
-    assert "排空失败" in sess._error, "连续失败应上报首错"
-    stopped_at = state["n"]
-    _t.sleep(0.06)
-    assert state["n"] == stopped_at, "达阈值后应停止 drain，不再空转"
+    # 持续失败也不写 _error（收尾不得报"排空失败"）
+    assert "排空失败" not in sess._error, "持续 drain 超时不应上报致命错误"
+    first = state["n"]
+    assert first >= 3, f"应已多次尝试排空，实际 {first} 次"
+    # 关键：不停止——后续仍在持续排空（不再 break 空转停止）
+    _t.sleep(0.08)
+    assert state["n"] > first, "持续超时也必须继续尝试排空，不得永久停止"
+    # 连续失败数进 stats 供诊断
+    assert sess._stats.get("drain_fail_streak", 0) >= 3
     svc.stop_all()
+
+
+# ---------------- 第七轮：worker 僵尸 task 清理（长录制收尾慢·v17） --------------
+def _code_without_docstring(fn):
+    """取函数源码，剥离 docstring 与注释，只留可执行代码行（供源码守卫断言）。"""
+    import ast as _ast
+    import inspect as _inspect
+    import textwrap as _tw
+    src = _tw.dedent(_inspect.getsource(fn))
+    tree = _ast.parse(src)
+    body = tree.body[0].body
+    lines = src.splitlines()
+    skip_to = 0
+    if (body and isinstance(body[0], _ast.Expr)
+            and isinstance(getattr(body[0], "value", None), _ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        skip_to = body[0].end_lineno
+    code_lines = []
+    for ln in lines[skip_to:]:
+        code = ln.split("#")[0].strip()
+        if code:
+            code_lines.append(code)
+    return "\n".join(code_lines)
+
+
+def test_worker_loop_skips_cancelled_tasks():
+    """[收尾慢根因回归·v17] worker 出队必须跳过 cancelled task（僵尸回收）。
+
+    MFWorker.call(cancelable=True) 超时后只打标记，真正"不执行僵尸"依赖 worker
+    _loop 出队时检查 done['cancelled']。缺了这段，超时 drain 仍会在 worker 被执行、
+    堆积拖垮 finalize——这是 3 分钟录制收尾超 1 分钟的根因。
+    """
+    loop_src = _code_without_docstring(mn.MFWorker._loop)
+    assert 'done.get("cancelled")' in loop_src, "worker 出队须检查 cancelled 标记"
+    assert "continue" in loop_src, "cancelled task 须跳过执行"
+
+
+def test_call_supports_cancelable_keyword():
+    """[收尾慢根因回归·v17] call() 必须支持 cancelable 并在超时时打标。"""
+    call_src = _code_without_docstring(mn.MFWorker.call)
+    assert "cancelable" in call_src, "call 须支持 cancelable 参数"
+    assert 'done["cancelled"] = True' in call_src, "超时时须给 task 打 cancelled 标记"
+
+
+def test_drain_loop_never_records_fatal_error():
+    """[收尾慢根因回归·v17] drain 循环不得再写 _error 或永久 break。
+
+    真机 3 分钟录制因 drain 超时写 _error 而误报"音频排空失败"（文件其实已保存）。
+    收尾失败只应由 finalize 裁决。源码中不得出现旧的 break + _error 赋值。
+    """
+    loop_src = _code_without_docstring(mcs.MFCaptureSession._drain_loop)
+    # 不得把 drain 超时写入致命错误通道
+    assert "音频排空失败" not in loop_src, "drain 超时不得写入 _error 误报收尾失败"
+    assert "self._error" not in loop_src, "drain 循环不得触碰 _error"
+    # 不得再因失败计数 break（旧 DRAIN_FAIL_STREAK_LIMIT 逻辑已废除）
+    assert "DRAIN_FAIL_STREAK_LIMIT" not in loop_src
+    assert "break" not in loop_src, "drain 超时不得永久停止排空"

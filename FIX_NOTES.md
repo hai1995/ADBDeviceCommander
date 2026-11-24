@@ -8080,3 +8080,46 @@ native 部分依赖 CI 编译 + 真机确认。
 真机 release 后日志指纹应为 `mf-20261124-avsync-v16`；预期视频 duration 与音频
 重新对齐（视频不再系统性偏长），声音不再晚于画面。Linux 沙箱无 Windows SDK，
 native 部分依赖 CI 编译 + 真机确认。
+
+---
+
+## 3 分钟长录制收尾超 1 分钟 + 假失败（v17，构建指纹 mf-20261124-drain-v17）
+
+**现象**：用户 3 分钟录制，收尾耗时 >1 分钟，报 `音频排空失败：MF worker
+调用超时（5s 未返回）`，但成品文件其实已保存（"1 个文件已保存"）。注意真机
+日志指纹是 `avsync-v15`，说明连 v16 音画同步修复都还没进 exe——本轮整包会
+一并带上 v16/v17 全部修复。
+
+**根因（代码链路确定，非猜测）**：三处缺陷叠加在单 worker 线程模型上——
+所有 native 调用（海量 write_video + 每 200ms 一次 drain + finalize）串行在
+一个 worker 线程。
+1. **超时 task 变僵尸**：`MFWorker.call()` 超时只让调用方抛异常，已投递的
+   `(fn,args,done)` 仍在 worker 队列、会被照常执行。长录制下 worker 被
+   write_video 占满，drain 排队 >5s 是常态 → 频繁超时 → 每次超时留一个僵尸
+   drain 继续占 worker → 恶性循环堆积。
+2. **v14 把 drain 超时从 15s 降到 5s**（本次日志正是 5s）：高负载下过于激进，
+   是大量误报超时的直接推手。
+3. **drain 循环达阈值就 break + 写 `_error`**：3 分钟长录制必然触发，剩余录制
+   音频无人排空（native 队列 overflow 丢弃），且这条误报被当成"收尾失败"展示，
+   尽管 finalize 其实成功、文件已发布。
+收尾慢 = 队列里堆积的僵尸 drain 挡在 finalize 前面；假失败 = drain 循环越权
+写 `_error`。
+
+**修复**（v17）：
+- `MFWorker.call(..., cancelable=False)` 新增可选参数；超时后给 task 打
+  `done["cancelled"]=True`，worker `_loop` 出队时跳过执行——僵尸根治。
+  仅 `session_drain_audio` 传 `cancelable=True`（可丢弃的尽力维护调用）；
+  write/finalize 语义不变（超时是致命错误、不能被静默丢弃）。
+- `DRAIN_CALL_TIMEOUT_S` 5s → 10s，减少高负载误报（配合可撤销，超时不再有害）。
+- `_drain_loop` 彻底重构为"尽力而为"：超时只丢本轮（僵尸已被跳过）、下个 tick
+  继续；**绝不写 `_error`、绝不 break**。整段音频持续排空不 overflow；收尾
+  失败只由 finalize 裁决（worker 真挂死时 finalize 自身超时会上报）。连续
+  失败数只写 `stats["drain_fail_streak"]` 供真机诊断。
+- native 录制逻辑未动（v10~v16 全保留），仅升指纹 → `mf-20261124-drain-v17`，
+  让真机日志能明确显示"已换成含本轮修复的整包"。
+
+**验证**：backend 专项 32→36（新增僵尸跳过 + cancelable + 3 项源码契约守卫），
+native 守卫 33，全量 **1740 passed, 1 skipped**。真机 release 后确认日志指纹
+`mf-20261124-drain-v17`；预期收尾明显加快、不再出现"音频排空失败"误报，且
+v16 的音画同步修复一并生效。Linux 沙箱无 Windows SDK，native 部分依赖 CI
+编译 + 真机确认；本轮主修复在 Python 层，可用单测完整覆盖。

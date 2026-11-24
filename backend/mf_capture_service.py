@@ -35,10 +35,10 @@ READ_CHUNK = 64 * 1024
 # 音频队列排空周期（秒）：远小于 native 的 5s 队列上限，留出充足余量。
 # 音频写入因此不依赖 video sample 到达——视频流稀疏/中断时音频仍能持续写盘。
 AUDIO_DRAIN_INTERVAL_S = 0.2
-# [修复-收尾慢/排空超时] 排空调用连续失败多少次才判定 worker 真的挂了并上报。
-# 高负载下单次 drain 可能偶发慢/超时；一次失败就停会永久关闭排空 → 音频队列
-# 无人写 → overflow → 音频丢失。改成容忍偶发抖动：成功即清零，连续失败才放弃。
-DRAIN_FAIL_STREAK_LIMIT = 3
+# [修复-长录制收尾·v17] 排空连续失败次数只作诊断统计（写入 stats），不再是
+# 停止排空的阈值。旧实现达阈值就 break + 记 _error，长录制下把 worker 繁忙
+# 造成的偶发 drain 超时误判成 worker 死亡，永久关闭排空并误报收尾失败。
+# 现在超时只丢本轮、下个 tick 继续；连续失败数仅用于真机观测 worker 健康度。
 # 名义帧率（H264 ES 无时间戳，native 用它估 duration；真机核对）。
 FPS_NUM, FPS_DEN = 30, 1
 # 默认麦克风目标格式 (rate, bits, channels)，与 native adc_mic_start /
@@ -153,27 +153,31 @@ class MFCaptureSession:
         return True, ""
 
     def _drain_loop(self):
-        """周期性排空音频队列（经 worker 线程）。
+        """周期性排空音频队列（经 worker 线程）。尽力而为，超时绝不致命。
 
-        [修复-收尾慢/排空超时] 旧实现一次异常就 break，把偶发抖动（高负载下 worker
-        正忙于慢 WriteSample，drain 排队超过超时）当成 worker 死亡，永久关闭排空，
-        结果音频队列在剩余录制里彻底没人写 → overflow → 音频丢失。改为连续失败
-        计数：成功即清零，只有连续 DRAIN_FAIL_STREAK_LIMIT 次都失败才判定 worker
-        真挂了、记首错退出。单次超时给 worker 下一个 tick 恢复的机会。
+        [修复-长录制收尾慢/排空失败·v17] 三处缺陷一并根治：
+          1) 旧实现一次超时就 break，把高负载下 write_video 挤占 worker 造成的
+             drain 排队误判为 worker 死亡，永久关闭排空 → 剩余录制音频无人写 →
+             native 队列 overflow 丢音频；
+          2) v14 改成"连续 3 次超时才 break 并记 _error"，3 分钟长录制仍会触发，
+             收尾把这条误报当失败展示给用户（文件其实已成功发布）；
+          3) 超时 task 在 worker 队列里变僵尸、堆积拖慢收尾 finalize。
+
+        现策略：drain 是尽力维护调用——超时只丢本轮（超时 task 已由
+        MFWorker.call(cancelable=True) 标记跳过、不留僵尸），下一个 tick 继续重试，
+        成功即清零；绝不写 _error、绝不永久停排空。真正能判定失败的是 finalize：
+        worker 若真挂死，finalize 调用自身会超时并上报可读错误，无需这里抢判。
+        这样既保证整段音频持续排空（不 overflow），又消除收尾的假失败提示。
         """
-        fail_streak = 0
         while not self._drain_stop.wait(AUDIO_DRAIN_INTERVAL_S):
             h = self._handle
             if not h:
                 continue
             try:
                 self.native.session_drain_audio(h)
-                fail_streak = 0          # 成功即清零，容忍偶发超时/抖动
-            except Exception as ex:  # noqa: BLE001  连续失败才上报，不打断录制
-                fail_streak += 1
-                if fail_streak >= DRAIN_FAIL_STREAK_LIMIT:
-                    self._error = self._error or f"音频排空失败：{ex}"
-                    break
+                self._stats["drain_fail_streak"] = 0   # 成功即清零
+            except Exception:  # noqa: BLE001  尽力调用：超时只丢本轮，继续重试
+                self._stats["drain_fail_streak"] = self._stats.get("drain_fail_streak", 0) + 1
 
     def _read_loop(self):
         nal_buf = __import__("backend.mf_native", fromlist=["NalBuffer"]).NalBuffer()

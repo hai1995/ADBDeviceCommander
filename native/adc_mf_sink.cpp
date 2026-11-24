@@ -64,7 +64,10 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261124-avsync-v16";
+// v17: native 录制逻辑未变（v10~v16 全部保留）；本轮修复在 Python worker 队列
+// 层（超时 drain 撤销 + 排空容错 + 放宽 drain 超时），升指纹仅为让真机日志能
+// 明确显示"已换成含本轮修复的整包"，避免再次拿旧 exe 验证。
+static const char* const kBuildId = "mf-20261124-drain-v17";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
