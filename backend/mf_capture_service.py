@@ -35,6 +35,11 @@ READ_CHUNK = 64 * 1024
 # 音频队列排空周期（秒）：远小于 native 的 5s 队列上限，留出充足余量。
 # 音频写入因此不依赖 video sample 到达——视频流稀疏/中断时音频仍能持续写盘。
 AUDIO_DRAIN_INTERVAL_S = 0.2
+# [收尾慢根治 v21] stop() 等读线程退出的预算：须覆盖一次最坏 session_rotate
+# （native 切段 120s 独立超时）+ 尾部几帧 write_video 的排队，留 ~10s 余量。
+# 正常切段只需几秒，这个上界仅在 worker 真挂死的病态场景才会用满，避免界面
+# 无限期卡住；届时读线程是 daemon，进程退出不受阻。
+READ_DONE_BUDGET_S = 130.0
 # [修复-长录制收尾·v17] 排空连续失败次数只作诊断统计（写入 stats），不再是
 # 停止排空的阈值。旧实现达阈值就 break + 记 _error，长录制下把 worker 繁忙
 # 造成的偶发 drain 超时误判成 worker 死亡，永久关闭排空并误报收尾失败。
@@ -85,6 +90,11 @@ class MFCaptureSession:
         self._drain_thread = None
         self._drain_stop = threading.Event()
         self._first_data = threading.Event()
+        # [收尾慢根治 v21] 读线程"真正跑完"的信号：_read_loop 的 finally 末尾置位。
+        # stop() 据此等待，而不是盲 join 固定秒数——读线程可能正阻塞在 120s 的
+        # session_rotate 里，等它退出才能保证它投递的所有 write_video/rotate 都已
+        # 排进 worker 队列、位于 finalize 之前，杜绝 write_video 被 finalize 顶超时。
+        self._read_done = threading.Event()
         self._error = ""
         # stderr 只作诊断信息，单独存放。它绝不能写进 _error：_error 是主流程
         # 错误通道，正常 stop 时 terminate 进程会让 stderr 读到 EOF/退出日志，
@@ -98,6 +108,7 @@ class MFCaptureSession:
     # ---- 启动 ----------------------------------------------------------
     def start(self):
         """返回 (ok, 错误原因)。同步等首字节，秒退立即报错。"""
+        self._read_done.clear()   # 防御会话复用：每次 start 重置读线程完成信号
         arate, abits, ach = self.mic_fmt
         # [EDR 误报缓解] native 只在 work_dir 里写 .tmp.mp4 / 改名 / 删除，
         # 用户保存目录不再出现"高熵半成品写入 → 改名 → 批量删"的勒索特征信号。
@@ -217,9 +228,20 @@ class MFCaptureSession:
                             self.native.session_rotate(self._handle)
                             self._stats["rotations"] = self._stats.get("rotations", 0) + 1
                     except Exception as ex:  # noqa: BLE001
-                        self._error = self._error or f"写入 H264 流失败：{ex}"
-                        self._stop.set()
-                        break
+                        # [收尾慢根治 v21] 区分"真 native 错误"与"worker 调用超时"：
+                        # 真错误（overflow / WriteSample 失败）必须上报，否则残缺文件
+                        # 假成功；但"MF worker 调用超时"是单 worker 队列被重量操作
+                        # （切段 rotate / finalize）挤占导致的排队等待——该 video task
+                        # 非 cancelable、最终仍会在 worker 里执行，数据不丢。旧实现把它
+                        # 当致命错误 → 报"写入 H264 流失败"并提前终止录制，是 v17~v20
+                        # 超时点反复转移的根源。超时只记诊断统计，不写 _error、不 break。
+                        if "MF worker 调用超时" in str(ex):
+                            self._stats["write_timeout_streak"] = \
+                                self._stats.get("write_timeout_streak", 0) + 1
+                        else:
+                            self._error = self._error or f"写入 H264 流失败：{ex}"
+                            self._stop.set()
+                            break
         except Exception as ex:  # noqa: BLE001  读线程异常记录原因，不吞
             self._error = self._error or f"读取 H264 流失败：{ex}"
         finally:
@@ -235,6 +257,11 @@ class MFCaptureSession:
                         self._error = self._error or f"写入 H264 尾帧失败：{ex}"
                         break
             self._first_data.set()   # 即使失败也唤醒 wait，避免等满超时
+            # [收尾慢根治 v21] 通知 stop()：本读线程的所有 native 调用（含切段
+            # rotate 与上面的尾刷 write_video）都已投递完毕。stop() 等此信号后再
+            # finalize，保证 worker 队列顺序为 [...write_video, rotate, finalize]，
+            # 而非 [...finalize, 迟到的 write_video]（后者会顶过 30s 超时）。
+            self._read_done.set()
 
     def _drain_stderr(self):
         stream = self._proc.stderr if self._proc is not None else None
@@ -366,7 +393,22 @@ class MFCaptureSession:
             self._proc = None
 
     def _join_threads(self):
-        for t in (self._read_thread, self._err_thread, self._drain_thread):
+        # [收尾慢根治 v21] 读线程必须"真正跑完"才能往下走 finalize。旧实现对所有
+        # 线程一律 join 6s：长录制切段时读线程正阻塞在 120s 的 session_rotate 里，
+        # 6s 超时后 stop() 就把 finalize 投递到 worker；读线程从 rotate 返回后迟到
+        # 的尾刷 write_video 排在重量 finalize 后面被顶过 30s → 误报"写入 H264 流
+        # 失败"、收尾拖 106s（真机 v20 症状，短录制无切段故正常）。
+        # 修复：等 _read_done 信号（读线程在 finally 末尾置位），预算覆盖一次最坏
+        # rotate(120s)+尾刷余量；stderr/drain 线程不投递 native 写调用，仍短 join。
+        read = self._read_thread
+        if read is not None and read.is_alive():
+            # 预算需覆盖 session_rotate 的 120s 超时 + 尾刷几次 write_video。
+            if not self._read_done.wait(timeout=READ_DONE_BUDGET_S):
+                # 病态兜底：worker 真挂死时不能无限等界面；此时读线程仍活着，但
+                # 再用一个短 join 收尾，避免留下非 daemon 线程（本线程均 daemon）。
+                with contextlib.suppress(Exception):
+                    read.join(timeout=2)
+        for t in (self._err_thread, self._drain_thread):
             if t is not None and t.is_alive():
                 with contextlib.suppress(Exception):
                     t.join(timeout=6)

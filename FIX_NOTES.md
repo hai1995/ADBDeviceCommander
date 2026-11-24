@@ -8264,3 +8264,40 @@ adc_mf_sink.cpp(667,55): error C2065: 'ADC_OK': undeclared identifier
 **修复**：C++ 常量区补 `static const int ADC_OK = 0;`（与 Python 严格对齐），并把两个返回码
 的对齐关系写进注释。新增守卫 `test_both_return_codes_defined_in_cpp` 锁定两端定义，防止复发。
 全量 1749 passed。指纹仍为 v20（仅补编译缺失常量，逻辑不变）。
+
+## 长录制分段仍失败："写入 H264 流失败 30s" 的真正根因（v21，Python 编排层修复）
+
+**现象**：v20 包，短录制（38s，无切段）成功；长录制（3分41秒，跨 170s 分段阈值）
+停止后 106s 报"写入 H264 流失败：MF worker 调用超时（30s 未返回）"。
+注意错误文案是**写入 H264 流失败**（`_read_loop` 主循环/尾刷的 write_video），
+**不是** v20 新加的 rotate 120s 超时——说明 v20 把切段移出 write_video 并未触及真根因。
+
+**根因（Plan agent + 代码链双重确认）**：这是单 worker FIFO 队列的**队头阻塞 + 停止时序竞态**：
+1. 长录制到 170s 触发切段，`session_rotate`（do_rotate：Finalize + MoveFile + 重建
+   SinkWriter/AAC MFT，数十秒）在 worker 线程里执行；`_read_loop` 阻塞在它上面。
+2. 用户此刻点停止，`stop()` → `_join_threads()` 对每个线程**只 join 6s**。读线程
+   正卡在 120s 的 rotate 里，6s 后 join 超时，stop() 继续投递 `session_finalize`（60s）。
+3. 读线程从 rotate 返回后，finally 的尾刷 `session_write_video`（30s）此时才投递，
+   **排在重量 finalize 后面**被顶过 30s → 抛"MF worker 调用超时（30s）" → 旧实现
+   写 `_error="写入 H264 流失败…"` 并提前终止 → 收尾拖 106s（≈rotate + finalize）。
+4. 短录制无切段，尾刷 write_video 先于 finalize 入队，故正常。这解释了"只在分段录制
+   出问题"。本质是 v17~v20 超时点反复转移的同一个病根：重量操作与高频写调用共享
+   单队列，一处超时就换一处报。
+
+**修复（v21，全部在 Python 编排层，native 无需改、指纹仍 v20）**：
+- **`_join_threads` 等读线程真正退出**：新增 `_read_done` Event，`_read_loop` 的 finally
+  末尾置位；`_join_threads` 对读线程等该信号（预算 `READ_DONE_BUDGET_S=130s`，覆盖最坏
+  rotate 120s + 余量），而非盲 join 6s。保证读线程所有 write_video/rotate 都排在
+  finalize 之前，队头顺序正确。（stderr/drain 线程不投递 native 写调用，仍短 join。）
+- **write_video 超时降级为非致命**：`_read_loop` 区分"MF worker 调用超时"与真 native
+  错误。超时是队列被挤占的排队等待，该 task 非 cancelable、最终仍会执行、数据不丢，
+  只记 `stats['write_timeout_streak']` 诊断，不写 `_error`、不 `set(_stop)`、不 break。
+  真错误（overflow / WriteSample 失败）仍照旧上报（守住 `test_write_video_error_is_reported`）。
+  这一条同时覆盖**多设备共享 worker**场景：某会话的 rotate 顶住另一会话的 write_video
+  导致超时，也不会再误报致命、不会提前终止。
+- start() 里 clear `_read_done`，防御会话复用。
+
+**验证**：新增 2 项守卫（write_video 超时非致命、stop 等读线程完成），专项 41 passed；
+pyflakes + ruff + 全量须通过。预期：长录制分段不再误报"写入 H264 流失败"、收尾不再
+拖 106s；即使偶发排队超时也不终止录制、由 finalize 兜底成片。真机确认包为 release 新构建
+（Python 改动随 exe 打包，指纹 v20 不变）。

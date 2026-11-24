@@ -884,3 +884,43 @@ def test_read_loop_drives_rotate_on_signal():
     assert "if need_rotate:" in loop, "须判断切段请求"
     assert "self.native.session_rotate(self._handle)" in loop, "须显式驱动重量切段"
     assert '"rotations"' in loop, "须统计切段次数供诊断"
+
+
+def test_write_video_timeout_is_not_fatal():
+    """[长录制收尾根治回归·v21] write_video 调用超时不得当致命错误终止录制。
+
+    真机 v20：长录制跨切段后报"写入 H264 流失败：MF worker 调用超时（30s）"。
+    根因是单 worker 被重量 rotate/finalize 挤占，write_video 排队超时；该 task
+    非 cancelable、最终仍会执行、数据不丢。旧实现把超时当致命错误 → 提前终止、
+    误报失败（超时点 v17~v20 反复转移）。真 native 错误(overflow 等)仍须上报。
+    """
+    loop = _code_without_docstring(mcs.MFCaptureSession._read_loop)
+    assert '"MF worker 调用超时" in str(ex)' in loop, (
+        "须把 worker 调用超时与真 native 错误区分开")
+    assert "write_timeout_streak" in loop, "超时须记入诊断统计"
+    # 超时分支不得再写 _error / set _stop / break（这些只在 else 的真错误分支）
+    timeout_branch = loop[loop.index('if "MF worker 调用超时" in str(ex)'):
+                          loop.index("else:")]
+    assert "self._error" not in timeout_branch, "超时分支不得写 _error 误报失败"
+    assert "self._stop.set()" not in timeout_branch, "超时分支不得终止录制"
+    assert "break" not in timeout_branch, "超时分支不得跳出读取循环"
+
+
+def test_stop_waits_for_read_thread_done():
+    """[长录制收尾根治回归·v21] stop 须等读线程真正退出后才 finalize。
+
+    旧实现 _join_threads 对读线程只 join 6s；切段时读线程正阻塞在 120s 的
+    session_rotate，6s 后 stop 就投递 finalize，迟到的尾刷 write_video 排在
+    finalize 后顶过 30s。修复：读线程在 finally 置 _read_done，_join_threads
+    等该信号（预算覆盖 rotate），保证 write_video 排在 finalize 之前。
+    """
+    import inspect
+    init_src = inspect.getsource(mcs.MFCaptureSession.__init__)
+    assert "self._read_done = threading.Event()" in init_src, "须有读线程完成信号"
+    loop = _code_without_docstring(mcs.MFCaptureSession._read_loop)
+    assert "self._read_done.set()" in loop, "读线程 finally 须置完成信号"
+    join_src = inspect.getsource(mcs.MFCaptureSession._join_threads)
+    assert "self._read_done.wait(" in join_src, "_join_threads 须等读线程完成信号"
+    assert "READ_DONE_BUDGET_S" in join_src, "等待须用覆盖 rotate 的预算"
+    assert mcs.READ_DONE_BUDGET_S >= 120.0, (
+        "等待预算须覆盖一次最坏 session_rotate(120s)")
