@@ -348,3 +348,77 @@ def test_silence_fill_capped_unconditionally_and_duration_matches_frames():
     assert "LONGLONG dur = (LONGLONG)frames * 10000000LL / arate_;" in fin
     assert "AudioBlock b{silence, anchor, dur};" in fin
     assert "AudioBlock b{silence, anchor, fill};" not in fin
+
+
+# --- 根因修复 v12：AnnexB 格式 + 完整 AU（0xC00D4A45 真因）-----------------
+
+def test_sequence_header_uses_annexb_start_codes():
+    """[0xC00D4A45 真因·v12] 序列头必须 AnnexB 起始码，不是 AVCC 长度前缀。
+
+    微软 MPEG-4 File Sink / MF_MT_MPEG_SEQUENCE_HEADER 文档明确要求：
+    h264 的 sequence header blob 是 'concatenated NAL units in Annex B format,
+    along with their start codes'。失败 mp4 的 mdat 中 0 个 AnnexB 起始码、
+    全是 AVCC 4 字节长度前缀，证明旧实现写的格式 sink 根本不认识。
+    """
+    src = _cpp()
+    assert "static const unsigned char kAnnexBStartCode[4] = {0x00, 0x00, 0x00, 0x01};" in src
+    helpers = src[src.index("static void append_annexb_nal"):
+                  src.index("/* ------------------- 音频：WASAPI")]
+    # SPS/PPS 都通过 AnnexB 追加，绝不能再出现 4 字节大端长度前缀
+    assert "append_annexb_nal(h, sps);" in helpers
+    assert "append_annexb_nal(h, pps);" in helpers
+    assert "(n>>24)&0xFF" not in helpers, "禁止回退到 AVCC 长度前缀"
+    # 序列头仍必须注入媒体类型
+    cv = src[src.index("HRESULT config_video_stream()"):
+             src.index("HRESULT config_audio_stream()")]
+    assert "SetBlob(MF_MT_MPEG_SEQUENCE_HEADER" in cv
+    assert "make_seq_header(sps_, pps_)" in cv
+
+
+def test_video_samples_are_annexb_not_length_prefixed():
+    """[0xC00D4A45 真因·v12] 喂给 sink 的样本必须是 AnnexB，不能 AVCC 化。
+
+    MPEG-4 File Sink 要求位流符合 H.264 Annex B（NALU 以 3/4 字节起始码分隔）。
+    旧实现 to_length_prefixed() 把每个 NAL 前加 4 字节长度，sink 原样写入 mdat
+    且无法解析 → WriteSample 首帧后 sticky E_UNEXPECTED、Finalize 出不了 header。
+    """
+    src = _cpp()
+    assert "to_annexb" in src
+    assert "to_length_prefixed" not in src, "AVCC 转换函数必须彻底移除"
+    fp = src[src.index("/* 冲刷跨 native 调用累积的当前 AU"):
+             src.index("void write_audio_block(")]
+    assert "to_annexb(pending_au_)" in fp
+    assert "(n>>24)&0xFF" not in fp
+
+
+def test_access_unit_assembled_across_native_calls():
+    """[0xC00D4A45 真因·v12] AU 必须跨 native 调用累积，收尾/切段冲刷。
+
+    Python 每次 session_write_video 只送一条 AnnexB NAL（见 mf_native.NalBuffer），
+    一帧的 SEI/VCL 常跨多次调用。旧实现在 write_video 末尾把每条 NAL 单独写成
+    sample，纯非 VCL(NAL type 6/9) 也成 sample，违反微软'样本须包含单帧全部
+    切片与数据 NALU'要求，sink 收到无效 AU 后进入 sticky 错误态。
+    """
+    src = _cpp()
+    # 成员：跨调用累积的 AU
+    assert "std::vector<std::vector<unsigned char>> pending_au_;" in src
+    # write_video 内不能有函数级局部 au，也不能在末尾 flush
+    wv = src[src.index("int write_video(const unsigned char* data, int len)"):
+             src.index("int mark_mic_stop()")]
+    assert "std::vector<std::vector<unsigned char>> au;" not in wv
+    assert "flush_au(au)" not in wv and "if (!au.empty())" not in wv
+    assert "pending_au_.push_back" in wv
+    # AU 边界：AUD 冲刷 + 新 VCL 到来时冲刷上一帧
+    assert "if (type == 9)" in wv and "flush_pending_au();" in wv
+    assert "if (type >= 1 && type <= 5 && has_vcl(pending_au_)) flush_pending_au();" in wv
+    # flush_pending_au 必须只写含 VCL 的完整 AU，纯非 VCL 残片丢弃
+    fp = src[src.index("/* 冲刷跨 native 调用累积的当前 AU"):
+             src.index("void write_audio_block(")]
+    assert "if (has_vcl(pending_au_))" in fp
+    assert "pending_au_.clear();" in fp
+    # 收尾/切段：close_writer 在 Finalize 前冲刷未到边界的最后一帧
+    cw = src[src.index("HRESULT close_writer(bool publish)"):
+             src.index("std::string out_dir_, stem_;")]
+    flush_at = cw.index("flush_pending_au();")
+    finalize_at = cw.index("writer_->Finalize()")
+    assert flush_at < finalize_at, "最后一帧必须在 Finalize 之前冲刷进 sink"

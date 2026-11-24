@@ -7893,3 +7893,38 @@ native C++ 在 Linux 沙箱无 Windows SDK 无法编译验证，仍需真机确�
 无指纹或提示旧 DLL，则是打包链路问题，ci 闸门本应提前拦下。
 
 **验证**：新增/改动测试相关 76 项全绿，ruff / pyflakes 全绿；全量见推送前汇总。
+
+## 第 N+6 轮：0xC00D4A45 真因锁定 —— MP4 sink 要求 AnnexB，实现却喂 AVCC
+
+**用户物证**：v11 制品 `record_190D333158554304_20261124_095613_p1.tmp.mp4`（65801B），
+诊断 `vws=1 vwf=98 vlhr=0x8000FFFF ... vfc=99 vsim=0x00000000`。
+`vsim=0` 证明上一轮 v11 的 SetInputMediaType 修复**确实生效**（新 DLL 已进包），
+但视频仍在首帧后 sticky 全失败 —— 旧假设被证伪，停止继续猜时间戳/输入类型。
+
+**根因（微软官方文档实证，非推测）**：
+1. [MPEG-4 File Sink](https://learn.microsoft.com/zh-cn/windows/win32/medfound/mpeg-4-file-sink)
+   明确要求 AVC 位流「必须符合 H.264 附件 B 格式规范，NALU 必须以 3/4 字节起始码分隔」，
+   且「媒体样本必须包含对应于单个呈现时间的所有切片和数据 NALU」。
+2. [MF_MT_MPEG_SEQUENCE_HEADER](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-mt-mpeg-sequence-header-attribute)
+   明确要求 h264 的 blob 是「concatenated NAL units in Annex B format, along with
+   their start codes」。
+而实现里 `make_seq_header()` 造的是 `[4B 大端长度][SPS][4B 大端长度][PPS]`、
+`to_length_prefixed()` 把每个样本 NAL 也改成 4 字节长度前缀 —— **与官方要求完全相反**。
+物证二次确认：失败 mp4 的 mdat 中 `00 00 00 01` 出现 **0 次**，`00 00 01` 仅 1 次
+（巧合），反而是 4 字节长度前缀的 NAL 结构清晰可辨 —— sink 原样写入了 AVCC 字节、
+从未识别出有效的 AnnexB 流，故生成不了 avcC/stsd → Finalize 报 0xC00D4A45。
+3. 附带缺陷：Python `NalBuffer` 每次 `session_write_video` 只送**一条** NAL，
+   而 C++ 在每个 native 调用末尾就 `flush_au`，导致一帧的 SEI 等非 VCL NAL 被
+   单独写成 sample，违反「样本须含单帧全部 NALU」，同样会把 sink 打进 sticky 错误态。
+
+**修复**：构建指纹 `mf-20261124-annexb-v12`。
+- `make_seq_header()` / 新 `to_annexb()` 统一输出 `00 00 00 01` 起始码的 AnnexB。
+- 新增成员 `pending_au_` 跨 native 调用累积当前 AU：AUD 或新 VCL 到达才冲刷，
+  只有含 VCL 的完整 AU 才写 sample（纯非 VCL 残片丢弃）；`close_writer` 在
+  Finalize 前冲刷最后一帧，切段也走同一路径。
+- 保留 v10 帧号时钟、v11 SetInputMediaType（均已证实生效，不动）。
+
+**验证**：静态守卫 23→26 passed（新增 AnnexB 序列头 / 样本格式 / 跨调用 AU 三项），
+全量 1726 passed, 1 skipped。native C++ 在 Linux 无 Windows SDK 无法编译，
+仍需真机 release 验证：日志指纹应为 `mf-20261124-annexb-v12`；成功时 mp4 应含
+moov/avcC/esds 且 mdat 中能查到 AnnexB 起始码。

@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261124-vinputtype-v11";
+static const char* const kBuildId = "mf-20261124-annexb-v12";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -200,28 +200,36 @@ static int next_annexb_nal(const unsigned char* p, size_t len, size_t& pos,
     return -1;
 }
 
-/* SPS/PPS → AVCC 风格 sequence header：[4B 大端长度][SPS][4B 大端长度][PPS] */
+/* [根因修复 v12] Annex B 格式：微软 MPEG-4 文件接收器文档明确要求
+ * "For h264/h265, MF_MT_MPEG_SEQUENCE_HEADER blob contains concatenated NAL
+ *  units in Annex B format, along with their start codes"、以及
+ * "bitstream must conform to H.264 Annex B: NALUs separated by 3/4-byte start
+ *  codes"。此前实现把序列头和样本都改成 AVCC(4 字节长度前缀)，与文档相反：
+ * sink 在 mdat 里原样写入了 AVCC 字节、找不到任何 AnnexB 起始码，视频流始终
+ * 无法被解析 → WriteSample 从首帧后全报 E_UNEXPECTED(0x8000FFFF)、Finalize
+ * 生成不了 avcC/stsd → 0xC00D4A45。改为统一输出 4 字节起始码的 AnnexB。 */
+static const unsigned char kAnnexBStartCode[4] = {0x00, 0x00, 0x00, 0x01};
+
+static void append_annexb_nal(std::vector<unsigned char>& out,
+                              const std::vector<unsigned char>& nal) {
+    if (nal.empty()) return;
+    out.insert(out.end(), kAnnexBStartCode, kAnnexBStartCode + 4);
+    out.insert(out.end(), nal.begin(), nal.end());
+}
+
+/* SPS/PPS → AnnexB 序列头：[00 00 00 01][SPS][00 00 00 01][PPS] */
 static std::vector<unsigned char> make_seq_header(const std::vector<unsigned char>& sps,
                                                   const std::vector<unsigned char>& pps) {
     std::vector<unsigned char> h;
-    auto push = [&](const std::vector<unsigned char>& nal) {
-        unsigned int n = (unsigned int)nal.size();
-        h.push_back((n>>24)&0xFF); h.push_back((n>>16)&0xFF);
-        h.push_back((n>>8)&0xFF);  h.push_back(n&0xFF);
-        h.insert(h.end(), nal.begin(), nal.end());
-    };
-    if (!sps.empty()) push(sps);
-    if (!pps.empty()) push(pps);
+    append_annexb_nal(h, sps);
+    append_annexb_nal(h, pps);
     return h;
 }
-static std::vector<unsigned char> to_length_prefixed(const std::vector<std::vector<unsigned char>>& nals) {
+
+/* 一个完整 AU 的所有 NAL → AnnexB 样本：[SC][NAL]... */
+static std::vector<unsigned char> to_annexb(const std::vector<std::vector<unsigned char>>& nals) {
     std::vector<unsigned char> out;
-    for (const auto& nal : nals) {
-        unsigned int n = (unsigned int)nal.size();
-        out.push_back((n>>24)&0xFF); out.push_back((n>>16)&0xFF);
-        out.push_back((n>>8)&0xFF);  out.push_back(n&0xFF);
-        out.insert(out.end(), nal.begin(), nal.end());
-    }
+    for (const auto& nal : nals) append_annexb_nal(out, nal);
     return out;
 }
 
@@ -602,7 +610,6 @@ public:
             }
         }
         size_t pos = 0;
-        std::vector<std::vector<unsigned char>> au;
         const unsigned char* p = data;
         size_t total = (size_t)len;
         while (pos < total) {
@@ -620,14 +627,20 @@ public:
                 pps_ = n;
                 continue;
             }
-            if (type == 9) {           // AUD：新 AU 边界
-                if (!au.empty()) { flush_au(au); au.clear(); }
+            if (type == 9) {           // AUD：显式 AU 边界，冲刷上一帧
+                flush_pending_au();
                 continue;
             }
-            if (type >= 1 && type <= 5 && has_vcl(au)) { flush_au(au); au.clear(); }
-            au.push_back(std::move(n));
+            // 新的 VCL NAL 到来且当前 AU 已有 VCL，说明上一帧结束。
+            if (type >= 1 && type <= 5 && has_vcl(pending_au_)) flush_pending_au();
+            // SEI/SPS-ext/PPS-ext 等非 VCL 与随后的 VCL 必须留在同一个样本里，
+            // 微软要求样本包含"单个呈现时间对应的全部切片与数据 NALU"。
+            pending_au_.push_back(std::move(n));
         }
-        if (!au.empty()) flush_au(au);
+        // [根因修复 v12] 不在每个 native 调用末尾 flush：Python 侧每次只送一条
+        // NAL，一帧的 AUD/SEI/VCL 常跨多次调用，旧实现把 SEI 等纯非 VCL 单独
+        // 写成样本，sink 收到无效 AU 后进入 sticky 错误态。改为跨调用累积，
+        // 只在 AU 边界 / 切段 / 收尾冲刷（见 flush_pending_au 调用点）。
         return check_rotate();
     }
 
@@ -767,12 +780,17 @@ private:
             if (!n.empty() && ((n[0] & 0x1F) >= 1 && (n[0] & 0x1F) <= 5)) return true;
         return false;
     }
-    void flush_au(std::vector<std::vector<unsigned char>>& au) {
-        if (!writer_ || !writing_ || au.empty()) return;
-        std::vector<unsigned char> sample = to_length_prefixed(au);
-        LONGLONG ts = qpc_now_hns();
-        LONGLONG dur = 10000000LL * fps_den_ / fps_num_;   // 名义帧率估算
-        push_sample(vstream_, false, sample.data(), (UINT32)sample.size(), ts, dur);
+    /* 冲刷跨 native 调用累积的当前 AU。只有至少含一个 VCL NAL 才是有效帧，
+     * 纯非 VCL（如只有 SEI/AUD）残片直接丢弃，绝不作为独立 sample 写入 sink。 */
+    void flush_pending_au() {
+        if (pending_au_.empty()) return;
+        if (has_vcl(pending_au_)) {
+            std::vector<unsigned char> sample = to_annexb(pending_au_);
+            LONGLONG ts = qpc_now_hns();
+            LONGLONG dur = 10000000LL * fps_den_ / fps_num_;   // 名义帧率估算
+            push_sample(vstream_, false, sample.data(), (UINT32)sample.size(), ts, dur);
+        }
+        pending_au_.clear();
     }
     void write_audio_block(const AudioBlock& blk) {
         if (!writer_ || !writing_ || blk.pcm.empty()) return;
@@ -880,8 +898,8 @@ private:
         MFSetAttributeSize(vin, MF_MT_FRAME_SIZE, width_, height_);
         MFSetAttributeRatio(vin, MF_MT_FRAME_RATE, fps_num_, fps_den_);
         MFSetAttributeRatio(vin, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        // H264→MP4 remux 必须带 AVCC 风格 sequence header（SPS/PPS），否则
-        // Finalize 报 0xC00D4A45 "required headers were not provided to the sink"
+        // H264→MP4 remux 必须带 AnnexB 起始码风格的 sequence header（SPS/PPS），
+        // 否则 Finalize 报 0xC00D4A45 "required headers were not provided to the sink"
         // 或产出无法解码的文件。真机曾现首段 _p1.tmp.mp4 收尾稳定报此错：根因是
         // 旧实现在 create() 里提前建 writer，那时 SPS/PPS 尚未到达、header 为空。
         // [修复] 首段 writer 已延迟到 write_video 收到 SPS+PPS 后才创建，故走到
@@ -980,6 +998,9 @@ private:
 
     HRESULT close_writer(bool publish) {
         if (!writer_) return S_OK;
+        // [根因修复 v12] 把尚未写到 AU 边界的最后一帧冲刷进当前段再 Finalize，
+        // 否则录屏末尾这帧永远丢失；切段路径同样走这里，新段从空 AU 开始。
+        if (writing_) flush_pending_au();
         HRESULT hr = S_OK;
         // [修复-半成品发布] Finalize 会把 writing_ 置回 false，先捕获"本段是否
         // 真正进入过 writing"。ensure_writer 在 BeginWriting 之前失败(AAC 编码器
@@ -1051,6 +1072,9 @@ private:
     int queue_peak_ms_;
     std::deque<AudioBlock> audio_q_;
     std::mutex audio_q_mtx_;
+    // [根因修复 v12] 跨 native 调用累积的当前 AU 的 NAL。Python 每次只送一条
+    // AnnexB NAL，一帧的 SEI/VCL 常跨多次调用，必须攒齐再写成一个完整 sample。
+    std::vector<std::vector<unsigned char>> pending_au_;
     std::atomic<bool> overflow_{false}, mic_stopped_{false};
     LONGLONG last_audio_end_;   // 已写入音频的最后结束时刻（100ns，QPC 时基）
     // [修复-视频时间戳 v10] 视频帧序号：ts = 帧序号 × 名义帧长。H264 裸流无时间戳，
