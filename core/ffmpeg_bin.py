@@ -1,15 +1,22 @@
 """
-core.ffmpeg_bin —— ffmpeg 可执行文件定位（内置优先，PATH 兜底）。
+core.ffmpeg_bin —— ffmpeg 可执行文件定位（仅作旧方案的兜底，验收通过后删除）。
 
-背景：录屏的音视频合成 / 多段合并依赖 ffmpeg，但目标机器大多没装。
-打包时由 build.py 把 imageio-ffmpeg 自带的 ffmpeg 二进制用 --add-binary
-嵌进 exe（见 BUNDLED_FFMPEG），运行时这里按以下优先级解析：
+背景：录屏**默认走同源录制**（Windows Media Foundation SinkWriter 直接把画面 +
+麦克风合成带声 MP4，无需 ffmpeg）。本模块只服务于「同源扩展不可用时的 ffmpeg
+兜底路径」—— 打包时**不再嵌入**任何 ffmpeg 二进制（见 build.py 的
+EXCLUDE_MODULES 已排除 imageio_ffmpeg，requirements.txt 也无此依赖），运行时
+按以下优先级解析：
 
-  1. 内置副本：exe 同目录 / PyInstaller 解包目录(_MEIPASS) 下的 ffmpeg(.exe)。
-     —— 打包用户零配置、离线可用，这是主路径。
-  2. 开发态的 imageio_ffmpeg.get_ffmpeg_exe()：源码运行时依赖已在
-     requirements.txt 里，直接拿它带的二进制，开发者无需另装 ffmpeg。
-  3. PATH 里的 ffmpeg：以上都没有时的最后兜底（老用户自建 PATH 仍可用）。
+  1. 内置副本：exe 同目录 / _MEIPASS 下的 ffmpeg(.exe)。打包已不产生它，
+     仅当使用者自行往目录里放一份时才会命中（外发覆盖用）。
+  2. 开发态的 imageio_ffmpeg.get_ffmpeg_exe()：仅当本机恰好装了 imageio-ffmpeg
+     时才可用（不再随本项目安装），拿不到就继续往下走。
+  3. PATH 里的 ffmpeg：以上都没有时的实际兜底（兜底路径要求用户机器自带
+     ffmpeg 并放进 PATH）。
+
+全部找不到时 ffmpeg_exe() 返回字符串 "ffmpeg"，交给 subprocess 报
+FileNotFoundError，由调用方转成可读提示，不在本模块抛异常打断收尾。
+ffmpeg_source() 供诊断：返回 'bundled' / 'imageio' / 'path' / 'missing'。
 
 只解析 **ffmpeg**；ffprobe 不在 imageio-ffmpeg 里，仍走 PATH，调用方
 （audio_service 的 _mp4_playable / _video_duration）本来就有「取不到 ffprobe

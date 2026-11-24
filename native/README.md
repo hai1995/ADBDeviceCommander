@@ -12,15 +12,37 @@ QPC（100ns）时基写入，直接产出 `H264 + AAC` 的 MP4。无 ffmpeg、�
 - `adc_init` 在**专用 MTA worker 线程**调用；UI 线程（STA）调用会返回
   `RPC_E_CHANGED_MODE (0x80010106)`，Python 层转成中文错误。
 - 每设备一个 `adc_session_create`（一个 SinkWriter，H264 + AAC 两路流）。
-- Python 读 adb stdout 的 H264 字节块 → `adc_session_write_video`。
+- Python 读 adb stdout 的 H264 字节块 → `adc_session_write_video`；该函数
+  每帧只做**有界**的轻量工作（攒 AU、写 sample、排空最多 48 块音频），到分段
+  阈值时**只返回 `ADC_ROTATE_PENDING=1` 请求信号**，不做重量操作。
 - 麦克风由 native 内部 WASAPI 线程采集，**广播**给所有 session（多设备
   全场共用一条），每 session 有自己的 5s 有界队列，超限明确失败。
-- stop：`adc_session_mark_mic_stop` → `adc_session_finalize`（排空音频 →
-  Finalize → 原子发布 `*.tmp.mp4` → `*.mp4`，moov 前置于 mdat）。
+- stop：`adc_session_mark_mic_stop` → `adc_session_finalize`（先退订音频生产
+  者 → 循环排空 → 补静音 → Finalize → 原子发布 `*.tmp.mp4` → `*.mp4`，
+  **moov 位于 mdat 尾部**——moov 前置属性已移除，见下方验证项 1）。
 - 取消：`adc_session_discard`（不发布，删临时文件）；强杀后 `.tmp` 永不
   冒充成功产物，启动扫目录清 `.tmp`。
-- 分段：每 `SEGMENT_SECONDS_(170)` 一个完整可播 MP4，同目录临时文件 +
-  成功关闭后 `MoveFileEx` 原子发布。
+- 分段：每 `SEGMENT_SECONDS_(170)` 一个完整可播 MP4。重量操作
+  （`Finalize` + 原子发布 + 重建 SinkWriter）已从 `write_video` 的临界路径移出，
+  由 Python 收到 `ADC_ROTATE_PENDING` 后在独立 worker 调用里执行
+  `adc_session_rotate`（120s 独立超时）；`close_writer` 用
+  `MOVEFILE_REPLACE_EXISTING` 改名（**不用** `MOVEFILE_WRITE_THROUGH` 强制刷盘）。
+
+**返回码约定**（`adc_mf_sink.h`，与 `backend/mf_native.py` 严格对齐）：`0` = 成功；
+`1`（`ADC_ROTATE_PENDING`）= 本帧写成功但请调用 `adc_session_rotate` 切段；
+其它为 HRESULT（转成 int 为负）。**老 DLL 没有 `adc_session_rotate` 导出**，
+Python 按可选符号降级：无此符号时 `write_video` 走内部切段旧行为、永不返回 1。
+
+**worker 调用超时分级**（`backend/mf_native.py`，改 C++/超时前必读）：音频排空
+`10s`（可取消，超时只丢本轮、不留僵尸 task）、`write_video` `30s`、`finalize`
+`60s`、切段 `120s`。这套分级是 v10~v20 多轮"超时点转移"排障的结论——重量操作
+一旦挤进高频调用的超时预算，就会反复出现"收尾慢 / MF worker 调用超时"。
+
+**构建指纹**：`kBuildId`（当前 `mf-20261124-drain-v20`）经 `adc_build_id()` 导出，
+启动日志会打印，供真机确认整包（含 native 改动）是否生效。`tools/check_native_dll.py`
+在 CI 校验 DLL 内指纹与源码一致，防止 CMake 缓存命中旧目标 / 拷贝陈旧 DLL 导致
+"改了却没进包"。**改任何 C++ 语义都必须手动升指纹并重新编译 DLL**，否则真机仍在
+用旧二进制验证。历史根因与物证见仓库根 `FIX_NOTES.md`。
 
 ## 构建
 

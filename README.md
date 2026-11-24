@@ -11,6 +11,7 @@
 ## 文档导航
 
 - [架构](#arch) · 前后端分层、目录职责、controllers 分包
+- [同源录制机制与排障](#mf-internals) · worker 超时分级 / 切段契约 / 指纹自证 / 改 native 的硬约束
 - [运行与打包](#运行与打包) · 开发运行、打包 exe、源码分发、推 GitHub、CI 发版
 - [`-s` 自动拼接规则](#-s-自动拼接规则)
 - [界面说明](#界面说明) · 六个页签与耗时操作的等待态
@@ -138,6 +139,69 @@ Media Foundation SinkWriter** 里按统一 QPC(100ns) 时基写入，直接产�
 被安全软件拦截），程序自动回退到旧的"录无声视频 + ffmpeg 合成"路径，此时需
 用户机器 PATH 中有 ffmpeg。FFmpeg 相关代码（`ffmpeg_mux`/`video_join`/
 `core/ffmpeg_bin.py`）本次一行未改，仅移除了内置二进制。
+
+---
+
+<a id="mf-internals"></a>
+## 同源录制机制与排障（改 native 前必读）
+
+这一节是给**后续维护者**看的。同源录制是本仓库最复杂、踩坑最密集的子系统，
+历史上"收尾慢 / 音画不同步 / 0xC00D4A45 / MF worker 调用超时"反复出现，错误点
+在多轮修复中不断转移（drain → write 15s → finalize 60s → write 30s → 切段）。
+根因是**重量操作挤进了高频调用的超时预算**。动手改之前先理解下面三件事。
+
+### 1. 单 worker 线程 + 超时分级
+
+所有 native 调用（写视频、排空音频、切段、Finalize）都经
+`backend/mf_native.py` 的 `MFWorker` 投递到**同一个 FIFO 队列**——这是 Media
+Foundation SinkWriter 的单线程约束要求的。各调用的超时按"操作重量"分级：
+
+| 调用 | 超时 | 可取消 | 设计理由 |
+| --- | --- | --- | --- |
+| 音频排空 `session_drain_audio` | 10s | 是 | 尽力调用：超时只丢本轮、不写错误、不永久停；可取消避免僵尸 task 堆积 |
+| 写视频 `session_write_video` | 30s | 否 | 每帧有界（攒 AU + 最多排空 48 块音频），不该慢 |
+| 切段 `session_rotate` | 120s | 否 | 重量操作独占长预算：Finalize + 原子发布 + 重建 SinkWriter |
+| 收尾 `session_finalize` | 60s | 否 | 退订音频 → 排空 → 补静音 → Finalize → 发布 |
+
+> **铁律**：任何新的重量操作都不能塞进 `write_video` / drain 这类高频调用里，
+> 否则超时点又会转移、收尾又变慢。超时数值是排障结论，不是可以随手调的旋钮。
+
+### 2. 切段契约（v20 起）
+
+`write_video` 到 170 秒阈值时**不再同步切段**，只置 `rotate_pending_` 并返回
+`ADC_ROTATE_PENDING=1`；Python 读到该信号后显式调 `session_rotate` 完成重量切段，
+并记 `stats['rotations']`。返回码在 `native/adc_mf_sink.h` 与
+`backend/mf_native.py` 两处定义，必须严格对齐（`0`=成功，`1`=请切段，负=HRESULT）。
+
+**向后兼容**：老 DLL 没有 `adc_session_rotate` 导出，Python 按**可选符号**降级——
+此时 `write_video` 走内部切段旧行为、永不返回 1，行为与旧版一致。所以改这条链路时
+要保证"新 DLL 走新路径、老 DLL 走旧路径"两条都通。
+
+### 3. 诊断三件套
+
+真机排障靠这三样，缺一不可：
+
+1. **日志时间戳**：每行状态信息带 `[HH:MM:SS]` 前缀（`frontend/js/app.js` 的
+   `logStamp()` 加在 `pushStatus` 层），能直接看出卡在哪个阶段、耗时多久。
+2. **构建指纹**：启动日志里的 `native 构建 mf-20261124-drain-vXX`。**改了 C++
+   却没升指纹 / 没重编译 DLL，真机跑的还是旧二进制**，会"改了没效果"地反复排查。
+   CI 的 `tools/check_native_dll.py` 会校验 DLL 内指纹与源码一致。
+3. **FIX_NOTES.md**：仓库根的 `FIX_NOTES.md` 逐轮记录了每个根因、物证（ffprobe /
+   MP4 box 解析）、修复和验证——开头是最近一轮的置顶摘要，其后各轮从 v14 起按版本
+   递增排列、最新的在文件末尾。**遇到新症状先在这里搜关键词**
+   （如 `0xC00D4A45`、`收尾慢`、`音画不同步`），大概率历史上定位过。
+
+### 改 native 的硬约束
+
+- 改 C++ 语义 → **手动升 `kBuildId` 指纹**（`native/adc_mf_sink.cpp`）+ 重新编译
+  DLL；沙箱是 Linux 无 Windows SDK，native 只能靠 CI 编译 + 真机验证。
+- 改返回码 / ABI / 超时 → Python（门面）、C++（导出）、守卫测试三处同步，并
+  `grep -rn` 搜残留。
+- 音频排空、切段、Finalize 的**任务依赖锁顺序 / 取消语义 / 有界性**都有守卫测试
+  锁定（`tests/test_native_sink_guards.py`、`tests/test_backend_mf_native.py`），
+  改之前先读测试了解不可动摇的不变量。
+- 每次改完跑 CI 的两道门：pyflakes/ruff 静态检查（本地 pytest 不覆盖 lint）+ 全量
+  测试；这两轮曾因 C++ 漏定义 `ADC_OK`、Python 测试误留未用 `import` 连续挂 CI。
 
 ---
 
@@ -307,7 +371,7 @@ set GH_TOKEN=github_pat_xxx && python tools\push_github.py
 
 | job | 运行环境 | 触发 | 做什么 |
 | --- | --- | --- | --- |
-| `test` | ubuntu-24.04 | 每次 push / PR | `pytest` 全量 + 前端 95 个 jsdom 测试文件 |
+| `test` | ubuntu-24.04 | 每次 push / PR | `pytest` 全量 + pyflakes/ruff 静态检查 + 前端全部 jsdom 测试（`tests/frontend/`，数量随迭代增长，以目录为准） |
 | `windows` | windows-2022 | push 到 main / 打 tag / 手动 | 装依赖 → 校验 tag 与源码 `VERSION` 一致 → `build.py --package --zip` → 生成 `sha256sums.txt` → 上传 artifact → tag 时发 Release |
 
 打 tag 之后的两三分钟，Releases 页面就有 `ADBDeviceCommander_v<版本>_win64.zip`
@@ -809,31 +873,27 @@ git commit -am "第五十二轮：…" && git tag v<版本号> && git push --tag
    刷新设备，并检查是否有别的 adb 进程抢占 server。
 4. **改了 `commands.json` / `quick_commands.json` 不生效**：json 必须和 exe 在同一
    运行目录，改完要重启；多份命令合集会被合并去重，同 `id` / 同名以最后加载者为准。
-5. **录屏为什么没有声音 / 为什么没看到麦克风权限申请**：默认是无声录制。若要带上
-   声音，勾选「同步录制电脑麦克风」—— 它录的是**本机麦克风**的说话声，**不是电脑
-   正在播放的声音**（系统声音回环暂不支持），并使用系统**默认输入设备**；仅 Windows
-   可用。**桌面程序不会弹出「允许访问麦克风」的申请窗口，这是正常的** —— 那是应用
-   商店应用的机制，本程序只受系统「隐私和安全性 → 麦克风 → **让桌面应用访问麦克风**」
-   总开关控制，确认它打开即可（程序不会出现在上面「允许访问的应用」列表里，同样属正常）。
+5. **录屏为什么没有声音 / 为什么没看到麦克风权限申请**：录屏**默认走同源录制**
+   （画面 + 本机麦克风一句话合成带声 MP4，由 Windows 系统媒体基础完成，**无需 ffmpeg**）。
+   麦克风录制的是一个可选项（「工具 → 录屏 → 同步录制电脑麦克风」），录的是**本机麦克风**
+   的说话声（解说用），**不是电脑正在播放的声音**（系统声音回环暂不支持），走系统
+   **默认输入设备**；仅 Windows 可用。**桌面程序不会弹出「允许访问麦克风」的申请窗口，
+   这是正常的** —— 那是应用商店应用的机制，本程序只受系统「隐私和安全性 → 麦克风 →
+   **让桌面应用访问麦克风**」总开关控制，确认它打开即可（程序不会出现在上面「允许访问
+   的应用」列表里，同样属正常）。
    **若成片没有声音**，最常见原因是系统默认输入设备被**虚拟麦克风**占用
    （钉钉、EV录屏、腾讯会议等会创建无信号的虚拟设备，常占住设备 0）—— 到系统
    「声音设置 → 输入」把你的真实麦克风设为默认即可；同源录制走 WASAPI 系统默认
-   输入设备，会跟随这个默认设备。带声合成由 Windows 系统媒体基础（MF）完成，
-   **无需安装 ffmpeg**。
-   **合成成功后会自动清理中间文件**（原始无声 `record_*.mp4` 与 `mic_*.wav`），目录里
-   只留带声音的 `*_final.mp4`；**合成失败时（如内置二进制异常）则保留原始视频与 wav**，
-   供你事后重试合成。设备音频（tinycap）仍不开放：多数机型需要 root，无法稳定承诺。
+   输入设备，会跟随这个默认设备。设备音频（tinycap）仍不开放：多数机型需要 root，
+   无法稳定承诺。
 6. **会不会自动下载安装新版本**：不会。程序只读取发布页并提示，点「去下载」交给
    系统浏览器；覆盖安装由用户自己完成，避免运行时替换自身文件。
-7. **ffmpeg 需要自己装吗**：不需要。录屏的音视频合成与多段合并所用的 `ffmpeg`
-   **已内置在程序里**（打包时由 `imageio-ffmpeg` 提供的二进制嵌入），开箱即用、
-   离线可用，换台没装过 ffmpeg 的电脑也能直接录带声音的视频。程序启动时按
-   「内置副本 → PATH 里的 ffmpeg」顺序查找，内置始终优先。
-   **许可证说明**：`imageio-ffmpeg` 这个 Python 包本身是 BSD-2-Clause，但它捆绑的
-   `ffmpeg` 二进制是 **GPL 构建**。个人 / 内部使用一般无需额外动作；若要把本程序
-   **对外分发**，请自行评估 GPL 的源码提供义务（FFmpeg 官方许可证见
-   <https://ffmpeg.org/legal.html>）。本项目未使用任何 GPL 编解码器特性——视频是
-   `-c copy` 直接搬流、音频用 ffmpeg 内置 AAC。
+7. **ffmpeg 需要自己装吗**：默认同源录制**完全不需要 ffmpeg** —— 音视频合成由
+   Windows 系统媒体基础（MF SinkWriter）完成，无第三方二进制、无 GPL，包体约 14M。
+   **仅当同源扩展不可用**（非 Windows / 未编译 / 被安全软件拦截）时程序才回退到旧的
+   「录无声视频 + ffmpeg 合成」兜底路径，此时需要你机器 **PATH 中有 ffmpeg**。
+   程序**不再内置 ffmpeg 二进制**（已从打包中移除，见 `build.py` 的 `EXCLUDE_MODULES`），
+   因此也**不引入 GPL 分发义务**；兜底路径仅在你自行提供的 ffmpeg 上工作。
 
 ---
 
