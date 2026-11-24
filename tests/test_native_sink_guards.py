@@ -422,3 +422,25 @@ def test_access_unit_assembled_across_native_calls():
     flush_at = cw.index("flush_pending_au();")
     finalize_at = cw.index("writer_->Finalize()")
     assert flush_at < finalize_at, "最后一帧必须在 Finalize 之前冲刷进 sink"
+
+
+def test_annexb_nal_scan_does_not_truncate_tail_bytes():
+    """[花屏回归·v13] NAL 扫描必须覆盖到 buffer 末尾，不能截掉尾部载荷。
+
+    本地 ffmpeg 实证：旧实现内层 `while (end + 3 <= len)` 在 buffer 末尾提前
+    2 字节退出，17/17 条 NAL 的尾部被截 1~2 字节，切片数据损坏 → 整屏马赛克。
+    修正为 `while (end < len)` 并对每个起始码判断逐项加 `end + k <= len` 守卫：
+    0/17 截断、15 帧全部正常解码。此守卫锁定该扫描边界不被回退。
+    """
+    src = _cpp()
+    fn = src[src.index("static int next_annexb_nal"):
+             src.index("/* [根因修复 v12] Annex B 格式")]
+    # 只看代码行（剔除注释中引用的旧循环），避免注释误触发
+    code_lines = [ln.split("//")[0] for ln in fn.splitlines()]
+    code = "\n".join(code_lines)
+    # 内层扫描必须走到 len（不能用 end+3<=len 当循环条件）
+    assert "while (end < len) {" in code, "NAL 扫描必须覆盖 buffer 最后一字节"
+    assert "while (end + 3 <= len)" not in code, "禁止回退到会截断尾部的扫描边界"
+    # 3/4 字节起始码判断都要有独立的长度守卫，避免越界读
+    assert "end + 3 <= len && p[end] == 0 && p[end+1] == 0 && p[end+2] == 1" in code
+    assert "end + 4 <= len && p[end] == 0 && p[end+1] == 0 &&" in code

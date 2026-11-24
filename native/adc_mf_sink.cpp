@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261124-annexb-v12";
+static const char* const kBuildId = "mf-20261124-annexb-v13";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -183,10 +183,15 @@ static int next_annexb_nal(const unsigned char* p, size_t len, size_t& pos,
                  p[pos+2] == 0 && p[pos+3] == 1) sc = 4;
         if (!sc) { ++pos; continue; }
         size_t start = pos + sc, end = start;
-        while (end + 3 <= len) {
-            if ((p[end] == 0 && p[end+1] == 0 && p[end+2] == 1) ||
-                (end + 4 <= len && p[end] == 0 && p[end+1] == 0 &&
-                 p[end+2] == 0 && p[end+3] == 1)) break;
+        // [根因修复 v13·花屏] 原循环 `while (end + 3 <= len)` 在 buffer 末尾会
+        // 提前 2 字节退出：end 最多停在 len-3，导致每条 NAL 尾部被截掉 1~2 个
+        // 真实载荷字节。切片(slice)尾部被截 → 解码出现马赛克/花屏。本地 ffmpeg
+        // 实证：17/17 条 NAL 被截、帧解码报 non-existing PPS；改为扫到 len 并对
+        // 起始码判断逐项加长度守卫后 0/17 截断、15 帧全部正常解码。
+        while (end < len) {
+            if (end + 3 <= len && p[end] == 0 && p[end+1] == 0 && p[end+2] == 1) break;
+            if (end + 4 <= len && p[end] == 0 && p[end+1] == 0 &&
+                p[end+2] == 0 && p[end+3] == 1) break;
             ++end;
         }
         // end 已指向本 NAL 结束处（下一个起始码前，或数据块末尾）

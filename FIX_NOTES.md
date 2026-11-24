@@ -7928,3 +7928,33 @@ native C++ 在 Linux 沙箱无 Windows SDK 无法编译验证，仍需真机确�
 全量 1726 passed, 1 skipped。native C++ 在 Linux 无 Windows SDK 无法编译，
 仍需真机 release 验证：日志指纹应为 `mf-20261124-annexb-v12`；成功时 mp4 应含
 moov/avcC/esds 且 mdat 中能查到 AnnexB 起始码。
+
+## 第 N+7 轮：v12 视频能合成但整屏花屏 —— NAL 尾部字节被截断
+
+**用户反馈**：v12 换 AnnexB 后视频终于合成出来了，但播放画面是马赛克/花屏
+（截图满是彩色噪点块）。容器/avcC 正常、能播放，说明 header 已修好；花屏是
+**样本字节级损坏**，与容器无关。
+
+**定位方式（本地 ffmpeg 复现，不再盲猜）**：沙箱无 Windows SDK，但有 ffmpeg。
+用 libopenh264 生成标准 AnnexB 测试流 `[SPS,PPS,IDR,P×14]`，用 Python 逐字节
+模拟完整数据链 `NalBuffer.feed → next_annexb_nal → AU组装 → to_annexb`：
+- 旧实现提取的 **17/17 条 NAL 尾部都被截掉 1~2 字节**（"first diff at len"，
+  即内容是前缀、尾部缺失）；重组流解码报 `non-existing PPS 0 referenced`、
+  `no frame!`，帧数 N/A —— 与用户花屏现象一致。
+- 根因在 `next_annexb_nal` 内层扫描 `while (end + 3 <= len)`：它要求剩余至少
+  3 字节才继续，导致 `end` 最多停在 `len-3`，buffer 最后 2 字节永远没被扫到，
+  被误当成 NAL 边界截掉。切片 slice 尾部载荷丢失 → 宏块解不出 → 整屏花屏。
+  该 bug 自 2026-11-20 首次引入同源录制就存在（`git blame` 确认），此前被
+  header 生成失败掩盖，v12 修好 header 后才暴露。
+- 修正：`while (end < len)` 扫到末尾，3/4 字节起始码判断各自加 `end+k<=len`
+  长度守卫防越界。同一复现脚本验证：**0/17 截断、15 帧全部正常解码、无错误**。
+
+**修复**：构建指纹 `mf-20261124-annexb-v13`。只改 `next_annexb_nal` 扫描边界，
+不动 v10 帧号时钟 / v11 SetInputMediaType / v12 AnnexB（均已证实生效）。
+新增守卫 `test_annexb_nal_scan_does_not_truncate_tail_bytes`（只看代码行、
+剔除注释，避免注释里引用的旧循环误触发）。
+
+**验证**：静态守卫 26→27 passed；全量 1727 passed, 1 skipped。
+真机 release 后日志指纹应为 `mf-20261124-annexb-v13`；花屏应消失、画面清晰。
+若仍有零星马赛克，下一嫌疑是 IDR 帧未设 `MFSampleExtension_CleanPoint`
+（默认 FALSE，影响 stss 关键帧表与 seek），本轮未改以避免引入未验证变量。
