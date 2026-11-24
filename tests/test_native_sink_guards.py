@@ -233,15 +233,42 @@ def test_finalize_failure_carries_stream_stats():
     call = cw[cw.index("append_error_stats("):]
     call = call[:call.index(");") + 2]
     for tok in ("vws_", "aws_", "vwf_", "awf_", "vlhr_", "alhr_",
-                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_", "video_frame_count_"):
+                "arate_", "ach_", "diag_sps_", "diag_pps_", "diag_seqh_",
+                "video_frame_count_", "diag_vsim_"):
         assert tok in call, f"诊断调用缺少 {tok}"
     # append_error_stats 本身要把分路字段写进错误文本
     ae = src[src.index("static void append_error_stats"):
              src.index("extern \"C\" int adc_last_error")]
     for key in ("a=%lldF", "v=%lldB", "vws=%lld", "aws=%lld",
                 "vlhr=0x%08X", "alhr=0x%08X", "aac=%dHz/%dch/%dbit",
-                "sps=%dB", "seqh=%dB", "vfc=%lld"):
+                "sps=%dB", "seqh=%dB", "vfc=%lld", "vsim=0x%08X"):
         assert key in ae, f"诊断文本缺少字段 {key}"
+
+
+def test_video_stream_sets_input_media_type():
+    """[0xC00D4A45 视频根因·v11] 视频流必须调用 SetInputMediaType。
+
+    物证(半成品 mp4)：只有 ftyp/uuid/mdat，无 moov/avcC/esds → sink 在 Finalize
+    前就拿不到生成 codec-private header 所需的信息。诊断：音频 aws=292/awf=0
+    全成功(音频流有 SetInputMediaType)，视频 vws=1/vwf=69 首帧后 sticky 全失败
+    (视频流此前只有 AddStream、从未设输入类型)。0xC00D4A45 =
+    MF_E_SINK_HEADERS_NOT_FOUND，SinkWriter 的 sequence header 从输入媒体类型读取。
+    修复：config_video_stream 在 AddStream 后对视频流调用 SetInputMediaType，
+    remux 输入输出同为 H264，复用带 sequence header 的 vin。
+    """
+    src = _cpp()
+    cv = src[src.index("HRESULT config_video_stream()"):
+             src.index("HRESULT config_audio_stream()")]
+    # 必须有 AddStream 之后的 SetInputMediaType(video)
+    assert "AddStream(vin, &vstream_)" in cv
+    assert "SetInputMediaType(vstream_, vin, nullptr)" in cv
+    # 顺序：AddStream 必须在 SetInputMediaType 之前（MSDN 标准序列）
+    assert cv.index("AddStream(vin, &vstream_)") < cv.index("SetInputMediaType(vstream_, vin, nullptr)")
+    # 结果必须落到诊断字段，便于真机确认是否被接受
+    assert "diag_vsim_ = writer_->SetInputMediaType(vstream_, vin, nullptr)" in cv
+    # 成员必须声明且构造初始化
+    assert "HRESULT diag_vsim_;" in src
+    assert "diag_vsim_(S_OK)" in src
 
 
 def test_video_uses_frame_index_clock():

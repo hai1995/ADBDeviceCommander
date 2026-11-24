@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261123-frameclock-v10";
+static const char* const kBuildId = "mf-20261124-vinputtype-v11";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -90,18 +90,18 @@ static void append_error_stats(long long vb, long long af, long long dr,
                                long long vws, long long aws, long long vwf, long long awf,
                                HRESULT vlhr, HRESULT alhr, int ar, int ac, int ab,
                                int sps, int pps, int seqh, int flt, int ovf, int uns,
-                               long long vfc) {
-    char buf[720];
+                               long long vfc, HRESULT vsim) {
+    char buf[768];
     _snprintf_s(buf, sizeof(buf),
         " [诊断 v=%lldB a=%lldF d=%lld | vws=%lld vwf=%lld vlhr=0x%08X | "
         "aws=%lld awf=%lld alhr=0x%08X | aac=%dHz/%dch/%dbit | sps=%dB pps=%dB seqh=%dB | "
-        "f32=%d ovf=%d uns=%d vfc=%lld]",
+        "f32=%d ovf=%d uns=%d vfc=%lld vsim=0x%08X]",
         vb, af, dr,
         vws, vwf, (unsigned int)vlhr,
         aws, awf, (unsigned int)alhr,
         ar, ac, ab,
         sps, pps, seqh,
-        flt, ovf, uns, vfc);
+        flt, ovf, uns, vfc, (unsigned int)vsim);
     std::lock_guard<std::mutex> lk(g_err_mtx);
     g_last_error += buf;
 }
@@ -528,6 +528,7 @@ public:
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
           last_audio_end_(0), video_frame_count_(0),
           vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
+          diag_vsim_(S_OK),
           diag_sps_(0), diag_pps_(0), diag_seqh_(0) {}
 
     ~RecordSession() { unsubscribe_(); close_writer(false); }
@@ -905,7 +906,21 @@ private:
         // 即写入文件的格式，SinkWriter 对 compressed-in 流直接以它作为输出。
         // 不存在 SetOutputMediaType；原实现调用了幻想 API，MSVC 编译直接失败。
         IF_FAILED_RETURN(writer_->AddStream(vin, &vstream_), "AddStream(video) 失败");
+        // [根因修复 v11] 视频流必须 SetInputMediaType —— MSDN 标准序列
+        // AddStream → SetInputMediaType → BeginWriting，此前视频流只调了 AddStream，
+        // 从未设输入类型（音频流 945 行有 → aws 全成功，视频缺 → vws=1 后 sticky 全败）。
+        // SinkWriter 生成 avcC/stsd 依赖输入媒体类型上的 sequence header；输入类型缺失
+        // 时 sink 在写 sample 阶段报 E_UNEXPECTED(0x8000FFFF)、Finalize 报
+        // 0xC00D4A45(MF_E_SINK_HEADERS_NOT_FOUND)，半成品 mp4 无 moov/avcC。
+        // remux 的输入/输出同为 H264，复用带 sequence header 的 vin 作为输入类型。
+        // 用显式 hr 记录而非 IF_FAILED_RETURN：即使此机型 sink 拒绝该调用，也不让
+        // 录制直接起不来，同时把 HRESULT 写进诊断供真机判断。
+        diag_vsim_ = writer_->SetInputMediaType(vstream_, vin, nullptr);
         vin->Release();
+        if (FAILED(diag_vsim_)) {
+            set_error(diag_vsim_, "SetInputMediaType(video/H264) 失败");
+            return diag_vsim_;
+        }
         return S_OK;
     }
 
@@ -981,7 +996,8 @@ private:
                                vws_, aws_, vwf_, awf_, vlhr_, alhr_,
                                arate_, ach_, abits_,
                                diag_sps_, diag_pps_, diag_seqh_,
-                               uns ? 0 : 1, overflow_.load() ? 1 : 0, uns, video_frame_count_);
+                               uns ? 0 : 1, overflow_.load() ? 1 : 0, uns,
+                               video_frame_count_, diag_vsim_);
             return hr;
         }
         if (publish && !tmp_files_.empty()) {
@@ -1030,6 +1046,7 @@ private:
     // vlhr/alhr=各路最后一次 HRESULT。0xC00D4A45 据此判断是哪一路没喂进 sink。
     long long vws_, aws_, vwf_, awf_;
     HRESULT vlhr_, alhr_;
+    HRESULT diag_vsim_;   // 诊断：SetInputMediaType(video) 的 HRESULT，S_OK=输入类型被接受
     int diag_sps_, diag_pps_, diag_seqh_;   // 诊断：注入 sink 的 sequence header 长度
     int queue_peak_ms_;
     std::deque<AudioBlock> audio_q_;
