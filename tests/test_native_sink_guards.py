@@ -656,3 +656,22 @@ def test_move_file_write_through_removed():
         "原子发布只需 MOVEFILE_REPLACE_EXISTING")
     assert "MOVEFILE_WRITE_THROUGH" not in code, "禁止 WRITE_THROUGH 强制刷盘"
 
+
+
+def test_both_return_codes_defined_in_cpp():
+    """[编译回归·v20-hotfix] write_video 用的两个返回码都必须在 C++ 侧定义。
+
+    CI release #58 (commit 0fd3a7b) 因 667 行 `? ADC_ROTATE_PENDING : ADC_OK`
+    里的 `ADC_OK` 只在 Python 定义、C++ 未定义而报 C2065 编译失败。
+    ADC_OK / ADC_ROTATE_PENDING 必须与 backend/mf_native.py 严格对齐定义。
+    """
+    src = _cpp()
+    assert "static const int ADC_OK = 0;" in src, (
+        "C++ 必须定义 ADC_OK=0（否则 write_video 三元返回 C2065 编译失败）")
+    assert "static const int ADC_ROTATE_PENDING = 1;" in src, (
+        "C++ 必须定义 ADC_ROTATE_PENDING=1")
+    # Python 侧须有对应定义，两边严格对齐
+    import inspect
+    import backend.mf_native as mn
+    assert mn.ADC_OK == 0 and mn.ADC_ROTATE_PENDING == 1, (
+        "Python 返回码须与 C++ 对齐：ADC_OK=0, ADC_ROTATE_PENDING=1")

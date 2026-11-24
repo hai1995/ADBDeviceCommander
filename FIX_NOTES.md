@@ -8250,3 +8250,17 @@ MF worker 调用超时（30s 未返回）"，收尾很久。这是超时点第 4
 Python 1748 passed、前端 102 个 cjs 全绿。Linux 沙箱无 Windows SDK，native 由 CI
 编译 + 指纹自证闸门保证进产物。真机请确认日志指纹 `mf-20261124-drain-v20`，预期
 每行状态带 `[HH:MM:SS]`，3min+ 长录制切段不再顶超时、收尾明显加快。
+
+## CI release #58 编译失败 hotfix（ADC_OK 未定义）
+
+**现象**：commit `0fd3a7b`（v20）推送后 CI release #58 编译失败：
+```
+adc_mf_sink.cpp(667,55): error C2065: 'ADC_OK': undeclared identifier
+```
+**根因**：v20 把 write_video 末尾改成 `return should_rotate() ? ADC_ROTATE_PENDING : ADC_OK;`，
+其中 `ADC_ROTATE_PENDING` 在 C++ 顶部有定义，但 `ADC_OK` 只在 Python（backend/mf_native.py）
+定义、C++ 侧遗漏——上一轮人工审查只核对了访问控制与 `ADC_ROTATE_PENDING`，漏了 `ADC_OK`。
+
+**修复**：C++ 常量区补 `static const int ADC_OK = 0;`（与 Python 严格对齐），并把两个返回码
+的对齐关系写进注释。新增守卫 `test_both_return_codes_defined_in_cpp` 锁定两端定义，防止复发。
+全量 1749 passed。指纹仍为 v20（仅补编译缺失常量，逻辑不变）。

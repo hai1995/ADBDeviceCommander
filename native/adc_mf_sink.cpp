@@ -75,8 +75,12 @@ static const char* const kBuildId = "mf-20261124-drain-v20";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
-// [收尾慢根治 v20] write_video 的特殊返回：该切段了，请调用 adc_session_rotate。
+// [收尾慢根治 v20] write_video 的返回码约定（与 backend/mf_native.py 的
+// ADC_OK / ADC_ROTATE_PENDING 严格对齐）：
+// - 0：本帧写入成功、无需切段；
+// - 1：本帧写入成功、但该切段了，请调用 adc_session_rotate。
 // 用小正整数，绝不与 HRESULT（0x8xxxxxxx 高位为 1，转成 int 为负）冲突。
+static const int ADC_OK = 0;
 static const int ADC_ROTATE_PENDING = 1;
 
 static std::mutex g_err_mtx;
