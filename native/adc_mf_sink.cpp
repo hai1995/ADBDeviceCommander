@@ -64,7 +64,7 @@
 /* [构建指纹] 每次改动本文件语义时必须更新本串。Python 在启动提示里显示，
  * 真机日志据此判断运行的是不是重新编译过的 DLL —— 本文件所有修复都必须
  * 重新 cmake --build + cmake --install 才会生效。 */
-static const char* const kBuildId = "mf-20261124-avsync-v15";
+static const char* const kBuildId = "mf-20261124-avsync-v16";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -541,6 +541,7 @@ public:
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
           queued_hns_(0), last_audio_end_(0), video_frame_count_(0),
           video_ts_hns_(0), video_frame_dur_hns_(10000000LL * (fps_den > 0 ? fps_den : 1) / (fps_num > 0 ? fps_num : 30)),
+          sync_audio_hns_(0),
           vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
           diag_vsim_(S_OK),
           diag_sps_(0), diag_pps_(0), diag_seqh_(0) {}
@@ -696,6 +697,10 @@ public:
             audio_frames_ += (LONGLONG)(blk.pcm.size() / (size_t)(ach_ * 16 / 8));
             LONGLONG this_end = blk.ts_hns + blk.dur_hns;
             if (this_end > last_audio_end_) last_audio_end_ = this_end;
+            // [音画同步 v16] 只累加采集时刻在视频段起点之后的音频时长，作为帧长
+            // 校准的干净观测源。麦克风常早于 screenrecord 启动，这些前置音频块
+            // (ts<seg_start) 不属于任何视频帧，计入会系统性抬高观测帧长(v15 的 bug)。
+            if (blk.ts_hns >= seg_start_hns_) sync_audio_hns_ += blk.dur_hns;
         }
     }
 
@@ -844,22 +849,23 @@ private:
         // 导致视频时间轴比音频真实墙钟短 2.4%，且偏差随录制时长线性累积(15s 差
         // 0.38s)——表现就是"声音快、画面慢"。成品 ffprobe 物证：视频 459 帧=15.300s
         // (硬编码30fps)、音频 735×1024/48000=15.680s，差 0.38s，坐实此因。
-        // 修复：视频 ts 改为累加式(video_ts_hns_ += 当前帧长)，每帧用音频已写入的
-        // 真实时长 A=audio_frames_×(1e7/arate_) 观测实时帧长 observed=A/N(N=已写帧数)，
+        // 修复：视频 ts 改为累加式(video_ts_hns_ += 当前帧长)，每帧用「与视频同时段
+        // 的音频真实时长」观测实时帧长 observed=sync_audio_hns_/N(N=已写帧数)，
         // 对帧长做步长受限的渐进校准。要点：
-        //   1) 观测源用音频样本数(独立 WASAPI 采集，不受 adb 传输抖动污染)，比 QPC
-        //      到达时刻可靠得多——本地模拟 ±80ms 抖动下仍收敛到 ±5ms，用 QPC 则过冲近 1s；
+        //   1) 观测源用 sync_audio_hns_——只统计采集时刻>=seg_start 的音频时长。
+        //      v15 误用全局 audio_frames_(含麦克风先启动的前置音频)，真机实证前置
+        //      约1.3s 使观测帧长虚高4%→视频被拉长1.3s(声音反而变晚)。按 ts 过滤后
+        //      观测帧长=真实帧长。音频样本来自独立 WASAPI，不受 adb 传输抖动污染。
         //   2) 帧长钳制在 [名义×0.7, 名义×1.4]、每帧调整步长 ≤ 名义/50，保证时间戳
-        //      严格单调、平滑渐变(33.33→34.15ms)，绝不产生重叠/向前 gap 触发 sink 的
-        //      E_UNEXPECTED(0x8000FFFF) sticky 错误(v8/v9 的教训)；
+        //      严格单调、平滑渐变，绝不产生重叠/向前 gap 触发 sink 的 E_UNEXPECTED
+        //      (0x8000FFFF) sticky 错误(v8/v9 的教训)。
         //   3) 音频路完全不动(真实 QPC + 按样本数 dur，已验证自洽)。
         // 校准有短暂滞后(音频每 200ms drain 一次)，只影响收敛速度不影响终值。
         if (!audio) {
             const LONGLONG nominal = 10000000LL * fps_den_ / fps_num_;
-            if (video_frame_count_ >= 5 && audio_frames_ > 0 && arate_ > 0) {
-                // 音频已覆盖的真实时长(100ns)，由写入样本数换算——无抖动标尺
-                LONGLONG audio_real = (LONGLONG)((long double)audio_frames_ * 10000000.0L / arate_);
-                LONGLONG observed = audio_real / video_frame_count_;  // 实测平均帧长
+            if (video_frame_count_ >= 5 && sync_audio_hns_ > 0) {
+                // 与视频同时段的音频真实时长(100ns)——已排除前置音频，无抖动标尺
+                LONGLONG observed = sync_audio_hns_ / video_frame_count_;  // 实测平均帧长
                 if (observed < nominal * 7 / 10) observed = nominal * 7 / 10;
                 if (observed > nominal * 14 / 10) observed = nominal * 14 / 10;
                 LONGLONG step = nominal / 50;
@@ -927,6 +933,7 @@ private:
         video_frame_count_ = 0;
         video_ts_hns_ = 0;
         video_frame_dur_hns_ = 10000000LL * fps_den_ / fps_num_;
+        sync_audio_hns_ = 0;
         return S_OK;
     }
 
@@ -1131,6 +1138,11 @@ private:
     long long video_frame_count_;
     LONGLONG video_ts_hns_;        // 累加式视频时间戳(相对段起点,100ns)
     LONGLONG video_frame_dur_hns_; // 校准后的当前帧长(100ns), 初值=名义帧长
+    // [音画同步 v16] 干净的帧长观测源：只累加「采集时刻 >= 视频段起点」的音频
+    // 时长。v15 用 audio_frames_ 全局累计，包含麦克风先于 screenrecord 启动的
+    // 前置音频(真机实证约1.3s)，导致观测帧长虚高4%、视频被拉长。按 ts 过滤后
+    // 只统计与视频帧同时段的音频，观测帧长=真实帧长。
+    LONGLONG sync_audio_hns_;
     // 视频 SPS/PPS 缓存：采集线程(write_video)写，worker 线程(config_video_stream)读。
     std::vector<unsigned char> sps_, pps_;
     std::mutex seq_mtx_;

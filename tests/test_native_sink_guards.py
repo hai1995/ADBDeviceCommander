@@ -513,20 +513,22 @@ def test_video_timestamp_is_cumulative_not_framecount_times_fixed():
     assert "dur = video_frame_dur_hns_;" in src
 
 
-def test_video_frame_dur_calibrated_from_audio_sample_count():
-    """[音画不同步回归·v15] 帧长观测源必须是音频样本数，且有钳制+步长限制。
+def test_video_frame_dur_calibrated_from_synced_audio_only():
+    """[音画不同步回归·v16] 帧长观测源必须是「与视频同时段」的音频时长。
 
-    用音频样本数(audio_frames_/arate_)做观测源，不受 adb 传输抖动污染；
-    钳制帧长在 [名义×0.7, 名义×1.4] 且每帧步长 ≤ 名义/50，保证时间戳严格
-    单调、平滑渐变，避免触发 sink 的 E_UNEXPECTED sticky 错误。
+    v15 用全局 audio_frames_(含麦克风先于 screenrecord 启动的前置音频)，真机
+    实证前置约1.3s 使观测帧长虚高4%→视频被拉长、声音反而变晚。v16 改用
+    sync_audio_hns_(只累加采集时刻>=seg_start 的音频)作观测源，彻底排除前置音频。
+    钳制 [名义×0.7,名义×1.4] + 步长≤名义/50 保证 sink 单调性。
     """
     src = _cpp()
     fn = src[src.index("void push_sample("):src.index("void push_sample(") + 3500]
     code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
-    # 观测源 = 音频样本数换算的真实时长（禁止用 QPC 到达时刻做观测）
-    assert "audio_frames_" in code and "arate_" in code, "须以音频样本数为观测源"
-    assert "audio_real" in code
-    assert "observed = audio_real / video_frame_count_" in code
+    # 观测源 = 已排除前置音频的 sync_audio_hns_（禁止用全局 audio_frames_ 换算）
+    assert "sync_audio_hns_" in code, "须以同步段音频时长为观测源"
+    assert "audio_frames_" not in code, "禁止用全局 audio_frames_(含前置音频)"
+    assert "audio_real" not in code
+    assert "observed = sync_audio_hns_ / video_frame_count_" in code
     # 钳制上下界 + 步长限制（sink 单调性保证）
     assert "nominal * 7 / 10" in code, "帧长下限钳制"
     assert "nominal * 14 / 10" in code, "帧长上限钳制"
@@ -534,6 +536,26 @@ def test_video_frame_dur_calibrated_from_audio_sample_count():
     assert "video_frame_dur_hns_ += delta;" in code, "渐进校准而非跳变"
     # 冷启动保护：前几帧音频未写入时不校准
     assert "video_frame_count_ >= 5" in code
+
+
+def test_sync_audio_excludes_pre_roll_before_segment_start():
+    """[音画不同步回归·v16] sync_audio_hns_ 必须按采集时刻过滤，排除前置音频。
+
+    麦克风常早于 screenrecord 启动，ts<seg_start 的音频块不属于任何视频帧。
+    若计入会使观测帧长虚高、视频被拉长。守卫锁定 ts 过滤条件存在。
+    """
+    src = _cpp()
+    # drain 中按 ts 过滤累加
+    drain = src[src.index("void drain_audio_queued()"):src.index("int drain_audio()")]
+    code = "\n".join(ln.split("//")[0] for ln in drain.splitlines())
+    assert "blk.ts_hns >= seg_start_hns_" in code, "必须按采集时刻过滤前置音频"
+    assert "sync_audio_hns_ += blk.dur_hns" in code, "只累加同步段音频时长"
+    # 成员声明 + 构造初始化 + 切段重置
+    assert "LONGLONG sync_audio_hns_;" in src
+    assert "sync_audio_hns_(0)" in src
+    ew = src[src.index("HRESULT ensure_writer(std::string& first_tmp_out)"):
+             src.index("HRESULT config_video_stream()")]
+    assert "sync_audio_hns_ = 0;" in ew, "切段须重置同步音频观测"
 
 
 def test_video_clock_reset_on_segment_rotation():
