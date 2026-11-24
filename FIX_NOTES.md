@@ -8170,3 +8170,39 @@ drain 已变为尽力而为、可取消、不再致命，但超时点**转移到
 （write_video 独立 30s 超时）。Linux 沙箱无 Windows SDK，native 部分依赖 CI 编译 +
 真机 release 验证。预期：长录制不再出现"写入 H264 流失败"误报、收尾不再拖 1 分钟；
 若仍积压，音频完整性由 finalize 循环排空兜底。
+
+## finalize 60s 超时、收尾卡死（v19 修复，构建指纹 mf-20261124-drain-v19）—— v18 引入的回归
+
+**现象**：真机指纹已是 `mf-20261124-drain-v18`（确认 v18 整包生效），1min+ 录制停止后：
+
+```
+⚠ 同源录制收尾提示：同源合成失败：MF worker 调用超时（60s 未返回）
+⏹ 录屏已停止
+```
+
+这次**不再报"写入 H264 流失败"**（v18 的 write_video 分批排空 + 30s 超时生效），
+但错误转移到了 finalize 本身的 60s 超时——是 v18 自己引入的回归。
+
+**根因（代码链物证）**：
+1. v18 为"分批排空不丢尾部音频"，把 native `drain_audio()` 改成
+   `while (drain_audio_queued() > 0) {}` **无界循环**，指望队列排到 0 退出。
+2. 但 `stop_all()` 的顺序是「先 `sess.stop()`（内含 finalize）→ 在 finally 里
+   才 `_stop_mic()`」。finalize 执行时，WASAPI 采集线程仍在 `publish()`→`on_audio()`
+   持续往 `audio_q_` 入队。
+3. `on_audio()` 只检查 `finalized_ || discarded_`，**不检查 mic_stopped_**；而
+   `finalized_` 在 finalize 里要到 `close_writer()` 之后才置 true。于是 drain 循环
+   执行期间生产者一直在填 → 队列永不空 → **忙等死循环** → 卡住单 worker 线程
+   → Python `session_finalize` 的 60s 超时触发 → 报"同源合成失败：MF worker 调用
+   超时（60s 未返回）"、收尾卡死。
+
+**修复（v19）**：
+- `drain_audio()` 开头先 `unsubscribe_()`——采集线程从此不再广播给本会话，
+  `audio_q_` 生产者停止，队列必然有限步见底（多会话场景只退订本会话，互不影响）。
+- 无界 `while` 改为**有界 for 循环**：`kMaxDrainBatches = 64`（64×48=3072 块，
+  远超 5s 队列容量 ~234 块），队列见底即 break。即便未来有别处继续入队，也绝不
+  忙等死循环。这是双保险：退订解决"生产不停"，硬上限解决"任何意外持续入队"。
+- 构建指纹 → `mf-20261124-drain-v19`。v10~v18 其余修复全部保留。
+
+**验证**：守卫测试更新（有界循环 + 先退订 + 指纹 v19），专项与全量须通过。
+Linux 沙箱无 Windows SDK，native 部分依赖 CI 编译 + 真机 release 验证。真机请确认
+日志指纹变为 `mf-20261124-drain-v19`；预期 finalize 不再卡 60s、收尾恢复正常。

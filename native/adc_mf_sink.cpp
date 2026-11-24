@@ -67,7 +67,7 @@
 // v17: native 录制逻辑未变（v10~v16 全部保留）；本轮修复在 Python worker 队列
 // 层（超时 drain 撤销 + 排空容错 + 放宽 drain 超时），升指纹仅为让真机日志能
 // 明确显示"已换成含本轮修复的整包"，避免再次拿旧 exe 验证。
-static const char* const kBuildId = "mf-20261124-drain-v18";
+static const char* const kBuildId = "mf-20261124-drain-v19";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -731,10 +731,19 @@ public:
         // [修复-真机 overflow] 移除 overflow 致命分支：即使中途丢过音频块，也要
         // 把队列里剩的正常写入并 close_writer 发布成可播放 MP4。丢块数由 dropped_
         // 统计暴露（stats），用户保住视频远比"因几秒音频积压整段报废"重要。
-        // [修复-收尾慢·v18] drain_audio_queued 现在每批封顶 48 块，这里必须循环排空
-        // 至队列见底（返回 0），否则积压的几百块音频会被留在队列里、成片尾部缺音轨。
-        // 循环完全在 worker 线程内、无额外队列往返，每批耗时有上界，不拖慢 finalize。
-        while (drain_audio_queued() > 0) {}
+        // [修复-收尾慢·v19] v18 的致命回归：这里用 `while(drain_audio_queued()>0){}`
+        // 循环排空，但 stop_all 的顺序是「先 sess.stop()(内含 finalize)→后 _stop_mic()」，
+        // finalize 执行时 WASAPI 采集线程仍在 on_audio() 持续入队；而 on_audio 只检查
+        // finalized_/discarded_(此时都还是 false)，于是生产者不停→队列永不空→忙等
+        // 死循环→卡住 worker→Python finalize 60s 超时(本次真机症状)。
+        // 修复两步：①先退订本会话(unsubscribe_)，采集线程从此不再往本会话 audio_q_
+        // 入队，生产者一停，队列必然有限步见底；②循环再加硬上限兜底(队列上限5s≈
+        // 234块/每批48≈5批，给 64 批余量)，即便未来有别处继续入队也绝不忙等死循环。
+        unsubscribe_();   // ① 停止音频生产者：g_audio 不再广播给本会话
+        const int kMaxDrainBatches = 64;   // ② 64 批 × 48 块 = 3072 块，远超 5s 队列容量
+        for (int i = 0; i < kMaxDrainBatches; ++i) {
+            if (drain_audio_queued() == 0) break;   // 队列见底即退出
+        }
         // [修复-0xC00D4A45 第二根因] 旧实现对 last_audio_end_ 正值门控，导致
         // "全程没有任何音频块写入"(麦克风设备无声/被占用)时该值恒为 0，
         // 补静音被整体跳过 → AAC 流一个 sample 都没有 → sink 生成不了 esds

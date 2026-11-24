@@ -593,16 +593,27 @@ def test_audio_drain_has_batch_cap():
     assert "queued_hns_ -= batch_hns" in code, "只减去本批移出的时长"
 
 
-def test_finalize_drains_all_batches():
-    """[收尾慢根因回归·v18] finalize 必须循环排空至队列见底，不能只跑一批。"""
+def test_finalize_stops_producer_then_drains_bounded():
+    """[收尾慢根因回归·v19] finalize 排空必须先停生产者、且有界，杜绝忙等死循环。
+
+    v18 用 `while(drain_audio_queued()>0){}` 无界循环，但 stop_all 顺序是
+    「先 finalize→后 _stop_mic」，finalize 期间采集线程仍在入队 → 队列永不空
+    → 忙等卡死 worker 60s+。v19：先 unsubscribe_() 停生产者，再用有界 for
+    循环排空（队列 5s 上限≈234 块，64 批绰绰有余）。
+    """
     src = _cpp()
     fn = src[src.index("int drain_audio()"):src.index("int finalize(")]
     code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
-    assert "while (drain_audio_queued() > 0)" in code, (
-        "finalize 须循环排空所有批次，否则尾部积压音频丢失")
+    # ① 必须先退订停止音频入队，否则生产者不停、循环永不结束
+    assert "unsubscribe_()" in code, "drain 前须 unsubscribe 停止音频生产者"
+    # ② 必须是有界循环，绝不能是 while(>0) 忙等
+    assert "while (drain_audio_queued() > 0)" not in code, "禁止无界 while 忙等"
+    assert "kMaxDrainBatches" in code, "排空循环须有硬上限"
+    assert "for (int i = 0; i < kMaxDrainBatches" in code, "须用有界 for 循环"
+    assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v18():
-    """native 指纹升到 v18，真机据此确认整包(含分批排空)已生效。"""
+def test_build_id_v19():
+    """native 指纹升到 v19，真机据此确认整包(含 finalize 死循环修复)已生效。"""
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v18"' in src, "native 指纹须为 v18"
+    assert 'kBuildId = "mf-20261124-drain-v19"' in src, "native 指纹须为 v19"
