@@ -443,6 +443,19 @@ class MFCaptureSession:
         if drop is not None:
             with contextlib.suppress(Exception):
                 drop()
+        # [真失败根治 v29] 撤销本会话残留的 write_video 僵尸，让 finalize 立即
+        # 排到队首执行。root cause：write_video 是非 cancelable 的高频调用，超时
+        # 后 v21 降级策略让读线程继续投递，每次超时留一个僵尸 task 在队列里；
+        # 长录制（真机 10min）worker 掉速 → 僵尸堆积 → finalize 投队尾被逐个执行
+        # 顶过 60s → 屏障 90s 也排不上 → 成片来不及改名落盘 → "未捞回成片"、
+        # 收尾 224s。此时读线程已退出（_join_threads 保证）、不会再生新帧，队列
+        # 里残留的全是迟到僵尸；按本会话句柄精准撤销（多设备共享 worker 不误伤
+        # 他机在途帧），finalize 随即执行。尾部最多丢已在队列未执行的几帧，远好
+        # 过整段成片丢失 + 收尾卡死。老 native/替身无此接口时静默降级。
+        drop_video = getattr(self.native, "drop_queued_video_writes", None)
+        if drop_video is not None:
+            with contextlib.suppress(Exception):
+                drop_video(self._handle)
         # [修复] finalize 失败（overflow / SinkWriter::Finalize 报错）必须转成
         # 可读原因上抛，否则 paths=[] + err="" 会被 controller 当成"正常停止但
         # 无产物"，用户看不到任何失败提示。

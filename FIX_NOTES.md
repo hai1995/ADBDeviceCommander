@@ -8553,3 +8553,42 @@ stop 撤销早于等读线程·源码守卫），指纹守卫更新为 v27。全
 **验证**：专项 + 全量须通过；真机预期：12min 长录制 finalize 超时时屏障能等到成片
 改名落盘并捞回（有视频则正常保存），万一确无成片则明确报"录屏失败：未保存任何视频
 文件"、返回失败，不再出现"1 个文件已保存"的假成功。日志指纹 v28。
+
+---
+
+## 2026-11-25 长录制收尾 224s + 成片丢失的真正病根：write_video 僵尸堆积（v29，纯 Python 编排层，指纹 mf-20261124-drain-v29）
+
+**现象**：v28 包、10min 录制（17:36:24→17:46:16），收尾拖到 17:50:00（224s），
+报错 `同源合成失败：MF worker 调用超时，未捞回已发布成片`，成片没落盘。
+
+**先承认前几轮在打地鼠**：v27/v28 一直在加超时（尾帧 30s、finalize 60s、屏障
+90s），但病根不是"等得不够"，而是 finalize 根本排不上 worker 队列——加超时只会
+把收尾从 162s 拖到 224s。
+
+**真正病根（代码链）**：
+1. `session_write_video` 是**非 cancelable** 高频调用（mf_native.py:429）。它超时
+   后的 task 不撤销，作为僵尸留在 worker 单 FIFO 队列里继续执行。
+2. v21 把主循环"MF worker 调用超时"降级为非致命统计后**继续投递下一帧**——每次
+   超时留一个僵尸 write_video。这与 drain 的僵尸问题（v17 已用 cancelable 根治）
+   是同一类病，但 write_video 当初因为"数据帧不能丢"漏改了。
+3. 长录制下 worker 一旦掉速（音频 AAC 同步编码 + 慢盘 IO 竞争），write_video 频繁
+   超时 → 僵尸不断堆积 → finalize 投到队尾被这些僵尸逐个执行顶过 60s → 屏障 90s
+   再排其后也超时 → 成片来不及改名落盘 → "未捞回成片"、收尾 224s。
+
+**修复（v29，纯 Python 编排层，native 语义不动）**：
+- `MFWorker.call` 新增 `owner` 参数存入 done（默认 None 向后兼容）；新增
+  `drop_queued_owner(owner)`：按会话句柄精准撤销队列中尚未执行的 write_video
+  僵尸（快照 + set event 幂等线程安全；给仍在 wait 的调用方一个"调用超时"错误，
+  让读线程既有降级逻辑接住，不误判成 native 错误）。
+- `MFNative.session_write_video` 传 `owner=h`；新增 `drop_queued_video_writes(h)`
+  便捷封装（老 worker/替身降级为 0）。
+- `MFCaptureSession.stop()`：在 `_join_threads()` **之后**（读线程已彻底退出、
+  不会再投递正常帧）、finalize **之前**调用 `drop_queued_video_writes(handle)`，
+  撤销本会话残留的 write_video 僵尸，finalize 立即排到队首执行落盘。多设备共享
+  worker 时按句柄过滤，绝不误伤他机会话在途帧。尾部最多丢已在队列未执行的几帧，
+  远好过整段成片丢失 + 收尾卡死。
+
+**验证**：新增 3 项回归（owner 精准撤销不误伤·行为 / call 透传 owner·守卫 /
+stop 撤销在等读线程后、finalize 前·源码守卫）。全量须通过。真机预期：10min 长
+录制收尾不再拖 224s、finalize 立即执行、成片正常落盘 1 个完整带声 MP4；日志指纹
+v29。若确无成片仍如实报"未保存任何视频文件"，不谎报成功（v28 守卫保留）。

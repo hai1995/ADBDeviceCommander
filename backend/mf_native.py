@@ -160,7 +160,7 @@ class MFWorker:
             with __import__("contextlib").suppress(Exception):
                 lib.adc_shutdown()
 
-    def call(self, fn, *args, timeout=15.0, cancelable=False):
+    def call(self, fn, *args, timeout=15.0, cancelable=False, owner=None):
         """在 worker 线程执行 fn(*args)，同步等结果。
 
         timeout 兜底：万一 worker 异常死亡（native 崩溃、adc_shutdown 卡死），
@@ -170,12 +170,16 @@ class MFWorker:
         打 cancelled 标记，worker 出队时会跳过、不执行。避免超时 task 变僵尸
         堆积占住 worker，拖垮收尾的 finalize。普通调用（write/finalize）不传，
         语义不变——它们超时是致命错误，也不能被静默丢弃。
+        [真失败根治 v29] owner：把会话句柄存进 done，供收尾时按会话精准撤销
+        排队中的 write_video 僵尸（多设备共享 worker 时只撤本会话、不误伤他机）。
         """
         if self._thread is None or not self._thread.is_alive():
             raise MFNativeError("MF worker 未启动")
-        # [收尾根治 v22] 把 cancelable 标记存进 done，供收尾时主动撤销排队任务。
+        # [收尾根治 v22] cancelable 标记存进 done，供收尾时主动撤销排队任务。
+        # [真失败根治 v29] owner 标记同上：write_video 用会话句柄标记，收尾前
+        # 精准撤销该会话残留的排队写入，不让僵尸顶住 finalize。
         done = {"event": threading.Event(), "value": None, "error": None,
-                "cancelled": False, "cancelable": cancelable}
+                "cancelled": False, "cancelable": cancelable, "owner": owner}
         self._q.put((fn, args, done))
         if not done["event"].wait(timeout):
             if cancelable:
@@ -214,6 +218,43 @@ class MFWorker:
                 done["cancelled"] = True
                 dropped += 1
                 # 唤醒正在 wait 的 drain 调用方，避免它们各自空等到 10s 超时。
+                done["event"].set()
+        return dropped
+
+    def drop_queued_owner(self, owner):
+        """[真失败根治 v29] 撤销队列中尚未执行的、属于指定 owner 的 write_video。
+
+        背景：write_video 是高频非 cancelable 调用（数据帧不能像 drain 那样随手
+        丢弃），但一旦 worker 因音频编码/慢盘掉速而排队超时，v21 的降级策略让
+        读线程继续投递 → 每次超时留一个僵尸 write_video 在队列里。长录制下僵尸
+        不断堆积，收尾时 finalize 投到队尾，被这些僵尸逐个执行顶过 60s 超时，
+        屏障再排其后也超时，成片永远来不及改名落盘（真机 10min 收尾 224s、
+        "未捞回已发布成片"即此病根）。
+
+        根治时机：stop() 里 `_join_threads()` 之后读线程已彻底结束、不会再投递
+        任何 write_video，此时队列里残留的 write_video 全是"迟到且无主"的僵尸。
+        在 finalize 之前按本会话 owner 精准撤销（多设备共享 worker，绝不能误伤
+        其它会话在途的帧），finalize 得以立即执行、成片及时落盘。尾部最多丢已
+        在队列里未执行的几帧，远好过整段成片丢失 + 收尾卡死。
+
+        正在 worker 中执行的那一个已出队、无法撤销，但它只占一个短任务，不挡
+        finalize。返回撤销的 task 数；owner=None 时不撤销任何任务（防御误伤）。
+        """
+        if owner is None:
+            return 0
+        dropped = 0
+        # 与 drop_queued_cancelable 同理：deque 有 mutex 保护，快照 + set event 幂等。
+        with self._q.mutex:
+            pending = list(self._q.queue)
+        for _fn, _args, done in pending:
+            if done.get("owner") == owner and not done.get("cancelled"):
+                done["cancelled"] = True
+                dropped += 1
+                # 给仍在 wait 的调用方一个"调用超时"错误（而非 value=None 被误判
+                # 成 native 错误）：读线程的 v21 降级逻辑认这个文本、记为诊断统计。
+                # 正常收尾时读线程已退出、无人等待，这里只是幂等兜底。
+                if done.get("error") is None:
+                    done["error"] = MFNativeError("MF worker 调用超时（收尾撤销排队写入）")
                 done["event"].set()
         return dropped
 
@@ -345,6 +386,21 @@ class MFNative:
         except Exception:  # noqa: BLE001  老 worker 无此方法时静默降级
             return 0
 
+    def drop_queued_video_writes(self, owner):
+        """[真失败根治 v29] 撤销 worker 队列里尚未执行的、本会话的 write_video。
+
+        收尾 finalize 之前调用，撤销长录制中因 worker 掉速超时而堆积的僵尸写入，
+        让 finalize 立即执行、成片及时落盘。按 owner（会话句柄）精准过滤，多设备
+        共享 worker 时不误伤其它会话。老 worker / 测试替身降级为 0（向后兼容）。
+        """
+        w = self.worker
+        if w is None:
+            return 0
+        try:
+            return w.drop_queued_owner(owner)
+        except Exception:  # noqa: BLE001  老 worker 无此方法时静默降级
+            return 0
+
     def worker_barrier(self, timeout=30.0):
         """[收尾根治 v22] 投递屏障并等待，确认此前入队的 native 调用已执行完。
 
@@ -426,8 +482,10 @@ class MFNative:
         buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
         # [修复-收尾慢·v18] 用独立的 write_video 超时（30s），不再走默认 15s：
         # 15s 会被 native 内部一次无上限的积压音频排空顶过，误报致命失败。
+        # [真失败根治 v29] owner=h：收尾前可按会话精准撤销队列里残留的写入僵尸，
+        # 让 finalize 立即执行（多设备共享 worker 不误伤他机会话）。
         rc = self.worker.call(self._lib.adc_session_write_video, h, buf, len(data),
-                              timeout=VIDEO_WRITE_CALL_TIMEOUT_S)
+                              timeout=VIDEO_WRITE_CALL_TIMEOUT_S, owner=h)
         if rc == ADC_ROTATE_PENDING:
             return True
         if rc != ADC_OK:

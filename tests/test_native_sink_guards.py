@@ -614,14 +614,16 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v28():
-    """native 指纹升到 v28，真机据此确认整包含 v24~v28 全部录制/收尾修复。
+def test_build_id_v29():
+    """native 指纹升到 v29，真机据此确认整包含 v24~v29 全部录制/收尾修复。
 
-    v28 纠正了上一轮 v27 的误判（曾以为成片已保存只是假警告；真机核实视频
-    根本没落盘）：捞回屏障加长、致命错误不被掩盖、无视频不再谎报成功。
+    v29 根治 write_video 僵尸堆积顶住 finalize：收尾按会话句柄精准撤销队列里
+    残留的 write_video 僵尸，让 finalize 立即执行落盘（真机 10min 收尾 224s、
+    成片丢失的真正病根）。v28 曾纠正 v27 的误判：捞回屏障加长、致命错误不被
+    掩盖、无视频不再谎报成功。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v28"' in src, "native 指纹须为 v28"
+    assert 'kBuildId = "mf-20261124-drain-v29"' in src, "native 指纹须为 v29"
 
 
 def test_rotate_is_pulled_out_of_write_video():

@@ -90,7 +90,14 @@
 // ② "未捞回成片"致命错误被先前尾帧超时用 `err or ...` 短路掩盖，改为直接上抛；
 // ③ controller 无视频成片却因 files 里有 logcat txt 谎报"已完成：1 个文件"，改为
 //    据实报录屏失败并返回 ok=False。仅升指纹让真机确认整包含 v24~v28 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v28";
+// v29: native 语义仍未动 —— 根治 write_video 僵尸堆积顶住 finalize（长录制收尾
+// 224s、成片丢失的真正病根）。write_video 是非 cancelable 高频调用，v21 超时降级
+// 让读线程继续投递、每次超时留一个僵尸 task 在单 FIFO worker 队列；长录制 worker
+// 掉速后僵尸堆积，finalize 投队尾被逐个执行顶过 60s、屏障 90s 也排不上。修复：
+// MFWorker.call 增加 owner 标记，收尾（读线程已退出）时按会话句柄精准撤销队列里
+// 残留的 write_video 僵尸，finalize 立即执行落盘；多设备共享 worker 不误伤他机。
+// 仅升指纹让真机确认整包含 v24~v29 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v29";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

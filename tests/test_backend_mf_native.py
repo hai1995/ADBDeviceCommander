@@ -1467,3 +1467,82 @@ def test_stop_drops_drains_before_joining_read_thread():
     join_pos = src.index("self._join_threads()")
     assert first_drop < join_pos, \
         "撤销 drain 必须在等读线程之前，否则尾帧 write_video 被残留 drain 顶超时"
+
+
+# ---------------- 真失败根治 v29：write_video 僵尸顶住 finalize ----------------
+def test_drop_queued_owner_only_cancels_matching_owner():
+    """[真失败根治 v29·行为] 按 owner 精准撤销排队 write_video，不误伤他机会话。
+
+    真机 v28：10min 录制，write_video 超时留僵尸堆积在 worker 单 FIFO 队列，
+    finalize 投队尾被逐个执行顶过 60s、屏障 90s 也排不上 → 收尾 224s、成片
+    未落盘。根治：收尾时读线程已退出，按本会话 owner 精准撤销队列里残留的
+    write_video 僵尸，让 finalize 立即执行。多设备共享 worker，必须只撤本会话，
+    绝不能撤销别的会话在途帧。
+    """
+    import threading as _th
+    lib = _BlockingLib()
+    w = mn.MFWorker(lib)
+    w.start()
+    lib._gate.clear()
+    # 一个任务占住 worker，后面排 owner=1 的两个、owner=2 的两个 write_video
+    blocker = _th.Thread(target=lambda: _call_and_catch(w, lib.block_forever, timeout=5))
+    blocker.start()
+    assert lib._gate.wait(2), "blocker 应已占用 worker"
+
+    def make_call(owner, executed, tag):
+        def fn():
+            executed.append(tag)
+            return 1
+        def invoke():
+            try:
+                w.call(fn, timeout=5, owner=owner)
+            except Exception:  # noqa: BLE001  撤销的 task 会拿到"调用超时"错误
+                pass
+        return _th.Thread(target=invoke)
+
+    own1_exec, own2_exec = [], []
+    threads = [
+        make_call(1, own1_exec, "o1a"),
+        make_call(1, own1_exec, "o1b"),
+        make_call(2, own2_exec, "o2a"),
+        make_call(2, own2_exec, "o2b"),
+    ]
+    for t in threads:
+        t.start()
+    _th.Event().wait(0.15)   # 让 4 个 write_video 确实排进队列
+
+    dropped = w.drop_queued_owner(1)
+    assert dropped == 2, f"应只撤销 owner=1 的 2 个排队写入，实际 {dropped}"
+
+    lib.release.set()        # 放行 blocker，worker 继续消费队列
+    blocker.join(3)
+    for t in threads:
+        t.join(3)
+    _th.Event().wait(0.2)
+    assert not own1_exec, "owner=1 的僵尸写入被撤销后不得执行"
+    assert len(own2_exec) == 2, "owner=2 的写入不得被误伤，须正常执行完"
+    w.stop()
+
+
+def test_call_passes_owner_to_done():
+    """[真失败根治 v29·守卫] MFWorker.call 须把 owner 存入 done 供收尾撤销。"""
+    import inspect
+    call_src = inspect.getsource(mn.MFWorker.call)  # 含签名，才能看到 owner 参数
+    assert "owner=None" in call_src, "call 须支持 owner 参数"
+    assert '"owner": owner' in call_src or "'owner': owner" in call_src, \
+        "call 须把 owner 存进 done，供 drop_queued_owner 过滤"
+    # write_video 须透传 owner=h（会话句柄）
+    wv_src = _code_without_docstring(mn.MFNative.session_write_video)
+    assert "owner=h" in wv_src, "session_write_video 须传 owner=h 才能按会话撤销"
+
+
+def test_stop_drops_queued_video_before_finalize():
+    """[真失败根治 v29·源码守卫] stop 须在 finalize 前撤销本会话 write_video 僵尸。"""
+    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    assert "drop_queued_video_writes" in src, \
+        "stop 须撤销本会话残留的 write_video 僵尸"
+    assert src.index("drop_queued_video_writes") < src.index("session_finalize"), (
+        "撤销 write_video 僵尸必须在 finalize 之前，否则 finalize 仍被顶过 60s")
+    join_pos = src.index("self._join_threads()")
+    assert src.index("drop_queued_video_writes") > join_pos, \
+        "撤销须在等读线程之后——读线程结束前仍有正常帧在途，过早撤销会丢帧"
