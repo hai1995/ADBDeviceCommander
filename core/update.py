@@ -226,6 +226,30 @@ def _host(url: str) -> str:
     return m.group(1) if m else (url or "更新源")
 
 
+def _ip_literal_of(host: str):
+    """把 host 解析成 IP 对象；不是 IP 字面量（真域名）返回 None。
+
+    除标准点分 IPv4 / IPv6 外，还必须识别 **inet_aton 风格的 IP 别名**：
+    整数（2130706433）、十六进制（0x7f000001）、八进制段（0177.0.0.1）、
+    混合/简写（127.1）都会被操作系统解析成 IP，但 `ipaddress.ip_address()`
+    对这些一律抛 ValueError。若把它们当"域名"放行，`http://2130706433`
+    就能绕过回环拦截打本机服务 —— 这是带回显的 SSRF。
+    `socket.inet_aton` 是纯字符串解析（不查 DNS），正好补齐这一层，且不改变
+    "域名放行"的既有设计（DNS 重绑定仍属下面注释里声明的已知边界）。
+    """
+    import ipaddress
+    import socket
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        packed = socket.inet_aton(host)
+    except (OSError, ValueError):
+        return None
+    return ipaddress.ip_address(packed)
+
+
 def feed_url_allowed(url: str) -> bool:
     """更新源 URL 是否安全可取 —— 堵住 SSRF / 本地文件探测。
 
@@ -240,13 +264,13 @@ def feed_url_allowed(url: str) -> bool:
       * 必须有 host；
       * host 是 IP 字面量时，拒绝回环 / 链路本地（含 169.254 元数据）/
         保留 / 组播 / 未指定地址；内网私网段（10./172.16-31./192.168.）放行；
+        整数 / 十六进制 / 八进制等 IP 别名同样按 IP 处理（见 _ip_literal_of）；
       * host 是域名时放行（可以是自建域名）；形如 localhost / *.localhost 的
         域名按回环处理，拒绝。
 
     DNS 重绑定（域名解析到私网）不在纯字符串校验的能力范围，属已知边界；
     真正的更新源是 GitHub 域名或用户显式配置的内网地址，风险可接受。
     """
-    import ipaddress
     from urllib.parse import urlparse
     try:
         p = urlparse(url or "")
@@ -259,11 +283,10 @@ def feed_url_allowed(url: str) -> bool:
         return False
     if host == "localhost" or host.endswith(".localhost"):
         return False
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return True    # 域名：放行（GitHub 或用户自建）
-    # IP 字面量：只挡"绝无可能是更新源"的段，保留内网私网
+    ip = _ip_literal_of(host)
+    if ip is None:
+        return True    # 真域名：放行（GitHub 或用户自建）
+    # IP 字面量（含整数/十六进制/八进制别名）：只挡"绝无可能是更新源"的段，保留内网私网
     return not (ip.is_loopback or ip.is_link_local or ip.is_reserved
                 or ip.is_multicast or ip.is_unspecified)
 

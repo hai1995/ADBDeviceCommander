@@ -343,6 +343,14 @@ def test_feed_url_allowed_rules():
         "http://169.254.169.254/latest/meta-data/", "http://[::1]:80/",
         "http://localhost:8080/", "http://a.localhost/", "http://0.0.0.0/",
         "http://224.0.0.1/", "not a url", "",
+        # 回环 / 元数据的 IP 别名：ipaddress.ip_address 不认，但操作系统会
+        # 解析成 127.0.0.1 / 169.254.169.254，必须同样拒绝（SSRF 绕过）。
+        "http://2130706433/",          # 127.0.0.1 十进制整数
+        "http://0x7f000001/",          # 127.0.0.1 十六进制
+        "http://0177.0.0.1/",          # 127.0.0.1 八进制段
+        "http://127.1/",               # 127.0.0.1 简写（inet_aton）
+        "http://2852039166/",          # 169.254.169.254 十进制整数（云元数据）
+        "http://[::ffff:127.0.0.1]/",  # IPv4-mapped 回环
     ):
         assert not update.feed_url_allowed(url), url
     for url in (
@@ -363,7 +371,11 @@ def test_check_rejects_ssrf_feed_without_request():
         return 200, '{"version":"2099.0101.0000","notes":"PWNED"}'
 
     for evil in ("file:///C:/secrets.txt", "http://127.0.0.1:8080/admin",
-                 "http://169.254.169.254/latest/meta-data/"):
+                 "http://169.254.169.254/latest/meta-data/",
+                 # IP 别名形式的回环 / 元数据：必须在 check 层就被拦下，绝不发请求
+                 "http://2130706433:8080/admin",
+                 "http://0x7f000001:8080/admin",
+                 "http://2852039166/latest/meta-data/"):
         calls.clear()
         res = update.check("2026.0101.0000", evil, opener)
         assert calls == [], f"不应请求 {evil}"
