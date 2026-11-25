@@ -8404,3 +8404,36 @@ pyflakes + ruff + 全量须通过。预期：长录制分段不再误报"写入 
 专项 48 passed；pyflakes + ruff 干净，全量 1758 passed / 1 skipped。真机预期：
 录 5min/8min 不再只留 p1，中间画面短暂卡顿后继续，收尾不再拖 135s。指纹 v23 随
 exe 打包不改 native；请用含本修复的新 release 包验证（日志指纹仍是 v23）。
+
+---
+
+## 第 N+6 轮：v25 单文件完整录制 —— 消除「N 段视频，未能合并」
+
+**真机现象**：v24 包、录制 218s，产出 p1+p2 两段、收尾 1s（续流修复全部生效、
+数据完整），但完成提示显示「✓ 录屏已完成（2 段视频，未能合并）：2 个文件」。
+用户诉求：合成 1 个完整视频。
+
+**根因**：分段是旧架构「screenrecord 180s 退出即断流」的配套手段（native 每
+170s 墙钟切段 ADC_ROTATE_PENDING）。v24 续流后视频流已全程连续、同一个
+SinkWriter 可持续写，切段反而把一条连续流切成 p1/p2 多文件。而 MF 同源录制
+路径 `_mf_teardown` 从设计落地起就不合并（ffmpeg 早在方案 B 就从安装包移除，
+老路径的 `join_segments` 依赖本机 ffmpeg），也不写 `merged_segs`，完成提示只能
+按 `mp4_n=2, merged_n=0` 显示「2 段视频，未能合并」。
+
+**修复**（纯 Python 编排层，native 语义不动）：
+- `backend/mf_capture_service.py` 加 `MF_SINGLE_FILE=True`（默认开）：`_read_loop`
+  收到切段请求时不再调 `session_rotate`，只记 `rotate_skipped` 诊断。关键机制：
+  native `should_rotate()` 在 `rotate_pending_` 置位后恒返回 false，忽略这一次
+  请求后整场不再请求切段，后续帧继续写同一个 writer。
+- 时间戳在单段下天然对齐：视频用累加式 `video_ts_hns_` 从 0 起算，音频用
+  `ts - seg_start_hns_` 相对整场起点；单 writer 时 `seg_start_hns_` 只设一次，
+  两者基准一致，无需 ffprobe 复核。finalize 直接产出 1 个完整带声 MP4。
+- 置 `MF_SINGLE_FILE=False` 可恢复分段（诊断/回退），保留 `session_rotate`
+  调用与 `rotations` 统计，既有守卫契约不破。
+- 完成提示无需改：单文件模式 `mp4_n=1`、`merged_segs` 空 → `seg_tip=""`，
+  显示「✓ 录屏已完成：1 个文件」，不再出现「未能合并」。
+- 指纹升 v23→v25（v24 续流那轮未升）：让真机日志确认整包含 v24+v25 修复。
+
+**验证**：新增 3 项回归（默认单文件跳过切段 / 关开关仍切段 / 默认值断言），
+专项 90 passed；pyflakes + ruff 干净，全量须通过。真机预期：长录制无论多久
+只产出 1 个从头到尾的带声 MP4，无拼接点、无「未能合并」提示；日志指纹 v25。

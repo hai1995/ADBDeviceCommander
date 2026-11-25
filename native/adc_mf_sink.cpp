@@ -74,7 +74,10 @@
 // v23: native 语义未动（v21/v22 均为纯 Python 编排层修复），仅升指纹——让真机
 // 日志能确认已换入含 v21（write_video 超时降级）+ v22（收尾撤销排队 drain +
 // 超时捞回成片）修复的整包，避免拿旧 exe 反复验证。纯升指纹的先例见 v17。
-static const char* const kBuildId = "mf-20261124-drain-v23";
+// v24: 纯 Python 编排层续流修复（screenrecord 180s 到期自动续接）。
+// v25: native 语义仍未动 —— 单文件完整录制由 Python 编排层忽略切段请求实现，
+// 仅升指纹让真机确认整包含 v24（续流）+ v25（不再切段、产出 1 个完整视频）。
+static const char* const kBuildId = "mf-20261124-drain-v25";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

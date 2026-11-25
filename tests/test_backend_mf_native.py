@@ -1149,3 +1149,73 @@ def test_restart_cap_prevents_endless_respawn(monkeypatch, tmp_path):
     assert spawned["n"] <= 1 + 2, f"续流须受上限约束，实际拉起 {spawned['n']} 次"
     assert sess._error, "续流耗尽上限须记录错误，不得静默成功"
     svc.stop_all()
+
+
+# -------------------- v25 单文件完整录制（忽略切段请求） ------------------
+
+class _RotatingNative(FakeNative):
+    """每次 write_video 都回切段请求（模拟到 170s），记录是否真切段。"""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.rotated = 0
+
+    def session_write_video(self, h, data):
+        super().session_write_video(h, data)
+        return mn.ADC_ROTATE_PENDING   # 请求切段
+
+    def session_rotate(self, h):
+        self.rotated += 1
+
+
+def _drive_one_nal_with_rotation(monkeypatch, tmp_path, single_file):
+    """驱动带切段请求的 NAL 流，返回 (session, native)。
+
+    NalBuffer 只在遇到下一起始码时才输出前一条完整 NAL，故喂两条：第一条在
+    循环中经 session_write_video 输出并触发 need_rotate 判定，第二条留到 flush。
+    """
+    nal = (b"\x00\x00\x01\x65" + b"\xaa" * 16 +
+           b"\x00\x00\x01\x41" + b"\xbb" * 16)
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([nal])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mcs, "MF_SINGLE_FILE", single_file)
+    native = _RotatingNative(available=True)
+    svc = mcs.MFCaptureService(native=native)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    import time
+    for _ in range(100):
+        if sess._read_done.is_set():
+            break
+        time.sleep(0.02)
+    svc.stop_all()
+    return sess, native
+
+
+def test_single_file_mode_skips_rotate(monkeypatch, tmp_path):
+    """[v25 回归] 单文件模式（默认）收到切段请求时不得切段。
+
+    v24 续流已让视频流全程连续，切段只会把一条连续流切成 p1/p2 多文件，而 MF
+    路径不合并（ffmpeg 已不随包发布）→ 完成提示"2 段视频，未能合并"。忽略该
+    请求后整场写同一个 writer，finalize 产出 1 个完整视频。
+    """
+    sess, native = _drive_one_nal_with_rotation(monkeypatch, tmp_path, True)
+    assert native.rotated == 0, "单文件模式不得调用 session_rotate"
+    assert sess._stats.get("rotate_skipped", 0) >= 1, "须记录被忽略的切段请求"
+    assert sess._stats.get("rotations", 0) == 0, "不计入真实切段次数"
+
+
+def test_single_file_false_keeps_rotate(monkeypatch, tmp_path):
+    """[v25 回归] 关闭单文件开关时仍按历史行为切段（诊断/回退路径）。"""
+    sess, native = _drive_one_nal_with_rotation(monkeypatch, tmp_path, False)
+    assert native.rotated >= 1, "关闭单文件开关时须执行切段"
+    assert sess._stats.get("rotations", 0) >= 1, "须统计真实切段次数"
+
+
+def test_single_file_default_is_true():
+    """[v25 回归] 单文件完整录制默认为开。"""
+    assert mcs.MF_SINGLE_FILE is True

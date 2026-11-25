@@ -46,6 +46,13 @@ READ_DONE_BUDGET_S = 130.0
 # write_video 驱动也随之中止（只剩 p1）。这里给续流次数设上限（约 20×170s
 # ≈ 57min，与 REC_MAX_SEGMENTS 对齐），防设备端反复秒退时无限空转。
 MF_RESTART_MAX = 20
+# [v25 单文件完整录制] native 每 170s 的墙钟切段（ADC_ROTATE_PENDING）初衷是
+# 配合旧架构「screenrecord 180s 退出即断流」——每段对应一次进程生命周期。v24
+# 续流后视频流全程连续、同一个 SinkWriter 可持续写，切段反而把一条连续流切成
+# p1/p2 多文件；而 MF 路径从不合并（ffmpeg 已不随包发布），完成提示只能显示
+# 「N 段视频，未能合并」。默认忽略切段请求、整场写单个 writer，finalize 自然
+# 产出 1 个从头到尾的带声 MP4。置 False 可恢复分段（诊断/回退用）。
+MF_SINGLE_FILE = True
 # [修复-长录制收尾·v17] 排空连续失败次数只作诊断统计（写入 stats），不再是
 # 停止排空的阈值。旧实现达阈值就 break + 记 _error，长录制下把 worker 繁忙
 # 造成的偶发 drain 超时误判成 worker 死亡，永久关闭排空并误报收尾失败。
@@ -244,10 +251,22 @@ class MFCaptureSession:
                                 # [收尾慢根治 v20] native 到 170s 只回"请求"信号，
                                 # 重量切段用独立 120s 超时显式执行。老 DLL 不返回
                                 # True（内部同步切段），此分支自动跳过，向后兼容。
+                                #
+                                # [v25 单文件完整录制] 默认忽略该请求：native 的
+                                # should_rotate() 在 rotate_pending_ 置位后恒返回
+                                # false，所以忽略这一次后整场不再请求切段，后续帧
+                                # 继续写同一个 SinkWriter。时间戳基准（视频从 0
+                                # 累加、音频相对 seg_start_hns_）在单段下天然对齐，
+                                # finalize 直接产出 1 个完整带声 MP4，无需 ffmpeg。
+                                # 只有显式关闭 MF_SINGLE_FILE（诊断/回退）才切段。
                                 if need_rotate:
-                                    self.native.session_rotate(self._handle)
-                                    self._stats["rotations"] = \
-                                        self._stats.get("rotations", 0) + 1
+                                    if MF_SINGLE_FILE:
+                                        self._stats["rotate_skipped"] = \
+                                            self._stats.get("rotate_skipped", 0) + 1
+                                    else:
+                                        self.native.session_rotate(self._handle)
+                                        self._stats["rotations"] = \
+                                            self._stats.get("rotations", 0) + 1
                             except Exception as ex:  # noqa: BLE001
                                 # [收尾慢根治 v21] 真 native 错误才上报；"MF worker
                                 # 调用超时"是单 worker 被重量操作挤占的排队等待，
