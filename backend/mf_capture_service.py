@@ -293,20 +293,77 @@ class MFCaptureSession:
                 self.native.session_mark_mic_stop(self._handle)
         paths = []
         err = self._error
+        # [收尾根治 v22] finalize 之前，撤销 worker 队列里尚未执行的音频 drain。
+        # 长录制切段（do_rotate，重量 Finalize+MoveFile+重建 writer，数十秒）占住
+        # 单 worker 期间，200ms 定时器持续投递 drain；它们只在各自 call() 超时
+        # （10s）后才被标 cancelled，切段结束时队尾仍有一批会真正执行的 drain
+        # 排在 finalize 前面，把 finalize 顶过 60s 超时——这是超时点第 5 次转移
+        # （drain→write15s→finalize60s→write30s→finalize60s）的真正病根：重量操作
+        # 与高频 drain 共用单 FIFO 队列。drain 是尽力维护调用，音频完整性由
+        # finalize 内部的 drain_audio() 有界排空保证，撤销排队 drain 不丢音频。
+        drop = getattr(self.native, "drop_queued_drains", None)
+        if drop is not None:
+            with contextlib.suppress(Exception):
+                drop()
         # [修复] finalize 失败（overflow / SinkWriter::Finalize 报错）必须转成
         # 可读原因上抛，否则 paths=[] + err="" 会被 controller 当成"正常停止但
         # 无产物"，用户看不到任何失败提示。
+        timed_out = False
         try:
             paths = self.native.session_finalize(self._handle)
         except Exception as ex:  # noqa: BLE001
-            err = err or f"同源合成失败：{ex}"
+            # [收尾根治 v22] 区分"worker 调用超时"与真 native 错误。超时时 finalize
+            # task 仍非 cancelable 地留在 worker 队列里、随后会执行并落盘 .mp4；
+            # 只是调用方已放弃、拿不到 out buffer 里的路径。此时不能马上 teardown：
+            # 先投递屏障等该 finalize 真正跑完，再从 work_dir 捞出已发布产物，
+            # 避免"明明成片了却报失败、产物还丢在 TEMP"的老问题。真 native 错误
+            # （overflow / Finalize 报错）task 已执行且失败，无需屏障兜底。
+            if "MF worker 调用超时" in str(ex):
+                timed_out = True
+            else:
+                err = err or f"同源合成失败：{ex}"
+        if timed_out:
+            # 投递屏障等 finalize task 真正执行完（它非 cancelable、仍在队列里，
+            # Finalize+MoveFile 会把 .tmp.mp4 改名为正式 .mp4 落盘）。
+            barrier = getattr(self.native, "worker_barrier", None)
+            if barrier is not None:
+                with contextlib.suppress(Exception):
+                    barrier()
+            recovered = self._recover_published_from_workdir()
+            if recovered:
+                # 成片确实已落盘：超时只是"等不及回传路径"的假失败，按正常产物搬运。
+                # err 在超时分支未写，保持为 self._error；捞回成功不新增错误。
+                paths = list(paths) + recovered
+            else:
+                # 既没拿到回传路径也没捞到成片：如实上报，绝不静默报成功。
+                err = err or "同源合成失败：MF worker 调用超时，未捞回已发布成片"
         # [EDR 误报缓解] native 产物在 TEMP 工作目录里：只在 finalize 成功后
         # 把成品 copy 回用户保存目录。copy 失败或未落盘的产物不入列表并明确
         # 上报（work_dir 留待下次启动清理，返回 TEMP 路径没有意义），绝不误报成功。
         published, pub_err = self._publish_to_save_dir(paths)
         err = err or pub_err
+        # session_destroy 同样经 worker.call 投递，FIFO 保证它排在 finalize 之后，
+        # finalize 执行时 handle 仍有效，无 use-after-free；worker 真挂死时 destroy
+        # 自身也会超时，被 _teardown_native 的 suppress 吞掉，不冒崩溃风险。
         self._teardown_native(discard=False)
         return published, err
+
+    def _recover_published_from_workdir(self):
+        """[收尾根治 v22] 扫描工作目录里已原子发布的 .mp4（排除 .tmp.mp4）。
+
+        finalize 超时兜底：native 已把 .tmp.mp4 改名为 .mp4 并记入 published_，
+        但 Python 侧因超时丢失了回传路径。这里直接扫描工作目录把成片捞回。
+        只认正式 .mp4、不认 .tmp.mp4 半成品，避免把损坏文件当用户产物。
+        """
+        if not self.work_dir:
+            return []
+        try:
+            import glob
+            pat = os.path.join(long_path(self.work_dir), "*.mp4")
+            return sorted(p for p in glob.glob(pat)
+                          if not p.lower().endswith(".tmp.mp4"))
+        except Exception:  # noqa: BLE001  扫描失败不影响主流程
+            return []
 
     def _publish_to_save_dir(self, paths):
         """把工作目录里的成品 copy 回用户保存目录。

@@ -924,3 +924,119 @@ def test_stop_waits_for_read_thread_done():
     assert "READ_DONE_BUDGET_S" in join_src, "等待须用覆盖 rotate 的预算"
     assert mcs.READ_DONE_BUDGET_S >= 120.0, (
         "等待预算须覆盖一次最坏 session_rotate(120s)")
+
+
+# ---------------- 收尾根治 v22：队列堆积 drain 顶超时 / 产物丢失 ------------
+def test_drop_queued_cancelable_skips_pending_drains():
+    """[收尾根治 v22] 撤销队列里尚未执行的 cancelable 任务（drain 堆积）。
+
+    真机 v21 包、198s 跨切段录制报"同源合成失败：MF worker 调用超时（60s）"。
+    根因：切段占住单 worker 期间 200ms 定时器持续投递 drain，队尾一批未超时
+    （cancelable 只在各自 call 超时后标 cancelled）排在 finalize 前把它顶过 60s。
+    修复：收尾前主动撤销排队 drain，让 finalize 立即执行。
+    """
+    import threading as _th
+    lib = _BlockingLib()
+    w = mn.MFWorker(lib)
+    w.start()
+    lib._gate.clear()
+    # 第一个 call 卡住 worker，后面排队 3 个 cancelable drain
+    blocker = _th.Thread(target=lambda: _call_and_catch(w, lib.block_forever, timeout=5))
+    blocker.start()
+    assert lib._gate.wait(2), "blocker 应已占用 worker"
+    executed = []
+    queued = []
+    for i in range(3):
+        def drain(idx=i):
+            executed.append(idx)
+            return 1
+        queued.append(_th.Thread(
+            target=lambda fn=drain: _call_and_catch_cancelable(w, fn, 5)))
+        queued.append(None)  # 占位，下面只取线程对象
+    threads = [t for t in queued if t is not None]
+    for t in threads:
+        t.start()
+    _th.Event().wait(0.15)   # 让 drain 确实排进队列
+
+    dropped = w.drop_queued_cancelable()
+    assert dropped >= 1, "应至少撤销一个排队的 cancelable drain"
+
+    lib.release.set()        # 放行 blocker，worker 继续消费队列
+    blocker.join(3)
+    for t in threads:
+        t.join(3)
+    _th.Event().wait(0.2)
+    assert not executed, "被撤销的排队 drain 不得被执行（否则仍会顶住 finalize）"
+    w.stop()
+
+
+def test_stop_drops_queued_drains_before_finalize(monkeypatch):
+    """[收尾根治 v22] stop() 须在 finalize 之前调用 drop_queued_drains。"""
+    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    assert "drop_queued_drains" in src, "stop 须撤销排队 drain"
+    assert src.index("drop_queued_drains") < src.index("session_finalize"), (
+        "撤销 drain 必须在 finalize 之前")
+
+
+def test_finalize_timeout_recovers_published_mp4(monkeypatch, tmp_path):
+    """[收尾根治 v22] finalize 超时但成片已落盘时，须经屏障兜底捞回产物。
+
+    真机症状：MF worker 60s 超时后报"同源合成失败"，但其实 .mp4 已由 worker
+    队列里的 finalize task 改名落盘，只是 Python 丢了回传路径 → 产物丢失。
+    修复：超时后投递屏障等 task 跑完，再扫描 work_dir 捞回正式 .mp4。
+    """
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    # 模拟 finalize task 在 worker 真正执行时落盘的成片（含半成品 .tmp.mp4 干扰）
+    published = work / "rec.mp4"
+    published.write_bytes(b"mp4")
+
+    def timeout_finalize(h):
+        raise mn.MFNativeError("MF worker 调用超时（60s 未返回）")
+
+    fake.session_finalize = timeout_finalize
+    # FakeNative 无 worker_barrier/drop_queued_drains；提供一个立即落盘的屏障替身
+    fake.worker_barrier = lambda timeout=30.0: True
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    sess.work_dir = str(work)   # 指向含成片的工作目录
+    out = svc.stop_all()
+    paths, err = out["s1"]
+    assert err == "", f"成片已落盘不应报失败，实际: {err!r}"
+    # 捞回后应 copy 到保存目录（basename 应为 rec.mp4）
+    assert any(p.endswith("rec.mp4") for p in paths), paths
+
+
+def test_finalize_timeout_without_artifact_reports_error(monkeypatch, tmp_path):
+    """[收尾根治 v22] finalize 超时且未捞到成片时，须如实报错，不静默成功。"""
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()   # 空目录：没有任何已发布成片
+
+    def timeout_finalize(h):
+        raise mn.MFNativeError("MF worker 调用超时（60s 未返回）")
+
+    fake.session_finalize = timeout_finalize
+    fake.worker_barrier = lambda timeout=30.0: True
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    sess.work_dir = str(work)
+    out = svc.stop_all()
+    paths, err = out["s1"]
+    assert paths == [], "无成片时不应报产物"
+    assert "超时" in err and "未捞回" in err, f"须如实上报超时无产物，实际: {err!r}"

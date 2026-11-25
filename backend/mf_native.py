@@ -173,8 +173,9 @@ class MFWorker:
         """
         if self._thread is None or not self._thread.is_alive():
             raise MFNativeError("MF worker 未启动")
+        # [收尾根治 v22] 把 cancelable 标记存进 done，供收尾时主动撤销排队任务。
         done = {"event": threading.Event(), "value": None, "error": None,
-                "cancelled": False}
+                "cancelled": False, "cancelable": cancelable}
         self._q.put((fn, args, done))
         if not done["event"].wait(timeout):
             if cancelable:
@@ -185,6 +186,36 @@ class MFWorker:
         if done["error"] is not None:
             raise done["error"]
         return done["value"]
+
+    def drop_queued_cancelable(self):
+        """[收尾根治 v22] 撤销队列中尚未执行的 cancelable 任务（仅 drain）。
+
+        停止收尾的时序痛点：长录制切段（do_rotate，重量 Finalize+MoveFile+
+        重建 writer，数十秒）占住单 worker 期间，200ms 定时器持续投递 drain；
+        这些 drain 是 cancelable，但"取消"只在各自 call() 超时（10s）后才标记，
+        切段结束时队尾仍有一批未超时、会真正执行的 drain 排在 finalize 前面，
+        把 finalize 顶过 60s 超时（超时点第 5 次转移）。
+
+        finalize 之前调用本方法，把队列里尚未出队的 cancelable drain 一次性
+        标记 cancelled + set event：worker 出队时会跳过（复用既有机制），等待的
+        drain 调用方也立即拿到错误而不必空等超时。音频完整性不受影响——finalize
+        内部的 drain_audio() 会把 audio_q_ 有界排空写入 writer（v19 保证）。
+
+        正在 worker 中执行的那一个 drain 已经出队、不在队列里，无法也不必撤销；
+        它只占一个短任务，不影响 finalize 及时执行。返回撤销的任务数。
+        """
+        dropped = 0
+        # queue.Queue 的内部 deque 有 mutex 保护；遍历期间 worker 可能出队，
+        # 用 all_tasks 快照 + set event 是幂等且线程安全的（重复 set 无害）。
+        with self._q.mutex:
+            pending = list(self._q.queue)
+        for _fn, _args, done in pending:
+            if done.get("cancelable") and not done.get("cancelled"):
+                done["cancelled"] = True
+                dropped += 1
+                # 唤醒正在 wait 的 drain 调用方，避免它们各自空等到 10s 超时。
+                done["event"].set()
+        return dropped
 
     def stop(self):
         if self._thread is None:
@@ -299,6 +330,37 @@ class MFNative:
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
+
+    def drop_queued_drains(self):
+        """[收尾根治 v22] 撤销 worker 队列里尚未执行的音频 drain 任务。
+
+        收尾 finalize 之前调用，避免切段期间堆积的 drain 把 finalize 顶过超时。
+        返回撤销数；无 worker / 老封装 / 测试替身时降级为 0（向后兼容）。
+        """
+        w = self.worker
+        if w is None:
+            return 0
+        try:
+            return w.drop_queued_cancelable()
+        except Exception:  # noqa: BLE001  老 worker 无此方法时静默降级
+            return 0
+
+    def worker_barrier(self, timeout=30.0):
+        """[收尾根治 v22] 投递屏障并等待，确认此前入队的 native 调用已执行完。
+
+        finalize 超时后，其 task 仍非 cancelable 地留在 worker 队列里、最终会
+        执行并落盘 .mp4。投递一个空任务到队尾，FIFO 保证它排在该 finalize
+        之后；屏障返回即证明 finalize 已跑完，此时再扫描 work_dir 能捞回产物。
+        屏障自身也用有界超时，worker 真卡死时不无限等待。
+        """
+        w = self.worker
+        if w is None:
+            return False
+        try:
+            w.call(lambda: True, timeout=timeout)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def last_error(self):
         if not self.available:

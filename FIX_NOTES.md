@@ -8301,3 +8301,46 @@ adc_mf_sink.cpp(667,55): error C2065: 'ADC_OK': undeclared identifier
 pyflakes + ruff + 全量须通过。预期：长录制分段不再误报"写入 H264 流失败"、收尾不再
 拖 106s；即使偶发排队超时也不终止录制、由 finalize 兜底成片。真机确认包为 release 新构建
 （Python 改动随 exe 打包，指纹 v20 不变）。
+
+## 分段录制 finalize 60s 超时 + 产物丢失根治（v22，Python 编排层，指纹仍 v20）
+
+**现象**：v21 包（日志指纹 `mf-20261124-drain-v20`，Python v21 改动不改指纹），
+198s 分段录制（跨 170s 切段阈值）停止后报 `同源合成失败：MF worker 调用超时
+（60s 未返回）`，且成片丢失。这是超时点**第 5 次转移**
+（drain→write15s→finalize60s→write30s→finalize60s），文案已从"写入 H264 流失败"
+变为"同源合成失败"——证明 v21 的 write_video 降级生效，但病根未除。
+
+**根因（代码链 + 时间线双重确认）**：
+1. 录制跨过 native `SEGMENT_SECONDS_=170`，`_read_loop` 显式调 `session_rotate`
+   → worker 线程执行 `do_rotate()`（Finalize+MoveFile+重建 SinkWriter/AAC MFT，
+   慢盘/EDR 下数十秒），占住单 FIFO worker。
+2. 这期间音频排空定时器每 200ms 投递一次 `session_drain_audio`（cancelable=10s）。
+   这些 drain 的"取消"只在各自 `call()` 超时后才打 cancelled；切段结束时队尾仍有
+   一批**未超时、会真正执行**的 drain 排在 finalize 前面，逐个同步 AAC 编码，
+   把 finalize 顶过 60s → 报"同源合成失败"。
+3. **产物丢失链**：finalize task 非 cancelable、超时后仍留在 worker 队列里、随后会
+   执行并把 `.tmp.mp4` 改名为 `.mp4` 落盘；但 Python 侧已放弃等待、拿不到 `out`
+   buffer 里的回传路径（paths=[]），`_publish_to_save_dir([])` 什么都不搬，随后
+   `_drop_work_dir()` 弃引用 → 成片烂在 TEMP、下次 sweep 删掉。用户看到"失败+无文件"。
+
+**修复（v22，全部 Python 编排层，native 不改）**：
+- **`MFWorker.call` 把 `cancelable` 存进 done**，新增 `drop_queued_cancelable()`：
+  收尾前把队列里尚未出队的 cancelable drain 一次性标 cancelled + set event，
+  worker 出队跳过、等待方立即返回，finalize 得以排到队首立即执行。音频完整性不受
+  影响——finalize 内部 `drain_audio()` 有界排空 audio_q_ 写入 writer（v19 保证）。
+  这是针对"重量操作与高频 drain 共用单队列"这一系统性病根的结构性处理，不再调超时。
+- **`MFNative.drop_queued_drains()` / `worker_barrier(timeout)`** 两个便捷封装，
+  对老 worker / 测试替身降级为 0 / False，向后兼容。
+- **`MFCaptureSession.stop()` 收尾重构**：finalize 前先 `drop_queued_drains()`；
+  finalize 区分"worker 调用超时"与真 native 错误——超时时投递屏障等队列里的
+  finalize task 真正跑完，再用 `_recover_published_from_workdir()` 扫描工作目录
+  捞回已原子发布的正式 `.mp4`（排除 `.tmp.mp4` 半成品），按正常产物搬运；捞不到
+  则如实报"超时未捞回成片"，绝不静默报成功。真 native 错误仍照旧上报。
+- 澄清：`session_destroy` 同样经 worker.call 投递，FIFO 保证排在 finalize 之后，
+  finalize 执行时 handle 有效，无 use-after-free；worker 真挂死时 destroy 自身超时
+  被 suppress 吞掉，不冒崩溃风险。
+
+**验证**：新增 4 项守卫（撤销排队 drain / stop 顺序 / 超时捞回成片 / 超时无产物如实报错），
+专项 45 passed；pyflakes 干净、全量 1755 passed / 1 skipped。预期：分段长录制收尾不再
+顶 60s 超时，偶发超时也不再丢成片。真机确认包为 release 新构建（Python 改动随 exe 打包，
+指纹仍 v20 不变）。
