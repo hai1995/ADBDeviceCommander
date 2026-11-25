@@ -1040,3 +1040,112 @@ def test_finalize_timeout_without_artifact_reports_error(monkeypatch, tmp_path):
     paths, err = out["s1"]
     assert paths == [], "无成片时不应报产物"
     assert "超时" in err and "未捞回" in err, f"须如实上报超时无产物，实际: {err!r}"
+
+
+# -------------------- screenrecord 180s 续流（长录制不丢后段） ------------
+
+class _ExitProc:
+    """模拟 screenrecord：流读到 EOF 后经 wait() 确认进程退出（180s 到期）。
+
+    poll() 只在 wait() 被调用后才返回退出码——对齐生产代码"先 wait(timeout=2)
+    再 poll()"的判定顺序。这样首帧等待阶段 poll() 恒 None（进程仍在运行），
+    不会被 start() 误判为秒退。
+    """
+
+    def __init__(self, chunks, exit_code=0):
+        import io
+        self.stdout = io.BytesIO(b"".join(chunks))
+        self.stderr = io.BytesIO(b"")
+        self._exit_code = exit_code
+        self._exited = False
+
+    def poll(self):
+        return self._exit_code if self._exited else None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        self._exited = True
+        return self._exit_code
+
+    def kill(self):
+        pass
+
+
+def test_h264_cmd_has_no_time_limit(monkeypatch):
+    """screenrecord 必须走 180s 硬上限+续流，而非 --time-limit 自停。
+
+    h264_cmd 若加 --time-limit，进程到点自停但 _read_loop 不续流，长录制会
+    在后半段丢画面（真机录 5/8 分钟只剩 p1 的根因）。这里锁定命令形态，
+    防止有人误加 time-limit 以为能"自动分段"。
+    """
+    cmd = mcs.h264_cmd("adb", "s1")
+    assert "--time-limit" not in cmd, "不得用 --time-limit 代替续流机制"
+    assert "--output-format=h264" in cmd
+
+
+def test_read_loop_restarts_on_stream_eof(monkeypatch, tmp_path):
+    """[长录制续流回归] 流读到 EOF 且进程确实退出时，须重拉 screenrecord
+    继续喂同一个 native session，不得 break 丢弃后续数据。"""
+    import threading
+    nal = b"\x00\x00\x01\x65" + b"\xaa" * 16
+    spawned = {"n": 0}
+    second_started = threading.Event()
+
+    def fake_popen(cmd, **kw):
+        spawned["n"] += 1
+        if spawned["n"] == 1:
+            return _ExitProc([nal])          # 第一段：读完即"进程退出"
+        second_started.set()                 # 第二段被拉起 = 续流发生
+        return FakeProc([nal])               # FakeProc.poll() 恒 None → 读完不再续流
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    fake = FakeNative(available=True)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    # 等读线程消费完两段（第二段 NAL 写入后 poll() None → 自然结束）
+    for _ in range(100):
+        if sess._read_done.is_set() and spawned["n"] >= 2:
+            break
+        import time
+        time.sleep(0.02)
+    assert second_started.is_set(), "进程退出后须重拉 screenrecord 续流"
+    assert spawned["n"] >= 2, f"应拉起至少两次进程，实际 {spawned['n']}"
+    writes = [c for c in fake.calls if c[0] == "write_video"]
+    assert len(writes) >= 2, f"两段 NAL 都应写入 native，实际 {len(writes)} 次"
+    # 续流统计可见
+    assert sess._stats.get("restarts", 0) >= 1, "续流次数应记录到 stats"
+    svc.stop_all()
+
+
+def test_restart_cap_prevents_endless_respawn(monkeypatch, tmp_path):
+    """[长录制续流回归] 设备反复秒退时长录制不能无限重拉：须按上限停止并
+    明确报错，而不是静默空转。"""
+    spawned = {"n": 0}
+    nal = b"\x00\x00\x01\x65" + b"\xaa" * 16
+
+    def fake_popen(cmd, **kw):
+        spawned["n"] += 1
+        if spawned["n"] == 1:
+            return _ExitProc([nal])    # 首段有数据：start() 首帧成功
+        return _ExitProc([])           # 后续段秒退（EOF 且 poll 非 None）
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mcs, "MF_RESTART_MAX", 2)
+    fake = FakeNative(available=True)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    for _ in range(200):
+        if sess._read_done.is_set():
+            break
+        import time
+        time.sleep(0.02)
+    # 首段 1 次 + 续流最多 MF_RESTART_MAX 次，须停手不能无限重拉
+    assert spawned["n"] <= 1 + 2, f"续流须受上限约束，实际拉起 {spawned['n']} 次"
+    assert sess._error, "续流耗尽上限须记录错误，不得静默成功"
+    svc.stop_all()

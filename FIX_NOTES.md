@@ -8367,3 +8367,40 @@ pyflakes + ruff + 全量须通过。预期：长录制分段不再误报"写入 
 显示 v23 即可确认整包含 v21/v22/v23 全部修复。
 
 **验证**：全量测试 + pyflakes 干净；真机日志指纹应为 `mf-20261124-drain-v23`。
+
+## 长录制只有 p1 + 收尾 135s 根治（v24，screenrecord 续流）
+
+**现象**：两次真机长录制（312s / 492s，日志指纹 v20）均只产出第一段
+`record_xxx_p1.mp4`，后段画面全丢，收尾稳定约 135s（10:36:04→10:38:19、
+10:49:03→10:51:19）。中间一次还有设备短暂失联重连。
+
+**根因**：这是 native 方案落地起就存在的结构性缺陷，与 v20~v23 的超时修复无关。
+- `screenrecord` 有 **180s 硬上限**（`core/constants.REC_MAX_S=180`），`h264_cmd`
+  未传 `--time-limit`，到点设备端进程自行退出、stdout EOF。
+- 投屏路径 `mirror_service._feed_loop` 早已实现"adb 退出→`_spawn_adb` 重开"的
+  续流，但同源录制路径 `mf_capture_service._read_loop` 读到空就 `break`，
+  **没有任何续流机制**——视频流在 180s 断掉，后面 132s/312s 的画面全部丢失。
+- 更隐蔽：切段 `should_rotate()` 在 native `write_video()` 末尾调用，视频流断后
+  再无 write_video → 永不切段 → 只有 p1；而 `stop()` 的 `_join_threads()` 等一个
+  已断流会话的读线程，叠加 finalize 拖满 `READ_DONE_BUDGET_S=130s` → 收尾 ~135s。
+- 之前 v20~v22 一直在"超时点转移"上打转（调超时/撤销 drain/捞回成片），从没触及
+  "流断了不续"这个源头，所以每次都复现。
+
+**修复**（纯 Python 编排层，native 不改、指纹仍 v23）：
+- `MFCaptureSession._spawn_proc()`：把 Popen + stderr 消费者抽成独立方法，供
+  start 与续流复用；每次新建 stderr 线程绑定新进程。
+- `_read_loop()` 改成双层循环：内层读当前进程流；读到 EOF 时先 `wait(timeout=2)`
+  给本地 adb 客户端退出时间，再以 `poll()` 非 None 判定"进程确实退出"——未 stop
+  且未超上限则重拉 screenrecord 继续喂**同一个** native session（handle 不变、
+  SinkWriter 不重建，H264 按到达时刻打 QPC 戳故续流不造成时间轴跳变）。新进程的
+  SPS/PPS 由 `write_video` 缓存、首个 IDR 正常写入，画面短暂卡一下即恢复。
+- `MF_RESTART_MAX=20`（≈57min，对齐 REC_MAX_SEGMENTS）：设备反复秒退时长录制
+  不无限空转，耗尽上限明确报错。
+- 关键兼容：`poll()` 判据让测试替身 `FakeProc.poll()` 恒 None 时不续流，既有测试
+  行为不变；`h264_cmd` 加守卫禁止用 `--time-limit` 代替续流（那会导致 180s 自停
+  却无人续接，正是本 bug）。
+
+**验证**：新增 3 项回归（禁 time-limit / 到期续流喂同一会话 / 秒退续流上限），
+专项 48 passed；pyflakes + ruff 干净，全量 1758 passed / 1 skipped。真机预期：
+录 5min/8min 不再只留 p1，中间画面短暂卡顿后继续，收尾不再拖 135s。指纹 v23 随
+exe 打包不改 native；请用含本修复的新 release 包验证（日志指纹仍是 v23）。

@@ -40,6 +40,12 @@ AUDIO_DRAIN_INTERVAL_S = 0.2
 # 正常切段只需几秒，这个上界仅在 worker 真挂死的病态场景才会用满，避免界面
 # 无限期卡住；届时读线程是 daemon，进程退出不受阻。
 READ_DONE_BUDGET_S = 130.0
+# [长录制续流根治] screenrecord 有 180s 硬上限（core.constants.REC_MAX_S），
+# 到点自行退出、视频流断。投屏路径 mirror_service 早已实现续流，但同源录制
+# 的 _read_loop 读到空就 break —— 于是 3min+ 录制后面全部丢画面、切段由
+# write_video 驱动也随之中止（只剩 p1）。这里给续流次数设上限（约 20×170s
+# ≈ 57min，与 REC_MAX_SEGMENTS 对齐），防设备端反复秒退时无限空转。
+MF_RESTART_MAX = 20
 # [修复-长录制收尾·v17] 排空连续失败次数只作诊断统计（写入 stats），不再是
 # 停止排空的阈值。旧实现达阈值就 break + 记 _error，长录制下把 worker 繁忙
 # 造成的偶发 drain 超时误判成 worker 死亡，永久关闭排空并误报收尾失败。
@@ -105,6 +111,26 @@ class MFCaptureSession:
         self._stats = {"bytes": 0, "first_ok": False}
         self._tmp_first = ""
 
+    def _spawn_proc(self):
+        """拉起一条 adb exec-out screenrecord H264 进程 + stderr 消费者。
+
+        [长录制续流根治] 抽成独立方法，供 start() 首次启动与 _read_loop 续流
+        复用。H264 是二进制流，stdout 必须保持 bytes 模式（不能用 adb_popen_
+        kwargs 的 text=True，会按 UTF-8 解码损坏码流）；stderr 是文本，由
+        _drain_stderr 按 utf-8/replace 解码，且必须有消费者，否则 64KB 写满
+        会把设备端阻塞。每次调用都新建 stderr 线程，绑定新进程的 stderr。
+        """
+        proc = subprocess.Popen(
+            h264_cmd(self.adb, self.serial, self.size),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, creationflags=no_window_flags())
+        self._proc = proc
+        self._err_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True,
+            name=f"mf-h264-err-{safe_name(self.serial)}")
+        self._err_thread.start()
+        return proc
+
     # ---- 启动 ----------------------------------------------------------
     def start(self):
         """返回 (ok, 错误原因)。同步等首字节，秒退立即报错。"""
@@ -118,23 +144,10 @@ class MFCaptureSession:
                 native_dir, self.stem, self.width, self.height,
                 FPS_NUM, FPS_DEN, arate, abits, ach)
         try:
-            # H264 是**二进制流**：绝不能用 adb_popen_kwargs()（它带 text=True/
-            # encoding=utf-8，会把码流按 UTF-8 解码并损坏数据）。这里 stdout 保持
-            # bytes 模式，只借用 no_window_flags 隐藏黑窗。stderr 是文本，由
-            # _drain_stderr 自行按 utf-8/replace 解码。
-            proc = subprocess.Popen(
-                h264_cmd(self.adb, self.serial, self.size),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL, creationflags=no_window_flags())
+            proc = self._spawn_proc()
         except Exception as ex:  # noqa: BLE001  启动失败转成可读原因
             self._teardown_native(discard=True)
             return False, f"无法启动 screenrecord H264 流：{ex}"
-        self._proc = proc
-        # stderr 必须有消费者，否则 64KB 写满会把设备端阻塞。
-        self._err_thread = threading.Thread(
-            target=self._drain_stderr, daemon=True,
-            name=f"mf-h264-err-{safe_name(self.serial)}")
-        self._err_thread.start()
         self._read_thread = threading.Thread(
             target=self._read_loop, daemon=True,
             name=f"mf-h264-read-{safe_name(self.serial)}")
@@ -192,56 +205,98 @@ class MFCaptureSession:
 
     def _read_loop(self):
         nal_buf = __import__("backend.mf_native", fromlist=["NalBuffer"]).NalBuffer()
-        stream = self._proc.stdout if self._proc is not None else None
-        if stream is None:
-            return
+        restarts = 0
         try:
+            # [长录制续流根治] 外层循环：screenrecord 有 180s 硬上限，到点进程
+            # 自行退出、stdout EOF。旧实现读到空就 break，视频流断后再无
+            # write_video → 切段停止 → 只留下第一段（真机录 5min/8min 只剩 p1，
+            # 收尾还拖满 _join_threads 的 130s 预算）。与投屏 mirror_service.
+            # _feed_loop 对齐：检测到进程确实退出且未 stop，就重拉一条
+            # screenrecord 继续喂**同一个** native session（handle 不变、
+            # SinkWriter 不重建），画面短暂卡一下即恢复，切段/音频都不受影响。
             while not self._stop.is_set():
-                # [修复-首帧超时] 必须用 read1，绝不能退回 read：
-                #   BufferedReader.read(64KB) 在管道上会阻塞到「凑满 64KB 或 EOF」。
-                #   车机静止/低码率画面下 H264 输出可能只有几 KB/s，6s 都攒不满，
-                #   _first_data 因此永不置位，start() 卡满超时后误报「screenrecord
-                #   未在 6s 内输出 H264 数据（退出码 None）」——其实进程还活着、
-                #   数据也在慢慢到达，只是被 read 憋在管道缓冲里。
-                #   read1 有多少读多少，首字节到达即置位首帧事件，慢速流也能秒过
-                #   判定。投屏路径 mirror_service._feed_loop 同样用 read1，对齐。
-                chunk = stream.read1(READ_CHUNK)
-                if not chunk:
+                proc = self._proc
+                stream = proc.stdout if proc is not None else None
+                if stream is None:
                     break
-                if not self._first_data.is_set():
-                    self._first_data.set()
-                # 按 NAL 边界切块，避免跨块 NAL 被 native 截断。
-                for nal in nal_buf.feed(chunk):
-                    if self._stop.is_set():
-                        break
-                    # [修复] native 写入失败（overflow / WriteSample 失败）必须
-                    # 记录，不能被 suppress 吞成"假成功"——否则 finalize 出一个
-                    # 缺帧/无音视频还向用户报成功。首错为准，并置停止标志。
-                    try:
-                        need_rotate = self.native.session_write_video(self._handle, nal)
-                        self._stats["bytes"] += len(nal)
-                        # [收尾慢根治 v20] native 到 170s 分段阈值只回"请求"信号，
-                        # 重量切段（Finalize+刷盘+重建）在这里用独立 120s 超时显式
-                        # 执行，不再挤占 write_video 的 30s 预算。老 DLL 不会返回
-                        # True（其内部仍同步切段），此分支自动跳过，向后兼容。
-                        if need_rotate:
-                            self.native.session_rotate(self._handle)
-                            self._stats["rotations"] = self._stats.get("rotations", 0) + 1
-                    except Exception as ex:  # noqa: BLE001
-                        # [收尾慢根治 v21] 区分"真 native 错误"与"worker 调用超时"：
-                        # 真错误（overflow / WriteSample 失败）必须上报，否则残缺文件
-                        # 假成功；但"MF worker 调用超时"是单 worker 队列被重量操作
-                        # （切段 rotate / finalize）挤占导致的排队等待——该 video task
-                        # 非 cancelable、最终仍会在 worker 里执行，数据不丢。旧实现把它
-                        # 当致命错误 → 报"写入 H264 流失败"并提前终止录制，是 v17~v20
-                        # 超时点反复转移的根源。超时只记诊断统计，不写 _error、不 break。
-                        if "MF worker 调用超时" in str(ex):
-                            self._stats["write_timeout_streak"] = \
-                                self._stats.get("write_timeout_streak", 0) + 1
-                        else:
-                            self._error = self._error or f"写入 H264 流失败：{ex}"
-                            self._stop.set()
+                try:
+                    while not self._stop.is_set():
+                        # [修复-首帧超时] 必须用 read1，绝不能退回 read：
+                        #   BufferedReader.read(64KB) 在管道上会阻塞到「凑满 64KB
+                        #   或 EOF」。车机静止/低码率画面下 H264 可能只有几 KB/s，
+                        #   read 会憋住首帧导致 start 误报超时；read1 有多少读多少。
+                        #   投屏 mirror_service._feed_loop 同样用 read1，对齐。
+                        chunk = stream.read1(READ_CHUNK)
+                        if not chunk:
                             break
+                        if not self._first_data.is_set():
+                            self._first_data.set()
+                        # 按 NAL 边界切块，避免跨块 NAL 被 native 截断。
+                        for nal in nal_buf.feed(chunk):
+                            if self._stop.is_set():
+                                break
+                            # [修复] native 写入失败（overflow / WriteSample 失败）
+                            # 必须记录，不能被 suppress 吞成"假成功"。首错为准。
+                            try:
+                                need_rotate = self.native.session_write_video(
+                                    self._handle, nal)
+                                self._stats["bytes"] += len(nal)
+                                # [收尾慢根治 v20] native 到 170s 只回"请求"信号，
+                                # 重量切段用独立 120s 超时显式执行。老 DLL 不返回
+                                # True（内部同步切段），此分支自动跳过，向后兼容。
+                                if need_rotate:
+                                    self.native.session_rotate(self._handle)
+                                    self._stats["rotations"] = \
+                                        self._stats.get("rotations", 0) + 1
+                            except Exception as ex:  # noqa: BLE001
+                                # [收尾慢根治 v21] 真 native 错误才上报；"MF worker
+                                # 调用超时"是单 worker 被重量操作挤占的排队等待，
+                                # task 非 cancelable、最终仍执行、数据不丢，只记统计。
+                                if "MF worker 调用超时" in str(ex):
+                                    self._stats["write_timeout_streak"] = \
+                                        self._stats.get("write_timeout_streak", 0) + 1
+                                else:
+                                    self._error = self._error or f"写入 H264 流失败：{ex}"
+                                    self._stop.set()
+                                    break
+                finally:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+
+                if self._stop.is_set():
+                    break
+
+                # 流读到 EOF。先 wait 给本地 adb 客户端一点时间退出（设备端
+                # screenrecord 先退、adb exec-out 后退，mirror 留 2s 余量同理）；
+                # 之后 poll() 非 None 才判定"进程确实退出→续流"。测试替身
+                # FakeProc.poll() 恒 None、wait 立即返回，故不续流，保持既有
+                # 测试"读空即静默结束"的行为不变。
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=2)
+                if proc.poll() is None:
+                    # 进程仍活着却 EOF：非正常到期的异常中断，按旧行为退出。
+                    break
+
+                restarts += 1
+                if restarts > MF_RESTART_MAX:
+                    self._error = self._error or (
+                        f"screenrecord 已续流 {MF_RESTART_MAX} 次后仍中断，停止录制")
+                    break
+                # 清理旧进程残留句柄（进程已退出，只 close 流 + 回收 wait）。
+                for name in ("stdout", "stderr"):
+                    with contextlib.suppress(Exception):
+                        s = getattr(proc, name, None)
+                        if s is not None:
+                            s.close()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=2)
+                # 重拉新进程，继续喂同一个 native session（handle 不变）。
+                try:
+                    self._spawn_proc()
+                    self._stats["restarts"] = restarts
+                except Exception as ex:  # noqa: BLE001
+                    self._error = self._error or f"screenrecord 续流失败：{ex}"
+                    break
         except Exception as ex:  # noqa: BLE001  读线程异常记录原因，不吞
             self._error = self._error or f"读取 H264 流失败：{ex}"
         finally:
