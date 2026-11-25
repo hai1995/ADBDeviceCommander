@@ -71,7 +71,10 @@
 // 30s 临界路径移出，改由 Python 收到 ADC_ROTATE_PENDING 后显式调用 adc_session_rotate
 // （独立长超时）；close_writer 去掉 WRITE_THROUGH 强制刷盘。根治 3min+ 长录制
 // 跨 170s 分段时 write_video 超时（真机"写入 H264 流失败 30s"元凶）。
-static const char* const kBuildId = "mf-20261124-drain-v20";
+// v23: native 语义未动（v21/v22 均为纯 Python 编排层修复），仅升指纹——让真机
+// 日志能确认已换入含 v21（write_video 超时降级）+ v22（收尾撤销排队 drain +
+// 超时捞回成片）修复的整包，避免拿旧 exe 反复验证。纯升指纹的先例见 v17。
+static const char* const kBuildId = "mf-20261124-drain-v23";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

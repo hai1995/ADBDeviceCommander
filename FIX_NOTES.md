@@ -8342,5 +8342,28 @@ pyflakes + ruff + 全量须通过。预期：长录制分段不再误报"写入 
 
 **验证**：新增 4 项守卫（撤销排队 drain / stop 顺序 / 超时捞回成片 / 超时无产物如实报错），
 专项 45 passed；pyflakes 干净、全量 1755 passed / 1 skipped。预期：分段长录制收尾不再
-顶 60s 超时，偶发超时也不再丢成片。真机确认包为 release 新构建（Python 改动随 exe 打包，
-指纹仍 v20 不变）。
+顶 60s 超时，偶发超时也不再丢成片。
+
+## 新构建指纹仍显示 v20 —— 漏升指纹导致无法确认真机整包（v23）
+
+**现象**：v21 / v22 是真机反馈后落地的两轮修复，但用户发现新构建包的启动日志仍打印
+`native 构建 mf-20261124-drain-v20`，怀疑 CI 没有把新代码编进产物。
+
+**结论：CI 流程本身正确**。build.yml / release.yml 每次 push/tag 都重新执行
+`cmake -S native -B native/build && cmake --build && cmake --install`，随后用
+`tools/check_native_dll.py` 比对源码 `kBuildId` 与 DLL 内 `adc_build_id()` 导出值。
+源码常量停在 v20 → 编出 DLL 指纹 v20 → 闸门比对一致 → 正常放行，全程符合预期。
+所以指纹是 v20 **不是 CI 编译出错，而是源码指纹从 v20 起就没升过**。
+
+**根因（上一轮判断失误）**：v21 / v22 都是纯 Python 编排层改动，当时按 README
+"改 C++ 语义才升指纹"的字面意思没有升指纹。但本项目指纹的真实用途（README「诊断
+三件套」、v17 先例——v17 也只升指纹未改 native 逻辑）是**让真机确认整包已换入本轮
+修复**。改了影响录制收尾的行为却不升指纹，用户拿到新包也无法区分新旧，正是本次困惑
+的来源。
+
+**修复**：仅升指纹 `mf-20261124-drain-v20` → `mf-20261124-drain-v23`（native 逻辑
+未动，不碰 C++ 语义），同步守卫测试 `test_build_id_v23` 与 native/README.md。CI 下次
+重新编译 DLL 即带 v23 指纹，`check_native_dll.py` 校验源码/DLL 一致后放行。真机日志
+显示 v23 即可确认整包含 v21/v22/v23 全部修复。
+
+**验证**：全量测试 + pyflakes 干净；真机日志指纹应为 `mf-20261124-drain-v23`。
