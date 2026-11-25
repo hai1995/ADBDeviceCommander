@@ -1219,3 +1219,156 @@ def test_single_file_false_keeps_rotate(monkeypatch, tmp_path):
 def test_single_file_default_is_true():
     """[v25 回归] 单文件完整录制默认为开。"""
     assert mcs.MF_SINGLE_FILE is True
+
+
+# -------------------- v26 录制链路缺陷回归 -------------------------------
+
+def test_restart_does_not_concat_stale_nal_with_new_process(monkeypatch, tmp_path):
+    """[v26 回归] 续流时旧进程尾部 NAL 残段不得与新进程首帧粘成畸形帧。
+
+    nal_buf 只吐"遇到下一起始码"的完整 NAL，进程 EOF 时最后一条仍留在缓冲。
+    旧实现不重建缓冲，新进程数据续写后残段会粘到新 SPS 前（实测畸形帧）。
+    修复：续流前把旧残段作为尾帧 flush 写入，再重建缓冲。
+    """
+    import threading
+    first_tail = b"\x00\x00\x01\x65" + b"\xaa" * 8   # 旧进程尾残段（IDR）
+    new_first = b"\x00\x00\x01\x67\x42\x00\x1e"       # 新进程首帧（SPS）
+    spawned = {"n": 0}
+    second_started = threading.Event()
+
+    class FirstProc:
+        def __init__(self):
+            import io
+            self.stdout = io.BytesIO(first_tail)
+            self.stderr = io.BytesIO(b"")
+            self._exited = False
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            self._exited = True   # 读空即视为进程退出，触发续流
+            return 0
+
+        def kill(self):
+            pass
+
+    class SecondProc:
+        def __init__(self):
+            import io
+            self.stdout = io.BytesIO(new_first)
+            self.stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return None   # 读完不再续流
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return None
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kw):
+        spawned["n"] += 1
+        if spawned["n"] == 1:
+            return FirstProc()
+        second_started.set()
+        return SecondProc()
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+
+    class RecordingNative(FakeNative):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.payloads = []
+
+        def session_write_video(self, h, data):
+            super().session_write_video(h, data)
+            self.payloads.append(bytes(data))
+
+    fake = RecordingNative(available=True)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    import time
+    for _ in range(100):
+        if sess._read_done.is_set() and second_started.is_set():
+            break
+        time.sleep(0.02)
+    # 旧残段与新首帧必须分两次写入，不得粘成 65...67... 的畸形 NAL
+    payloads = fake.payloads
+    assert any(first_tail[3:] in p for p in payloads), "旧残段应作为尾帧写入"
+    assert any(new_first[3:] in p for p in payloads), "新进程首帧应单独写入"
+    for p in payloads:
+        assert not (b"\xaa" in p and b"\x42\x00\x1e" in p), \
+            f"旧残段与新 SPS 粘成畸形帧：{p.hex()}"
+    svc.stop_all()
+
+
+def test_multidevice_recover_only_own_stem(monkeypatch, tmp_path):
+    """[v26 回归] 多设备共享 work_dir，超时捞回只取本 stem 的成片。
+
+    旧实现按 *.mp4 全捞，A finalize 超时会把 B 的成片也当 A 的产物发布。
+    """
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    # 两台设备各发布一段，stem 不同
+    (work / "record_S1_20261125_p1.mp4").write_bytes(b"a")
+    (work / "record_S2_20261125_p1.mp4").write_bytes(b"b")
+
+    def timeout_finalize(h):
+        raise mn.MFNativeError("MF worker 调用超时（60s 未返回）")
+
+    fake.session_finalize = timeout_finalize
+    fake.worker_barrier = lambda timeout=30.0: True
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    # 两台设备同时启动（multi_device=True 生效）
+    ok, _, _ = svc.start_all(
+        ["S1", "S2"], str(tmp_path / "save"),
+        {"S1": "record_S1_20261125", "S2": "record_S2_20261125"},
+        {}, None)
+    assert ok is True
+    sess1 = svc._sessions["S1"]
+    sess1.work_dir = str(work)
+    # 直接验证兜底捞回只返回本 stem 的成片
+    recovered = sess1._recover_published_from_workdir()
+    assert len(recovered) == 1, f"只应捞回本设备成片，实际 {recovered}"
+    assert recovered[0].endswith("record_S1_20261125_p1.mp4"), recovered
+    svc.cancel_all()
+
+
+def test_restart_checks_stop_in_window(monkeypatch, tmp_path):
+    """[v26 回归] stop 在续流窗口置位时，不得拉起无人回收的孤儿进程。
+
+    285 行 stop 检查在 proc.wait(2s) 之前，旧实现 wait 返回后不复查 stop 就
+    _spawn_proc，新进程在 _close_proc 之后拉起成为孤儿（占设备屏幕）。修复
+    用两道闸：spawn 前检查 stop；spawn 后复查 _proc 是否仍指向新进程，是则关闭。
+
+    这里用源码守卫锁定两道闸都存在，避免重构时无意删除（行为竞态难以在单测
+    中稳定复现——需精确卡在 2s wait 窗口内）。
+    """
+    import inspect
+    src = inspect.getsource(mcs.MFCaptureSession._read_loop)
+    # spawn 前必须有一次 stop 检查（在 _spawn_proc 调用之前的代码段里）
+    spawn_pos = src.find("self._spawn_proc()")
+    assert spawn_pos > 0, "续流须调用 _spawn_proc"
+    before = src[:spawn_pos]
+    assert "if self._stop.is_set():" in before, \
+        "续流 _spawn_proc 前须检查 stop，防止停止窗口拉起孤儿进程"
+    # spawn 后须复查新进程是否仍被引用（竞态兜底关闭）
+    after = src[spawn_pos:]
+    assert "current is new_proc" in after, \
+        "续流 _spawn_proc 后须复查 _proc 引用，竞态下主动关闭新进程"

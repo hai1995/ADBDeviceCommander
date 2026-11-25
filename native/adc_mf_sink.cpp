@@ -77,7 +77,10 @@
 // v24: 纯 Python 编排层续流修复（screenrecord 180s 到期自动续接）。
 // v25: native 语义仍未动 —— 单文件完整录制由 Python 编排层忽略切段请求实现，
 // 仅升指纹让真机确认整包含 v24（续流）+ v25（不再切段、产出 1 个完整视频）。
-static const char* const kBuildId = "mf-20261124-drain-v25";
+// v26: native 语义仍未动 —— 三处纯 Python 编排层录制缺陷修复：续流 NAL 残段
+// 污染、多设备共享 work_dir 兜底捞回串味、续流窗口与 stop 竞态孤儿进程。仅升
+// 指纹让真机确认整包含 v24~v26 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v26";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

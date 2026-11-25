@@ -614,10 +614,10 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v25():
-    """native 指纹升到 v25，真机据此确认整包(含 v24 续流 + v25 单文件录制)已生效。"""
+def test_build_id_v26():
+    """native 指纹升到 v26，真机据此确认整包含 v24 续流 + v25 单文件 + v26 三处录制缺陷修复。"""
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v25"' in src, "native 指纹须为 v25"
+    assert 'kBuildId = "mf-20261124-drain-v26"' in src, "native 指纹须为 v26"
 
 
 def test_rotate_is_pulled_out_of_write_video():

@@ -88,6 +88,9 @@ class MFCaptureSession:
         # work_dir=None 时退回 save_dir（保留旧行为，便于兼容/调试）。
         self.work_dir = work_dir
         self.stem = stem
+        # [串味根治 v26] 仅多设备共享 work_dir 时才按 stem 严格过滤兜底捞回。
+        # 单设备（含测试替身）work_dir 里只有本会话产物，保持原行为不过滤。
+        self._strict_recover = False
         self.width = int(width)
         self.height = int(height)
         self.mic_fmt = mic_fmt
@@ -301,6 +304,13 @@ class MFCaptureSession:
                     self._error = self._error or (
                         f"screenrecord 已续流 {MF_RESTART_MAX} 次后仍中断，停止录制")
                     break
+                # [竞态根治 v26] stop 可能恰在上面 proc.wait(timeout=2) 期间置位：
+                # 285 行的 stop 检查在 wait 之前，wait 返回后到 spawn 之间没有检查。
+                # 若此时继续续流，新进程会在 stop 的 _close_proc 之后才拉起，成为
+                # 无人 terminate 的孤儿——设备屏幕被占、下次录制起不来。spawn 前
+                # 先检查一次，spawn 后再复查（见下）。
+                if self._stop.is_set():
+                    break
                 # 清理旧进程残留句柄（进程已退出，只 close 流 + 回收 wait）。
                 for name in ("stdout", "stderr"):
                     with contextlib.suppress(Exception):
@@ -311,8 +321,32 @@ class MFCaptureSession:
                     proc.wait(timeout=2)
                 # 重拉新进程，继续喂同一个 native session（handle 不变）。
                 try:
-                    self._spawn_proc()
+                    new_proc = self._spawn_proc()
                     self._stats["restarts"] = restarts
+                    # [竞态根治 v26] spawn 期间 stop 若恰好置位，_close_proc 可能
+                    # 已先于 new_proc 赋值执行（terminate 旧进程并把 _proc 置空），
+                    # 那新进程就无人关闭。这里复查：若 _proc 仍指向刚拉起的进程，
+                    # 说明 _close_proc 没覆盖到它，主动关闭；若已被置空/替换，说明
+                    # stop 已处理，不重复。两种情况都不留孤儿进程。
+                    if self._stop.is_set():
+                        with self._lock:
+                            current = self._proc
+                        if current is new_proc:
+                            self._close_proc()
+                        break
+                    # [续流残段根治 v26] nal_buf 只吐"遇到下一起始码"的完整 NAL，
+                    # 上一段进程 EOF 时末尾那条仍留在缓冲里。若直接让新进程的
+                    # 数据续写进去，旧残段会与新进程首个 NAL 粘成畸形帧（实测
+                    # 残段 65aabbcc 粘到新 SPS 前）。正确做法：先把旧残段作为本段
+                    # 尾帧 flush 写入 native（不丢帧），再重建缓冲让新进程从关键帧
+                    # 干净开始。仅在没有错误时才写尾帧，与正常收尾语义一致。
+                    if not self._error:
+                        for tail in nal_buf.flush():
+                            with contextlib.suppress(Exception):
+                                self.native.session_write_video(self._handle, tail)
+                                self._stats["bytes"] += len(tail)
+                    nal_buf = __import__(
+                        "backend.mf_native", fromlist=["NalBuffer"]).NalBuffer()
                 except Exception as ex:  # noqa: BLE001
                     self._error = self._error or f"screenrecord 续流失败：{ex}"
                     break
@@ -433,9 +467,21 @@ class MFCaptureSession:
             return []
         try:
             import glob
+            # [串味根治 v26] 所有设备会话共享一个 work_dir（start_all 里共建），
+            # 各设备靠 stem 前缀隔离。若按 *.mp4 全捞，设备 A finalize 超时时会把
+            # 设备 B 的成片也当自己的产物发布（重复/错配给用户）。只捞本会话 stem
+            # 开头的正式 .mp4——native 命名规则是 {stem}_pN.mp4。
             pat = os.path.join(long_path(self.work_dir), "*.mp4")
-            return sorted(p for p in glob.glob(pat)
-                          if not p.lower().endswith(".tmp.mp4"))
+            all_published = [p for p in glob.glob(pat)
+                             if not p.lower().endswith(".tmp.mp4")]
+            if not getattr(self, "_strict_recover", False):
+                return sorted(all_published)
+            # 多设备共享 work_dir：native 文件名是 {stem}_pN.mp4，stem 用原生值
+            # （controller 传入时已净化），必须与之一致、不可二次净化，否则前缀
+            # 失配反而捞不到成片。只保留本会话 stem 的成片，杜绝串味。
+            prefix = self.stem + "_p"
+            return sorted(p for p in all_published
+                          if os.path.basename(p).startswith(prefix))
         except Exception:  # noqa: BLE001  扫描失败不影响主流程
             return []
 
@@ -657,6 +703,9 @@ class MFCaptureService:
         # 所有设备会话共享一个目录（stem 不同天然隔离）；收尾不删，留待下次
         # 启动由 tmpfiles.sweep_workdirs 后台清理，让"点停止"瞬间零批量删除。
         self._work_dir = tempfile.mkdtemp(prefix=MF_WORKDIR_PREFIX)
+        # [串味根治 v26] 多设备共享同一 work_dir 时，兜底捞回必须按 stem 隔离，
+        # 否则 A 超时捞回会把 B 的成片当 A 的产物发布。
+        multi_device = len(serials) > 1
         started, first_err = {}, None
         for s in serials:
             stem = self._value(stems, s, f"record_{safe_name(s)}")
@@ -666,6 +715,7 @@ class MFCaptureService:
                 self.native, s, save_dir, stem, width, height,
                 mic_fmt=mic_fmt, adb=self.adb, size=size,
                 work_dir=self._work_dir)
+            session._strict_recover = multi_device
             ok, err = session.start()
             if ok:
                 started[s] = session
