@@ -197,13 +197,22 @@ class RecordMixin:
                 self.logcat_capture.stop(s, zip_on_stop=False)
         results = self.mf_capture.stop_all()   # {serial: ([路径], 错误)}
         files = []
+        # [真失败根治 v28] 视频成片与 logcat 等附带文件分开记：完成提示必须按
+        # 「有没有视频」说话，不能因为目录里还有个 logcat txt 就报「1 个文件
+        # 已保存」把成片丢失伪装成成功。err 也单独收集，供上层据实上报。
+        videos = []
+        errors = []
         for s, (paths, err) in results.items():
             if err:
+                errors.append(f"{s} {err}")
                 self._push_toast("warn", f"⚠ {s} 同源录制收尾提示：{err}")
             for p in paths or []:
                 if p and path_exists(p):
+                    videos.append(p)
                     files.append(p)
                     self._push_status("ok", f"✓ {s} 带声视频已保存: {p}")
+        sess["mf_videos"] = videos
+        sess["mf_errors"] = errors
         # logcat 文件一并进产物列表
         for p in (sess.get("logcat_captures") or {}).values():
             if p and path_exists(p):
@@ -732,6 +741,18 @@ class RecordMixin:
                 seg_tip = f"（{mp4_n:d} 段视频，未能合并）"
             else:
                 seg_tip = ""
+            # [真失败根治 v28] 同源录制（MF）一个视频成片都没落盘时，绝不能因为
+            # files 里还有 logcat 的 txt 就报「✓ 录屏已完成：1 个文件已保存」——
+            # 那 1 个文件是日志不是视频，用户据此以为录到了，去目录一看空的。
+            # 真机 12min 长录制 finalize 超时、成片烂在 TEMP 即此症状：收尾提示
+            # 只有一条尾帧超时 warn，完成提示却谎报成功。这里据实判失败。
+            if sess.get("mf") and mp4_n == 0:
+                errs = "; ".join(sess.get("mf_errors") or [])
+                reason = errs or "native 未产出视频成片（finalize 超时或合成失败）"
+                self._push_toast(
+                    "err", f"⚠ 录屏失败：未保存任何视频文件（{reason}）")
+                self._push_logcat_notes(sess)
+                return {"ok": False, "reason": "no_video", "error": reason}
             if zpath:
                 self._push_toast(
                     "ok", f"✓ 录屏已完成{seg_tip}，产物已打包: {zpath}")

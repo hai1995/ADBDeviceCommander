@@ -84,7 +84,13 @@
 // 的"MF worker 调用超时"误判为致命失败（应降级为非致命，与主循环一致）、停止时
 // 撤销排队 drain 太晚（提前到等读线程之前）。根治 12min 长录制"写入 H264 尾帧
 // 失败"假警告 + 收尾 160s+。仅升指纹让真机确认整包含 v24~v27 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v27";
+// v28: native 语义仍未动 —— 三处纯 Python 编排层"真成片丢失 + 谎报成功"修复：
+// ① finalize 超时后捞回屏障只用默认 30s（短于 finalize 的 60s 预算）→ 成片尚是
+//    .tmp.mp4 就被放弃、随后被 worker.stop() 丢弃烂在 TEMP，改为显式 90s；
+// ② "未捞回成片"致命错误被先前尾帧超时用 `err or ...` 短路掩盖，改为直接上抛；
+// ③ controller 无视频成片却因 files 里有 logcat txt 谎报"已完成：1 个文件"，改为
+//    据实报录屏失败并返回 ok=False。仅升指纹让真机确认整包含 v24~v28 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v28";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

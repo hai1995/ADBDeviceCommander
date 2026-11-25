@@ -40,6 +40,13 @@ AUDIO_DRAIN_INTERVAL_S = 0.2
 # 正常切段只需几秒，这个上界仅在 worker 真挂死的病态场景才会用满，避免界面
 # 无限期卡住；届时读线程是 daemon，进程退出不受阻。
 READ_DONE_BUDGET_S = 130.0
+# [真失败根治 v28] finalize 超时后，投递屏障等 finalize task 真正跑完并落盘的
+# 预算。必须 >= finalize 自身最坏耗时（mf_native.FINALIZE_CALL_TIMEOUT_S=60s，
+# 含 SinkWriter::Finalize 编码器 flush + 慢盘/EDR 下 MoveFile 改名），否则屏障
+# 先于 finalize 超时 → 捞回时成片还是 .tmp.mp4（被排除）→ 随后 worker.stop()
+# 把队列里未跑完的 finalize task 丢弃 → 成片永远烂在 TEMP。真机 12min 录制
+# 收尾 162s 却无文件即此病根。留 30s 余量取 90s。
+BARRIER_RECOVER_TIMEOUT_S = 90.0
 # [长录制续流根治] screenrecord 有 180s 硬上限（core.constants.REC_MAX_S），
 # 到点自行退出、视频流断。投屏路径 mirror_service 早已实现续流，但同源录制
 # 的 _read_loop 读到空就 break —— 于是 3min+ 录制后面全部丢画面、切段由
@@ -366,9 +373,11 @@ class MFCaptureSession:
                         # 是单 worker 被残留 drain / 重量操作挤占的排队等待；该
                         # write_video task 非 cancelable、仍在队列里最终执行，尾帧
                         # 数据不丢，finalize（FIFO 排在其后）能拿到完整数据。
-                        # 旧实现把超时记为致命 _error → 成片明明保存成功却弹
-                        # "写入 H264 尾帧失败"假警告（真机 12min 录制即此症状）。
-                        # 超时只记诊断统计、不写 _error；真 native 错误仍须上报。
+                        # [结论更正 v28] 上一轮曾据此断言"成片已保存、只是假警告"——
+                        # 这是误判：真机 12min 录制 finalize 同样超时且屏障(30s)先于
+                        # finalize(60s)放弃，成片烂在 TEMP 真的丢了。尾帧超时本身仍
+                        # 不应写成致命（否则掩盖真正失败），但"成片丢失"由 stop() 的
+                        # 未捞回成片错误据实上报，绝不静默成功。真 native 错误仍上报。
                         if "MF worker 调用超时" in str(ex):
                             self._stats["write_timeout_streak"] = \
                                 self._stats.get("write_timeout_streak", 0) + 1
@@ -454,18 +463,26 @@ class MFCaptureSession:
         if timed_out:
             # 投递屏障等 finalize task 真正执行完（它非 cancelable、仍在队列里，
             # Finalize+MoveFile 会把 .tmp.mp4 改名为正式 .mp4 落盘）。
+            # [真失败根治 v28] 屏障预算必须覆盖 finalize 最坏耗时（含慢盘改名），
+            # 旧实现用 worker_barrier 默认 30s，比 finalize 的 60s 预算还短：
+            # 屏障先超时→捞回时成片仍是 .tmp.mp4（被排除）→报"未捞回成片"，
+            # 而队列里的 finalize task 随后被 worker.stop() 丢弃→成片真丢失。
+            # 这里显式传 90s，让 finalize 有时间改名落盘后再捞回。
             barrier = getattr(self.native, "worker_barrier", None)
             if barrier is not None:
                 with contextlib.suppress(Exception):
-                    barrier()
+                    barrier(timeout=BARRIER_RECOVER_TIMEOUT_S)
             recovered = self._recover_published_from_workdir()
             if recovered:
                 # 成片确实已落盘：超时只是"等不及回传路径"的假失败，按正常产物搬运。
                 # err 在超时分支未写，保持为 self._error；捞回成功不新增错误。
                 paths = list(paths) + recovered
             else:
-                # 既没拿到回传路径也没捞到成片：如实上报，绝不静默报成功。
-                err = err or "同源合成失败：MF worker 调用超时，未捞回已发布成片"
+                # [真失败根治 v28] 既没拿到回传路径也没捞到成片：如实上报，绝不
+                # 静默报成功。用直接赋值覆盖作为主错误上抛——旧实现 `err or ...`
+                # 会被前面记下的尾帧超时等诊断错误短路，把"没成片"这一致命结果
+                # 掩盖成一条无害警告，controller 再据 files 里的 logcat 谎报成功。
+                err = "同源合成失败：MF worker 调用超时，未捞回已发布成片"
         # [EDR 误报缓解] native 产物在 TEMP 工作目录里：只在 finalize 成功后
         # 把成品 copy 回用户保存目录。copy 失败或未落盘的产物不入列表并明确
         # 上报（work_dir 留待下次启动清理，返回 TEMP 路径没有意义），绝不误报成功。

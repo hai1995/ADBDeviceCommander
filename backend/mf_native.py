@@ -352,6 +352,9 @@ class MFNative:
         执行并落盘 .mp4。投递一个空任务到队尾，FIFO 保证它排在该 finalize
         之后；屏障返回即证明 finalize 已跑完，此时再扫描 work_dir 能捞回产物。
         屏障自身也用有界超时，worker 真卡死时不无限等待。
+        [真失败根治 v28] 默认 30s，但它必须覆盖 finalize 最坏耗时（60s 含慢盘
+        改名）才能等到成片落盘；stop() 超时兜底改为显式传 90s。测试替身请接收
+        timeout 参数。
         """
         w = self.worker
         if w is None:

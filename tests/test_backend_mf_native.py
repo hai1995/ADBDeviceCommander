@@ -1376,13 +1376,17 @@ def test_restart_checks_stop_in_window(monkeypatch, tmp_path):
 
 # ---------------- 收尾根治 v27：尾帧超时误报 + 撤销 drain 太晚 ------------
 def test_tail_write_timeout_is_not_fatal(monkeypatch):
-    """[收尾根治 v27·行为] 尾帧 write_video 超时须降级为非致命，不弹假失败警告。
+    """[收尾根治 v27/v28·行为] 尾帧 write_video 超时须降级为诊断统计，不写成致命错误。
 
     真机 12min 长录制："⚠ 写入 H264 尾帧失败：MF worker 调用超时（30s）"，
-    但同一行日志显示"✓ 录屏已完成：1 个文件已保存"——成片其实完整落盘。
-    根因：v21 只把主循环的 write_video 超时降级，漏改 finally 尾帧写入，
-    导致超时点转移到尾帧、被误记为致命 _error 上抛成 warn。修复后超时只记
-    统计，真 native 错误仍上报。
+    完成提示还谎报"✓ 录屏已完成：1 个文件已保存"（那 1 个其实是 logcat txt，
+    视频成片因 finalize 超时 + 屏障过早放弃而丢在 TEMP）。
+
+    [结论更正 v28] 上一轮曾据此断言"成片已保存、只是假警告"——这是误判，
+    用户核实目录里根本没有视频。正确认知：尾帧超时本身确实不该写成致命
+    _error（否则会掩盖真正失败），但成片丢失是真实发生的，必须由 stop()
+    的"未捞回成片"错误据实上报。本用例只锁定"尾帧超时→诊断统计、不致命"
+    这一条；成片丢失的上报由 finalize 超时用例覆盖。真 native 错误仍上报。
     """
     fake = FakeNative(available=True)
 
@@ -1429,6 +1433,24 @@ def test_tail_write_real_error_is_still_fatal(monkeypatch):
     assert "写入 H264 尾帧失败" in reason, \
         "真 native 错误仍须记为致命，不能被超时降级误吞"
     svc.cancel_all()
+
+
+def test_finalize_recover_barrier_exceeds_finalize_budget():
+    """[真失败根治 v28·源码守卫] finalize 超时后的捞回屏障预算须覆盖 finalize 最坏耗时。
+
+    病根：finalize call 给 60s（mf_native.FINALIZE_CALL_TIMEOUT_S），但旧实现
+    随后只用 worker_barrier 默认 30s 等它跑完——屏障先超时、捞回时成片还是
+    .tmp.mp4（被排除）、随后 worker.stop() 丢弃队列里的 finalize task → 成片
+    真丢在 TEMP。真机 12min 收尾 162s 无文件即此症状。修复：stop() 额外常量
+    BARRIER_RECOVER_TIMEOUT_S=90s 显式传给屏障，覆盖 finalize 60s + 慢盘改名。
+    """
+    import backend.mf_native as mn_local
+    import backend.mf_capture_service as mcs_local
+    assert mcs_local.BARRIER_RECOVER_TIMEOUT_S >= mn_local.FINALIZE_CALL_TIMEOUT_S, \
+        "捞回屏障预算须 >= finalize 调用超时，否则成片改名落盘前就放弃捞回"
+    src = _code_without_docstring(mcs_local.MFCaptureSession.stop)
+    assert "barrier(timeout=BARRIER_RECOVER_TIMEOUT_S)" in src, \
+        "stop() 超时兜底须把加长后的预算显式传给屏障"
 
 
 def test_stop_drops_drains_before_joining_read_thread():

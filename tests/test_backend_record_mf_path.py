@@ -171,6 +171,60 @@ def test_stop_uses_mf_teardown(monkeypatch, tmp_path):
     assert api._rec_session == {}
 
 
+def test_mf_stop_no_video_reports_failure_not_fake_success(monkeypatch, tmp_path):
+    """[真失败根治 v28] MF 收尾没产出任何视频，只有 logcat txt 时，
+    完成提示绝不能谎报「✓ 录屏已完成：1 个文件已保存」。
+
+    真机 12min 长录制：finalize 超时 + 屏障过早放弃 → 成片烂在 TEMP，
+    stop_all 返回 ([], err)，但 logcat txt 仍在 → files 里有 1 个 txt。
+    旧实现据 len(files) 报成功，用户去目录一看没有视频。修复后必须据实
+    报失败、返回 ok=False，并把收尾错误原因带出来。
+    """
+    api = _api(monkeypatch, tmp_path)
+
+    # 捕获 toast/status，验证完成提示文案
+    toasts = []
+    api._push_toast = lambda kind, text: toasts.append((kind, text))
+    api._push_status = lambda *a, **k: None
+    api._push_logcat_notes = lambda *a, **k: None
+
+    class _NoVideoMF:
+        available = True
+        build_id = "mf-test"
+
+        def start_all(self, *a, **kw):
+            return True, "", {"SER1": "/tmp/reports.mp4"}
+
+        def stop_all(self):
+            # 收尾失败：没有视频成片，只有一条错误
+            return {"SER1": ([], "同源合成失败：MF worker 调用超时，未捞回已发布成片")}
+
+        def cancel_all(self):
+            pass
+
+    api.mf_capture = _NoVideoMF()
+
+    # 构造已经在录制中的 MF 会话，附带一个存在的 logcat txt（真机情形）
+    log = tmp_path / "logcat_SER1.txt"
+    log.write_text("log line\n", encoding="utf-8")
+    api._rec_session = {
+        "ts": "20261125_150427", "dir": str(tmp_path), "with_zip": False,
+        "mf": True, "videos": {}, "mic_path": None, "mic_started": True,
+        "devaudio": {}, "logcat_captures": {"SER1": str(log)},
+        "pointer_location_prev": {}, "show_touches_prev": {},
+    }
+
+    res = api.screen_record_stop()
+    assert res["ok"] is False and res["reason"] == "no_video", res
+    # 绝不能出现谎报成功的完成提示
+    done_ok = [t for k, t in toasts if k == "ok" and "录屏已完成" in t]
+    assert done_ok == [], f"无视频却报完成：{done_ok}"
+    # 必须有明确的失败提示，且带出收尾错误原因
+    fail = [t for k, t in toasts if k == "err" and "录屏失败" in t]
+    assert fail, f"须如实报录屏失败，实际 toast: {toasts}"
+    assert "未捞回" in fail[0] or "超时" in fail[0], fail[0]
+
+
 def test_cancel_uses_mf_discard(monkeypatch, tmp_path):
     api = _api(monkeypatch, tmp_path)
     fake = FakeMFCapture(available=True)
