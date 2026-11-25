@@ -362,8 +362,19 @@ class MFCaptureSession:
                         self.native.session_write_video(self._handle, tail)
                         self._stats["bytes"] += len(tail)
                     except Exception as ex:  # noqa: BLE001
-                        self._error = self._error or f"写入 H264 尾帧失败：{ex}"
-                        break
+                        # [收尾根治 v27] 与主循环(v21)口径一致："MF worker 调用超时"
+                        # 是单 worker 被残留 drain / 重量操作挤占的排队等待；该
+                        # write_video task 非 cancelable、仍在队列里最终执行，尾帧
+                        # 数据不丢，finalize（FIFO 排在其后）能拿到完整数据。
+                        # 旧实现把超时记为致命 _error → 成片明明保存成功却弹
+                        # "写入 H264 尾帧失败"假警告（真机 12min 录制即此症状）。
+                        # 超时只记诊断统计、不写 _error；真 native 错误仍须上报。
+                        if "MF worker 调用超时" in str(ex):
+                            self._stats["write_timeout_streak"] = \
+                                self._stats.get("write_timeout_streak", 0) + 1
+                        else:
+                            self._error = self._error or f"写入 H264 尾帧失败：{ex}"
+                            break
             self._first_data.set()   # 即使失败也唤醒 wait，避免等满超时
             # [收尾慢根治 v21] 通知 stop()：本读线程的所有 native 调用（含切段
             # rotate 与上面的尾刷 write_video）都已投递完毕。stop() 等此信号后再
@@ -392,6 +403,16 @@ class MFCaptureSession:
         """正常收尾：停 adb → 等读线程 → native finalize → 返回发布路径列表。"""
         self._stop.set()
         self._stop_drain()          # 先停音频排空定时器，再 finalize
+        # [收尾根治 v27] 停定时器后立刻撤销 worker 队列里尚未执行的 drain。
+        # 读线程 finally 的尾帧 write_video 在 _join_threads() 期间投递；旧实现
+        # 把撤销 drain 放在 _join_threads() 之后、finalize 之前，尾帧 write_video
+        # 会先排在残留 drain 后面被顶过 30s → 超时误报 + 收尾拖慢。此处提前撤销，
+        # 让尾帧与 finalize 都不被挤占。定时器已停、不会再投新 drain；音频完整性
+        # 仍由 finalize 内部的 drain_audio() 有界排空保证，撤销不丢音频。
+        drop = getattr(self.native, "drop_queued_drains", None)
+        if drop is not None:
+            with contextlib.suppress(Exception):
+                drop()
         self._close_proc()
         self._join_threads()
         if not self._handle:

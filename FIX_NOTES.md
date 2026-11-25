@@ -8477,3 +8477,37 @@ terminate，成为孤儿占住设备屏幕，导致下次录制起不来。**修
 **验证**：新增 3 项回归（续流残段不粘连 / 多设备捞回只取本 stem / 竞态双闸守卫），
 专项 54 passed；pyflakes + ruff 干净，全量须通过。真机预期：长录制续流点无畸形
 帧花屏、多设备产物不错配、停止时无孤儿进程残留。日志指纹 v26。
+
+---
+
+## 2026-11-25 长录制收尾"写入 H264 尾帧失败"假警告（v27，纯 Python 编排层）
+
+**真机现象**：v26 包、录制约 12min（15:04:29→15:16:16），收尾拖到 15:18:58（约
+162s），弹出 `⚠ 同源录制收尾提示：写入 H264 尾帧失败：MF worker 调用超时（30s
+未返回）`；但紧接着 `✓ 录屏已完成：1 个文件已保存到 D:\BUG` —— 成片其实完整
+落盘，这是一次**假失败告警**，视频数据并未丢失。
+
+**根因链**（两处编排层缺陷叠加，native 语义未动）：
+1. **尾帧超时误判为致命**：`_read_loop` 的 `finally` 块把尾帧 `session_write_video`
+   的任何异常都写成致命 `_error`。而 v21 早已把**主循环**里同样的"MF worker 调用
+   超时"降级为非致命统计（task 非 cancelable、仍在队列里最终执行、数据不丢）。
+   v21 漏改 finally 块，超时点这次转移到尾帧，被误记为失败上抛成 warn。
+2. **撤销 drain 太晚**：`stop()` 里 `drop_queued_drains()` 在 `_join_threads()` **之后**
+   才调用。读线程 finally 的尾帧 write_video 在 `_join_threads()` 期间投递，排在
+   残留 drain 后面被顶过 30s → 直接触发上面的超时 + 收尾拖慢。
+
+**修复**（纯 Python 编排层，native 语义不动）：
+- `backend/mf_capture_service.py` `_read_loop` finally 尾帧写入：捕获异常时若含
+  `"MF worker 调用超时"` → 只累加 `write_timeout_streak` 统计、不写 `_error`；
+  真 native 错误（overflow / WriteSample 失败等）仍记为致命并上报。与主循环 v21
+  口径统一，假警告根治。
+- `backend/mf_capture_service.py` `stop()`：停音频排空定时器后**立刻**撤销一次
+  排队 drain（早于 `_close_proc()`/`_join_threads()`），让尾帧 write_video 与
+  finalize 都不被残留 drain 挤占；finalize 前保留 v22 那次撤销作幂等保险。
+  定时器已停不再投新 drain，音频完整性仍由 finalize 内部 `drain_audio()` 保证。
+- 指纹 v26→v27，让真机日志确认整包含 v24~v27 全部录制/收尾修复。
+
+**验证**：新增 3 项回归（尾帧超时降级不致命·行为 / 尾帧真错误仍上报·行为 /
+stop 撤销早于等读线程·源码守卫），指纹守卫更新为 v27。全量须通过；真机预期：
+长录制收尾不再弹"写入 H264 尾帧失败"假警告，收尾不再被残留 drain 拖慢，成片
+正常保存 1 个完整带声 MP4。日志指纹 v27。

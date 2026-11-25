@@ -1372,3 +1372,76 @@ def test_restart_checks_stop_in_window(monkeypatch, tmp_path):
     after = src[spawn_pos:]
     assert "current is new_proc" in after, \
         "续流 _spawn_proc 后须复查 _proc 引用，竞态下主动关闭新进程"
+
+
+# ---------------- 收尾根治 v27：尾帧超时误报 + 撤销 drain 太晚 ------------
+def test_tail_write_timeout_is_not_fatal(monkeypatch):
+    """[收尾根治 v27·行为] 尾帧 write_video 超时须降级为非致命，不弹假失败警告。
+
+    真机 12min 长录制："⚠ 写入 H264 尾帧失败：MF worker 调用超时（30s）"，
+    但同一行日志显示"✓ 录屏已完成：1 个文件已保存"——成片其实完整落盘。
+    根因：v21 只把主循环的 write_video 超时降级，漏改 finally 尾帧写入，
+    导致超时点转移到尾帧、被误记为致命 _error 上抛成 warn。修复后超时只记
+    统计，真 native 错误仍上报。
+    """
+    fake = FakeNative(available=True)
+
+    def timeout_write(h, data):
+        raise mn.MFNativeError("MF worker 调用超时（30s 未返回）")
+
+    fake.session_write_video = timeout_write
+    # 一条完整 NAL：留在 NalBuffer 里直到 finally flush，触发尾帧写入
+    monkeypatch.setattr(mcs.subprocess, "Popen",
+                        lambda cmd, **kw: FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 16]))
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    sess._read_thread.join(timeout=3)
+    # 超时被降级：记入统计，_error 保持为空（不弹假警告）
+    assert sess._stats.get("write_timeout_streak", 0) >= 1, \
+        "尾帧超时须记入诊断统计"
+    assert not sess._error, \
+        f"尾帧 write_video 超时不得记为致命错误，实际：{sess._error}"
+    svc.cancel_all()
+
+
+def test_tail_write_real_error_is_still_fatal(monkeypatch):
+    """[收尾根治 v27·行为] 尾帧真 native 错误（非超时）仍须上报为失败。"""
+    fake = FakeNative(available=True)
+
+    def fail_write(h, data):
+        raise mn.MFNativeError("native overflow（测试替身）")
+
+    fake.session_write_video = fail_write
+    monkeypatch.setattr(mcs.subprocess, "Popen",
+                        lambda cmd, **kw: FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 16]))
+    svc = mcs.MFCaptureService(native=fake)
+    # 尾帧在 finally 写入（start 等首帧期间）：真错误须转成可读原因上抛，
+    # 不能被"超时降级"逻辑误吞成假成功。
+    ok, reason, _ = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    # 真错误既可能在 start 阶段被捕获（ok=False），也可能在 stop 阶段由
+    # 会话 _error 带出；两种都必须明确上报，绝不静默成功。
+    if ok:
+        sess = svc._sessions["s1"]
+        sess._read_thread.join(timeout=3)
+        reason = sess._error
+    assert "写入 H264 尾帧失败" in reason, \
+        "真 native 错误仍须记为致命，不能被超时降级误吞"
+    svc.cancel_all()
+
+
+def test_stop_drops_drains_before_joining_read_thread():
+    """[收尾根治 v27·源码守卫] 撤销 drain 须早于等读线程，否则尾帧被挤占超时。
+
+    旧实现把 drop_queued_drains 放在 _join_threads() 之后、finalize 之前；读线程
+    finally 的尾帧 write_video 在 _join_threads() 期间投递，排在残留 drain 后面
+    被顶过 30s。修复：停定时器后立刻撤销一次（v27），finalize 前再撤销一次（v22，
+    幂等保险）。守卫锁定第一次撤销在 _join_threads() 之前。
+    """
+    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    assert "drop_queued_drains" in src, "stop 须撤销排队 drain"
+    first_drop = src.index("drop_queued_drains")
+    join_pos = src.index("self._join_threads()")
+    assert first_drop < join_pos, \
+        "撤销 drain 必须在等读线程之前，否则尾帧 write_video 被残留 drain 顶超时"

@@ -80,7 +80,11 @@
 // v26: native 语义仍未动 —— 三处纯 Python 编排层录制缺陷修复：续流 NAL 残段
 // 污染、多设备共享 work_dir 兜底捞回串味、续流窗口与 stop 竞态孤儿进程。仅升
 // 指纹让真机确认整包含 v24~v26 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v26";
+// v27: native 语义仍未动 —— 两处纯 Python 编排层收尾缺陷：finally 尾帧 write_video
+// 的"MF worker 调用超时"误判为致命失败（应降级为非致命，与主循环一致）、停止时
+// 撤销排队 drain 太晚（提前到等读线程之前）。根治 12min 长录制"写入 H264 尾帧
+// 失败"假警告 + 收尾 160s+。仅升指纹让真机确认整包含 v24~v27 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v27";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
