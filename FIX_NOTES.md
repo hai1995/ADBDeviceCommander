@@ -8772,3 +8772,54 @@ screenrecord 连接不被掐断，成片正常落盘；日志指纹 v32。
 
 **待跟进**：若换新构建后仍偶发失败，下一步需成品 mp4 的 ffprobe 数据（视频/音频
 duration、真实帧率）定位音画轻微不同步；本轮不动 v15/v16 时间戳逻辑。
+
+---
+
+## 2026-11-26 单设备长录制仍"未捞回成片"——屏障结构性缺陷 + 诊断落地（v33，纯 Python 编排层，指纹 mf-20261124-drain-v33）
+
+**现象**：v32 包、单设备 190D333158554304 录制约 224s（跨 180s screenrecord
+续流阈值一次）：
+```
+14:22:42 ✓ 已开始同源录制（native v32）
+14:26:26 ⏹ 停止录屏并收尾
+14:30:17 ⚠ 同源合成失败：MF worker 调用超时，未捞回已发布成片  ← 收尾 231s
+14:30:17 ⚠ 录屏失败：未保存任何视频文件
+```
+无 adb 命令下发、无设备重启、无满缓冲 logcat——与 v31/v32 场景都不同，说明前面
+两轮修的上游打断源不是本例病根。
+
+**先承认**：v27~v32 连续六轮都在"加超时 / 清排队任务 / 两阶段收尾 / 自愈守卫"
+层面打补丁，真机每次换一种触发就复发。本轮不再加超时。
+
+**真正病根（结构性缺陷）**：finalize `worker.call` 60s 超时后的兜底——
+`worker_barrier(timeout=90)` —— **本身就是一次 worker.call**，与卡住的 finalize
+task 排在同一个单 FIFO worker 队列里：
+1. worker 被某个"正在执行的 native 调用"（write_video 内的同步 AAC 编码 /
+   SinkWriter::WriteSample，慢盘或 sticky error 态下可达数十秒以上）占住时，
+   屏障 task 排队、跟着 90s 超时；
+2. 屏障超时只说明"没等到一个入队任务被执行"，**不能证明成片是否落盘**——
+   旧实现把它当落盘判据，单次扫描此时 `.tmp.mp4` 还没被 finalize task 改名；
+3. `stop_all` finally 里 `worker.stop()` 随即 `_drain_pending()` 丢弃队列里未执行
+   的 finalize task → `.tmp.mp4` 永远来不及改名 → 成片真丢失、收尾 231s。
+`drop_queued_*` 只能撤销"排队未执行"的任务，撤销不了"正在执行"的那一个——
+这正是 v29/v31 清队列方案对本例无效的原因。
+
+**修复（v33，纯 Python 编排层，native 语义不动）**：
+- finalize 超时兜底：屏障仍投一次（worker 健康时最快确认 finalize 跑完），但
+  **不再把屏障返回值当唯一落盘判据**。屏障成功 → 单次扫描即可；屏障超时/失败
+  → 改用**纯文件系统轮询**（`_wait_published_in_workdir`，0.25s 间隔、额外 20s
+  预算）直接观察 `.tmp.mp4`→`.mp4` 原子改名。只要 native finalize task 最终跑到
+  `MoveFileExW`，就能捞回成片；不向被污染的 worker 队列追加任何依赖。健康路径
+  收尾不变慢（屏障成功即返回）。
+- **诊断落地**：`MFNative.session_stats()` 封装早已绑定却从未采集的
+  `adc_session_stats`（video_bytes / audio_frames / dropped / queue_peak_ms）；
+  无成片失败时由 `_failure_diagnostics()` 把它 + 工作目录里本会话文件的尺寸快照
+  拼进错误文案（短超时 3s、异常降级，绝不拖慢收尾）。下一次真机失败日志将能
+  一锤定音：video_bytes=0 → 没收到 H264 帧（续流断流）；audio_frames=0 → 音频路
+  没写；dropped 大 → 音频溢出；有 `.tmp.mp4` 无 `.mp4` → finalize 卡在改名前。
+- 指纹 v32→v33（native 字符串常量，语义未动，CI 重编译让真机日志确认整包）。
+
+**验证**：新增 3 项回归（屏障失败后轮询捞回延迟落盘成片 / 失败文案带 native stats
+与 workdir 快照 / 无符号无 worker 时 stats 降级）；既有守卫全过；基线 1778 passed
+1 skipped。真机预期：若属"finalize 慢但没死"，延迟落盘的成片可被轮询捞回；若仍
+失败，错误文案首次带出内部统计，据此精准定位、不再盲改。据实失败保护（v28）保留。

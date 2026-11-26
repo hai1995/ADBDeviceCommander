@@ -117,7 +117,14 @@
 // video + logcat，漏了 MF 会话。修复：把 _rec_session(mf=True) 与
 // mf_capture._sessions 纳入守卫，录制期间暂缓自愈。仅升指纹让真机确认整包含
 // v24~v32 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v32";
+// v33: native 语义仍未动 —— 纯 Python 编排层收尾结构性修复 + 诊断落地。真机
+// 单设备 224s 录制收尾 231s"未捞回成片"复发：finalize 超时后投递的 worker_barrier
+// 本身也是 worker.call，worker 被卡住的 native 调用占住时屏障与 finalize 一起超时、
+// 随 worker.stop() 被丢弃，无法证明成片落盘。修复：屏障超时后改用纯文件系统轮询
+// 观察 .tmp.mp4→.mp4 改名，并首次把 native stats（video_bytes/audio_frames/dropped/
+// queue_peak_ms）采集进失败文案，让下一次真机失败能定位病根、不再盲改。仅升指纹
+// 让真机确认整包含 v24~v33 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v33";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

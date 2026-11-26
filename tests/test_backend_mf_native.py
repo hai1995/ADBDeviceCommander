@@ -1631,3 +1631,87 @@ def test_stop_remains_single_device_compat_entry():
     src = _code_without_docstring(mcs.MFCaptureSession.stop)
     assert "_stop_producers()" in src and "_finalize()" in src, \
         "stop 须保留单设备兼容入口，依次调用两阶段"
+
+
+# -------------------- v33：屏障失败改文件轮询 + 诊断落地 --------------------
+
+def test_barrier_failure_polls_workdir_and_recovers_late_mp4(monkeypatch, tmp_path):
+    """[结构性根治 v33] 屏障超时后须靠文件轮询捞回"稍后才落盘"的成片。
+
+    病根：barrier 本身是 worker.call，worker 被卡死时它一起超时，旧实现随即
+    单次扫描（此刻 .tmp.mp4 还没改名）→ 报未捞回；而 finalize task 最终跑到
+    MoveFile 后成片其实落盘了，只是没人再扫。修复：屏障失败后轮询工作目录，
+    成片一出现即捞回。屏障成功（worker 健康）则单次扫描、不额外等。
+    """
+    import threading as _th
+
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    published = work / "rec_p1.mp4"
+
+    def late_publish_finalize(h):
+        # finalize call 超时返回，但约定 0.3s 后 native task 落盘成片
+        def publish_later():
+            _th.Event().wait(0.3)
+            published.write_bytes(b"mp4")
+        _th.Thread(target=publish_later, daemon=True).start()
+        raise mn.MFNativeError("MF worker 调用超时（60s 未返回）")
+
+    fake.session_finalize = late_publish_finalize
+    fake.worker_barrier = lambda timeout=30.0: False   # 屏障失败 → 触发轮询路径
+    monkeypatch.setattr(mcs, "PUBLISH_POLL_EXTRA_S", 3.0)
+    monkeypatch.setattr(mcs, "PUBLISH_POLL_INTERVAL_S", 0.05)
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, _, _ = svc.start_all(["s1"], str(tmp_path / "save"), {}, {}, None)
+    assert ok is True
+    sess = svc._sessions["s1"]
+    sess.work_dir = str(work)
+    out = svc.stop_all()
+    paths, err = out["s1"]
+    assert err == "", f"成片延迟落盘应被轮询捞回，实际: {err!r}"
+    assert any(p.endswith("rec_p1.mp4") for p in paths), paths
+
+
+def test_failure_diagnostics_carries_native_stats(tmp_path):
+    """[诊断落地 v33] 无成片失败时错误文案须带 native stats 与工作目录快照。"""
+    fake = FakeNative(available=True)
+    fake.session_stats = lambda h: {
+        "video_bytes": 0, "audio_frames": 12345, "dropped": 7, "queue_peak_ms": 9000}
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "rec_2026_p1.tmp.mp4").write_bytes(b"x" * 10)
+
+    def timeout_finalize(h):
+        raise mn.MFNativeError("MF worker 调用超时（60s 未返回）")
+
+    fake.session_finalize = timeout_finalize
+    fake.worker_barrier = lambda timeout=30.0: True   # 健康 → 单次扫描、不轮询
+    sess = mcs.MFCaptureSession(
+        fake, "s1", str(tmp_path / "save"), "rec_2026", 1920, 1080,
+        work_dir=str(work))
+    sess._handle = 1
+    sess.work_dir = str(work)
+    paths, err = sess._finalize()
+    assert paths == []
+    assert "video_bytes=0" in err and "audio_frames=12345" in err, err
+    assert "dropped=7" in err and "queue_peak_ms=9000ms" in err, err
+    assert "rec_2026_p1.tmp.mp4" in err, err
+
+
+def test_session_stats_degrades_without_symbol():
+    """[诊断落地 v33] native 无 adc_session_stats/无 worker 时降级为空 dict。"""
+    fake = FakeNative(available=True)
+    n = mn.MFNative.__new__(mn.MFNative)
+    n._lib = fake
+    n.worker = object()          # 无 call 方法也须被 suppress
+    assert n.session_stats(1) == {}
+    n2 = mn.MFNative.__new__(mn.MFNative)
+    n2._lib = object()           # 无 adc_session_stats 符号
+    n2.worker = object()
+    assert n2.session_stats(1) == {}

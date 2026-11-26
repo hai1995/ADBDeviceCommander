@@ -20,9 +20,10 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 from core.constants import no_window_flags, safe_name, unique_path
-from core.longpath import long_path, path_isfile
+from core.longpath import long_path, path_getsize, path_isfile
 from core.tmpfiles import MF_WORKDIR_PREFIX
 
 # 首帧等待：screenrecord 秒退（ROM 不支持 --output-format=h264）要能快速报错。
@@ -47,6 +48,12 @@ READ_DONE_BUDGET_S = 130.0
 # 把队列里未跑完的 finalize task 丢弃 → 成片永远烂在 TEMP。真机 12min 录制
 # 收尾 162s 却无文件即此病根。留 30s 余量取 90s。
 BARRIER_RECOVER_TIMEOUT_S = 90.0
+# [诊断落地 v33] 扫描工作目录等待成片原子落盘的轮询间隔/追加预算。用于替代
+# "屏障 worker.call" 作为 finalize 超时后的落盘判据：屏障本身也是 worker 调用，
+# worker 被卡死的 native 调用占住时它一起超时、且会随 worker.stop() 被丢弃，
+# 无法可靠证明成片已落盘。改为直接观察文件系统，绕开被污染的 worker 队列。
+PUBLISH_POLL_INTERVAL_S = 0.25
+PUBLISH_POLL_EXTRA_S = 20.0
 # [长录制续流根治] screenrecord 有 180s 硬上限（core.constants.REC_MAX_S），
 # 到点自行退出、视频流断。投屏路径 mirror_service 早已实现续流，但同源录制
 # 的 _read_loop 读到空就 break —— 于是 3min+ 录制后面全部丢画面、切段由
@@ -488,18 +495,30 @@ class MFCaptureSession:
             else:
                 err = err or f"同源合成失败：{ex}"
         if timed_out:
-            # 投递屏障等 finalize task 真正执行完（它非 cancelable、仍在队列里，
-            # Finalize+MoveFile 会把 .tmp.mp4 改名为正式 .mp4 落盘）。
-            # [真失败根治 v28] 屏障预算必须覆盖 finalize 最坏耗时（含慢盘改名），
-            # 旧实现用 worker_barrier 默认 30s，比 finalize 的 60s 预算还短：
-            # 屏障先超时→捞回时成片仍是 .tmp.mp4（被排除）→报"未捞回成片"，
-            # 而队列里的 finalize task 随后被 worker.stop() 丢弃→成片真丢失。
-            # 这里显式传 90s，让 finalize 有时间改名落盘后再捞回。
+            # [结构性根治 v33] finalize 超时后，旧实现投递 worker_barrier 等 task
+            # 跑完。但屏障本身就是一次 worker.call，与卡住的 finalize 同在单 FIFO
+            # 队列里：worker 被"正在执行的 native 调用"占住时，屏障跟着一起超时，
+            # 既不证明成片已落盘，又随 worker.stop() 一起被丢弃——这是 v27~v32
+            # 反复"未捞回成片"却屡修不中的结构性病根。
+            # 新策略：屏障仍投一次（worker 健康时能最快确认 finalize 跑完），但
+            # **不作为唯一落盘判据**；随后直接轮询工作目录观察 .tmp.mp4→.mp4 的
+            # 原子改名（绕开被污染的 worker 队列）。只要 native 的 finalize task
+            # 最终执行到 MoveFile，文件系统轮询就能捞回成片，不再因屏障自身超时
+            # 而误判"未捞回"。
+            barrier_ok = False
             barrier = getattr(self.native, "worker_barrier", None)
             if barrier is not None:
                 with contextlib.suppress(Exception):
-                    barrier(timeout=BARRIER_RECOVER_TIMEOUT_S)
-            recovered = self._recover_published_from_workdir()
+                    barrier_ok = bool(barrier(timeout=BARRIER_RECOVER_TIMEOUT_S))
+            if barrier_ok:
+                # 屏障成功返回 = worker 健康、队列已排到屏障，finalize task 必已跑完；
+                # 单次扫描即可，无需额外轮询（不让健康路径的收尾变慢）。
+                recovered = self._recover_published_from_workdir()
+            else:
+                # 屏障超时/失败 = worker 可能被卡死的 native 调用占住；改用纯文件
+                # 系统轮询兜底，等待 finalize task 最终把 .tmp.mp4 改名落盘。
+                recovered = self._wait_published_in_workdir(
+                    self._recover_published_from_workdir, PUBLISH_POLL_EXTRA_S)
             if recovered:
                 # 成片确实已落盘：超时只是"等不及回传路径"的假失败，按正常产物搬运。
                 # err 在超时分支未写，保持为 self._error；捞回成功不新增错误。
@@ -509,7 +528,12 @@ class MFCaptureSession:
                 # 静默报成功。用直接赋值覆盖作为主错误上抛——旧实现 `err or ...`
                 # 会被前面记下的尾帧超时等诊断错误短路，把"没成片"这一致命结果
                 # 掩盖成一条无害警告，controller 再据 files 里的 logcat 谎报成功。
+                # [诊断落地 v33] 附上 native 统计与工作目录快照，让真机日志能判断
+                # 到底卡在视频帧/音频/编码哪一路（六轮盲修没有这些数据）。
                 err = "同源合成失败：MF worker 调用超时，未捞回已发布成片"
+                diag = self._failure_diagnostics()
+                if diag:
+                    err = f"{err}（诊断：{diag}）"
         # [EDR 误报缓解] native 产物在 TEMP 工作目录里：只在 finalize 成功后
         # 把成品 copy 回用户保存目录。copy 失败或未落盘的产物不入列表并明确
         # 上报（work_dir 留待下次启动清理，返回 TEMP 路径没有意义），绝不误报成功。
@@ -549,6 +573,72 @@ class MFCaptureSession:
                           if os.path.basename(p).startswith(prefix))
         except Exception:  # noqa: BLE001  扫描失败不影响主流程
             return []
+
+    def _wait_published_in_workdir(self, recover_fn, budget_s):
+        """[结构性根治 v33] 轮询工作目录等待成片原子落盘，绕开被污染的 worker 队列。
+
+        与"投递 worker 屏障再扫一次"的本质区别：屏障本身是 worker.call，worker
+        被卡死的 native 调用占住时它一起超时、且随 worker.stop() 被丢弃，无法
+        可靠证明 finalize task 是否跑到 MoveFile。本方法只观察文件系统——native
+        的 finalize task 一旦真正执行到 close_writer 里的 MoveFileExW，.tmp.mp4
+        就会原子改名为正式 .mp4，这里随即捞回。不向 worker 追加任何任务，不依赖
+        屏障的存活，让"慢但没死"的 finalize 有机会靠文件事实被救回。
+
+        recover_fn 是 _recover_published_from_workdir 的引用（注入便于单测）。
+        预算含首次立即扫描；仅在没有产物且预算未耗尽时短间隔轮询。任何异常都
+        按"本轮未捞回"处理，绝不让诊断逻辑反过来打断收尾。
+        """
+        deadline = time.monotonic() + max(0.0, budget_s)
+        while True:
+            try:
+                found = recover_fn()
+            except Exception:  # noqa: BLE001
+                found = []
+            if found:
+                return found
+            if time.monotonic() >= deadline:
+                return []
+            time.sleep(min(PUBLISH_POLL_INTERVAL_S,
+                           max(0.0, deadline - time.monotonic())))
+
+    def _failure_diagnostics(self):
+        """[诊断落地 v33] 收尾失败时采集 native 统计 + 工作目录文件快照。
+
+        六轮"未捞回成片"都只有一句超时文案、没有任何内部数据，无法判断究竟是
+        视频流断（video_bytes=0）、音频没写（audio_frames=0）、音频溢出（dropped
+        很大）还是 worker 严重积压（queue_peak_ms 很大）。这里把 native 早已暴露
+        却从未采集的 stats 和工作目录里 .tmp.mp4/.mp4 的尺寸快照拼成一段可读串，
+        附到错误文案里，让下一次真机日志一锤定音定位病根，避免继续盲改。
+        全程防御式访问：拿不到就返回空串，绝不影响失败上报本身。
+        """
+        parts = []
+        try:
+            stats = self.native.session_stats(self._handle) if self._handle else {}
+        except Exception:  # noqa: BLE001
+            stats = {}
+        if stats:
+            parts.append(
+                "native(video_bytes={video_bytes},audio_frames={audio_frames},"
+                "dropped={dropped},queue_peak_ms={queue_peak_ms}ms)".format(**stats))
+        if self.work_dir:
+            try:
+                import glob
+                pat = os.path.join(long_path(self.work_dir), "*")
+                names = []
+                for p in sorted(glob.glob(pat)):
+                    base = os.path.basename(p)
+                    if not base.startswith(self.stem):
+                        continue
+                    try:
+                        size = path_getsize(p)
+                    except Exception:  # noqa: BLE001
+                        size = -1
+                    names.append(f"{base}={size}B")
+                if names:
+                    parts.append("workdir(" + ",".join(names) + ")")
+            except Exception:  # noqa: BLE001, S110  诊断扫描失败不影响上报
+                pass
+        return ";".join(parts)
 
     def _publish_to_save_dir(self, paths):
         """把工作目录里的成品 copy 回用户保存目录。

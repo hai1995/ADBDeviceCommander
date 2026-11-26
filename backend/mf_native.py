@@ -58,6 +58,9 @@ DRAIN_CALL_TIMEOUT_S = 10.0
 FINALIZE_CALL_TIMEOUT_S = 60.0
 VIDEO_WRITE_CALL_TIMEOUT_S = 30.0
 ROTATE_CALL_TIMEOUT_S = 120.0
+# [诊断落地 v33] 收尾失败时采集 native stats 的短超时。这种调用可能发生在 worker
+# 仍被卡住的时刻，只允许短暂旁听、绝不能反过来拖慢收尾；拿不到就降级为空字典。
+STATS_CALL_TIMEOUT_S = 3.0
 
 
 class MFNativeError(RuntimeError):
@@ -560,6 +563,36 @@ class MFNative:
             raise MFNativeError(self.last_error())
         pub = out.value.decode("utf-8", "replace")
         return [p for p in pub.split(";") if p]
+
+    def session_stats(self, h):
+        """[诊断落地 v33] 采集 native 会话运行时统计，供收尾失败时定位病根。
+
+        native 早已绑定 adc_session_stats（video_bytes / audio_frames / dropped /
+        queue_peak_ms），但六轮收尾修复从未把它带进真机日志。收尾失败时用它区分：
+          * video_bytes=0            → 根本没收到 H264 帧（screenrecord 续流断流）
+          * audio_frames=0           → 音频路没写入（writer 未建/编码失败）
+          * dropped 很大             → 音频队列 overflow 丢块
+          * queue_peak_ms 很大       → worker 曾严重积压（僵尸/慢调用）
+        诊断调用走 worker 队列、短超时、异常一律降级为空 dict：它绝不能反过来
+        拖慢或打断收尾（可能在 worker 仍被占住时调用）。老 DLL/替身无此符号时
+        同样降级为空，向后兼容。
+        """
+        w = self.worker
+        lib = getattr(self, "_lib", None)
+        stats_fn = getattr(lib, "adc_session_stats", None)
+        if w is None or stats_fn is None:
+            return {}
+        vb, af, dr = ctypes.c_longlong(), ctypes.c_longlong(), ctypes.c_longlong()
+        qp = ctypes.c_int()
+        try:
+            rc = w.call(stats_fn, h, ctypes.byref(vb), ctypes.byref(af),
+                        ctypes.byref(dr), ctypes.byref(qp), timeout=STATS_CALL_TIMEOUT_S)
+            if rc != 0:
+                return {}
+            return {"video_bytes": int(vb.value), "audio_frames": int(af.value),
+                    "dropped": int(dr.value), "queue_peak_ms": int(qp.value)}
+        except Exception:  # noqa: BLE001  诊断绝不打断收尾
+            return {}
 
     def session_discard(self, h):
         self.worker.call(self._lib.adc_session_discard, h)
