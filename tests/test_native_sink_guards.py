@@ -24,14 +24,88 @@ def _cpp():
 def test_no_moov_before_mdat_attribute():
     """禁止重新引入 moov 前置：真机 Finalize 二次 remux 会报 0x80070005。"""
     src = _cpp()
-    assert "MF_MPEG4SINK_MOOV_BEFORE_MDAT" not in src, (
+    # 只看代码行（剔除 // 注释）：v35 的修复注释里会提到该属性名作警示，
+    # 但代码里绝不能真的使用它。
+    code = "\n".join(ln.split("//")[0] for ln in src.splitlines())
+    assert "MF_MPEG4SINK_MOOV_BEFORE_MDAT" not in code, (
         "moov 前置属性已移除：真机 Finalize 二次 seek/remux 触发拒绝访问")
 
 
-def test_sinkwriter_created_with_null_attributes():
-    """MFCreateSinkWriterFromURL 的 pAttributes 传 nullptr，走默认 moov 布局。"""
+def test_sinkwriter_disables_throttling():
+    """[收尾卡死根治·v35] SinkWriter 必须禁用默认节流，WriteSample 永不阻塞 worker。
+
+    Microsoft Learn（MF_SINK_WRITER_DISABLE_THROTTLING / IMFSinkWriter::WriteSample）
+    原文：默认情况下 SinkWriter 的 WriteSample 通过**阻塞调用线程**来限制数据速率。
+    本程序全部写入走单一 MTA worker；sink 落盘线程被拖慢（EDR 实时扫描持续增长的
+    .tmp.mp4 / 慢盘）时，节流阻塞发生在 WriteSample 内部且无超时——真机 v34 日志：
+    6min 录制收尾 271s，phase=5(WriteSample-a) 全程无返回，worker 被占死、成片丢失。
+    修复：创建 SinkWriter 时传 MF_SINK_WRITER_DISABLE_THROTTLING=TRUE。
+    """
     src = _cpp()
-    assert "MFCreateSinkWriterFromURL(wtmp, nullptr, nullptr, &writer_)" in src
+    # 属性存储 + 节流开关 + 经 attrs 创建（不再传 nullptr）
+    assert "MFCreateAttributes(&attrs, 1)" in src, "须创建 SinkWriter 属性存储"
+    assert "attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE)" in src, (
+        "须禁用 SinkWriter 默认节流（WriteSample 阻塞调用线程的官方开关）")
+    assert "MFCreateSinkWriterFromURL(wtmp, nullptr, attrs, &writer_)" in src, (
+        "必须经属性存储创建 SinkWriter")
+    # 节流开关与 moov 前置互斥：只许设节流，不许重新引入 moov 前置
+    attrs_block = src[src.index("IMFAttributes* attrs = nullptr;"):
+                      src.index("MFCreateSinkWriterFromURL(wtmp, nullptr, attrs")]
+    assert "MF_MPEG4SINK_MOOV_BEFORE_MDAT" not in attrs_block, (
+        "属性存储里绝不能重新引入 moov 前置（真机 Finalize 0x80070005）")
+    # attrs 必须在创建后释放（避免泄漏）
+    assert "if (attrs) attrs->Release();" in src
+
+
+def test_audio_timestamp_gate_in_write_audio_block():
+    """[收尾卡死根治·v35] 音频时间戳门控：前置音频丢弃 + 单调非递减。
+
+    旧实现把 ts<seg_start 的前置音频 clamp 到 0：一批样本全部压在 t=0 且相互
+    重叠，污染 AAC 编码器/MP4 sink 时间轴（收尾卡死与音画错位的共同诱因）。
+    修复：①前置音频直接丢弃；②rel_ts 小于上一写入样本时抬到上一值（单调门控），
+    设备热切换/乱序块不再造成时间回退。
+    """
+    src = _cpp()
+    fn = src[src.index("void write_audio_block(const AudioBlock& blk)"):
+             src.index("void push_sample(DWORD stream, bool audio")]
+    code = "\n".join(ln.split("//")[0] for ln in fn.splitlines())
+    # ① 前置音频丢弃（不再是 clamp 0）
+    assert "if (rel < 0) return;" in code, "前置音频（ts<seg_start）必须丢弃而非压到 t=0"
+    # ② 单调门控存在且生效（回退时抬到上一时间戳并记录）
+    assert "if (rel < last_audio_rel_ts_) rel = last_audio_rel_ts_;" in code
+    assert "last_audio_rel_ts_ = rel;" in code, "门控后的时间戳须回写基准"
+    # 传入 push_sample 的时间必须已换算为段内相对值（seg_start_hns_ + rel）
+    assert "seg_start_hns_ + rel, blk.dur_hns" in code
+    # 成员须存在：构造初始化 + 切段归零
+    assert "LONGLONG last_audio_rel_ts_;" in src
+    assert "last_audio_rel_ts_(0)" in src
+    ew = src[src.index("HRESULT ensure_writer(std::string& first_tmp_out)"):
+             src.index("HRESULT config_video_stream()")]
+    assert "last_audio_rel_ts_ = 0;" in ew, "切段须重置单调门控基准"
+
+
+def test_dropped_and_queue_peak_are_atomic():
+    """[数据竞争修复·v35] dropped_/queue_peak_ms_ 必须是原子。
+
+    dropped_ 被 WASAPI 采集线程（on_audio 队列满丢块）与 worker（push_sample
+    写入失败）并发写、stats() 跨线程读；queue_peak_ms_ 同理。非原子 long long/int
+    是数据竞争（UB）。stats() 读取必须显式 load。
+    """
+    src = _cpp()
+    assert "std::atomic<long long> dropped_;" in src, "dropped_ 须为原子（双线程写）"
+    assert "std::atomic<int> queue_peak_ms_;" in src, "queue_peak_ms_ 须为原子"
+    # 旧的裸类型声明不得残留
+    assert "long long video_bytes_, audio_frames_, dropped_;" not in src
+    assert "\n    int queue_peak_ms_;" not in src
+    # on_audio 的读改写必须走原子接口，不能裸赋值
+    on_audio = src[src.index("void on_audio(const AudioBlock& blk) override"):
+                   src.index("int write_video(")]
+    assert "queue_peak_ms_.store(" in on_audio, "峰值更新须原子 store"
+    assert "queue_peak_ms_ = (int)peak;" not in on_audio, "禁止裸赋值（数据竞争）"
+    # stats 读取显式 load
+    st = src[src.index("void stats(long long* vb"):
+             src.index("private:\n    void unsubscribe_")]
+    assert "dropped_.load(" in st and "queue_peak_ms_.load(" in st
 
 
 def test_finalize_error_is_reported():
@@ -614,17 +688,18 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v34():
-    """native 指纹升到 v34，真机据此确认整包含 v24~v34 全部录制/收尾修复。
+def test_build_id_v35():
+    """native 指纹升到 v35，真机据此确认整包含 v24~v35 全部录制/收尾修复。
 
-    v34 native 增加带外 phase 探针（adc_diag_phase，纯原子读不经 worker）：worker
-    被 native 同步调用占死时，stats/最后错误都因走 worker 或加锁拿不到，只有 phase
-    能带外读出卡死点；配合 Python 侧 moov 成片抢救（已 Finalize 的 .tmp.mp4 直接
-    改名捞回）。v33 屏障不再当唯一落盘判据 + native stats 落地；v32 adb 自愈守卫；
-    v31 stop_all 两阶段收尾；v30 IDR 打 CleanPoint 根治快进花屏。
+    v35 native 真语义改动（收尾卡死根治）：①SinkWriter 禁用默认节流
+    （MF_SINK_WRITER_DISABLE_THROTTLING）——WriteSample 永不阻塞 worker，
+    根治真机 6min 录制 phase=5(WriteSample-a) 卡死 271s、成片丢失；
+    ②音频时间戳门控（前置音频丢弃 + 单调非递减）；③dropped_/queue_peak_ms_
+    改原子修数据竞争。历史：v34 带外 phase 探针；v33 屏障不当唯一判据；
+    v32 adb 自愈守卫；v31 stop_all 两阶段收尾；v30 IDR 打 CleanPoint 根治花屏。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v34"' in src, "native 指纹须为 v34"
+    assert 'kBuildId = "mf-20261126-throttle-v35"' in src, "native 指纹须为 v35"
 
 
 def test_diag_phase_probe_is_out_of_band():

@@ -1,6 +1,21 @@
 # 修复说明
 
-- **同源录制审查修复·第三轮（最新一轮）**：再次逐段审查，修复 6 项真实缺陷：
+- **同源录制收尾卡死根治 v35（最新一轮）**：v34 带外探针首次带回卡死点——真机
+  6min 带声录制收尾 271s，`phase=5(写音频样本 WriteSample-a)` 全程无返回、
+  .tmp.mp4 仅 3.2MB 无 moov，worker 被**单次 WriteSample 调用**彻底占死。根因
+  （Microsoft Learn 权威文档）：SinkWriter **默认节流**——"WriteSample 通过阻塞
+  调用线程来限制数据速率"；本程序全部写入走单一 MTA worker，sink 落盘线程被拖慢
+  （EDR 实时扫描持续增长的 .tmp.mp4 / 慢盘 / 系统卡顿）时，节流阻塞发生在
+  WriteSample 内部且无任何超时，finalize/屏障/文件轮询全部失效。修复三件套：
+  ①创建 SinkWriter 时设 `MF_SINK_WRITER_DISABLE_THROTTLING=TRUE`（微软文档给出
+  的唯一官方开关），WriteSample 只排进 sink 内部队列立即返回、永不阻塞 worker，
+  积压由 Finalize 统一冲刷；②音频时间戳门控——前置音频（writer 未建时积压、
+  ts<段起点）由"clamp 到 0"改为**丢弃**（旧实现把一批样本全压在 t=0、相互重叠，
+  污染 AAC 编码器/sink 时间轴），另加单调门控（rel_ts 非递减，设备热切换/乱序块
+  不再时间回退）；③`dropped_`/`queue_peak_ms_` 改原子（WASAPI 采集线程与 worker
+  并发写、stats 跨线程读的数据竞争）。指纹 mf-20261124-drain-v34 →
+  **mf-20261126-throttle-v35**（native 真语义改动，须 CI 重编译）。详见文末 v35 节。
+- **同源录制审查修复·第三轮**：再次逐段审查，修复 6 项真实缺陷：
   ①**致命启动竞态**——`mic_start()` 只 `CreateThread` 即返回，真实 mix format
   要等采集线程 `GetMixFormat` 才有，`mic_format()` 立即回读到 `(0,0,0)` → 会话
   `AddStream` 失败、整场录制根本起不来；native 加 `fmt_ready_` 就绪标志 +
@@ -8860,3 +8875,72 @@ stem 隔离、phase 进文案）+ 2 项 native 守卫（指纹 v34、探针无�
 **真机预期**：若属"Finalize 已完成、只差改名"——抢救直接捞回成片、不再失败；若属
 "卡在 Finalize/WriteSample 中途"（.tmp.mp4 无 moov）——仍据实失败，但日志首次带出
 `phase=N(...)` 精确卡死点，据此精准修 native，不再盲改。
+
+## 2026-11-26 收尾 271s 卡死根治：SinkWriter 默认节流阻塞 worker（v35，native 真语义改动，指纹 mf-20261126-throttle-v35）
+
+### 真机日志（v34 探针首次带回卡死点）
+
+```
+[17:13:45] ✓ 已开始同源录制（H264 画面 + 麦克风语音由系统媒体基础直接合成带声 MP4，native 构建 mf-20261124-drain-v34）
+[17:19:45] ⏹ 正在停止录屏并收尾（停止设备端 → 拉取视频 → 打包），请稍候…
+[17:24:16] ⚠ 190D333158554304 同源录制收尾提示：同源合成失败：MF worker 调用超时，未捞回已发布成片
+           （诊断：phase=5(写音频样本(WriteSample-a));workdir(record_190D333158554304_20261126_171343_p1.tmp.mp4=3212548B)）
+```
+
+时间线拆解：6min 录制 → 收尾 271s → 失败。271s ≈ mark_mic_stop(15s 超时) +
+finalize(60s 超时) + 屏障(90s 超时) + 文件轮询(20s) + destroy/停 worker 兜底——
+**所有这些超时都只是同一个事实的余波：worker 被一次正在执行的
+`WriteSample-a`（音频样本写入）彻底占死**。.tmp.mp4 停在 3.2MB（6min 的 AAC 音频
+按 128kbps 本应 ≥5.7MB）说明 sink 很早就停止消费样本；无 moov 说明 Finalize 从未
+执行。phase=5 在 v34 探针的九个埋点里精确落"音频 WriteSample 调用内部"。
+
+### 根因（权威文档定性）
+
+Microsoft Learn「MF_SINK_WRITER_DISABLE_THROTTLING」/「IMFSinkWriter::WriteSample」
+原文：**"By default, the sink writer's WriteSample method limits the data rate by
+blocking the calling thread."** —— SinkWriter 默认开启节流，`WriteSample` 会
+**阻塞调用线程**来限制数据速率。本程序的全部写入（write_video / 定时 drain /
+finalize 排空）都走**单一 MTA worker 线程**（满足 SinkWriter 单线程写入约束），
+因此：
+
+1. sink 自身的落盘线程被拖慢（本项目真机环境有 EDR：对 TEMP 里持续增长的
+   .tmp.mp4 实时扫描；叠加慢盘 / 系统卡顿）→ sink 内部队列积压；
+2. 节流启动：下一次 `WriteSample` **阻塞在调用线程里**，直到积压消化——没有
+   任何超时；
+3. 积压不消化（sink 落盘线程持续被拖）→ 阻塞无限期 → worker 被占死；
+4. v27~v34 的全部编排层修复（清队列、屏障、文件轮询、成片抢救）都建立在
+   "worker 会腾出来"的假设上，worker 被占死时全部失效——这就是八轮"未捞回成片"
+   屡修不中的最终病根。
+
+注意 v17~v19 曾把"drain 内逐块 AAC WriteSample 累计耗时"当过嫌疑并加了批上限
+(48 块/批)——那修的是"慢"，这次是"单次调用无限期阻塞"，批上限救不了。
+
+### 修复（v35）
+
+- **①禁用 SinkWriter 节流（根治）**：`ensure_writer` 创建 `IMFAttributes` 并设
+  `MF_SINK_WRITER_DISABLE_THROTTLING=TRUE`，经
+  `MFCreateSinkWriterFromURL(wtmp, nullptr, attrs, &writer_)` 创建。禁用后
+  WriteSample 只把样本排进 sink 内部队列**立即返回**，永不阻塞 worker；落盘速度
+  落后时样本在内存里排队（本场景码率下内存占用可忽略），由 Finalize 统一冲刷。
+  attrs 创建失败退回 nullptr 旧行为（可用性优先）。**只**设节流开关，绝不重新
+  引入 moov 前置属性（真机 Finalize 二次 remux 报 0x80070005，见 v20 前历史）。
+- **②音频时间戳门控**：`write_audio_block` 改为——前置音频（writer 未建时积压、
+  `ts < seg_start_hns_`，麦克风先于 screenrecord 启动所致）**直接丢弃**，不再
+  clamp 到 0（旧实现把一批样本全压在 t=0、相互重叠，污染 AAC 编码器/sink 时间轴，
+  是收尾卡死与音画错位的共同诱因）；新增 `last_audio_rel_ts_` 单调门控——rel_ts
+  回退（WASAPI 设备热切换/块乱序）时抬到上一写入值，音频时间轴严格非递减。
+  新成员随切段归零；`push_sample` 内的 clamp 保留作防御。
+- **③数据竞争修复**：`dropped_`（on_audio 采集线程写 + push_sample worker 写 +
+  stats 读）、`queue_peak_ms_`（on_audio 写 + stats 读）由裸 `long long/int` 改
+  `std::atomic`，读写走显式 load/store——消除两处数据竞争（UB）。
+- 指纹 v34 → **v35**（native 真语义改动，CI 必须重编译 DLL 才生效）。
+
+### 验证
+
+- 新增 3 项 native 守卫（节流禁用 + moov 前置互斥/attrs 释放、音频时间戳门控
+  全链路、原子成员与显式 load/store）；`test_no_moov_before_mdat_attribute` 升级
+  为剔注释后断言（v35 修复注释里会点名该属性作警示）；`test_build_id_v35` 替换
+  v34 指纹断言。MF 相关 116 项测试全过，全量套件无回归。
+- **真机预期**：收尾不再被 WriteSample 阻塞占死——finalize 在 60s 预算内正常
+  返回、成片改名发布；即使 sink 落盘暂时落后，也只是收尾时 Finalize 多冲刷几秒，
+  不再出现"phase=5 永不返回"。若仍异常，phase 探针会给出新的精确卡死点。

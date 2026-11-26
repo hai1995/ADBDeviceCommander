@@ -131,7 +131,23 @@
 // 纯原子、不经 worker、不碰 COM 的 phase 标记 adc_diag_phase()，在 write/drain/
 // flush/WriteSample/Finalize/MoveFile 各阶段更新，卡死时带外直读即可一锤定音。
 // 配合 Python 侧 moov 成片抢救（.tmp.mp4 已 Finalize 时直接改名捞回）。
-static const char* const kBuildId = "mf-20261124-drain-v34";
+// v35: 收尾卡死根治 —— v34 探针带出的真机日志一锤定音：6min 录制收尾 271s，
+// phase=5(写音频样本 WriteSample-a) 全程无返回、.tmp.mp4 仅 3.2MB 无 moov，
+// worker 被**单次 WriteSample 调用**彻底占死。根因（Microsoft Learn 权威文档）：
+// SinkWriter 默认开启节流，"By default, the sink writer's WriteSample method
+// limits the data rate by **blocking the calling thread**"。本程序所有写入走
+// 单一 MTA worker，sink 落盘线程一旦被拖慢（EDR 实时扫描持续增长的 .tmp.mp4 /
+// 慢盘 / 系统卡顿），节流阻塞发生在 WriteSample 内部且无任何超时——worker 被
+// 无限期占死，finalize/屏障/文件轮询全部失效。修复三件套：
+//   ① 创建 SinkWriter 时设 MF_SINK_WRITER_DISABLE_THROTTLING=TRUE：WriteSample
+//     只把样本排进 sink 内部队列立即返回，永不阻塞 worker；积压由 Finalize 统一
+//     冲刷。这是微软文档给出的唯一官方开关。
+//   ② 音频时间戳门控：前置音频（writer 未建时积压、ts<seg_start）由"clamp 到 0"
+//     改为丢弃——旧实现把一批样本全压在 t=0、相互重叠，污染 AAC 编码器/sink
+//     时间轴；另加单调门控（rel_ts 非递减），杜绝设备热切换/乱序块的时间回退。
+//   ③ dropped_/queue_peak_ms_ 改原子：它们被 WASAPI 采集线程与 worker 并发写、
+//     stats 跨线程读，原来是非原子 long long/int（数据竞争 UB）。
+static const char* const kBuildId = "mf-20261126-throttle-v35";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -628,7 +644,8 @@ public:
           writer_(nullptr), vstream_(0), astream_(0), writing_(false),
           seg_no_(0), seg_start_hns_(0), rotate_pending_(false),
           video_bytes_(0), audio_frames_(0), dropped_(0), queue_peak_ms_(0),
-          queued_hns_(0), last_audio_end_(0), video_frame_count_(0),
+          queued_hns_(0), last_audio_end_(0), last_audio_rel_ts_(0),
+          video_frame_count_(0),
           video_ts_hns_(0), video_frame_dur_hns_(10000000LL * (fps_den > 0 ? fps_den : 1) / (fps_num > 0 ? fps_num : 30)),
           sync_audio_hns_(0),
           vws_(0), aws_(0), vwf_(0), awf_(0), vlhr_(S_OK), alhr_(S_OK),
@@ -677,7 +694,10 @@ public:
         audio_q_.push_back(blk);
         queued_hns_ = queued + blk.dur_hns;
         LONGLONG peak = queued_hns_ / 10000;
-        if (peak > queue_peak_ms_) queue_peak_ms_ = (int)peak;
+        // [数据竞争修复 v35] queue_peak_ms_ 已改原子：采集线程写、worker 读。
+        int cur_peak = queue_peak_ms_.load(std::memory_order_relaxed);
+        if ((int)peak > cur_peak)
+            queue_peak_ms_.store((int)peak, std::memory_order_relaxed);
     }
 
     int write_video(const unsigned char* data, int len) {
@@ -921,7 +941,10 @@ public:
     }
 
     void stats(long long* vb, long long* af, long long* dr, int* qp) {
-        *vb = video_bytes_; *af = audio_frames_; *dr = dropped_; *qp = queue_peak_ms_;
+        // [数据竞争修复 v35] dropped_/queue_peak_ms_ 原子读。
+        *vb = video_bytes_; *af = audio_frames_;
+        *dr = dropped_.load(std::memory_order_relaxed);
+        *qp = queue_peak_ms_.load(std::memory_order_relaxed);
     }
 
 private:
@@ -961,7 +984,21 @@ private:
     }
     void write_audio_block(const AudioBlock& blk) {
         if (!writer_ || !writing_ || blk.pcm.empty()) return;
-        push_sample(astream_, true, blk.pcm.data(), (UINT32)blk.pcm.size(), blk.ts_hns, blk.dur_hns);
+        // [收尾卡死根治 v35] 音频时间戳门控：
+        // ① 前置音频丢弃：麦克风先于 screenrecord 启动，writer 建立前积压的块
+        //    ts < seg_start_hns_。旧实现 push_sample 把 rel_ts clamp 到 0，一批
+        //    样本全部压在 t=0 且相互重叠——AAC 编码器/MP4 sink 收到大量时间相同
+        //    的样本，时间轴被污染（收尾卡死与音画错位的共同诱因）。这些块本就
+        //    属于录制起点之前，丢弃无损。
+        // ② 单调门控：rel_ts 小于上一写入样本的时间戳（WASAPI 设备热切换、块
+        //    乱序）时抬到上一时间戳——sink 音频时间轴严格非递减，绝不回退。
+        //    push_sample 内部的 clamp 只保留作防御，正常路径不再触达。
+        LONGLONG rel = blk.ts_hns - seg_start_hns_;
+        if (rel < 0) return;                       // ① 前置音频：丢弃
+        if (rel < last_audio_rel_ts_) rel = last_audio_rel_ts_;   // ② 单调非递减
+        last_audio_rel_ts_ = rel;
+        push_sample(astream_, true, blk.pcm.data(), (UINT32)blk.pcm.size(),
+                    seg_start_hns_ + rel, blk.dur_hns);
     }
     void push_sample(DWORD stream, bool audio, const unsigned char* data, UINT32 len,
                      LONGLONG ts, LONGLONG dur, bool is_keyframe = false) {
@@ -1069,8 +1106,24 @@ private:
         // 被 overflow 提前 return 掩盖的问题。
         // 本项目录屏保存在本地、由本机播放器双击播放，moov 在尾部完全可播，
         // 不需要 faststart；用 sink 默认布局即可从根上消除该二次文件访问。
-        // pAttributes 传 nullptr 合法（SDK 文档允许），无需再创建 attrs。
-        HRESULT hr = MFCreateSinkWriterFromURL(wtmp, nullptr, nullptr, &writer_);
+        // pAttributes 此前传 nullptr（SDK 文档允许）。[收尾卡死根治 v35] 现在
+        // 必须传属性：**禁用 SinkWriter 默认节流**。Microsoft Learn
+        // 「MF_SINK_WRITER_DISABLE_THROTTLING」原文：默认情况下 SinkWriter 的
+        // WriteSample 通过**阻塞调用线程**来限制数据速率。本程序全部写入走单一
+        // MTA worker，sink 落盘线程被拖慢（EDR 实时扫描持续增长的 .tmp.mp4 /
+        // 慢盘 / 系统卡顿）时，节流阻塞发生在 WriteSample 内部、无任何超时——
+        // 真机 v34 日志：6min 录制收尾 271s，phase=5(WriteSample-a) 全程无返回，
+        // worker 被占死，finalize/屏障/文件轮询全部失效、成片丢失。禁用节流后
+        // WriteSample 只把样本排进 sink 内部队列立即返回，永不阻塞 worker；积压
+        // 由 Finalize 统一冲刷。注意：这里**只**设节流开关，绝不重新引入 moov
+        // 前置属性（MF_MPEG4SINK_MOOV_BEFORE_MDAT：真机 Finalize 二次 seek/remux
+        // 报 0x80070005，见上方历史注释）。attrs 创建失败退回 nullptr 旧行为。
+        IMFAttributes* attrs = nullptr;
+        if (SUCCEEDED(MFCreateAttributes(&attrs, 1))) {
+            attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+        }
+        HRESULT hr = MFCreateSinkWriterFromURL(wtmp, nullptr, attrs, &writer_);
+        if (attrs) attrs->Release();
         if (FAILED(hr)) { set_error(hr, "MFCreateSinkWriterFromURL 失败"); return hr; }
         tmp_files_.push_back(tmp);
         if (seg_no_ == 1) first_tmp_out = tmp;
@@ -1086,6 +1139,7 @@ private:
         video_ts_hns_ = 0;
         video_frame_dur_hns_ = 10000000LL * fps_den_ / fps_num_;
         sync_audio_hns_ = 0;
+        last_audio_rel_ts_ = 0;   // [v35] 新段时间轴归零，单调门控基准复位
         return S_OK;
     }
 
@@ -1284,14 +1338,18 @@ private:
     bool rotate_pending_;
     static const int SEGMENT_SECONDS_ = 170;   // 与 core.constants.REC_SEGMENT_S 一致
     std::vector<std::string> tmp_files_, published_;
-    long long video_bytes_, audio_frames_, dropped_;
+    long long video_bytes_, audio_frames_;
+    // [数据竞争修复 v35] dropped_ 被 WASAPI 采集线程（on_audio 队列满丢块）与
+    // worker（push_sample 写入失败）并发写、stats() 跨线程读——必须原子，否则
+    // 是数据竞争（未定义行为）。queue_peak_ms_ 同理（on_audio 写 / stats 读）。
+    std::atomic<long long> dropped_;
+    std::atomic<int> queue_peak_ms_;
     // [诊断 v8] 分路写入统计：vws/aws=各路 WriteSample 成功数；vwf/awf=失败数；
     // vlhr/alhr=各路最后一次 HRESULT。0xC00D4A45 据此判断是哪一路没喂进 sink。
     long long vws_, aws_, vwf_, awf_;
     HRESULT vlhr_, alhr_;
     HRESULT diag_vsim_;   // 诊断：SetInputMediaType(video) 的 HRESULT，S_OK=输入类型被接受
     int diag_sps_, diag_pps_, diag_seqh_;   // 诊断：注入 sink 的 sequence header 长度
-    int queue_peak_ms_;
     std::deque<AudioBlock> audio_q_;
     std::mutex audio_q_mtx_;
     // [修复-收尾慢] 与 audio_q_ 同锁维护的累计时长(100ns)：on_audio 入队时 +=，
@@ -1302,6 +1360,10 @@ private:
     std::vector<std::vector<unsigned char>> pending_au_;
     std::atomic<bool> overflow_{false}, mic_stopped_{false};
     LONGLONG last_audio_end_;   // 已写入音频的最后结束时刻（100ns，QPC 时基）
+    // [收尾卡死根治 v35] 已写入音频样本的最大段内相对时间戳（100ns）。
+    // write_audio_block 用它做单调门控：音频时间轴绝不回退（设备热切换/乱序块
+    // 时把 rel_ts 抬到上一值）。切段时随新段时间轴归零。
+    LONGLONG last_audio_rel_ts_;
     // [视频时间戳 v15] 帧号主钟 + 音频真实时长校准。H264 裸流无时间戳，且屏幕录制
     // 真实帧率随设备/负载漂移（真机实测 29.27fps，非硬编码的 30fps）。v10 用
     // 帧号×固定33.33ms 合成时间轴 → 视频比音频短 2.4% 且随录制时长线性累积，
