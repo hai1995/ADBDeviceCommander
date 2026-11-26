@@ -408,8 +408,14 @@ class MFCaptureSession:
             pass
 
     # ---- 停止 / 取消 ---------------------------------------------------
-    def stop(self):
-        """正常收尾：停 adb → 等读线程 → native finalize → 返回发布路径列表。"""
+    def _stop_producers(self):
+        """[多设备收尾根治 v31·阶段1] 停 adb 进程 + 停音频定时器 + 等读线程退出。
+
+        执行完后本会话不再向 worker 投递任何 write_video / drain。stop_all 先对
+        所有会话跑完本阶段，再全局清队列、最后逐个 finalize，杜绝 A 的 finalize
+        被设备 B（尤其卡死重启那台）仍在投递的 write_video 顶过 60s——真机 2 台
+        设备收尾 249s 仍丢成片即此病根。单设备 stop() 行为完全不变。
+        """
         self._stop.set()
         self._stop_drain()          # 先停音频排空定时器，再 finalize
         # [收尾根治 v27] 停定时器后立刻撤销 worker 队列里尚未执行的 drain。
@@ -424,6 +430,14 @@ class MFCaptureSession:
                 drop()
         self._close_proc()
         self._join_threads()
+
+    def stop(self):
+        """单设备收尾入口：停 producer → finalize（多设备走 stop_all 两阶段）。"""
+        self._stop_producers()
+        return self._finalize()
+
+    def _finalize(self):
+        """[多设备收尾根治 v31·阶段3] mark mic stop → finalize → barrier → publish。"""
         if not self._handle:
             return [], self._error or "会话未创建"
         with self._lock:
@@ -785,15 +799,40 @@ class MFCaptureService:
         return True, "", firsts
 
     def stop_all(self):
-        """停止全部并 finalize，返回 {serial: ([路径], 错误)}。finally 清理 worker。"""
+        """[多设备收尾根治 v31] 两阶段收尾，返回 {serial: ([路径], 错误)}。
+
+        旧实现串行 `sess.stop()`：A 停完 producer 才轮到 B，而 B 在读线程退出前
+        仍在往共享 worker 投递 write_video；A 的 finalize 排在 B 的迟到帧后面被
+        顶过 60s → 屏障 90s 也超时 → A 成片丢失。真机两台设备、其中一台中途卡死
+        重启（读线程卡在续流、投递更持久）时收尾 249s 仍"未捞回成片"即此病根。
+
+        三阶段：
+          1) 对所有会话停 producer（置 stop / 停 drain / close proc / join 读线程），
+             之后没有任何设备再投递新写入；
+          2) 全局清空 worker 队列里所有会话残留的 drain + write_video 僵尸
+             （此刻队列是静态的，撤销绝对安全）；
+          3) 逐个 finalize —— 每个 finalize 都排到干净队首，立即执行落盘。
+        """
         out = {}
         with self._lock:
             sessions = list(self._sessions.items())
             self._sessions.clear()
         try:
+            # 阶段1：先停掉所有设备的 producer，杜绝收尾期间任何新写入投递。
+            for _s, sess in sessions:
+                sess._stop_producers()
+            # 阶段2：全局清空共享 worker 队列的僵尸（drain + 所有会话的 write_video）。
+            drop = getattr(self.native, "drop_queued_drains", None)
+            if drop is not None:
+                with contextlib.suppress(Exception):
+                    drop()
+            drop_all = getattr(self.native, "drop_all_video_writes", None)
+            if drop_all is not None:
+                with contextlib.suppress(Exception):
+                    drop_all()
+            # 阶段3：队列已净，逐个 finalize，成片及时落盘、互不顶。
             for s, sess in sessions:
-                paths, err = sess.stop()
-                out[s] = (paths, err)
+                out[s] = sess._finalize()
         finally:
             self._stop_mic()
             if self.native.worker is not None:

@@ -614,15 +614,15 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v30():
-    """native 指纹升到 v30，真机据此确认整包含 v24~v30 全部录制/收尾修复。
+def test_build_id_v31():
+    """native 指纹升到 v31，真机据此确认整包含 v24~v31 全部录制/收尾修复。
 
-    v30 是少有的 native 语义真改动：给 IDR sample 打 CleanPoint/Discontinuity，
-    让 MP4 stss 关键帧表含 seek 锚点，根治长录制"快进/拖进度条花屏"。
-    v29 根治 write_video 僵尸堆积顶住 finalize；v28 纠正 v27 误判。
+    v31 纯 Python 编排层：stop_all 两阶段收尾（先停所有 producer → 全局清队列
+    → 逐个 finalize），根治多设备 + 设备重启时 finalize 被他机迟到写入顶过 60s。
+    v30 给 IDR sample 打 CleanPoint 根治快进花屏；v29 根治 write_video 僵尸堆积。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v30"' in src, "native 指纹须为 v30"
+    assert 'kBuildId = "mf-20261124-drain-v31"' in src, "native 指纹须为 v31"
 
 
 def test_rotate_is_pulled_out_of_write_video():

@@ -810,6 +810,18 @@ def _code_without_docstring(fn):
     return "\n".join(code_lines)
 
 
+def _stop_flow_src():
+    """[v31] 拼接 stop 两阶段源码：_stop_producers → stop → _finalize。
+
+    v31 把原 stop() 拆成阶段1(_stop_producers：停 producer/等读线程)与阶段3
+    (_finalize：finalize/publish)，stop() 仅作单设备入口组合两者。旧的 v22/v27/
+    v28/v29 源码守卫断言的是 stop() 内的先后顺序，改用本函数拼出完整收尾链路，
+    保持这些守卫的语义（顺序关系）不变、且覆盖到拆分后的方法。
+    """
+    return (_code_without_docstring(mcs.MFCaptureSession._stop_producers)
+            + "\n" + _code_without_docstring(mcs.MFCaptureSession._finalize))
+
+
 def test_worker_loop_skips_cancelled_tasks():
     """[收尾慢根因回归·v17] worker 出队必须跳过 cancelled task（僵尸回收）。
 
@@ -972,7 +984,7 @@ def test_drop_queued_cancelable_skips_pending_drains():
 
 def test_stop_drops_queued_drains_before_finalize(monkeypatch):
     """[收尾根治 v22] stop() 须在 finalize 之前调用 drop_queued_drains。"""
-    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    src = _stop_flow_src()
     assert "drop_queued_drains" in src, "stop 须撤销排队 drain"
     assert src.index("drop_queued_drains") < src.index("session_finalize"), (
         "撤销 drain 必须在 finalize 之前")
@@ -1448,7 +1460,7 @@ def test_finalize_recover_barrier_exceeds_finalize_budget():
     import backend.mf_capture_service as mcs_local
     assert mcs_local.BARRIER_RECOVER_TIMEOUT_S >= mn_local.FINALIZE_CALL_TIMEOUT_S, \
         "捞回屏障预算须 >= finalize 调用超时，否则成片改名落盘前就放弃捞回"
-    src = _code_without_docstring(mcs_local.MFCaptureSession.stop)
+    src = _stop_flow_src()
     assert "barrier(timeout=BARRIER_RECOVER_TIMEOUT_S)" in src, \
         "stop() 超时兜底须把加长后的预算显式传给屏障"
 
@@ -1461,7 +1473,7 @@ def test_stop_drops_drains_before_joining_read_thread():
     被顶过 30s。修复：停定时器后立刻撤销一次（v27），finalize 前再撤销一次（v22，
     幂等保险）。守卫锁定第一次撤销在 _join_threads() 之前。
     """
-    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    src = _stop_flow_src()
     assert "drop_queued_drains" in src, "stop 须撤销排队 drain"
     first_drop = src.index("drop_queued_drains")
     join_pos = src.index("self._join_threads()")
@@ -1538,7 +1550,7 @@ def test_call_passes_owner_to_done():
 
 def test_stop_drops_queued_video_before_finalize():
     """[真失败根治 v29·源码守卫] stop 须在 finalize 前撤销本会话 write_video 僵尸。"""
-    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    src = _stop_flow_src()
     assert "drop_queued_video_writes" in src, \
         "stop 须撤销本会话残留的 write_video 僵尸"
     assert src.index("drop_queued_video_writes") < src.index("session_finalize"), (
@@ -1546,3 +1558,76 @@ def test_stop_drops_queued_video_before_finalize():
     join_pos = src.index("self._join_threads()")
     assert src.index("drop_queued_video_writes") > join_pos, \
         "撤销须在等读线程之后——读线程结束前仍有正常帧在途，过早撤销会丢帧"
+
+
+# ---------------- 多设备收尾根治 v31：stop_all 两阶段 ----------------
+def test_drop_queued_all_owners_cancels_every_session_but_spares_none_owner():
+    """[多设备收尾根治 v31·行为] 全局撤销所有会话的排队写入，但不误伤 owner=None。
+
+    真机 2 台设备共享单 worker：A 先收尾 finalize 时，B（中途卡死重启那台）
+    仍在投递 write_video，排在 A 的 finalize 前把它顶过 60s → 成片丢失。
+    根治需要一次性撤销**所有**会话的僵尸写入；但 fill/诊断等 owner=None 的
+    调用必须保留，否则会影响 native 内部逻辑。
+    """
+    import threading as _th
+    lib = _BlockingLib()
+    w = mn.MFWorker(lib)
+    w.start()
+    lib._gate.clear()
+    blocker = _th.Thread(target=lambda: _call_and_catch(w, lib.block_forever, timeout=5))
+    blocker.start()
+    assert lib._gate.wait(2), "blocker 应已占用 worker"
+
+    executed = []
+
+    def make_call(owner, tag):
+        def fn():
+            executed.append(tag)
+            return 1
+        def invoke():
+            try:
+                w.call(fn, timeout=5, owner=owner)
+            except Exception:  # noqa: BLE001  撤销的 task 会拿到超时错误
+                pass
+        return _th.Thread(target=invoke)
+
+    # owner=1/2 是两台设备的 write_video；owner=None 是非写入调用
+    threads = [make_call(1, "h1"), make_call(2, "h2"), make_call(None, "none")]
+    for t in threads:
+        t.start()
+    _th.Event().wait(0.15)   # 确保 3 个 task 排进队列
+
+    dropped = w.drop_queued_all_owners()
+    assert dropped == 2, f"应撤销两个会话的写入，实际 {dropped}"
+
+    lib.release.set()
+    blocker.join(3)
+    for t in threads:
+        t.join(3)
+    _th.Event().wait(0.2)
+    assert not executed or executed == ["none"], \
+        f"两台设备的僵尸写入须全撤销，仅 owner=None 可执行，实际 {executed}"
+    w.stop()
+
+
+def test_stop_all_two_phase_stops_producers_before_finalize():
+    """[多设备收尾根治 v31·源码守卫] stop_all 须两阶段：先停所有 producer、
+    再全局清队列、最后逐个 finalize，避免 A 被 B 的迟到帧顶住。"""
+    src = _code_without_docstring(mcs.MFCaptureService.stop_all)
+    # 三段逻辑都在
+    assert "_stop_producers()" in src, "阶段1 须停所有 producer"
+    assert "drop_all_video_writes" in src, "阶段2 须全局清所有会话的 write_video"
+    assert "_finalize()" in src, "阶段3 须逐个 finalize"
+    # 顺序：先停所有 producer 的循环 → 全局清队列 → 逐个 finalize
+    stop_all_pos = src.index("_stop_producers()")
+    drop_all_pos = src.index("drop_all_video_writes")
+    finalize_pos = src.index("_finalize()")
+    assert stop_all_pos < drop_all_pos < finalize_pos, \
+        "收尾顺序须为：停所有 producer → 全局清队列 → 逐个 finalize"
+
+
+def test_stop_remains_single_device_compat_entry():
+    """[多设备收尾根治 v31·守卫] stop() 保留为单设备入口，组合两阶段方法。"""
+    src = _code_without_docstring(mcs.MFCaptureSession.stop)
+    assert "_stop_producers()" in src and "_finalize()" in src, \
+        "stop 须保留单设备兼容入口，依次调用两阶段"

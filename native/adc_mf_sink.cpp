@@ -105,7 +105,12 @@
 // CleanPoint + Discontinuity，让 stss 正确记录 seek 随机访问点。长录制每次
 // screenrecord 续流的新 IDR 同样被标记。音画"一点点延迟"经审查属 v15/v16
 // 累加式时钟在续流空档的固有残余，无实测数据不盲改（详见 FIX_NOTES）。
-static const char* const kBuildId = "mf-20261124-drain-v30";
+// v31: native 语义仍未动 —— 纯 Python 编排层多设备收尾修复。真机两台设备、
+// 其中一台中途卡死重启时收尾 249s 仍丢成片：单 worker 单 FIFO，v29 只清本会话
+// write_video，先 stop 的设备 finalize 被另一台仍在投递的写入顶过 60s。修复：
+// stop_all 改两阶段（先停所有 producer → 全局清队列 → 逐个 finalize），新增按
+// 全会话撤销 write_video 的能力。仅升指纹让真机确认整包含 v24~v31 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v31";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

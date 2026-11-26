@@ -240,22 +240,42 @@ class MFWorker:
         正在 worker 中执行的那一个已出队、无法撤销，但它只占一个短任务，不挡
         finalize。返回撤销的 task 数；owner=None 时不撤销任何任务（防御误伤）。
         """
-        if owner is None:
+        return self._drop_queued_by_owner(owner, match_all=False)
+
+    def drop_queued_all_owners(self):
+        """[多设备收尾根治 v31] 撤销队列中尚未执行的**所有**会话的 write_video。
+
+        v29 的 drop_queued_owner 只清指定 owner（本会话），但 stop_all 串行收尾时，
+        先 stop 的会话 finalize 会排在**另一台仍在活跃投递**的 write_video 后面被
+        顶过 60s（真机 2 台设备、其中一台中途重启，收尾 249s 仍丢成片即此病根）。
+        本方法供 stop_all 在**所有 producer 已停止**后一次性清空全队列——此时不会有
+        新写入投递，撤销全部迟到僵尸是安全的。owner=None 的调用（fill/诊断）不受影响。
+        """
+        return self._drop_queued_by_owner(None, match_all=True)
+
+    def _drop_queued_by_owner(self, owner, match_all=False):
+        """按 owner 撤销排队 write_video 的共用实现。match_all=True 时不分会话全清。"""
+        if owner is None and not match_all:
             return 0
         dropped = 0
-        # 与 drop_queued_cancelable 同理：deque 有 mutex 保护，快照 + set event 幂等。
+        # deque 有 mutex 保护；快照 + set event 幂等线程安全。
         with self._q.mutex:
             pending = list(self._q.queue)
         for _fn, _args, done in pending:
-            if done.get("owner") == owner and not done.get("cancelled"):
-                done["cancelled"] = True
-                dropped += 1
-                # 给仍在 wait 的调用方一个"调用超时"错误（而非 value=None 被误判
-                # 成 native 错误）：读线程的 v21 降级逻辑认这个文本、记为诊断统计。
-                # 正常收尾时读线程已退出、无人等待，这里只是幂等兜底。
-                if done.get("error") is None:
-                    done["error"] = MFNativeError("MF worker 调用超时（收尾撤销排队写入）")
-                done["event"].set()
+            o = done.get("owner")
+            if o is None:
+                continue    # 非 write_video（fill / 诊断调用）绝不撤销
+            if not match_all and o != owner:
+                continue
+            if done.get("cancelled"):
+                continue
+            done["cancelled"] = True
+            dropped += 1
+            # 给仍在 wait 的调用方一个"调用超时"错误（而非 value=None 被误判
+            # 成 native 错误）：读线程的 v21 降级逻辑认这个文本、记为诊断统计。
+            if done.get("error") is None:
+                done["error"] = MFNativeError("MF worker 调用超时（收尾撤销排队写入）")
+            done["event"].set()
         return dropped
 
     def stop(self):
@@ -398,6 +418,20 @@ class MFNative:
             return 0
         try:
             return w.drop_queued_owner(owner)
+        except Exception:  # noqa: BLE001  老 worker 无此方法时静默降级
+            return 0
+
+    def drop_all_video_writes(self):
+        """[多设备收尾根治 v31] 撤销 worker 队列里所有会话未执行的 write_video。
+
+        供 stop_all 在停掉所有 producer 后、逐个 finalize 前一次性调用，避免某台
+        设备的迟到写入顶住另一台设备的 finalize。老 worker / 替身降级为 0。
+        """
+        w = self.worker
+        if w is None:
+            return 0
+        try:
+            return w.drop_queued_all_owners()
         except Exception:  # noqa: BLE001  老 worker 无此方法时静默降级
             return 0
 

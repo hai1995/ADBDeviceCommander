@@ -8669,3 +8669,54 @@ default record_xxx_p1.mp4` 输出。拿到后即可对比视频/音频 duration 
 **验证（v30 花屏修复）**：新增 2 项守卫；专项 + 全量须通过；pyflakes / CI 版 ruff
 全过。真机预期：换新构建（日志指纹 v30）后，快进/拖进度条不再出现马赛克花屏，
 seek 落点即清晰关键帧；顺序播放画质不变。
+
+---
+
+## 2026-11-26 多设备 + 设备卡死重启收尾 249s 丢成片（v31，纯 Python 编排层，指纹 mf-20261124-drain-v31）
+
+**现象**：v29/v30 包、2 台设备同源录制，其中一台（2bacb535）中途卡死重启：
+```
+10:43:34 停止录屏并收尾
+10:43:44 ⚠ 指针/触摸恢复失败（adb 命令 10s 超时）   ← 设备已卡死失联
+10:44:20 ⚠ 设备短暂失联：2bacb535（保留勾选，重连后自动恢复）
+10:47:43 ⚠ 同源录制收尾提示：同源合成失败：MF worker 调用超时，未捞回已发布成片
+10:47:44 ⚠ 录屏失败：未保存任何视频文件
+```
+收尾 249s（比 v29 单设备的 224s 更久），成片仍未落盘。错误文案与 v28 相同——
+说明 v29 的 write_video 僵尸清理在"多设备 + 设备重启"场景失效。
+
+**根因（架构级，v27~v30 都没覆盖的组合场景）**：
+1. **单 worker 单 FIFO，两台设备共享**。v29 的 `drop_queued_video_writes(handle)`
+   只撤销**本会话 owner** 的排队写入，且只在**自己 stop() 时**执行一次。
+2. `stop_all()` **串行 stop**：先 stop 的会话 A 走完自己的 `_stop_producers()`
+   → drop 自己的写入 → finalize A。但此刻**设备 B 还没 stop**，B 的读线程仍在
+   活跃投递 write_video(B handle)——尤其 B 卡死重启时读线程卡在续流/read1，
+   投递更持久、拖更长。这些 B 的写入排在 A 的 finalize 前面被逐个执行，把 A
+   的 finalize 顶过 60s → 屏障 90s 也排不上 → A 成片来不及改名落盘 → "未捞回"。
+3. 之前几轮（v27 排 drain、v29 按 owner 清写入、v28 加屏障预算）都是单设备视角，
+   **默认"收尾时别的 producer 已停"**；多设备串行收尾打破了这个前提。
+
+**修复（v31，纯 Python 编排层，native 语义不动）**：
+- `backend/mf_capture_service.py`：把 `MFCaptureSession.stop()` 拆成两阶段方法：
+  - `_stop_producers()`：置 stop / 停 drain 定时器 / 提前撤销 drain / close adb
+    进程 / 等读线程退出——不再投递任何新写入（含卡死重启那台）；
+  - `_finalize()`：mark mic stop / finalize / 超时兜底 / publish / teardown。
+  - `stop()` 保留为单设备兼容入口，依次调用两者（单设备行为完全不变）。
+- `MFCaptureService.stop_all()` 改**三阶段编排**：① 对**所有**会话先跑
+  `_stop_producers()`（杜绝收尾期间任何设备再投递）→ ② 全局撤销 drain + 新增的
+  `drop_all_video_writes()` 清掉**所有会话**残留的 write_video 僵尸 → ③ 逐个
+  `_finalize()`（每个 finalize 都排到干净队首、立即执行落盘）。
+- `backend/mf_native.py`：`MFWorker` 抽出 `_drop_queued_by_owner()`，新增
+  `drop_queued_all_owners()`（撤销所有 owner 的排队写入、保留 owner=None 的诊断
+  调用）；`MFNative` 新增 `drop_all_video_writes()` 封装（老 worker/替身降级 0）。
+- 指纹 v30→v31，让真机日志确认整包含 v24~v31 全部录制修复。
+
+**验证**：新增 3 项回归（全局撤销不误伤 owner=None·行为 / stop_all 两阶段顺序·
+守卫 / stop 单设备兼容入口·守卫）；既有收尾守卫改用 `_stop_flow_src()` 拼接两阶段
+源码，语义不变。专项须全过。真机预期：两台设备（含一台中途重启）收尾不再拖
+249s，两台成片都能及时落盘；若某台确无成片仍如实报错（v28 保护保留）。日志指纹 v31。
+
+**反思**：v27~v30 连续几轮都在"单 worker 队列"里打转（排 drain → 分级超时 →
+按 owner 清写入 → 加屏障预算），每次真机换一种超时点/组合场景就复发。本轮跳出
+单设备视角，从"all producers must stop before any finalize"入手才覆盖根因。以后
+审查共享资源（worker/队列/work_dir）须始终以**多设备并发**为前提。
