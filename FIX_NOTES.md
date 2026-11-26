@@ -8592,3 +8592,80 @@ stop 撤销早于等读线程·源码守卫），指纹守卫更新为 v27。全
 stop 撤销在等读线程后、finalize 前·源码守卫）。全量须通过。真机预期：10min 长
 录制收尾不再拖 224s、finalize 立即执行、成片正常落盘 1 个完整带声 MP4；日志指纹
 v29。若确无成片仍如实报"未保存任何视频文件"，不谎报成功（v28 守卫保留）。
+
+---
+
+## 2026-11-26 长录制快进花屏根治 + 音画不同步审查（v30，native 语义真改动，指纹 mf-20261124-drain-v30）
+
+**用户反馈**：长录制成品顺序播放正常，但**快进/拖进度条时满屏马赛克条带花屏**（附图）；
+另反馈播放时"画面感觉延迟了一点点"（音画轻微不同步）。用户问是否解码器不兼容、
+是否编码问题。
+
+### 一、快进花屏 = 编码/封装缺陷，已根治（v30）
+
+**结论：不是解码器不兼容，是封装侧没给 MP4 写全关键帧表。**
+
+**证据链（三重印证，高置信度）**：
+1. **项目历史预言**：FIX_NOTES v13 条目（约 7959 行）在修完 NAL 尾部截断后明确写下
+   "若仍有零星马赛克，下一嫌疑是 IDR 帧未设 `MFSampleExtension_CleanPoint`
+   （默认 FALSE，影响 stss 关键帧表与 seek）"。v13 修的是"全程花屏/字节损坏"，
+   本次是"仅快进花屏"，正是这个遗留嫌疑的兑现。
+2. **代码实证**：grep `CleanPoint|Discontinuity|stss|MFSampleExtension` 在
+   native/ 全仓 0 命中——`push_sample` 从未给任何 video sample 设关键帧标记。
+3. **微软官方文档**：MP4 SinkWriter 靠 sample 上的 `MFSampleExtension_CleanPoint`
+   把该 sample 写进 stss(sync sample table) 作为随机访问点；缺标记则 stss 不含
+   关键帧锚点。
+
+**症状机理（与用户描述完全吻合）**：顺序播放从首帧 IDR 顺序解码、参考链完整 →
+画面正常；快进/拖进度条时播放器查 stss 找最近关键帧，stss 缺锚点 → 只能落到
+非 IDR 的 P 帧、缺前向参考帧 → 宏块解不出 → 马赛克条带花屏，直到下一个真正 IDR
+才恢复。长录制因 screenrecord 180s 上限多次续流、IDR 更多，花屏点更密集。
+
+**修复（native/adc_mf_sink.cpp，真语义改动，须重编译）**：
+- `flush_pending_au()` 遍历 pending_au_，按 H264 `NAL type=5` 识别当前 AU 是否含
+  IDR，算出 `is_keyframe` 并透传给 push_sample。type=5 判断天然覆盖续流新进程
+  首帧 IDR，无需额外状态。
+- `push_sample()` 新增 `is_keyframe` 参数（默认 false 向后兼容音频调用）；当
+  `!audio && is_keyframe` 时给 sample 设 `MFSampleExtension_CleanPoint=TRUE` +
+  `MFSampleExtension_Discontinuity=TRUE`，让 MP4 sink 把 IDR 写进 stss 关键帧表、
+  提示解码器参考链在此重置。普通 P 帧保持默认 FALSE；顺序解码下 IDR 本就清参考
+  链，故不影响正常播放。
+- 指纹 v29→v30，让真机日志确认整包含本轮重编译的 DLL（native 改动必须重编译
+  才生效，纯 Python 升指纹无效）。
+- 新增 2 项守卫：IDR sample 须打 CleanPoint/Discontinuity、flush_pending_au 须按
+  type=5 识别 IDR 并透传 is_keyframe。
+
+### 二、音画不同步（画面轻微延迟）= 代码审查给出结论，本轮不盲改
+
+**审查了 v15/v16 的累加式视频时钟**（`push_sample` 视频分支）：视频时间戳
+`video_ts_hns_ += video_frame_dur_hns_`，帧长用 `observed = sync_audio_hns_ /
+video_frame_count_` 渐进校准；音频路完全不动（真实 QPC + 按样本数 dur）。
+该机制历史上经两次真机 ffprobe 物证精调（v15 把偏差 377ms→4ms，v16 修前置
+音频污染、30.938s 偏差 -41ms），是已验证的成熟方案。
+
+**发现一个理论上的残余因素**：`sync_audio_hns_` 设计于续流功能（v24）之前，
+其假设是"音频与视频帧在同一时段同步产出"。长录制续流时（screenrecord 180s
+上限重启、约 1~3s 空档），视频帧暂停产出（`video_frame_count_` 停滞），而音频
+采集/排空不停（`sync_audio_hns_` 持续累加）。这会抬高 `observed` 观测帧长 →
+校准帧长偏大 → 视频时间轴被拉长 → 画面相对声音滞后，方向与用户"一点点延迟"
+一致。次要因素：静止画面时 screenrecord 输出帧稀疏，全局平均帧长模型本身对
+VFR 场景是近似。
+
+**为何本轮不改（证据驱动，避免重蹈覆辙）**：
+1. **无实测数据**：用户本次只给截图、未给成品 mp4，我无法用 ffprobe 量出
+   视频/音频真实 duration 差、帧数、真实帧率，无法确认主因与量级。
+2. **高风险区**：时间戳逻辑历史上 v15→v16 就因观测源选错发生过方向反转
+   ("声音快画面慢"→"声音比画面晚")，v27/v28 也因证据不足误判过。在"一点点"
+   的轻微症状下盲改校准参数，很可能引入新的不同步或触发 sink 的 sticky 错误
+   (0x8000FFFF，v8/v9 教训)。
+3. native 改动须重编译+真机确认，无法在本沙箱验证时间戳效果。
+
+**请用户提供以精确定位（下一步）**：本次成品 mp4 的 `ffprobe -v error -show_entries
+format=duration -show_entries stream=codec_type,nb_frames,avg_frame_rate,duration -of
+default record_xxx_p1.mp4` 输出。拿到后即可对比视频/音频 duration 差与真实帧率，
+再决定是否需要针对续流空档做帧长观测源修正（候选方案：续流边界重置校准基线，
+或观测源改用"视频段内音频"而非全局累计）。在拿到数据前保持 v15/v16 机制不动。
+
+**验证（v30 花屏修复）**：新增 2 项守卫；专项 + 全量须通过；pyflakes / CI 版 ruff
+全过。真机预期：换新构建（日志指纹 v30）后，快进/拖进度条不再出现马赛克花屏，
+seek 落点即清晰关键帧；顺序播放画质不变。

@@ -97,7 +97,15 @@
 // MFWorker.call 增加 owner 标记，收尾（读线程已退出）时按会话句柄精准撤销队列里
 // 残留的 write_video 僵尸，finalize 立即执行落盘；多设备共享 worker 不误伤他机。
 // 仅升指纹让真机确认整包含 v24~v29 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v29";
+// v30: native 语义真改动 —— 根治长录制"快进/拖进度条花屏"。此前的实现从未给
+// 视频 sample 设 MFSampleExtension_CleanPoint，MP4 sink 生成的 stss(sync sample
+// table) 缺关键帧锚点；播放器 seek 只能落到非 IDR 的 P 帧、缺参考帧解不出 →
+// 马赛克花屏（顺序播放参考链完整、正常，正是"快进才花屏"症状）。修复：
+// flush_pending_au 检测 AU 内 IDR(NAL type=5)，push_sample 对该 sample 打
+// CleanPoint + Discontinuity，让 stss 正确记录 seek 随机访问点。长录制每次
+// screenrecord 续流的新 IDR 同样被标记。音画"一点点延迟"经审查属 v15/v16
+// 累加式时钟在续流空档的固有残余，无实测数据不盲改（详见 FIX_NOTES）。
+static const char* const kBuildId = "mf-20261124-drain-v30";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -891,7 +899,19 @@ private:
             std::vector<unsigned char> sample = to_annexb(pending_au_);
             LONGLONG ts = qpc_now_hns();
             LONGLONG dur = 10000000LL * fps_den_ / fps_num_;   // 名义帧率估算
-            push_sample(vstream_, false, sample.data(), (UINT32)sample.size(), ts, dur);
+            // [快进花屏根治 v30] 判断当前 AU 是否含 IDR（NAL type=5）。IDR 是
+            // 随机访问点，必须显式打 MFSampleExtension_CleanPoint，MP4 SinkWriter
+            // 才会把该 sample 写进 stss(sync sample table) 关键帧表。缺此标记时
+            // stss 不含关键帧（或只有首帧），播放器快进/拖进度条只能落到最近的
+            // P 帧、缺参考帧解不出 → 马赛克花屏（顺序播放因参考链完整而正常，
+            // 正是用户"快进才花屏"的症状）。typ=5 判断不受续流影响：每次
+            // screenrecord 续流的新进程首帧也是 IDR，会被同样正确标记。
+            bool is_keyframe = false;
+            for (const auto& nal : pending_au_) {
+                if (!nal.empty() && (nal[0] & 0x1F) == 5) { is_keyframe = true; break; }
+            }
+            push_sample(vstream_, false, sample.data(), (UINT32)sample.size(),
+                        ts, dur, is_keyframe);
         }
         pending_au_.clear();
     }
@@ -899,10 +919,19 @@ private:
         if (!writer_ || !writing_ || blk.pcm.empty()) return;
         push_sample(astream_, true, blk.pcm.data(), (UINT32)blk.pcm.size(), blk.ts_hns, blk.dur_hns);
     }
-    void push_sample(DWORD stream, bool audio, const unsigned char* data, UINT32 len, LONGLONG ts, LONGLONG dur) {
+    void push_sample(DWORD stream, bool audio, const unsigned char* data, UINT32 len,
+                     LONGLONG ts, LONGLONG dur, bool is_keyframe = false) {
         if (!writer_ || !writing_) return;
         IMFSample* sample = nullptr;
         if (FAILED(MFCreateSample(&sample))) { dropped_++; return; }
+        // [快进花屏根治 v30] 仅视频 IDR sample 设 CleanPoint/Discontinuity：
+        // CleanPoint 让 MP4 sink 把它写进 stss 关键帧表（seek 随机访问点）；
+        // Discontinuity 提示解码器此处参考链重置。顺序解码下 IDR 本就清参考链，
+        // 故不影响正常播放；只对 keyframe 设，普通 P 帧保持默认 FALSE。
+        if (!audio && is_keyframe) {
+            sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
+            sample->SetUINT32(MFSampleExtension_Discontinuity, TRUE);
+        }
         IMFMediaBuffer* buf = nullptr;
         if (FAILED(MFCreateMemoryBuffer(len, &buf))) { sample->Release(); dropped_++; return; }
         BYTE* dst = nullptr;

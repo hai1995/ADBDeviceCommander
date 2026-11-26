@@ -614,16 +614,15 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v29():
-    """native 指纹升到 v29，真机据此确认整包含 v24~v29 全部录制/收尾修复。
+def test_build_id_v30():
+    """native 指纹升到 v30，真机据此确认整包含 v24~v30 全部录制/收尾修复。
 
-    v29 根治 write_video 僵尸堆积顶住 finalize：收尾按会话句柄精准撤销队列里
-    残留的 write_video 僵尸，让 finalize 立即执行落盘（真机 10min 收尾 224s、
-    成片丢失的真正病根）。v28 曾纠正 v27 的误判：捞回屏障加长、致命错误不被
-    掩盖、无视频不再谎报成功。
+    v30 是少有的 native 语义真改动：给 IDR sample 打 CleanPoint/Discontinuity，
+    让 MP4 stss 关键帧表含 seek 锚点，根治长录制"快进/拖进度条花屏"。
+    v29 根治 write_video 僵尸堆积顶住 finalize；v28 纠正 v27 误判。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v29"' in src, "native 指纹须为 v29"
+    assert 'kBuildId = "mf-20261124-drain-v30"' in src, "native 指纹须为 v30"
 
 
 def test_rotate_is_pulled_out_of_write_video():
@@ -680,3 +679,45 @@ def test_both_return_codes_defined_in_cpp():
     import backend.mf_native as mn
     assert mn.ADC_OK == 0 and mn.ADC_ROTATE_PENDING == 1, (
         "Python 返回码须与 C++ 对齐：ADC_OK=0, ADC_ROTATE_PENDING=1")
+
+
+def test_idr_sample_marked_clean_point_for_seek():
+    """[快进花屏根治·v30] IDR sample 须打 CleanPoint，让 MP4 stss 含 seek 锚点。
+
+    真机长录制成品：顺序播放正常、快进/拖进度条满屏马赛克条带。根因是从未
+    给视频 sample 设 MFSampleExtension_CleanPoint，MP4 sink 生成的 stss 关键帧表
+    缺随机访问点；seek 落到非 IDR 的 P 帧、缺参考帧解不出 → 花屏。历史
+    FIX_NOTES v13 早已把"IDR 未设 CleanPoint"列为下一嫌疑。
+    """
+    src = _cpp()
+    # ① push_sample 对 is_keyframe 的视频 sample 设 CleanPoint + Discontinuity
+    ps = src[src.index("void push_sample("):src.index("// 段临时文件名")]
+    code = "\n".join(ln.split("//")[0] for ln in ps.splitlines())
+    assert "bool is_keyframe = false" in code, (
+        "push_sample 须有 is_keyframe 参数（默认 false 向后兼容音频调用）")
+    assert "if (!audio && is_keyframe)" in code, (
+        "只对视频 IDR 设关键帧标记，避免误伤音频 sample")
+    assert "MFSampleExtension_CleanPoint" in code, (
+        "IDR sample 须设 CleanPoint，MP4 sink 才把它写进 stss 关键帧表")
+    assert "MFSampleExtension_Discontinuity" in code, (
+        "IDR sample 须设 Discontinuity，提示解码器参考链在此重置")
+
+
+def test_flush_pending_au_detects_idr_nal_type5():
+    """[快进花屏根治·v30] flush_pending_au 须检测 AU 内 IDR(NAL type=5) 并透传。
+
+    只有正确识别 IDR 才能给对应 sample 打关键帧标记；若漏判则 stss 仍缺锚点。
+    type=5 判断天然覆盖续流后新进程首帧 IDR，无需额外状态。
+    """
+    src = _cpp()
+    fp = src[src.index("void flush_pending_au()"):src.index("void write_audio_block(")]
+    code = "\n".join(ln.split("//")[0] for ln in fp.splitlines())
+    assert "(nal[0] & 0x1F) == 5" in code, (
+        "须按 H264 NAL type=5 识别 IDR（随机访问点）")
+    assert "is_keyframe" in code, "flush_pending_au 须计算 is_keyframe 并传给 push_sample"
+    # 确认 push_sample 调用确实把 is_keyframe 传下去（而非仅算未用）；
+    # 调用跨多行，取 push_sample(...) 起到段落末尾的整体片段再判断。
+    call_start = code.index("push_sample(vstream_")
+    call_block = code[call_start:]
+    assert "is_keyframe" in call_block, (
+        "is_keyframe 必须透传给 push_sample，不能算了不用")
