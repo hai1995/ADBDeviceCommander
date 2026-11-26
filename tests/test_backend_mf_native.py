@@ -1804,3 +1804,90 @@ def test_failure_diagnostics_carries_phase(tmp_path):
     sess.work_dir = str(work)
     diag = sess._failure_diagnostics()
     assert "phase=7" in diag and "Finalize" in diag, diag
+
+
+# ------------------------- 编排层缺陷修复（v35 后续审查） ------------------
+
+def test_session_create_exception_returns_readable_failure(monkeypatch):
+    """[缺陷修复] session_create 抛异常（worker 已死/native 崩溃）必须转成
+    (False, 可读原因)，不能让异常冒泡穿出 start()/start_all()。
+
+    start_all 的调用循环没有 try：session_create 的异常会一路穿透到 controller
+    变成 API 500，多设备场景还会让已启动的会话收不到收尾。
+    """
+    fake = FakeNative(available=True)
+
+    def boom_create(*a, **kw):
+        raise mn.MFNativeError("MF worker 未启动")
+
+    fake.session_create = boom_create
+    svc = mcs.MFCaptureService(native=fake)
+    # start_all 不得抛异常，须返回可读失败
+    ok, reason, firsts = svc.start_all(["s1"], "/tmp", {}, {}, None)
+    assert ok is False
+    assert "创建同源录制会话失败" in reason, reason
+    assert firsts == {}
+
+
+def test_session_create_exception_isolated_per_device(monkeypatch):
+    """[缺陷修复] 多设备时仅某台 session_create 失败：该台失败、其余照常启动。"""
+    fake = FakeNative(available=True)
+    calls = {"n": 0}
+    orig = fake.session_create
+
+    def flaky(out_dir, stem, *a, **kw):
+        calls["n"] += 1
+        if stem.startswith("record_bad"):
+            raise mn.MFNativeError("MF worker 未启动")
+        return orig(out_dir, stem, *a, **kw)
+
+    fake.session_create = flaky
+
+    def fake_popen(cmd, **kw):
+        return FakeProc([b"\x00\x00\x01\x65" + b"\xaa" * 8])
+
+    monkeypatch.setattr(mcs.subprocess, "Popen", fake_popen)
+    svc = mcs.MFCaptureService(native=fake)
+    ok, reason, firsts = svc.start_all(
+        ["bad1", "good1"], "/tmp", {}, {}, None)
+    # 有一台成功即整体 ok=True（既有"任一失败仅该台 cancel"语义，部分失败的
+    # reason 为空是 start_all 既有契约）；关键是失败台被剔除、不留残会话。
+    assert ok is True, reason
+    assert "good1" in firsts and "bad1" not in firsts
+    # 失败的那台已走 cancel 清理，不留残会话
+    assert set(svc._sessions.keys()) == {"good1"}
+    svc.cancel_all()
+
+
+def test_drain_stderr_tolerates_cleared_proc():
+    """[缺陷修复·竞态] _close_proc 把 _proc 置 None 后再启动 stderr 消费线程，
+    _drain_stderr 必须安静返回，不能 AttributeError 在 try 之外无声死亡。"""
+    fake = FakeNative(available=True)
+    sess = mcs.MFCaptureSession(fake, "s1", "/tmp", "rec", 1920, 1080)
+    sess._proc = None
+    sess._drain_stderr()   # 不抛异常即通过
+
+
+def test_drain_stderr_snapshots_proc_and_consumes_to_eof():
+    """[缺陷修复·竞态] _drain_stderr 须快照 proc 引用：即使消费期间 _proc 被置
+    None（模拟 stop 竞态），仍正常读到 EOF 退出，不中断、不异常。"""
+    import io
+    import threading as _th
+    fake = FakeNative(available=True)
+    sess = mcs.MFCaptureSession(fake, "s1", "/tmp", "rec", 1920, 1080)
+
+    class Proc:
+        def __init__(self):
+            self.stderr = io.BytesIO(b"screenrecord: encoder stopped\n")
+
+    proc = Proc()
+    sess._proc = proc
+    th = _th.Thread(target=sess._drain_stderr, daemon=True)
+    th.start()
+    # 消费期间模拟 stop/cancel 置空 _proc
+    sess._lock.acquire()
+    sess._proc = None
+    sess._lock.release()
+    th.join(timeout=3)
+    assert not th.is_alive(), "stderr 消费线程须正常退出"
+    assert "encoder stopped" in sess._stderr_tail

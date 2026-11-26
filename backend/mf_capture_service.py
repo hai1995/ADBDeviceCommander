@@ -163,10 +163,19 @@ class MFCaptureSession:
         # [EDR 误报缓解] native 只在 work_dir 里写 .tmp.mp4 / 改名 / 删除，
         # 用户保存目录不再出现"高熵半成品写入 → 改名 → 批量删"的勒索特征信号。
         native_dir = self.work_dir or self.save_dir
+        # [缺陷修复] session_create 走 worker.call，可能抛 MFNativeError（worker
+        # 未启动/已死、native 崩溃）。start() 的契约是返回 (ok, 原因)——异常必须
+        # 在此转成可读失败，绝不能冒泡：start_all 的调用循环没有 try，异常会一路
+        # 穿透到 controller 变成 API 500，多设备场景还会让已启动的会话收不到收尾。
         with self._lock:
-            self._handle, self._tmp_first = self.native.session_create(
-                native_dir, self.stem, self.width, self.height,
-                FPS_NUM, FPS_DEN, arate, abits, ach)
+            try:
+                self._handle, self._tmp_first = self.native.session_create(
+                    native_dir, self.stem, self.width, self.height,
+                    FPS_NUM, FPS_DEN, arate, abits, ach)
+            except Exception as ex:  # noqa: BLE001  异常转可读失败原因
+                self._handle = 0
+                self._tmp_first = ""
+                return False, f"创建同源录制会话失败：{ex}"
         try:
             proc = self._spawn_proc()
         except Exception as ex:  # noqa: BLE001  启动失败转成可读原因
@@ -399,7 +408,16 @@ class MFCaptureSession:
             self._read_done.set()
 
     def _drain_stderr(self):
-        stream = self._proc.stderr if self._proc is not None else None
+        # [缺陷修复·竞态] 先在本锁内快照 proc 引用，再取 stderr。旧实现
+        # `stream = self._proc.stderr if self._proc is not None else None` 的
+        # 判空与取属性是两步：stop/cancel 的 _close_proc 可在两步之间把 _proc
+        # 置 None → AttributeError 抛在本方法 try 之外 → 消费线程无声死亡。
+        # stderr 无人读时 adb 管道 64KB 写满会反向阻塞设备端，而线程死了连
+        # 诊断痕迹都没有。快照后即使 _proc 被置空，本线程仍持有有效引用正常
+        # 消费到 EOF（进程已 terminate，很快退出）。
+        with self._lock:
+            proc = self._proc
+        stream = proc.stderr if proc is not None else None
         if stream is None:
             return
         try:

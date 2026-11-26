@@ -1,5 +1,13 @@
 # 修复说明
 
+- **编排层缺陷修复（v35 后续审查）**：同源录制 Python 编排层两处真实缺陷：
+  ①`start()` 里 `session_create` 走 worker.call，可能抛 MFNativeError（worker
+  已死/native 崩溃）——start() 契约是返回 (ok, 原因)，异常必须就地转成可读失败，
+  否则会穿出没有 try 的 start_all 调用循环变成 API 500；②`_drain_stderr` 的
+  `self._proc.stderr` 判空与取属性是两步且不在锁内，stop/cancel 的 `_close_proc`
+  可在两步之间把 `_proc` 置 None → AttributeError 抛在 try 之外 → stderr 消费
+  线程无声死亡（无人读的 adb 管道 64KB 写满会反向阻塞设备端）。修复：快照 proc
+  引用 + session_create 异常转可读失败。新增 4 项回归测试。
 - **同源录制收尾卡死根治 v35（最新一轮）**：v34 带外探针首次带回卡死点——真机
   6min 带声录制收尾 271s，`phase=5(写音频样本 WriteSample-a)` 全程无返回、
   .tmp.mp4 仅 3.2MB 无 moov，worker 被**单次 WriteSample 调用**彻底占死。根因
@@ -8944,3 +8952,26 @@ finalize 排空）都走**单一 MTA worker 线程**（满足 SinkWriter 单线�
 - **真机预期**：收尾不再被 WriteSample 阻塞占死——finalize 在 60s 预算内正常
   返回、成片改名发布；即使 sink 落盘暂时落后，也只是收尾时 Finalize 多冲刷几秒，
   不再出现"phase=5 永不返回"。若仍异常，phase 探针会给出新的精确卡死点。
+
+## 2026-11-26 录制编排层两处缺陷修复（v35 后续审查，纯 Python）
+
+逐段审查 backend/mf_capture_service.py 发现的两处真实缺陷（均属"无声失败"类，
+平时不可见、出问题时没有任何诊断痕迹）：
+
+1. **`start()` 异常契约**：`session_create` 经 worker.call 执行，worker 未启动/
+   已死、native 崩溃时抛 MFNativeError。start() 的契约是返回 `(ok, 原因)`，但
+   session_create 的异常未被捕获——start_all 的调用循环没有 try，异常一路穿透到
+   controller 变成 API 500；多设备场景还会让已成功启动的会话收不到统一收尾。
+   修复：start() 就地 try/except，转成 `(False, "创建同源录制会话失败：{ex}")`，
+   并清空 handle/first_tmp 防止半初始化状态被后续路径引用。
+2. **`_drain_stderr` 竞态**：旧实现
+   `stream = self._proc.stderr if self._proc is not None else None` 的判空与取
+   属性是两步且不在锁内——stop/cancel 的 `_close_proc`（持 _lock）可在两步之间
+   把 `_proc` 置 None，`AttributeError` 抛在本方法 try 之外，消费线程无声死亡；
+   adb stderr 管道 64KB 写满且无人读时，设备端会反向阻塞。修复：在 `_lock` 内
+   快照 proc 引用再取 stderr；即使消费期间 `_proc` 被置空，快照引用仍有效，
+   正常读到 EOF 退出。
+
+验证：新增 4 项回归（session_create 异常转可读失败、多设备隔离不误伤他台、
+_proc 已清空时安静返回、消费期间 _proc 被置空仍正常到 EOF）。MF 相关测试全过，
+全量套件无回归。
