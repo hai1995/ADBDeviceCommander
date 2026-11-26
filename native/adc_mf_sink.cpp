@@ -110,7 +110,14 @@
 // write_video，先 stop 的设备 finalize 被另一台仍在投递的写入顶过 60s。修复：
 // stop_all 改两阶段（先停所有 producer → 全局清队列 → 逐个 finalize），新增按
 // 全会话撤销 write_video 的能力。仅升指纹让真机确认整包含 v24~v31 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v31";
+// v32: native 语义仍未动 —— 纯 Python 编排层录制保全修复。真机录屏期间对别的
+// 设备下发 adb 命令 + 满缓冲全级别 logcat(472MB) 占满 USB 带宽，设备轮询连续
+// 超时触发 adb start-server 自愈，掐断在途 screenrecord H264 连接 → 收尾 237s
+// "未捞回成片"。根因：adb server 自愈守卫 _has_inflight_adb_sessions 只查老路径
+// video + logcat，漏了 MF 会话。修复：把 _rec_session(mf=True) 与
+// mf_capture._sessions 纳入守卫，录制期间暂缓自愈。仅升指纹让真机确认整包含
+// v24~v32 全部录制修复。
+static const char* const kBuildId = "mf-20261124-drain-v32";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 

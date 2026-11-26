@@ -8720,3 +8720,55 @@ seek 落点即清晰关键帧；顺序播放画质不变。
 按 owner 清写入 → 加屏障预算），每次真机换一种超时点/组合场景就复发。本轮跳出
 单设备视角，从"all producers must stop before any finalize"入手才覆盖根因。以后
 审查共享资源（worker/队列/work_dir）须始终以**多设备并发**为前提。
+
+---
+
+## 2026-11-26 录屏期间下发 adb 命令致失败（v32，纯 Python 编排层，指纹 mf-20261124-drain-v32）
+
+**现象**：v31 包、单台设备（190D333158554304）录制约 17min。期间对**另一台**
+设备（2bacb535）下发了两条 adb 命令（临时脚本执行区），随后收尾 237s：
+```
+13:26:19 ✓ 已开始同源录制（native v31）
+13:28:26 [临时脚本执行区] ──── 设备: 2bacb535 ──── / ✓ 完成   ← 下发 adb 命令
+13:43:42 ⏹ 停止录屏并收尾
+13:43:43 ✓ Logcat 抓取完毕：3079830 行 · 472 MB              ← 满缓冲全级别 logcat
+13:47:39 ⚠ 同源合成失败：MF worker 调用超时，未捞回已发布成片
+13:47:43 ⚠ 录屏失败：未保存任何视频文件
+```
+
+**根因（确定性代码缺陷，与用户操作直接耦合）**：
+1. 自动轮询每 5s 调 `devices.refresh()` → `DeviceManager._poll_devices()`；当
+   `adb devices -l` 连续失败达阈值会触发 `adb start-server` 自愈。
+2. 自愈前检查 `inflight_guard()` → `_has_inflight_adb_sessions()`。但**该守卫只查
+   老路径 `video.any_recording()` + logcat_capture/monitor，完全漏掉 MF 同源录制
+   会话**（MF 状态在 `RecordMixin._rec_session(mf=True)` 与 `mf_capture._sessions`）。
+3. 本次恰是守卫注释里点名的最坏组合：满缓冲全级别 logcat（472MB/307 万行）拉满
+   USB 带宽 → 设备轮询超时 → 连续失败触发自愈 → 守卫因漏查 MF 而放行 →
+   `adb start-server` 把在途的 screenrecord H264 长连接掐断。
+4. 设备本身**在线**（日志无"设备失联"提示，与 v31 设备重启场景不同），所以 MF
+   读线程走续流掩盖了中途断流；但流在 NAL 残段/时间戳上留下缺口，最终 finalize
+   异常、收尾 237s 仍"未捞回成片"。这与 test_backend_controller.py 早有的守卫
+   注释（"自愈照样跑，adb start-server 把在途 screenrecord 掐断"）预言一致——
+   只是 MF 路径引入后守卫漏接。
+
+**修复（v32，纯 Python 编排层，native 语义不动）**：
+- `backend/controllers/base.py` `_has_inflight_adb_sessions()`：在老路径 video +
+  logcat 之外，新增对 `self._rec_session.get("mf")` 与 `self.mf_capture._sessions`
+  的检查，两者任一非空即返回 True，录制期间暂缓 adb server 自愈。全部用 getattr +
+  suppress 防御式访问，查询异常不影响其余分支；会话结束后恢复放行（不永久压住
+  自愈）。`WebApi` 同时继承 WebApiBase 与 RecordMixin，可直接访问这两个状态。
+
+**为何这次不再"加超时"**：v27~v31 连续多轮在 worker 队列/超时层面打地鼠（排 drain
+→ 分级超时 → 按 owner 清写入 → 两阶段收尾），每次真机换一种触发场景就复发。本次
+从用户操作（下发 adb 命令）与时间线倒推，定位到「自愈掐断在途录制连接」这一
+**上游打断源**——它是前面所有收尾修补都没覆盖的环节：连接若被掐断，再完善的收尾
+编排也救不回已被截断的码流。
+
+**验证**：新增 1 项回归（MF 录制期间守卫须返回 True / 会话结束恢复放行 / 非 MF
+会话不误拦）；指纹 v31→v32（native 语义未动，纯 Python 改动，但按惯例升指纹让
+真机日志确认整包版本）。全量须通过。真机预期：录屏期间对别的设备下发 adb 命令、
+即便满缓冲 logcat 占带宽，设备轮询连续失败也不会触发 start-server 自愈，
+screenrecord 连接不被掐断，成片正常落盘；日志指纹 v32。
+
+**待跟进**：若换新构建后仍偶发失败，下一步需成品 mp4 的 ffprobe 数据（视频/音频
+duration、真实帧率）定位音画轻微不同步；本轮不动 v15/v16 时间戳逻辑。

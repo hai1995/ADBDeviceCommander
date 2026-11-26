@@ -847,6 +847,45 @@ def test_inflight_guard_blocks_server_heal_while_recording(monkeypatch):
         "落盘抓取也是长连接，同样不能被自愈掐断")
 
 
+def test_inflight_guard_covers_mf_recording(monkeypatch):
+    """[录制保全 v32] MF 同源录制在跑时守卫须返回 True，暂缓 adb server 自愈。
+
+    真机病根：录屏期间对别的设备下发 adb 命令 + 满缓冲全级别 logcat 占满 USB
+    带宽 → 设备轮询连续超时 → adb start-server 自愈把在途的 screenrecord H264
+    长连接掐断 → 设备在线却录屏流中断、收尾 finalize 无成片（收尾 237s 仍
+    "未捞回成片"）。MF 会话不在 video._sessions，旧守卫漏掉它，本测试锁定修复：
+    _rec_session(mf=True) 或 mf_capture._sessions 非空都要拦住自愈。
+    """
+    api = _make_api()
+    # 老路径 / logcat 全部空闲，确保 True 只能来自 MF 会话
+    monkeypatch.setattr(api.video, "any_recording", lambda: False)
+    monkeypatch.setattr(api.logcat_capture, "running_serials", lambda: [])
+    monkeypatch.setattr(api.logcat_monitor, "running_serials", lambda: [])
+    assert api.devices.inflight_guard() is False, "前置：无在途会话时不拦自愈"
+
+    # 场景一：RecordMixin 的会话标记 mf=True（真实录屏期间就是这个状态）
+    api._rec_session = {"mf": True, "videos": {"190D333158554304": "x.mp4"}}
+    assert api.devices.inflight_guard() is True, \
+        "MF 录制 (_rec_session mf=True) 必须暂缓自愈，否则掐断 screenrecord"
+    assert api.devices._inflight_blocks_heal() is True
+
+    # 场景二：_rec_session 尚未置 mf（启动竞态），但 mf_capture 已有会话
+    api._rec_session = {}
+    api.mf_capture._sessions = {"190D333158554304": object()}
+    assert api.devices.inflight_guard() is True, \
+        "mf_capture._sessions 非空同样说明有在途 MF 录制，须拦住自愈"
+
+    # 收尾清空后，守卫应恢复放行（不永久压住自愈）
+    api.mf_capture._sessions = {}
+    assert api.devices.inflight_guard() is False, \
+        "MF 会话结束后应恢复允许自愈，不能永久压住"
+
+    # _rec_session 是 dict 但不是 MF（老路径残留）时不应误拦
+    api._rec_session = {"mf": False, "videos": {"A1": "y.mp4"}}
+    assert api.devices.inflight_guard() is False, \
+        "非 MF 会话不应触发 MF 守卫分支"
+
+
 def test_reap_gone_tools_noop_when_all_present():
     """所有正在监控的设备都仍在列表中时，_reap_gone_tools 不应停止任何设备。"""
     api = _make_api()

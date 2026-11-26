@@ -614,15 +614,16 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v31():
-    """native 指纹升到 v31，真机据此确认整包含 v24~v31 全部录制/收尾修复。
+def test_build_id_v32():
+    """native 指纹升到 v32，真机据此确认整包含 v24~v32 全部录制/收尾修复。
 
-    v31 纯 Python 编排层：stop_all 两阶段收尾（先停所有 producer → 全局清队列
-    → 逐个 finalize），根治多设备 + 设备重启时 finalize 被他机迟到写入顶过 60s。
-    v30 给 IDR sample 打 CleanPoint 根治快进花屏；v29 根治 write_video 僵尸堆积。
+    v32 纯 Python 编排层：把 MF 录制会话纳入 adb server 自愈守卫，录制期间下发
+    adb 命令 + 满缓冲 logcat 占带宽时暂缓 start-server 自愈，避免掐断 screenrecord。
+    v31 stop_all 两阶段收尾根治多设备/设备重启互顶；v30 给 IDR 打 CleanPoint 根治
+    快进花屏；v29 根治 write_video 僵尸堆积。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v31"' in src, "native 指纹须为 v31"
+    assert 'kBuildId = "mf-20261124-drain-v32"' in src, "native 指纹须为 v32"
 
 
 def test_rotate_is_pulled_out_of_write_video():

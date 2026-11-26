@@ -173,12 +173,35 @@ class WebApiBase:
         EOF。设备明明正常，却是程序自己的自愈动作把录屏搞断的 —— 所以录屏 /
         抓取期间暂缓自愈（见 DeviceManager._poll_devices）。
 
-        查询异常时返回 False：宁可让它照旧自愈，也不要想当然地永久压住自愈。
+        [录制保全 v32] 老路径录屏在 video._sessions；MF 同源录制另存于
+        _rec_session(mf=True) 与 mf_capture._sessions，两者都要查。漏掉 MF 会让
+        录屏期间的自愈掐断 screenrecord，是真机"下发 adb 命令后录屏失败"的病根。
+
+        查询异常时各自 suppress 后继续，都不在途才返回 False：宁可让它照旧
+        自愈，也不要想当然地永久压住自愈。
         """
         video = getattr(self, "video", None)
         if video is not None:
             with contextlib.suppress(Exception):
                 if video.any_recording():
+                    return True
+        # [录制保全 v32] MF 同源录制的会话不经过 video._sessions，而是在
+        # RecordMixin 的 _rec_session（含 "mf": True）与 mf_capture._sessions 里。
+        # 旧守卫只查老路径 video + logcat，漏掉 MF：用户录屏期间对别的设备下发
+        # adb 命令 + 满缓冲全级别 logcat 占满 USB 带宽 → 设备轮询连续超时 →
+        # adb start-server 自愈把在途的 screenrecord H264 长连接掐断 → 设备明明
+        # 在线却录屏流中断、收尾 finalize 无成片（真机收尾 237s 仍"未捞回成片"）。
+        # 这与本文件下方 device_service 自愈注释里"录屏期间绝不自动重启 server"
+        # 的设计意图一致，只是 MF 路径引入后漏接了守卫，此处补齐。
+        rec = getattr(self, "_rec_session", None)
+        if rec:
+            with contextlib.suppress(Exception):
+                if rec.get("mf"):
+                    return True
+        mf = getattr(self, "mf_capture", None)
+        if mf is not None:
+            with contextlib.suppress(Exception):
+                if mf._sessions:
                     return True
         for name in ("logcat_capture", "logcat_monitor"):
             svc = getattr(self, name, None)
