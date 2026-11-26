@@ -614,17 +614,41 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v33():
-    """native 指纹升到 v33，真机据此确认整包含 v24~v33 全部录制/收尾修复。
+def test_build_id_v34():
+    """native 指纹升到 v34，真机据此确认整包含 v24~v34 全部录制/收尾修复。
 
-    v33 纯 Python 编排层：finalize 超时后的兜底不再把 worker_barrier 当唯一落盘
-    判据（屏障自身也是 worker.call，worker 被卡死时一起超时），改用纯文件系统
-    轮询观察 .tmp.mp4→.mp4 改名；并首次把 native stats 采集进失败文案供定位。
-    v32 MF 会话纳入 adb server 自愈守卫；v31 stop_all 两阶段收尾；v30 IDR 打
-    CleanPoint 根治快进花屏；v29 根治 write_video 僵尸堆积。
+    v34 native 增加带外 phase 探针（adc_diag_phase，纯原子读不经 worker）：worker
+    被 native 同步调用占死时，stats/最后错误都因走 worker 或加锁拿不到，只有 phase
+    能带外读出卡死点；配合 Python 侧 moov 成片抢救（已 Finalize 的 .tmp.mp4 直接
+    改名捞回）。v33 屏障不再当唯一落盘判据 + native stats 落地；v32 adb 自愈守卫；
+    v31 stop_all 两阶段收尾；v30 IDR 打 CleanPoint 根治快进花屏。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261124-drain-v33"' in src, "native 指纹须为 v33"
+    assert 'kBuildId = "mf-20261124-drain-v34"' in src, "native 指纹须为 v34"
+
+
+def test_diag_phase_probe_is_out_of_band():
+    """[诊断 phase v34·守卫] 卡死点探针必须是纯原子读、不经 worker、不碰锁/COM。
+
+    worker 被 native 同步调用占死时，任何 worker.call（stats/barrier/finalize）都
+    超时，诊断通道若也走 worker 就永远拿不到卡死点。本守卫确保 adc_diag_phase 是
+    直接 atomic load，且在 write_video/drain/flush/push_sample/ensure_writer/
+    sink_finalize/movefile/finalize_done 各阶段都有 diag_phase 埋点。
+    """
+    src = _cpp()
+    assert "std::atomic<int> g_diag_phase" in src, "phase 必须用原子变量"
+    fn = src[src.index("extern \"C\" int adc_diag_phase"):]
+    fn = fn[:fn.index("\n}") + 2]
+    assert "load(std::memory_order_relaxed)" in fn, "探针须为无锁原子读"
+    assert "worker" not in fn and "call" not in fn, "探针不得走 worker 队列"
+    # 头文件必须有 ADC_API 导出声明，否则 MSVC 不导出符号、ctypes 找不到
+    hdr = open(os.path.join(ROOT, "native", "adc_mf_sink.h"),
+               "r", encoding="utf-8").read()
+    assert "ADC_API int adc_diag_phase(void);" in hdr, "头文件须声明探针导出"
+    # 关键阶段都要有埋点码（1~9）；视频/音频样本WriteSample(4/5)用三元写法
+    for code in (1, 2, 3, 6, 7, 8, 9):
+        assert f"diag_phase({code}" in src, f"缺少阶段 {code} 的埋点"
+    assert "diag_phase(audio ? 5 : 4)" in src, "缺少 WriteSample 视频/音频分路埋点"
 
 
 def test_rotate_is_pulled_out_of_write_video():

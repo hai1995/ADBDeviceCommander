@@ -61,6 +61,22 @@ ROTATE_CALL_TIMEOUT_S = 120.0
 # [诊断落地 v33] 收尾失败时采集 native stats 的短超时。这种调用可能发生在 worker
 # 仍被卡住的时刻，只允许短暂旁听、绝不能反过来拖慢收尾；拿不到就降级为空字典。
 STATS_CALL_TIMEOUT_S = 3.0
+# [诊断 phase v34] 带外卡死点探针的阶段码，与 native adc_mf_sink.cpp 严格对齐。
+# 与 stats 不同，adc_diag_phase() 是纯原子读、不经 worker 队列，worker 被 native
+# 同步调用占死时仍能立刻拿到"最后停在哪一步"。
+PHASE_NAMES = {
+    0: "空闲/未知",
+    1: "写入视频帧(write_video)",
+    2: "排空音频(drain_audio)",
+    3: "冲刷视频AU(flush_au)",
+    4: "写视频样本(WriteSample-v)",
+    5: "写音频样本(WriteSample-a)",
+    6: "创建/配置SinkWriter(ensure_writer)",
+    7: "最终化(SinkWriter::Finalize)",
+    8: "改名发布(MoveFileEx)",
+    9: "收尾完成(finalized)",
+    -1: "native无此探针(老DLL)",
+}
 
 
 class MFNativeError(RuntimeError):
@@ -482,6 +498,27 @@ class MFNative:
             return (raw or b"").decode("utf-8", "replace").strip() if isinstance(raw, bytes) else ""
         except Exception:  # noqa: BLE001  诊断信息，绝不因它打断录制
             return ""
+
+    def diag_phase(self):
+        """[诊断 phase v34] 带外读取 native 最后执行阶段（不经过 worker 线程）。
+
+        与 session_stats()/last_error() 的本质区别：本调用直接读一个 std::atomic，
+        不投递 worker 队列、不加锁、不碰 COM。因此即使 worker 被某个 native 同步
+        调用（WriteSample/Finalize/MoveFile）彻底占死，仍能拿到卡死点——这是七轮
+        "未捞回成片"始终拿不到内部数据的根因所在。任何异常/老 DLL（无此符号）
+        一律降级为 -1，绝不因诊断打断收尾。
+
+        返回 (码, 可读名)。
+        """
+        code = -1
+        try:
+            fn = getattr(self._lib, "adc_diag_phase", None)
+            if fn is not None:
+                fn.restype = ctypes.c_int
+                code = int(fn())
+        except Exception:  # noqa: BLE001  诊断绝不打断收尾
+            code = -1
+        return code, PHASE_NAMES.get(code, f"未知阶段({code})")
 
     # ---- 便捷调用（都经 worker 线程；调用方持有 worker）----------------
     def mic_start(self, endpoint_id, rate, bits, channels):

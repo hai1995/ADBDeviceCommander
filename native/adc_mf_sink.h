@@ -50,6 +50,12 @@ ADC_API int adc_last_error(char* out, int out_cap);
  * 老版本 DLL 没有此导出，Python 侧必须按「可选符号」容错。 */
 ADC_API const char* adc_build_id(void);
 
+/* [诊断 phase v34] 带外读取 worker 最后执行阶段码（0~9，见 cpp PHASE 注释）。
+ * 纯 std::atomic 读：不经 worker 队列、不加锁、不碰 COM。worker 被 native 同步
+ * 调用占死时，stats/last_error/barrier 都因走 worker 或加锁而失效，唯有本探针
+ * 仍能带外读出卡死点。可在任意线程调用；老 DLL 无此导出，按可选符号容错。 */
+ADC_API int adc_diag_phase(void);
+
 /* ---- 麦克风（全局单例，native 内部 WASAPI 线程）---------------------- */
 
 /* 启动采集。

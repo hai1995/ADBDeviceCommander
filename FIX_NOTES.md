@@ -8823,3 +8823,40 @@ task 排在同一个单 FIFO worker 队列里：
 与 workdir 快照 / 无符号无 worker 时 stats 降级）；既有守卫全过；基线 1778 passed
 1 skipped。真机预期：若属"finalize 慢但没死"，延迟落盘的成片可被轮询捞回；若仍
 失败，错误文案首次带出内部统计，据此精准定位、不再盲改。据实失败保护（v28）保留。
+
+## 2026-11-26 单设备 681s 录制仍"未捞回成片"——诊断通道自陷 + 带外探针 + 成片抢救（v34，native v34）
+
+**真机日志**：15:55 起录 681s（历次最长）、收尾 265s 后报"未捞回成片"；指纹 v33。
+诊断首次生效，但只有 `workdir(..._p1.tmp.mp4=2658496B)`、**没有 `native(...)` 部分**。
+
+**诊断数据读出的两个铁证**：
+1. 诊断里没有 `native(...)` → `session_stats()` 也超时降级 → worker 不是"慢"，是被
+   **彻底卡死**；而 stats/last_error/barrier 这些诊断通道本身也走 worker 队列或加锁，
+   worker 一卡死它们全部失效——这就是 v27~v33 七轮"拿不到内部数据、只能盲改"的
+   结构性病根。
+2. 只有 `_p1.tmp.mp4`（2.6MB）无正式 `.mp4` → finalize 的 `MoveFileExW` 改名从未
+   执行；681s 只写 2.6MB 印证真机 H264 流极稀疏。卡住的是**正在 worker 里执行的
+   native 同步调用**，Python 的超时/清队列/文件系统轮询都够不到它。
+
+**修复（v34）**：
+- **带外卡死点探针**：native 新增 `g_diag_phase`（`std::atomic<int>`）与 C ABI
+  `adc_diag_phase()`——纯原子读，不经 worker、不加锁、不碰 COM。在 write_video、
+  drain_audio、flush_au、WriteSample(v/a)、ensure_writer、SinkWriter::Finalize、
+  MoveFileEx、finalize_done 各阶段埋点（码 1~9，与 Python `PHASE_NAMES` 对齐）。
+  worker 全卡时 Python 仍能带外读出"最后停在哪一步"，下次真机失败日志一锤定音。
+  `MFNative.diag_phase()` 封装，异常/老 DLL 降级为 -1，绝不打断收尾。
+- **成片抢救**：`MFCaptureSession._recover_finalized_tmp()`——正式 .mp4 捞不到时，
+  扫描本会话 `.tmp.mp4`，含 moov atom（`_has_moov`，说明 SinkWriter::Finalize 已完成、
+  只差改名）就就地原子改名为正式 .mp4 纳入产物。纯文件系统操作、不碰卡死的 worker；
+  改名前必验 moov，无 moov 的半成品绝不发布（v28 据实失败原则不变）。多设备按 stem
+  前缀隔离，杜绝串味。
+- **失败文案带上 phase**：`_failure_diagnostics()` 把带外 phase 拼进错误文案，和 workdir
+  快照、native stats 一起给下一次真机定位用。
+- 指纹 v33→v34（native 真改：新增导出符号与埋点，CI 重编译）。
+
+**验证**：新增 7 项 Python 回归（带外探针读取/降级、含 moov 捞回、无 moov 不发布、
+stem 隔离、phase 进文案）+ 2 项 native 守卫（指纹 v34、探针无锁不经 worker、9 阶段
+埋点齐全），共 13 项 v34 测试通过；既有 finalize/诊断测试全过。`kBuildId` v34。
+**真机预期**：若属"Finalize 已完成、只差改名"——抢救直接捞回成片、不再失败；若属
+"卡在 Finalize/WriteSample 中途"（.tmp.mp4 无 moov）——仍据实失败，但日志首次带出
+`phase=N(...)` 精确卡死点，据此精准修 native，不再盲改。

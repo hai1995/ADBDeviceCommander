@@ -46,6 +46,9 @@ class FakeNative:
     def last_error(self):
         return "native 错误（测试替身）"
 
+    def diag_phase(self):
+        return (0, "空闲/未知")
+
     def mic_start(self, endpoint, rate, bits, channels):
         self.calls.append(("mic_start", endpoint, rate, bits, channels))
         return 0
@@ -1715,3 +1718,89 @@ def test_session_stats_degrades_without_symbol():
     n2._lib = object()           # 无 adc_session_stats 符号
     n2.worker = object()
     assert n2.session_stats(1) == {}
+
+
+# ------------------------- v34 带外诊断 + 成片抢救 ---------------------
+
+def test_diag_phase_out_of_band_and_degrade():
+    """[诊断 phase v34] 带外探针读阶段码；老 DLL 无符号降级为 -1。"""
+
+    class _Lib:
+        adc_diag_phase = staticmethod(lambda: 7)
+
+    n = mn.MFNative.__new__(mn.MFNative)
+    n._lib = _Lib()
+    code, name = n.diag_phase()
+    assert code == 7 and "Finalize" in name, (code, name)
+
+    # 无符号：降级为 -1，不抛异常
+    n2 = mn.MFNative.__new__(mn.MFNative)
+    n2._lib = object()
+    assert n2.diag_phase() == (-1, mn.PHASE_NAMES[-1])
+
+
+def test_recover_finalized_tmp_with_moov(tmp_path):
+    """[成片抢救 v34] 已含 moov 的 .tmp.mp4 就地改名为正式 .mp4 捞回。"""
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    tmp = work / "rec_2026_p1.tmp.mp4"
+    tmp.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"moov" + b"\x00" * 128)
+    sess = mcs.MFCaptureSession(
+        fake, "s1", str(tmp_path / "save"), "rec_2026", 1920, 1080,
+        work_dir=str(work))
+    sess._handle = 1
+    sess.work_dir = str(work)
+    got = sess._recover_finalized_tmp()
+    assert len(got) == 1 and got[0].endswith("rec_2026_p1.mp4"), got
+    assert not tmp.exists(), "临时文件应已被改名"
+    assert (work / "rec_2026_p1.mp4").exists()
+
+
+def test_recover_finalized_tmp_without_moov_is_left_alone(tmp_path):
+    """[成片抢救 v34] 无 moov 的半成品 .tmp.mp4 绝不改名发布（v28 据实失败）。"""
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    tmp = work / "rec_2026_p1.tmp.mp4"
+    tmp.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128)  # 无 moov
+    sess = mcs.MFCaptureSession(
+        fake, "s1", str(tmp_path / "save"), "rec_2026", 1920, 1080,
+        work_dir=str(work))
+    sess._handle = 1
+    sess.work_dir = str(work)
+    got = sess._recover_finalized_tmp()
+    assert got == [], got
+    assert tmp.exists(), "半成品不应被改名"
+
+
+def test_recover_finalized_tmp_isolates_other_stem(tmp_path):
+    """[成片抢救 v34] 多设备共享 work_dir 时只捞本会话 stem，杜绝串味。"""
+    fake = FakeNative(available=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    # 他机的成片（含 moov）
+    (work / "other_dev_p1.tmp.mp4").write_bytes(b"ftypmp42moov" + b"\x00" * 128)
+    sess = mcs.MFCaptureSession(
+        fake, "s1", str(tmp_path / "save"), "rec_2026", 1920, 1080,
+        work_dir=str(work))
+    sess._handle = 1
+    sess.work_dir = str(work)
+    got = sess._recover_finalized_tmp()
+    assert got == [], got
+    assert (work / "other_dev_p1.tmp.mp4").exists(), "他机文件不应被触碰"
+
+
+def test_failure_diagnostics_carries_phase(tmp_path):
+    """[诊断 phase v34] 失败文案带上带外 phase 卡死点。"""
+    fake = FakeNative(available=True)
+    fake.diag_phase = lambda: (7, "最终化(SinkWriter::Finalize)")
+    work = tmp_path / "work"
+    work.mkdir()
+    sess = mcs.MFCaptureSession(
+        fake, "s1", str(tmp_path / "save"), "rec_2026", 1920, 1080,
+        work_dir=str(work))
+    sess._handle = 1
+    sess.work_dir = str(work)
+    diag = sess._failure_diagnostics()
+    assert "phase=7" in diag and "Finalize" in diag, diag

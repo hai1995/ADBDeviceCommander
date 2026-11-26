@@ -124,9 +124,30 @@
 // 观察 .tmp.mp4→.mp4 改名，并首次把 native stats（video_bytes/audio_frames/dropped/
 // queue_peak_ms）采集进失败文案，让下一次真机失败能定位病根、不再盲改。仅升指纹
 // 让真机确认整包含 v24~v33 全部录制修复。
-static const char* const kBuildId = "mf-20261124-drain-v33";
+// v34: 带外 phase 诊断 —— 真机 681s 录制仍"未捞回成片"，诊断里连 native stats
+// 都没有（session_stats 也是 worker.call，worker 卡死时同样超时降级）。根因：
+// worker 被"正在执行的 native 同步调用"占死时，Python 的一切超时/清队列/轮询
+// 都够不到它，且现有诊断通道本身也走 worker，永远拿不到卡死点。修复：加一个
+// 纯原子、不经 worker、不碰 COM 的 phase 标记 adc_diag_phase()，在 write/drain/
+// flush/WriteSample/Finalize/MoveFile 各阶段更新，卡死时带外直读即可一锤定音。
+// 配合 Python 侧 moov 成片抢救（.tmp.mp4 已 Finalize 时直接改名捞回）。
+static const char* const kBuildId = "mf-20261124-drain-v34";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
+
+/* [诊断 phase v34] 卡死点带外探针：纯 std::atomic<int>，任何线程可读、不加锁、
+ * 不碰 COM/MF、不经 worker 队列。worker 被某个 native 同步调用占死时，Python
+ * 用 adc_diag_phase() 直接读它即可知道最后停在哪一步——这是唯一在"worker 全卡"
+ * 病态场景下仍然可靠的诊断通道（stats/最后错误都因走 worker 或加锁而失效）。
+ * 阶段码与 backend/mf_native.py 的 PHASE_NAMES 严格对齐。
+ * 0=空闲 1=write_video 2=drain_audio 3=flush_au 4=push_sample_v
+ * 5=push_sample_a 6=ensure_writer 7=sink_finalize 8=movefile 9=finalize_done
+ */
+static std::atomic<int> g_diag_phase{0};
+static inline void diag_phase(int p) { g_diag_phase.store(p, std::memory_order_relaxed); }
+extern "C" int adc_diag_phase(void) {
+    return g_diag_phase.load(std::memory_order_relaxed);
+}
 
 // [收尾慢根治 v20] write_video 的返回码约定（与 backend/mf_native.py 的
 // ADC_OK / ADC_ROTATE_PENDING 严格对齐）：
@@ -660,6 +681,7 @@ public:
     }
 
     int write_video(const unsigned char* data, int len) {
+        diag_phase(1);   // [诊断 v34] PH=write_video
         if (finalized_ || discarded_) return E_FAIL;
         video_bytes_ += len;
         // [修复] 每个视频 sample 到来时顺带把音频队列排空写入 writer。
@@ -743,6 +765,7 @@ public:
      * 调用，也由 finalize 在补静音前调用一次。写完后 last_audio_end_ 记录
      * 最后一块的结束时刻，供补静音使用。 */
     size_t drain_audio_queued() {
+        diag_phase(2);   // [诊断 v34] PH=drain_audio（同步 AAC WriteSample 在此）
         // [修复-收尾慢/排空超时] 关键：绝不能持 audio_q_mtx_ 做 WriteSample。
         // 旧实现在锁内逐块 write_audio_block（内含同步的 MF SinkWriter::WriteSample
         // → AAC 编码），高负载下单次可达数十毫秒；持锁期间 WASAPI 采集线程 on_audio
@@ -869,6 +892,7 @@ public:
         }
         HRESULT hr = close_writer(true);
         if (FAILED(hr)) return (int)hr;
+        diag_phase(9);   // [诊断 v34] PH=finalize_done（成片已改名发布）
         finalized_ = true;
         unsubscribe_();
         for (size_t i = 0; i < published_.size(); ++i) {
@@ -913,6 +937,7 @@ private:
     /* 冲刷跨 native 调用累积的当前 AU。只有至少含一个 VCL NAL 才是有效帧，
      * 纯非 VCL（如只有 SEI/AUD）残片直接丢弃，绝不作为独立 sample 写入 sink。 */
     void flush_pending_au() {
+        diag_phase(3);   // [诊断 v34] PH=flush_au
         if (pending_au_.empty()) return;
         if (has_vcl(pending_au_)) {
             std::vector<unsigned char> sample = to_annexb(pending_au_);
@@ -1006,6 +1031,7 @@ private:
         }
         sample->SetSampleTime(rel_ts); sample->SetSampleDuration(dur);
         // 必须真正把 sample 写进 sink；hr 供下方分路统计与错误上报使用。
+        diag_phase(audio ? 5 : 4);   // [诊断 v34] PH=push_sample_a / push_sample_v（WriteSample 卡死点）
         HRESULT hr = writer_->WriteSample(stream, sample);
         sample->Release();
         // [诊断 v8] 按流分别统计：哪一路 WriteSample 真正被 sink 接受。
@@ -1028,6 +1054,7 @@ private:
     }
 
     HRESULT ensure_writer(std::string& first_tmp_out) {
+        diag_phase(6);   // [诊断 v34] PH=ensure_writer（建 sink/配置流/BeginWriting）
         ++seg_no_;
         std::string tmp = seg_tmp_path(seg_no_);
         wchar_t wtmp[2048];
@@ -1192,6 +1219,7 @@ private:
         // 不可用/流配置失败)时 writer 已建、tmp 已入列、磁盘 tmp 已生成，但从未
         // BeginWriting —— 该 tmp 无 moov、不可播放，绝不能当成功产物发布。
         const bool was_writing = writing_;
+        diag_phase(7);   // [诊断 v34] PH=sink_finalize（SinkWriter::Finalize 是最可能的卡死点）
         if (writing_) { hr = writer_->Finalize(); writing_ = false; }
         writer_->Release(); writer_ = nullptr;
         if (FAILED(hr)) {
@@ -1223,6 +1251,7 @@ private:
             wchar_t wt[2048], wf[2048];
             MultiByteToWideChar(CP_UTF8, 0, tmp.c_str(), -1, wt, 2048);
             MultiByteToWideChar(CP_UTF8, 0, final.c_str(), -1, wf, 2048);
+            diag_phase(8);   // [诊断 v34] PH=movefile（改名发布，已 Finalize 完）
             // [收尾慢根治 v20] 去掉 MOVEFILE_WRITE_THROUGH：它是同卷改名却强制把
             // 几十~上百 MB 的 tmp 刷到物理盘，在慢盘/EDR 实时扫描下可达数十秒，
             // 是切段与收尾卡顿的元凶。同卷 rename 本身是元数据操作、天然原子，

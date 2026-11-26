@@ -519,6 +519,13 @@ class MFCaptureSession:
                 # 系统轮询兜底，等待 finalize task 最终把 .tmp.mp4 改名落盘。
                 recovered = self._wait_published_in_workdir(
                     self._recover_published_from_workdir, PUBLISH_POLL_EXTRA_S)
+            if not recovered:
+                # [成片抢救 v34] 正式 .mp4 没出现，但 .tmp.mp4 可能已写完 moov
+                # （SinkWriter::Finalize 完成、只差 MoveFile 改名，而 worker 正卡在
+                # 改名或之后）。此前明确排除 .tmp.mp4 导致"成片明明在磁盘上却报丢"。
+                # 这里就地把它原子改名为正式 .mp4 捞回——纯文件系统操作，不碰卡死的
+                # worker，且改名前必验 moov，绝不发半成品（v28 据实失败原则不变）。
+                recovered = self._recover_finalized_tmp()
             if recovered:
                 # 成片确实已落盘：超时只是"等不及回传路径"的假失败，按正常产物搬运。
                 # err 在超时分支未写，保持为 self._error；捞回成功不新增错误。
@@ -528,8 +535,8 @@ class MFCaptureSession:
                 # 静默报成功。用直接赋值覆盖作为主错误上抛——旧实现 `err or ...`
                 # 会被前面记下的尾帧超时等诊断错误短路，把"没成片"这一致命结果
                 # 掩盖成一条无害警告，controller 再据 files 里的 logcat 谎报成功。
-                # [诊断落地 v33] 附上 native 统计与工作目录快照，让真机日志能判断
-                # 到底卡在视频帧/音频/编码哪一路（六轮盲修没有这些数据）。
+                # [诊断落地 v33/v34] 附上带外 phase 卡死点、native 统计与工作目录
+                # 快照，让真机日志一锤定音定位病根（不再盲改）。
                 err = "同源合成失败：MF worker 调用超时，未捞回已发布成片"
                 diag = self._failure_diagnostics()
                 if diag:
@@ -601,6 +608,62 @@ class MFCaptureSession:
             time.sleep(min(PUBLISH_POLL_INTERVAL_S,
                            max(0.0, deadline - time.monotonic())))
 
+    def _has_moov(self, path):
+        """[成片抢救 v34] 判断 MP4 是否已写入 moov atom（= 已 Finalize、可播放）。
+
+        与 video_join._has_moov 同判据：moov 在文件尾部，只扫头/尾各 4MB，长路径
+        安全。无 moov 的 .tmp.mp4 是未 Finalize 的半成品，绝不能当用户产物。
+        """
+        try:
+            lpath = long_path(path)
+            size = path_getsize(lpath)
+            if size < 64:
+                return False
+            scan = 4 * 1024 * 1024
+            with open(lpath, "rb") as f:
+                if b"moov" in f.read(min(size, scan)):
+                    return True
+                f.seek(max(0, size - scan))
+                return b"moov" in f.read()
+        except Exception:  # noqa: BLE001  判据失败按"无 moov"处理，绝不误发半成品
+            return False
+
+    def _recover_finalized_tmp(self):
+        """[成片抢救 v34] 把已 Finalize 却未改名的 .tmp.mp4 原子发布为正式 .mp4。
+
+        病根：worker 被 native 同步调用占死时，finalize task 永远排不到 MoveFileEx，
+        磁盘上只剩 .tmp.mp4（可能已写完 moov）。此前 Python 只认正式 .mp4、明确
+        排除 .tmp.mp4，于是"成片明明在磁盘上、却报未捞回"。本方法绕开卡死的 worker
+        直接检查：本会话的 .tmp.mp4 若已含 moov（说明 SinkWriter::Finalize 已完成、
+        只差改名这一步），就地原子改名为 .mp4 并纳入产物。这是纯文件系统操作，不
+        向 worker 投递任何任务、不碰 COM；改名前必须确认 moov，绝不把无 moov 的
+        半成品当用户视频（坚守 v28 据实失败原则）。
+
+        返回捞回的正式 .mp4 路径列表（可能为空）。多设备共享 work_dir 时按本会话
+        stem 前缀隔离，杜绝串味。
+        """
+        if not self.work_dir:
+            return []
+        recovered = []
+        try:
+            import glob
+            pat = os.path.join(long_path(self.work_dir), "*.tmp.mp4")
+            for tmp in sorted(glob.glob(pat)):
+                base = os.path.basename(tmp)
+                if not base.startswith(self.stem):
+                    continue
+                if not self._has_moov(tmp):
+                    continue
+                final = tmp[:-len(".tmp.mp4")] + ".mp4"
+                try:
+                    os.replace(long_path(tmp), long_path(final))
+                    recovered.append(final)
+                except Exception:  # noqa: BLE001  改名失败不该成片，跳过
+                    continue
+        except Exception:  # noqa: BLE001, S110  扫描失败不影响主流程
+            pass
+        return recovered
+
     def _failure_diagnostics(self):
         """[诊断落地 v33] 收尾失败时采集 native 统计 + 工作目录文件快照。
 
@@ -612,6 +675,14 @@ class MFCaptureSession:
         全程防御式访问：拿不到就返回空串，绝不影响失败上报本身。
         """
         parts = []
+        # [诊断 phase v34] 带外读卡死点：不经 worker，worker 全卡时仍能拿到。
+        # 它比 stats 更可靠——stats 走 worker 队列、卡死时超时降级为空（本次真机
+        # 日志就没有 native 部分），phase 用原子读不受影响。
+        try:
+            code, name = self.native.diag_phase()
+            parts.append(f"phase={code}({name})")
+        except Exception:  # noqa: BLE001, S110  诊断绝不打断失败上报
+            pass
         try:
             stats = self.native.session_stats(self._handle) if self._handle else {}
         except Exception:  # noqa: BLE001
