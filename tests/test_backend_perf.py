@@ -1284,3 +1284,75 @@ def test_evaluate_alerts_clock_rollback_never_negative():
     a = svc.evaluate_alerts(samples)
     assert a and a[0]["longest_s"] >= 0.0
     assert "持续 -" not in str(a)
+
+
+# ------------------------- 监测项设置（metrics 裁剪） ----------------------
+def test_normalize_metrics_defaults_and_filters():
+    """非法/空回落全部；合法项按 METRICS 声明顺序去重返回。"""
+    allk = svc.ALL_METRICS
+    assert svc.normalize_metrics(None) == allk
+    assert svc.normalize_metrics([]) == allk
+    assert svc.normalize_metrics(["bogus", ""]) == allk
+    assert svc.normalize_metrics("batt") == ("batt",)
+    assert svc.normalize_metrics(["temp", "cpu", "temp", None, 7]) == ("cpu", "temp")
+
+
+def test_script_skips_unmonitored_sections():
+    """关掉的指标连设备端 adb 命令都不跑——这是「监测项设置」的核心语义。"""
+    mon = svc.PerfMonitor("adb", "S1", 1.0, "com.foo", metrics=["cpu", "fps"])
+    script = mon._script()
+    # 仍采 STAT（CPU 差分 + start 的健康探针）与 GFX（fps 需要）
+    assert "@@STAT" in script and "gfxinfo" in script
+    # 不采电量/温度、内存、PSS
+    assert "dumpsys battery" not in script and "@@BATT" not in script
+    assert "@@MEM" not in script and "/proc/meminfo" not in script
+    assert "@@PSS" not in script and "dumpsys meminfo" not in script
+    # 锁定包名（manual）模式本就不需要探前台
+    assert "@@FOCUS" not in script
+    # 跟随前台 + fps 仍要探（探到才有 pkg 可喂给 gfxinfo）
+    auto = svc.PerfMonitor("adb", "S1", 1.0, "", metrics=["fps"])
+    assert "@@FOCUS" in auto._script() and "gfxinfo" not in auto._script()
+
+
+def test_script_skips_focus_when_no_app_metrics():
+    """跟随前台模式下若应用级指标全关，连前台包名探测都不必做。"""
+    mon = svc.PerfMonitor("adb", "S1", 1.0, "", metrics=["cpu", "batt"])
+    script = mon._script()
+    assert mon.auto_pkg is True
+    assert "@@FOCUS" not in script and "dumpsys window" not in script
+    assert "dumpsys battery" in script and "@@STAT" in script
+
+
+def test_script_always_keeps_stat_for_health_check():
+    """即便 CPU 不在监测项里，STAT 段也必须保留——start() 靠它判设备在线。"""
+    mon = svc.PerfMonitor("adb", "S1", 1.0, "com.foo", metrics=["temp"])
+    assert "@@STAT" in mon._script()
+    assert "@@BATT" in mon._script()
+
+
+def test_collect_with_trimmed_script_returns_none_for_off_metrics():
+    """缺段的 sample 字段是 None（不是崩溃/空串），消费侧按「没采到」处理。"""
+    class R:
+        returncode = 0
+        stdout = "@@STAT\ncpu  200 0 100 800 0 0 0 0 0 0\n@@BATT\nlevel: 55\n"
+        stderr = ""
+
+    mon = svc.PerfMonitor("adb", "S1", 1.0, "com.foo", metrics=["cpu", "temp"])
+    mon._run = lambda *a, **kw: R()
+    # 先给 CPU 一份差分基线（正常由 _baseline 建立，这里直接注入省一次 adb）
+    mon._prev = {"t": time.time() - 1,
+                 "stat": svc.parse_proc_stat("cpu  100 0 100 800 0 0 0 0 0 0")}
+    s = mon._collect()
+    assert s["cpu"] is not None and s["batt"] == 55
+    assert s["mem_used"] is None and s["pss"] is None and s["fps"] is None
+    assert s["jank"] is None and s["temp"] is None
+
+
+def test_report_hides_unmonitored_metrics():
+    """报告不残留被关掉指标的统计行与空图卡（CSV 列仍稳定）。"""
+    html = svc.build_report_html(
+        _demo_samples(), {"serial": "A1"}, metrics=["cpu", "fps"])
+    markup = _report_markup(html)
+    assert "CPU (%)" in markup and "帧率 (FPS)" in markup
+    assert "电量 (%)" not in markup and "电池温度 (℃)" not in markup
+    assert markup.count('class="echart"') == 2

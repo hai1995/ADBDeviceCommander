@@ -72,6 +72,8 @@ from backend.mirror_service import (
 from backend.perf_service import (
     PerfMonitor, DEFAULT_INTERVAL, MAX_INTERVAL as PERF_MAX_INTERVAL,
     MIN_INTERVAL as PERF_MIN_INTERVAL, DEFAULT_THRESHOLDS,
+    ALL_METRICS as PERF_ALL_METRICS,
+    normalize_metrics as perf_normalize_metrics,
     threshold_rule_text as perf_rule_text, write_report as perf_write_report,
     write_compare_report as perf_write_compare,
     parse_thresholds as perf_parse_thresholds,

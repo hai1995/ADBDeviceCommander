@@ -100,6 +100,10 @@
     perfBand: $("perf-band"), perfRange: $("perf-range"),
     perfLegend: $("perf-legend"),
     perfChartTitle: $("perf-chart-title"), perfChartSub: $("perf-chart-sub"),
+    perfMetricsBtn: $("perf-metrics-btn"), perfMetricsModal: $("perf-metrics-modal"),
+    perfMetricsRows: $("perf-metrics-rows"), perfMetricsErr: $("perf-metrics-err"),
+    perfMetricsSave: $("perf-metrics-save"), perfMetricsCancel: $("perf-metrics-cancel"),
+    perfMetricsClose: $("perf-metrics-close"), perfMetricsReset: $("perf-metrics-reset"),
     perfThBtn: $("perf-th"), perfThModal: $("perf-th-modal"),
     perfThRows: $("perf-th-rows"), perfThErr: $("perf-th-err"),
     perfThSave: $("perf-th-save"), perfThCancel: $("perf-th-cancel"),
@@ -418,6 +422,8 @@
     "pulse": '<path d="M2 12h4l3-8 4 16 3-8h6"/>',
     "report": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 17v-3"/><path d="M12 17v-6"/><path d="M16 17v-4"/>',
     "sliders": '<path d="M4 6h9"/><path d="M19 6h1"/><circle cx="16" cy="6" r="2.2"/><path d="M4 12h3"/><path d="M13 12h7"/><circle cx="10" cy="12" r="2.2"/><path d="M4 18h9"/><path d="M19 18h1"/><circle cx="16" cy="18" r="2.2"/>',
+    // 监测项设置（齿轮）：与「阈值」的滑杆并列，一个管采什么、一个管怎么判
+    "settings": '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.36.4.67.75.88H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
     "arrow-up": '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>',
     // 返回上级（corner-up-left）：上一步/回退到父目录
     "corner-up-left": '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
@@ -1516,7 +1522,9 @@
     if (typeof s.shot_preview_w === "number" || typeof s.shot_preview_h === "number") {
       applyShotPreviewSize(s.shot_preview_w, s.shot_preview_h);
     }
-    // 性能监控：目标包名 / 采样间隔 / 图表指标
+    // 性能监控：监测项 / 目标包名 / 采样间隔 / 图表指标
+    // 监测项必须先恢复——下面的 setPerfMetric 要按它校验收藏的指标是否仍可选。
+    loadPerfMetrics(s.perf_metrics);
     if (typeof s.perf_pkg === "string") setPerfPkg(s.perf_pkg, true);
     if (els.perfPkgAll && typeof s.perf_pkg_all === "boolean") {
       els.perfPkgAll.checked = s.perf_pkg_all;
@@ -4671,6 +4679,9 @@
   let perfSessions = new Map();
   let perfFocus = "";               // 指标卡读数 / 单线模式对应的设备
   let perfMetric = "cpu";           // 当前曲线指标
+  // 监测项设置：默认全部七项。取消勾选的项不再下发设备端 adb 命令、卡片隐藏、
+  // 报告不画图。持久化键 perf_metrics（config.json settings，与 perf_metric 同机制）。
+  let perfEnabled = new Set(Object.keys(PERF_METRICS));
   let perfInfo = {};
   let perfDrawQueued = false;
   // 告警阈值由后端下发（backend/perf_service.DEFAULT_THRESHOLDS），前端不抄一份：
@@ -4690,6 +4701,104 @@
   let perfDrag = null;              // {x0}：左键按下后的起点（已夹取到绘图区）
   let perfRange = null;             // {a, b, t0, t1, rows, …}：松手后的选区
   const PERF_RANGE_MIN = 8;         // 小于 8px 当点击处理（手抖不该出统计卡）
+
+  /* ---------------- 监测项设置（采什么 / 显示什么） ----------------
+     配置从 booted.settings.perf_metrics 恢复：既接受数组（本程序保存的格式），
+     也接受 JSON 字符串（与 cmd_history / file_fav_paths 同一约定，手改配置时
+     两种写法都能认）。非法 / 空 / 全不认识 -> 全部，绝不让用户掉进「一项都不采」
+     的黑洞；后端 normalize_metrics 同样兜底，两边口径一致。 */
+  function normalizePerfMetrics(raw) {
+    const all = Object.keys(PERF_METRICS);
+    let arr = null;
+    if (Array.isArray(raw)) arr = raw;
+    else if (typeof raw === "string") {
+      try { const v = JSON.parse(raw); if (Array.isArray(v)) arr = v; } catch (e) { /* 配置写坏 -> 全部 */ }
+    }
+    if (!arr || !arr.length) return all;
+    const picked = all.filter((k) => arr.indexOf(k) >= 0);
+    return picked.length ? picked : all;
+  }
+
+  function loadPerfMetrics(raw) {
+    perfEnabled = new Set(normalizePerfMetrics(raw));
+    applyPerfMetricsVisibility();
+  }
+
+  function applyPerfMetricsVisibility() {
+    const all = Object.keys(PERF_METRICS);
+    for (const key of all) {
+      const card = document.getElementById("perf-stat-" + key);
+      if (card) card.hidden = !perfEnabled.has(key);
+    }
+    // 当前曲线指标被关掉：自动切到剩下的第一项，避免继续画一条不存在的线
+    if (!perfEnabled.has(perfMetric)) {
+      perfMetric = all.find((k) => perfEnabled.has(k)) || "cpu";
+      if (els.perfChartTitle) els.perfChartTitle.textContent = PERF_METRICS[perfMetric].title;
+    }
+    document.querySelectorAll("#perf-stats .perf-stat").forEach((el) => {
+      const on = el.dataset.metric === perfMetric;
+      el.classList.toggle("on", on);
+      el.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    updatePerfLegend();
+    queuePerfDraw();
+  }
+
+  function renderPerfMetricsRows(keys) {
+    const box = els.perfMetricsRows;
+    if (!box) return;
+    box.textContent = "";
+    const on = new Set(keys || Array.from(perfEnabled));
+    for (const key of Object.keys(PERF_METRICS)) {
+      const meta = PERF_METRICS[key];
+      const row = document.createElement("label");
+      row.className = "th-row pm-row" + (on.has(key) ? " on" : "");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "th-on pm-on";   // 复用阈值弹窗的方块勾选样式
+      cb.checked = on.has(key);
+      cb.dataset.metric = key;
+      const name = document.createElement("span");
+      name.className = "n";
+      name.textContent = meta.title;
+      const unit = document.createElement("span");
+      unit.className = "u";
+      unit.textContent = meta.unit;
+      row.appendChild(cb); row.appendChild(name); row.appendChild(unit);
+      box.appendChild(row);
+    }
+  }
+
+  function showPerfMetricsError(msg) {
+    if (!els.perfMetricsErr) return;
+    els.perfMetricsErr.hidden = !msg;
+    els.perfMetricsErr.textContent = msg || "";
+  }
+
+  function openPerfMetricsModal() {
+    if (!els.perfMetricsModal) return;
+    renderPerfMetricsRows(Array.from(perfEnabled));
+    showPerfMetricsError("");
+    els.perfMetricsModal.classList.remove("hidden");
+  }
+
+  function closePerfMetricsModal() {
+    if (els.perfMetricsModal) els.perfMetricsModal.classList.add("hidden");
+  }
+
+  function savePerfMetrics() {
+    if (!els.perfMetricsRows) return;
+    const picked = Array.from(els.perfMetricsRows.querySelectorAll(".pm-on"))
+      .filter((c) => c.checked).map((c) => c.dataset.metric);
+    if (!picked.length) { showPerfMetricsError("至少保留一项监测指标。"); return; }
+    const keys = Object.keys(PERF_METRICS).filter((k) => picked.indexOf(k) >= 0);
+    perfEnabled = new Set(keys);
+    applyPerfMetricsVisibility();   // 可能已把曲线切到另一项，先应用再落盘 perf_metric
+    persistPref("perf_metrics", keys);
+    persistPref("perf_metric", perfMetric);
+    closePerfMetricsModal();
+    showToast("ok", "✓ 监测项已更新：" + keys.length + " 项");
+  }
 
   function perfPrimarySerial() {
     const first = perfSessions.keys().next();
@@ -4900,7 +5009,7 @@
   /* 指标卡读数：当前值 + 均值/峰值/谷值。多设备时读**焦点设备**的那一份
      （焦点由图例点击切换），对比模式下把各设备数值交给图例展示。 */
   function updatePerfStats() {
-    const keys = Object.keys(PERF_METRICS);
+    const keys = Array.from(perfEnabled);
     const samples = perfFocusSamples();
     const label = perfLabelOf(perfFocus || perfPrimarySerial());
     for (const key of keys) {
@@ -4941,7 +5050,7 @@
       const lastSample = sess.samples[sess.samples.length - 1];
       if (!lastSample) continue;
       const who = perfSessions.size > 1 ? perfLabelOf(serial) : "";
-      for (const key of Object.keys(PERF_METRICS)) {
+      for (const key of perfEnabled) {
         const v = lastSample[key];
         if (typeof v === "number" && isFinite(v)) perfAlertEdge(key, v, who);
       }
@@ -5578,7 +5687,8 @@
   }
 
   function setPerfMetric(key, persist) {
-    if (!PERF_METRICS[key]) return;
+    // 被监测项设置关掉的指标不可选：点隐藏卡片进不来，启动回填也要挡住
+    if (!PERF_METRICS[key] || !perfEnabled.has(key)) return;
     perfMetric = key;
     document.querySelectorAll("#perf-stats .perf-stat").forEach((el) => {
       const on = el.dataset.metric === key;
@@ -5950,8 +6060,10 @@
     setPerfState("启动中…");
     markBtnBusy(els.perfStart, true);
     // 第一个参数传 null：交给后端取「全部受控设备」，多台即进入对比模式
+    // 第 4 参：当前启用的监测项。后端据此裁剪设备端 adb 命令——关掉的指标
+    // 是真的不采，不只是界面少一张卡。
     const res = await callApi(api.perf_start(
-      null, ms, perfPkg));
+      null, ms, perfPkg, Array.from(perfEnabled)));
     markBtnBusy(els.perfStart, false);
     // 期间又触发了 stop / 另一次 start：本次结果已过期，丢弃。
     if (epoch !== perfEpoch) return;
@@ -8406,6 +8518,29 @@
     if (els.perfView) {
       els.perfView.addEventListener("click", () => {
         callApi(api.open_save_dir(saveDir()));
+      });
+    }
+    // 监测项设置：勾选框变化只切 .on 高亮；保存才落盘并重建卡片/统计/曲线可见性
+    if (els.perfMetricsBtn) els.perfMetricsBtn.addEventListener("click", openPerfMetricsModal);
+    if (els.perfMetricsSave) els.perfMetricsSave.addEventListener("click", savePerfMetrics);
+    if (els.perfMetricsCancel) els.perfMetricsCancel.addEventListener("click", closePerfMetricsModal);
+    if (els.perfMetricsClose) els.perfMetricsClose.addEventListener("click", closePerfMetricsModal);
+    if (els.perfMetricsReset) {
+      els.perfMetricsReset.addEventListener("click", () => {
+        renderPerfMetricsRows(Object.keys(PERF_METRICS));
+        showPerfMetricsError("");
+      });
+    }
+    if (els.perfMetricsModal) {
+      els.perfMetricsModal.addEventListener("click", (e) => {
+        if (e.target === els.perfMetricsModal) closePerfMetricsModal();   // 点遮罩关闭
+      });
+      els.perfMetricsModal.addEventListener("change", (e) => {
+        const t = e.target;
+        if (t && t.classList && t.classList.contains("pm-on")) {
+          const row = t.closest(".pm-row");
+          if (row) row.classList.toggle("on", t.checked);
+        }
       });
     }
     if (els.perfThBtn) els.perfThBtn.addEventListener("click", openPerfThresholds);

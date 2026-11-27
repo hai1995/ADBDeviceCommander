@@ -5771,3 +5771,32 @@ def test_file_download_legacy_without_task_id_unchanged(monkeypatch):
                         lambda *a: called.append(a) or ("/tmp/a", None))
     api._run_file_op(api._do_file_download, "A1", "/sdcard/a", "/tmp")
     assert called == [("A1", "/sdcard/a", "/tmp")], called
+
+
+def test_perf_start_passes_monitored_metrics_to_sampler(monkeypatch):
+    """监测项设置：显式传 metrics 必须下传到采样器——后端据此裁剪设备端 adb 命令，
+    而不是只在前端隐藏卡片。不传 / 全非法时回落全部（兼容旧前端）。"""
+    api = _make_api()
+    monkeypatch.setattr(api.devices, "selected_serials", lambda: ["A1"])
+    made = {}
+
+    def _factory(adb, serial, interval, pkg, on_status=None, metrics=None):
+        m = _FakePerfMon(adb, serial, interval, pkg, on_status)
+        m.metrics = frozenset(metrics or ())
+        made["m"] = m
+        return m
+
+    patch_ctrl(monkeypatch, "PerfMonitor", _factory)
+    res = api.perf_start(None, 1000, "", metrics=["cpu", "fps"])
+    assert res["ok"] is True
+    assert made["m"].metrics == frozenset({"cpu", "fps"})
+    assert res["metrics"] == ["cpu", "fps"]
+
+    # 全非法回落全部；且旧调用（不传 metrics）仍能启动
+    api.perf_stop()
+    made.clear()
+    res = api.perf_start(None, 1000, "", metrics=["bogus"])
+    assert res["ok"] is True
+    assert len(res["metrics"]) == 7
+    assert made["m"].metrics == frozenset(res["metrics"])
+    api.perf_stop()

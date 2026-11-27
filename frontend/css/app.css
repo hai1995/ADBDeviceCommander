@@ -1863,6 +1863,17 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   border: 1px solid rgba(255, 95, 107, .32); background: rgba(255, 95, 107, .08);
   color: #ff8f9a; font: 400 var(--fs-sm)/1.5 var(--font-mono);
 }
+/* 监测项设置：复用 .th-row 的方块勾选 / 未选淡化，只换三列布局与文字样式 */
+.pm-row { grid-template-columns: 18px minmax(0, 1fr) 44px; }
+.pm-row .n {
+  font: 500 var(--fs-md)/1.3 var(--font-display); color: var(--text-1);
+}
+.pm-row .u {
+  font: 400 var(--fs-xs)/1 var(--font-mono); color: var(--faint);
+  text-align: right;
+}
+/* 隐藏未监测的指标卡：.perf-stat 自带 display:flex，须显式压过 [hidden] 的 UA 样式 */
+.perf-stat[hidden] { display: none !important; }
 .th-err[hidden] { display: none; }
 
 /* 窄窗：理由换到第二行，数值与名称不挤 */

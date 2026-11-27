@@ -81,6 +81,27 @@ METRICS = (
     ("temp", "电池温度", "℃", None),
 )
 METRIC_LABEL = {k: t for k, t, _u, _m in METRICS}
+ALL_METRICS = tuple(k for k, _t, _u, _m in METRICS)
+_METRIC_SET = frozenset(ALL_METRICS)
+
+
+def normalize_metrics(keys):
+    """把「监测项设置」规整成合法的指标集合（元组，按 METRICS 声明顺序）。
+
+    None / 空 / 全非法 -> 全部：既兼容不传该参数的旧前端，也保证手改配置写坏时
+    不会落到「一路空采样」这种最难排查的状态。至少保留一项——界面上不允许把
+    七项全关（全关等于没监控），后端同样兜底。
+    """
+    if not keys:
+        return ALL_METRICS
+    if isinstance(keys, str):
+        keys = [keys]
+    if not isinstance(keys, (list, tuple, set, frozenset)):
+        return ALL_METRICS
+    picked = {k for k in keys if isinstance(k, str) and k in _METRIC_SET}
+    if not picked:
+        return ALL_METRICS
+    return tuple(k for k in ALL_METRICS if k in picked)
 
 # 内置告警阈值。取值不是「教科书标准」，而是「拿这份报告去验收时会被问的那几条」：
 #   * 帧率 < 45：60Hz 屏掉到 45 以下，滑动已经能被肉眼看出不跟手；
@@ -497,10 +518,13 @@ class PerfMonitor:
     """
 
     def __init__(self, adb="adb", serial="", interval=DEFAULT_INTERVAL,
-                 pkg="", on_status=None):
+                 pkg="", on_status=None, metrics=None):
         self.adb = adb or "adb"
         self.serial = serial
         self.interval = min(MAX_INTERVAL, max(MIN_INTERVAL, float(interval)))
+        # 监测项设置：关掉的指标**连设备端 adb 命令都不跑**（不只是界面隐藏）。
+        # frozenset 便于 _script 里做集合交集判断。
+        self.metrics = frozenset(normalize_metrics(metrics))
         user_pkg = (pkg or "").strip()
         # 全系统模式：既不是「跟随前台」也不是「锁定某应用」，单独一种状态。
         # （哨兵值不能落到 self.pkg 上 —— 那会被拼进 gfxinfo/meminfo 命令。）
@@ -537,26 +561,37 @@ class PerfMonitor:
 
         GFX / PSS / PID 这些「按包名取数」的段，只在 pkg 已知时才拼进脚本——
         跟随前台但还没探到前台包名时，自然先只采整机指标。
+
+        「监测项设置」在这里真正生效：不监测的指标连设备端命令都不跑。关掉
+        电量/温度就不再执行 dumpsys battery；关掉帧率/卡顿/PSS 就不再执行
+        pidof / gfxinfo / meminfo。省的是每次 adb shell 的设备端开销，而不是
+        只在界面少画一张卡。缺段的 sample 字段自然是 None（parse_* 对空串安全），
+        前端与报告按「没采到」处理，无需为裁剪改动消费侧。
         """
-        # 仅跟随前台模式下带 @@FOCUS；其余模式（全系统 / 锁定包名）不需要。
-        focus = ("echo @@FOCUS; dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -4; "
-                 if self.auto_pkg else "")
-        pkg = self.pkg
-        if not pkg:
-            return ("echo @@STAT; head -1 /proc/stat; "
-                    "echo @@MEM; head -8 /proc/meminfo; "
-                    + focus +
-                    "echo @@BATT; dumpsys battery 2>/dev/null")
-        return (
-            "echo @@STAT; head -1 /proc/stat; "
-            "echo @@MEM; head -8 /proc/meminfo; "
-            "echo @@PID; P=$(pidof " + pkg + " 2>/dev/null | tr ' ' '\\n' | head -1); echo \"$P\"; "
-            "echo @@PSTAT; [ -n \"$P\" ] && cat /proc/$P/stat 2>/dev/null; "
-            "echo @@GFX; dumpsys gfxinfo " + pkg + " 2>/dev/null | head -80; "
-            "echo @@PSS; dumpsys meminfo " + pkg + " 2>/dev/null | grep -E '^[[:space:]]*TOTAL' "
-            "| head -3; "
-            + focus +
-            "echo @@BATT; dumpsys battery 2>/dev/null")
+        parts = []
+        # @@STAT 始终采：既是 CPU% 的差分源，也是 start() 判定设备是否授权/在线
+        # 的唯一探针（_baseline 要拿到 _prev["stat"]）。即便关掉 CPU 显示也不能省。
+        parts.append("echo @@STAT; head -1 /proc/stat; ")
+        want_app = bool(self.metrics & {"pss", "fps", "jank"})
+        if "mem_used" in self.metrics:
+            parts.append("echo @@MEM; head -8 /proc/meminfo; ")
+        if want_app and self.pkg:
+            pkg = self.pkg
+            # 再按应用级指标细分：帧率/卡顿只需 gfxinfo，PSS 才需要 pidof + meminfo。
+            # 一捆拼会让「只要帧率」的用户照跑一遍 dumpsys meminfo，白花设备端开销。
+            if "pss" in self.metrics:
+                parts.append("echo @@PID; P=$(pidof " + pkg + " 2>/dev/null | tr ' ' '\\n' | head -1); echo \"$P\"; ")
+                parts.append("echo @@PSTAT; [ -n \"$P\" ] && cat /proc/$P/stat 2>/dev/null; ")
+            if self.metrics & {"fps", "jank"}:
+                parts.append("echo @@GFX; dumpsys gfxinfo " + pkg + " 2>/dev/null | head -80; ")
+            if "pss" in self.metrics:
+                parts.append("echo @@PSS; dumpsys meminfo " + pkg + " 2>/dev/null | grep -E '^[[:space:]]*TOTAL' | head -3; ")
+        # 跟随前台只有在还需要应用级指标时才探前台包名（探它就是为了拿 pkg）
+        if self.auto_pkg and want_app:
+            parts.append("echo @@FOCUS; dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -4; ")
+        if self.metrics & {"batt", "temp"}:
+            parts.append("echo @@BATT; dumpsys battery 2>/dev/null")
+        return "".join(parts)
 
     def _read_device_info(self):
         try:
@@ -1742,16 +1777,20 @@ def _alert_card_html(alerts, thresholds=None):
         '<tbody>{}</tbody></table><div class="note">{}</div></div>'.format("".join(rows), esc(th_line)))
 
 
-def build_report_html(samples, info, thresholds=None, generated_at=None):
+def build_report_html(samples, info, thresholds=None, generated_at=None, metrics=None):
     """生成自包含的 HTML 报告（无外链、无脚本，双击即可看）。
 
     图表带悬停提示：鼠标停在曲线上浮出该时刻的时间与读数（SVG 原生
     <title>，无需脚本，离线双击可用）。
     thresholds 由调用方（controller）从用户配置解析后传入：None = 内置基线，
     {} = 用户关掉了全部告警。报告、界面、CSV 必须按同一份阈值判，缺一不可。
+
+    metrics 是本次「监测项设置」启用的指标：未在其中的指标不进统计表与图表卡，
+    避免用户明明关掉了电量/温度，报告里却还剩两张空图。None = 全部（兼容旧调用）。
     """
     info = info or {}
     th = DEFAULT_THRESHOLDS if thresholds is None else thresholds
+    shown = _METRIC_SET if metrics is None else frozenset(normalize_metrics(metrics))
     generated_at = generated_at or datetime.datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S")
     sums = metric_summary(samples)
@@ -1763,6 +1802,8 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
 
     rows = []
     for key, title, unit, _cap in METRICS:
+        if key not in shown:
+            continue
         s = sums.get(key)
         if not s:
             rows.append("<tr><td>{}</td><td>--</td><td>--</td><td>--</td>"
@@ -1779,6 +1820,8 @@ def build_report_html(samples, info, thresholds=None, generated_at=None):
     use_ec = echarts_ready()
     ci = 0
     for key, title, unit, cap in METRICS:
+        if key not in shown:
+            continue
         rule = th.get(key)
         note = ""
         if rule:
@@ -1898,8 +1941,12 @@ def write_csv(samples, path):
     return rows
 
 
-def write_report(samples, info, out_dir, thresholds=None):
-    """把 HTML + CSV 写到 out_dir，返回 {"html","csv","rows"}。"""
+def write_report(samples, info, out_dir, thresholds=None, metrics=None):
+    """把 HTML + CSV 写到 out_dir，返回 {"html","csv","rows"}。
+
+    metrics 只裁剪 HTML 的统计表与图表；CSV 保留全部列（未监测项留空），
+    这样分析工具读到的表头永远稳定，不会因监测项变化而列数漂移。
+    """
     os.makedirs(long_path(out_dir), exist_ok=True)
     serial = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(info.get("serial") or "device"))
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1909,7 +1956,7 @@ def write_report(samples, info, out_dir, thresholds=None):
     html_path = base + ".html"
     csv_path = os.path.join(out_dir, base + ".csv")
     with open(long_path(html_path), "w", encoding="utf-8") as f:
-        f.write(build_report_html(samples, info, thresholds))
+        f.write(build_report_html(samples, info, thresholds, metrics=metrics))
     rows = write_csv(samples, csv_path)
     return {"html": html_path, "csv": csv_path, "rows": rows}
 
@@ -2072,7 +2119,7 @@ def _cell_num(v):
     return _fmt(v)
 
 
-def _compare_matrix(entries, sums):
+def _compare_matrix(entries, sums, metrics=None):
     """指标 × 设备的统计矩阵；每行把最不理想的那台标红。
 
     「最差」按方向判：帧率越低越差，卡顿 / 温度 / CPU / 内存越高越差。
@@ -2083,7 +2130,10 @@ def _compare_matrix(entries, sums):
     for e in entries:
         head.append('<th>{}</th>'.format(esc_html(e.get("label") or e.get("serial"))))
     rows = []
+    shown = _METRIC_SET if metrics is None else frozenset(normalize_metrics(metrics))
     for key, title, unit, _cap in METRICS:
+        if key not in shown:
+            continue
         cells, avgs = [], []
         for i, _e in enumerate(entries):
             s = sums[i].get(key)
@@ -2132,7 +2182,7 @@ def _compare_alert_table(entries, th, alerts_per):
             '</div>'.format("".join(head), "".join(rows), _fmt(ALERT_CRIT_RATIO)))
 
 
-def build_compare_html(entries, thresholds=None, generated_at=None):
+def build_compare_html(entries, thresholds=None, generated_at=None, metrics=None):
     """多设备横向对比报告（单文件、无外链）。
 
     entries: [{"serial","label","samples","info","interval"}, ...]
@@ -2144,6 +2194,7 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
     th = DEFAULT_THRESHOLDS if thresholds is None else thresholds
     generated_at = generated_at or datetime.datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S")
+    shown = _METRIC_SET if metrics is None else frozenset(normalize_metrics(metrics))
 
     sums = [metric_summary(e["samples"]) for e in entries]
     alerts_per = [evaluate_alerts(e["samples"], th) for e in entries]
@@ -2178,7 +2229,7 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
     matrix = ('<div class="card"><h2>指标对比 <em>COMPARE</em></h2>{}'
               '<div class="note">每格为「均值 / 峰值」；<span class="worst-inline">'
               '红字</span> = 该指标最不理想的一台（FPS 取最低，其余取最高）。'
-              '</div></div>'.format(_compare_matrix(entries, sums)))
+              '</div></div>'.format(_compare_matrix(entries, sums, metrics)))
 
     series_all = [(e.get("label") or e.get("serial"),
                    COMPARE_COLORS[i % len(COMPARE_COLORS)], e["samples"])
@@ -2187,6 +2238,8 @@ def build_compare_html(entries, thresholds=None, generated_at=None):
     use_ec = echarts_ready()
     ci = 0
     for key, title, unit, cap in METRICS:
+        if key not in shown:
+            continue
         rule = (th or {}).get(key)
         note = (f'<span class="thmark">{esc_html(threshold_rule_text(key, th[key]))}</span>') if rule else ""
         if use_ec:
@@ -2259,9 +2312,9 @@ td .dim, .dim { color: #6e8299; font-weight: 400; }
 """
 
 
-def write_compare_report(entries, out_dir, thresholds=None):
+def write_compare_report(entries, out_dir, thresholds=None, metrics=None):
     """把多设备对比报告写到 out_dir；单设备返回 {}（没有对比可做）。"""
-    html = build_compare_html(entries, thresholds)
+    html = build_compare_html(entries, thresholds, metrics=metrics)
     if not html:
         return {}
     os.makedirs(long_path(out_dir), exist_ok=True)

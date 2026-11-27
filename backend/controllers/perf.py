@@ -4,6 +4,7 @@ import contextlib
 
 from backend.controller import (
     DEFAULT_INTERVAL,
+    PERF_ALL_METRICS,
     PERF_CRIT_RATIO,
     PERF_MAX_DEVICES,
     PERF_MAX_INTERVAL,
@@ -16,6 +17,7 @@ from backend.controller import (
     perf_default_threshold_expr,
     perf_format_thresholds,
     perf_list_installed,
+    perf_normalize_metrics,
     perf_parse_thresholds,
     perf_pkg_display,
     perf_rule_text,
@@ -90,12 +92,16 @@ class PerfMixin:
                 self._perf_pkg_cache[target] = {"at": now, "data": dict(res)}
         return res
 
-    def perf_start(self, serial=None, interval_ms=None, pkg=None):
+    def perf_start(self, serial=None, interval_ms=None, pkg=None, metrics=None):
         """开始性能监控。
 
         不传 serial 时监控**全部受控设备**（多台即进入对比模式），上限
         PERF_MAX_DEVICES 台：每台一条采样线程、每 1s 一次 `adb shell`，
         再多就只是在 adb 的调用队列里排队，换不来更多信息。
+
+        metrics 是「监测项设置」启用的指标 key 列表。未启用的指标连设备端
+        adb 命令都不跑（PerfMonitor._script 按集合裁剪），不只是界面隐藏。
+        空 / 全非法回落全部，兼容不传该参数的旧前端。
         """
         serials = self._target_serials(serial)
         if not serials:
@@ -108,10 +114,14 @@ class PerfMixin:
                 "warn", f"⚠ 性能监控最多同时监控 {PERF_MAX_DEVICES:d} 台设备，已忽略：{'、'.join(skipped)}")
         interval = self._perf_interval(interval_ms)
         pkg = (pkg or "").strip()
+        met = perf_normalize_metrics(metrics)
         started, infos, failed = {}, {}, {}
+        # 只有前端显式传了监测项时才往采样器下传：不传时采样器自己回落全部，
+        # 同时兼容替换了 PerfMonitor 的测试替身 / 外部集成（其构造签名未必有此参数）。
+        extra = {"metrics": met} if metrics is not None else {}
         for s in serials:
             mon = PerfMonitor(self.state.adb_path, s, interval, pkg,
-                              on_status=self._push_status)
+                              on_status=self._push_status, **extra)
             ok, err = mon.start()
             if not ok:
                 with contextlib.suppress(Exception):
@@ -138,12 +148,16 @@ class PerfMixin:
         perf_stop_monitors(old.values())
         primary = serials[0] if serials[0] in started else next(iter(started))
         info = infos[primary]
+        # 裁剪过监测项时说一句，免得用户关掉电量后满心疑惑「电量怎么一直 --」
+        met_note = ("" if len(met) == len(PERF_ALL_METRICS)
+                    else " · 监测 {} 项".format(len(met)))
         if len(started) == 1:
             self._push_status(
-                "ok", "✓ 已开始性能监控：{}（{} · 每 {:.1f} 秒采样一次）".format(info.get("model") or primary, perf_pkg_display(info), interval))
+                "ok", "✓ 已开始性能监控：{}（{} · 每 {:.1f} 秒采样一次{}）".format(
+                    info.get("model") or primary, perf_pkg_display(info), interval, met_note))
         else:
             self._push_status(
-                "ok", f"✓ 已开始性能监控：{len(started):d} 台设备（{perf_pkg_display(info)} · 每 {interval:.1f} 秒采样一次）")
+                "ok", f"✓ 已开始性能监控：{len(started):d} 台设备（{perf_pkg_display(info)} · 每 {interval:.1f} 秒采样一次{met_note}）")
         if failed:
             # 部分成功：失败的那几台**必须**单独说清楚。旧实现只把 failed 塞进
             # 返回值，而前端从不读它 —— 勾了 3 台、实际只监控 2 台，界面上没有
@@ -151,7 +165,8 @@ class PerfMixin:
             self._push_status(
                 "warn", f"⚠ 有 {len(failed):d} 台设备未能开始性能监控：{'；'.join((f'{k}（{v}）' for k, v in failed.items()))}")
         return {"ok": True, "serial": primary, "info": info,
-                "interval": interval, "sessions": infos, "failed": failed}
+                "interval": interval, "sessions": infos, "failed": failed,
+                "metrics": list(met)}
 
     def perf_stop(self, serial=None):
         """停止采样。会话对象**保留**：停完还能导出刚才那段报告。
@@ -306,6 +321,14 @@ class PerfMixin:
             return {"ok": False, "reason": "no_data"}
         saved, errors, total_rows, total_samples = [], {}, 0, 0
         th, _th_errs, _expr = self._perf_thresholds()
+        # 报告按「本次监测项」裁剪统计表与图表：用户关掉了电量/温度就不该在报告
+        # 里再看到两张空图。各会话的 metrics 来自同一次 perf_start，取任意一份即可。
+        export_metrics = tuple(getattr(next(iter(sessions.values())),
+                                       "metrics", PERF_ALL_METRICS))
+        # 未裁剪（全部指标）时不传 metrics 关键字：兼容替换了 write_report 的
+        # 测试替身 / 外部集成；只有确实关掉了指标才让报告函数按集合过滤。
+        report_kwargs = ({"metrics": export_metrics}
+                         if set(export_metrics) != set(PERF_ALL_METRICS) else {})
         compare_entries = []
         for s, mon in sessions.items():
             samples = mon.all_samples()
@@ -318,7 +341,8 @@ class PerfMixin:
                 "samples": samples, "info": info, "interval": mon.interval,
             })
             try:
-                res = perf_write_report(samples, info, self._default_save_dir(), th)
+                res = perf_write_report(samples, info, self._default_save_dir(), th,
+                                        **report_kwargs)
             except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 errors[s] = str(ex)
                 continue
@@ -336,7 +360,8 @@ class PerfMixin:
         compare = ""
         if len(compare_entries) > 1:
             try:
-                res = perf_write_compare(compare_entries, self._default_save_dir(), th)
+                res = perf_write_compare(compare_entries, self._default_save_dir(), th,
+                                         **report_kwargs)
                 compare = res.get("html") or ""
             except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
                 errors["compare"] = str(ex)

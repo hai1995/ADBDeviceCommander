@@ -600,6 +600,8 @@
           <button id="perf-stop" class="btn" disabled data-icon="stop">停止</button>
           <button id="perf-export" class="btn" disabled data-icon="report">导出报告</button>
           <button id="perf-view" class="btn" data-icon="folder">查看报告</button>
+          <button id="perf-metrics-btn" class="btn" data-icon="settings"
+                  title="设置需要监测和显示的指标（取消勾选可省设备端采样开销）">设置</button>
           <button id="perf-th" class="btn" data-icon="sliders"
                   title="自定义告警阈值（超标时指标卡切红、报告里标色带）">阈值</button>
           <span id="perf-state" class="scrcpy-state">未开始</span>
@@ -1042,6 +1044,31 @@
         <button id="cmd-export-copy" class="btn" type="button" data-icon="copy">复制</button>
         <button id="cmd-export-save" class="btn" type="button" data-icon="save">保存到文件</button>
         <button id="cmd-export-close2" class="btn accent" type="button" data-icon="x">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 监测项设置弹窗：勾选需要监测/显示的指标（落到 config.json 的 perf_metrics）。
+       取消勾选的指标不再下发设备端 adb 命令、卡片隐藏、报告也不再输出；至少保留一项。
+       七项的名称/单位与前端 PERF_METRICS 同源，避免与后端 METRICS 漂移。 -->
+  <div id="perf-metrics-modal" class="modal hidden">
+    <div class="modal-box cmd-edit-box">
+      <div class="modal-head">
+        <span>监测项设置</span>
+        <div class="modal-actions">
+          <button id="perf-metrics-reset" class="btn tiny" type="button"
+                  data-icon="refresh" title="改回全部监测（尚未保存）">恢复默认</button>
+          <button id="perf-metrics-close" class="modal-x" type="button" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body cmd-edit-body">
+        <div class="export-hint dim">只勾选需要监测的项。取消勾选后该项不再采集（省设备端开销）、卡片隐藏、报告不再输出；至少保留一项。改动在下次「开始监控」时真正作用于采样。</div>
+        <div id="perf-metrics-rows" class="th-rows pm-rows"></div>
+        <div id="perf-metrics-err" class="th-err pm-err" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button id="perf-metrics-cancel" class="btn" type="button" data-icon="x">取消</button>
+        <button id="perf-metrics-save" class="btn accent" type="button" data-icon="save">保存</button>
       </div>
     </div>
   </div>
