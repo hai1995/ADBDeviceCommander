@@ -297,9 +297,29 @@
             <button id="lc-preset-del" class="btn" data-icon="trash"
                     title="删除当前选中的预设" disabled>删除</button>
             <label class="lbl" title="按包名过滤：选中后自动解析该包当前 pid 并只看它的日志">按包</label>
-            <select id="lc-pkg" class="inp lc-pkg" title="选择要过滤的包（含系统应用）">
-              <option value="">（全部）</option>
-            </select>
+            <!-- 与性能监控「应用包名」同款的可搜索下拉：原生 select 无法搜索，
+                 几百个包只能靠滚动条找。这里复用 .pkg-pick 样式类，交互一致。 -->
+            <div class="pkg-pick" id="lc-pkg-pick">
+              <button id="lc-pkg" class="pkg-btn" type="button" aria-haspopup="listbox"
+                      aria-expanded="false" title="选择要过滤的包（支持模糊搜索，含系统应用）">
+                <span class="pkg-btn-t" id="lc-pkg-label">（全部）</span>
+                <svg class="pkg-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                     aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+              <div class="pkg-pop hidden" id="lc-pkg-pop">
+                <input id="lc-pkg-search" type="text" class="inp pkg-search" autocomplete="off"
+                       spellcheck="false" placeholder="搜索包名（支持模糊），回车可直接使用输入的包名">
+                <div class="pkg-ops">
+                  <button type="button" class="pkg-mode" id="lc-pkg-clear"
+                          title="清除按包过滤，恢复全部日志">（全部）</button>
+                  <button type="button" class="pkg-refresh" id="lc-pkg-refresh"
+                          title="重新读取设备上的应用">刷新</button>
+                  <span class="pkg-count" id="lc-pkg-count"></span>
+                </div>
+                <div class="pkg-list" id="lc-pkg-list" role="listbox"></div>
+              </div>
+            </div>
             <label class="lbl">级别</label>
             <span id="lc-levels" class="levels">
               <label><input type="checkbox" value="V" checked>V</label>
@@ -568,7 +588,7 @@
           <!-- 目标应用选择器：默认「跟随前台应用」，可下拉挑选设备上的已安装应用
                （列表来自本机 adb 的 pm list packages，支持模糊搜索），也可切「全系统」
                只采整机指标。手动输入包名同样支持：搜索框里回车即用。 -->
-          <div class="perf-pick" id="perf-pkg-pick">
+          <div class="pkg-pick" id="perf-pkg-pick">
             <button id="perf-pkg" class="pkg-btn" type="button" aria-haspopup="listbox"
                     aria-expanded="false" title="选择要监控的应用（默认跟随前台应用）">
               <span class="pkg-btn-t" id="perf-pkg-label">跟随前台应用</span>

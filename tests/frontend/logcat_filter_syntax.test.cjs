@@ -198,20 +198,22 @@ function switchTab(doc, key) {
       },
       logcat_pidof: () => Promise.resolve({ ok: true, pids: ["5417"] }),
     });
-    // 分步加载：包下拉是 Logcat 页专属数据，切到该页才拉设备包名列表。
+    // 分步加载：包列表是 Logcat 页专属数据，切到该页才拉设备包名列表。
     // boot 时设备已确定但没进过 Logcat 页，不会白打这次设备调用。
     switchTab(doc, "logcat");
-    const sel = doc.getElementById("lc-pkg");
-    const filled = await waitFor(() => sel.options.length >= 5, 4000, "包列表填充");
-    ok(filled, "设备确定后包下拉被填充（全部 + 4 个包）", sel.options.length + " 项");
+    const items = () => Array.from(doc.querySelectorAll("#lc-pkg-list .pkg-item"));
+    const filled = await waitFor(() => items().length >= 4, 4000, "包列表填充");
+    ok(filled, "设备确定后包列表被填充（4 个包）", items().length + " 项");
     ok(pkgArgs && pkgArgs.length >= 2 && pkgArgs[1] === false,
        "取包列表时显式传 third_party_only=false：" + JSON.stringify(pkgArgs));
-    const vals = Array.from(sel.options).map((o) => o.value);
+    const vals = items().map((o) => o.dataset.pkg);
     ok(vals.indexOf("android") >= 0 && vals.indexOf("com.android.systemui") >= 0,
-       "系统应用出现在下拉列表中：" + vals.join(","));
+       "系统应用出现在可搜索列表中：" + vals.join(","));
 
-    sel.value = "com.demo.app";
-    sel.dispatchEvent(new window.Event("change", { bubbles: true }));
+    // 点列表项选中（可搜索下拉的交互，替代旧 select 的 value+change）
+    const target = items().find((o) => o.dataset.pkg === "com.demo.app");
+    ok(!!target, "列表里有 com.demo.app 可点选");
+    if (target) target.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     const applied = await waitFor(
       () => doc.getElementById("lc-filter").value === "pid:5417", 4000, "写入 pid 过滤");
     ok(applied, "单进程包被改写为可读可编辑的 pid:5417",

@@ -9134,3 +9134,35 @@ MF 架构（v24 续流 + v25 单文件）：screenrecord 到 170 秒退出后由
   `test_backend_controller.py` 相关 3 项断言、前端 `rec_limit_hint.test.cjs` 文案断言。
 - 全量回归：Python `pytest tests -q --ignore=tests/frontend` 与前端 `node run-all.cjs`
   均通过（详见提交记录）。
+
+---
+
+## 2026-11-27 Logcat「按包」筛选支持模糊搜索（对齐性能监控）
+
+你要求 Logcat 实时监控的「按包筛选」支持模糊搜索，交互与性能监控那儿的
+包名筛选一致。
+
+### 改动
+
+- **控件替换**：Logcat「按包」从原生 `<select>`（几百个包只能滚动条找）换成
+  与性能监控「应用包名」同款的可搜索下拉——搜索框模糊匹配 + 列表点选 +
+  回车手输 + 刷新 + 计数 + 点外部 / Esc 关闭。两个控件共用 `.pkg-pick` 样式类
+  （原 `.perf-pick` 前缀抽成通用 `.pkg-pick`）。
+- **匹配口径统一**：模糊打分 `perfPkgScore` 抽成通用 `pkgFuzzyScore`，两处共用
+  （子串命中越靠前分越高 → 退化成按顺序凑字符，comkwo 也能命中 com.tencent.kuwo）。
+- **过滤语义不变**：选中包仍走 `logcat_pidof` 写 `pid:`（单进程）/ `pkg:`（多进程）
+  到过滤框，与旧 `<select>` change 完全一致；数据源仍是
+  `logcat_packages(serial, false)`（第三方 + 系统全量）。「（全部）」按钮精确移除
+  上次下拉写入的 term，不误删用户手写的其它过滤条件。
+- **上下文**：性能监控额外有「跟随前台 / 全系统」「含系统应用」，Logcat 只需挑
+  一个包写过滤框，故省掉这两项，主体交互与样式完全共用。
+
+### 测试
+
+- 新增 `tests/frontend/logcat_pkg_search.test.cjs`（27 项）：结构默认值、打开下拉
+  拉全量包（含系统）+ third_party_only=false、模糊搜索三种命中（子串 / 片段 / 顺序）、
+  点选项写 pid:/pkg:、回车手输、精确清除、刷新。
+- 改写 `logcat_filter_syntax.test.cjs`、`tab_staged_load.test.cjs` 中对原生 select
+  `.options` / `change` 的断言，改为新列表项点选。
+- 全量回归：Python 1748 passed / 1 skipped，前端 106 个测试文件 0 失败，
+  pyflakes / ruff / node --check 全通过。

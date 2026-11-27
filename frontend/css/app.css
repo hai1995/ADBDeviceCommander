@@ -1274,12 +1274,10 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
   margin-bottom: 8px; padding: 7px 10px;
 }
 .lc-status { color: var(--muted); font-size: var(--fs-sm); font-family: var(--font-mono); }
-/* 「按包」下拉：限制最大宽度，长包名（com.xxx.xxx.dashboard）不把工具栏撑爆；
-   超出部分用省略号。字体统一走等宽，和过滤框、日志正文风格一致。 */
-.lc-pkg {
-  max-width: 240px; min-width: 120px; font-family: var(--font-mono);
-  font-size: var(--fs-sm); text-overflow: ellipsis;
-}
+/* 「按包」可搜索下拉：限制容器最大宽度，长包名（com.xxx.xxx.dashboard）
+   不把工具栏撑爆；按钮内文字省略由 .pkg-btn-t 负责，字体统一走等宽，
+   和过滤框、日志正文风格一致。 */
+#lc-pkg-pick { max-width: 240px; }
 /* 「预设」下拉：名称通常是用户自己起的短语，限宽避免把「按包 / 级别」挤到下一行 */
 .lc-preset {
   max-width: 180px; min-width: 100px; font-size: var(--fs-sm);
@@ -2413,12 +2411,14 @@ body.tool-sorting, body.tool-sorting * {
 }
 
 /* ============================================================================
-   性能监控：目标应用选择器（下拉 + 模糊搜索）
+   可搜索包名选择器（性能监控「应用包名」+ Logcat「按包」共用）
    ============================================================================
-   不用原生 <select>：原生 select 不支持搜索、也没法在一个控件里混「跟随前台 /
-   全系统 / 具体应用」三个语义，几百个包名只能靠滚动条找。 */
-.perf-pick { position: relative; flex: none; }
-.perf-pick .pkg-btn {
+   不用原生 <select>：原生 select 不支持搜索，几百个包名只能靠滚动条找。
+   两处交互一致：搜索框模糊匹配 + 列表点选 + 回车手输 + 刷新 + 计数。
+   性能监控额外有「跟随前台 / 全系统」模式与「含系统应用」开关；Logcat 这边
+   只要挑一个包写进过滤框，故省掉那两项，样式与交互主体完全共用。 */
+.pkg-pick { position: relative; flex: none; }
+.pkg-pick .pkg-btn {
   display: inline-flex; align-items: center; gap: 6px;
   max-width: 250px; padding: 5px 9px;
   background: var(--inset); border: 1px solid var(--line-strong);
@@ -2427,17 +2427,17 @@ body.tool-sorting, body.tool-sorting * {
   transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease,
               background var(--dur-fast) ease;
 }
-.perf-pick .pkg-btn:hover { border-color: var(--accent); color: var(--text); }
-.perf-pick .pkg-btn.is-set {
+.pkg-pick .pkg-btn:hover { border-color: var(--accent); color: var(--text); }
+.pkg-pick .pkg-btn.is-set {
   color: var(--accent); background: var(--accent-soft);
   border-color: rgba(52, 224, 234, .38);
 }
-.perf-pick .pkg-btn .pkg-btn-t {
+.pkg-pick .pkg-btn .pkg-btn-t {
   max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.perf-pick .pkg-btn .pkg-caret { width: 13px; height: 13px; flex: none; opacity: .75; }
+.pkg-pick .pkg-btn .pkg-caret { width: 13px; height: 13px; flex: none; opacity: .75; }
 
-.perf-pick .pkg-pop {
+.pkg-pick .pkg-pop {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
   width: 340px; max-width: 80vw; padding: 9px;
   display: flex; flex-direction: column; gap: 8px;
@@ -2446,19 +2446,19 @@ body.tool-sorting, body.tool-sorting * {
   border: 1px solid var(--line-strong); border-radius: var(--r-md);
   box-shadow: 0 14px 38px rgba(0, 0, 0, .62);
 }
-.perf-pick .pkg-pop.hidden { display: none; }
-.perf-pick .pkg-pop .pkg-search {
+.pkg-pick .pkg-pop.hidden { display: none; }
+.pkg-pick .pkg-pop .pkg-search {
   width: 100%; background: var(--inset); border: 1px solid var(--line-strong);
   color: var(--text); border-radius: var(--r-sm); padding: 6px 9px;
   font: 400 var(--fs-md)/1.2 var(--font-mono);
 }
-.perf-pick .pkg-pop .pkg-search::placeholder { color: var(--faint); }
-.perf-pick .pkg-pop .pkg-search:focus {
+.pkg-pick .pkg-pop .pkg-search::placeholder { color: var(--faint); }
+.pkg-pick .pkg-pop .pkg-search:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(52, 224, 234, .14);
 }
-.perf-pick .pkg-modes { display: flex; gap: 6px; }
-.perf-pick .pkg-mode {
+.pkg-pick .pkg-modes { display: flex; gap: 6px; }
+.pkg-pick .pkg-mode {
   flex: 1; padding: 5px 8px; cursor: pointer;
   background: var(--surface-2); border: 1px solid var(--line);
   border-radius: var(--r-sm); color: var(--text-2);
@@ -2466,54 +2466,54 @@ body.tool-sorting, body.tool-sorting * {
   transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease,
               background var(--dur-fast) ease;
 }
-.perf-pick .pkg-mode:hover { border-color: var(--line-strong); color: var(--text); }
-.perf-pick .pkg-mode.on {
+.pkg-pick .pkg-mode:hover { border-color: var(--line-strong); color: var(--text); }
+.pkg-pick .pkg-mode.on {
   color: var(--accent-ink); background: var(--accent); border-color: var(--accent);
   font-weight: 600;
 }
-.perf-pick .pkg-ops {
+.pkg-pick .pkg-ops {
   display: flex; align-items: center; gap: 8px;
   font: 400 var(--fs-xs)/1 var(--font-body); color: var(--muted);
 }
-.perf-pick .pkg-ops .pkg-sys { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.pkg-pick .pkg-ops .pkg-sys { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 /* 「含系统应用」用全局开关的**小号变体**（28×16 / 滑块 10px）：
    弹层本来就窄，标准 36×20 的开关会把「刷新 + 计数」挤到换行。 */
-.perf-pick .pkg-ops .pkg-sys input[type="checkbox"] { width: 28px; height: 16px; }
-.perf-pick .pkg-ops .pkg-sys input[type="checkbox"]::after { width: 10px; height: 10px; }
-.perf-pick .pkg-ops .pkg-sys input[type="checkbox"]:checked::after { left: 14px; }
-.perf-pick .pkg-refresh {
+.pkg-pick .pkg-ops .pkg-sys input[type="checkbox"] { width: 28px; height: 16px; }
+.pkg-pick .pkg-ops .pkg-sys input[type="checkbox"]::after { width: 10px; height: 10px; }
+.pkg-pick .pkg-ops .pkg-sys input[type="checkbox"]:checked::after { left: 14px; }
+.pkg-pick .pkg-refresh {
   margin-left: auto; padding: 3px 8px; cursor: pointer;
   background: var(--surface-2); border: 1px solid var(--line);
   border-radius: var(--r-sm); color: var(--text-2);
   font: 500 var(--fs-xs)/1.2 var(--font-body);
 }
-.perf-pick .pkg-refresh:hover { border-color: var(--accent); color: var(--accent); }
-.perf-pick .pkg-count { color: var(--faint); white-space: nowrap; }
-.perf-pick .pkg-list {
+.pkg-pick .pkg-refresh:hover { border-color: var(--accent); color: var(--accent); }
+.pkg-pick .pkg-count { color: var(--faint); white-space: nowrap; }
+.pkg-pick .pkg-list {
   display: flex; flex-direction: column; gap: 1px;
   max-height: 46vh; overflow-y: auto; overscroll-behavior: contain;
   padding-right: 2px;
 }
-.perf-pick .pkg-item {
+.pkg-pick .pkg-item {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 5px 8px; cursor: pointer; text-align: left;
   background: transparent; border: 1px solid transparent;
   border-radius: var(--r-sm); color: var(--text-2);
   font: 400 var(--fs-md)/1.3 var(--font-mono);
 }
-.perf-pick .pkg-item:hover { background: var(--surface-3); color: var(--text); }
-.perf-pick .pkg-item.on {
+.pkg-pick .pkg-item:hover { background: var(--surface-3); color: var(--text); }
+.pkg-pick .pkg-item.on {
   background: var(--accent-soft); border-color: rgba(52, 224, 234, .34); color: var(--accent);
 }
-.perf-pick .pkg-item .pkg-item-n {
+.pkg-pick .pkg-item .pkg-item-n {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.perf-pick .pkg-item .pkg-item-t {
+.pkg-pick .pkg-item .pkg-item-t {
   flex: none; padding: 1px 5px; border-radius: 999px;
   font: 500 var(--fs-xs)/1.4 var(--font-body);
   color: var(--muted); background: var(--surface-3); border: 1px solid var(--line);
 }
-.perf-pick .pkg-tip {
+.pkg-pick .pkg-tip {
   padding: 8px 4px; color: var(--faint);
   font: 400 var(--fs-sm)/1.4 var(--font-body);
 }

@@ -30,7 +30,12 @@
     lcStart: $("lc-start"), lcStop: $("lc-stop"),
     lcClear: $("lc-clear"), lcStatus: $("lc-status"),
     lcCounter: $("lc-counter"), lcDev: $("lc-dev"), lcFilter: $("lc-filter"),
-    lcPkg: $("lc-pkg"),
+    // 按包过滤：可搜索下拉（与性能监控「应用包名」同款）；lcPkg 复用为触发按钮
+    lcPkg: $("lc-pkg"), lcPkgPick: $("lc-pkg-pick"),
+    lcPkgLabel: $("lc-pkg-label"), lcPkgPop: $("lc-pkg-pop"),
+    lcPkgSearch: $("lc-pkg-search"), lcPkgList: $("lc-pkg-list"),
+    lcPkgCount: $("lc-pkg-count"), lcPkgRefresh: $("lc-pkg-refresh"),
+    lcPkgClear: $("lc-pkg-clear"),
     lcPreset: $("lc-preset"), lcPresetSave: $("lc-preset-save"),
     lcPresetDel: $("lc-preset-del"),
     lcLevels: $("lc-levels"), lcOnlyExc: $("lc-only-exc"),
@@ -3127,28 +3132,213 @@
     syncLcPkgTimer();
     if (lcSerial) renderLogcat();
   }
-  // 「按包」下拉的数据源：设备确定后异步拉一次包列表。失败（老系统没有
-  // pm / 设备刚拔掉）就保持只有「（全部）」，不打断用户。
-  function refreshLcPackages() {
+  /* ---------------- 按包过滤：可搜索下拉（与性能监控「应用包名」同款交互） ----------------
+     旧实现是原生 <select>：几百个包只能靠滚动条找，无法搜索。现在换成与性能
+     监控一致的搜索面板——搜索框模糊匹配 + 列表点选 + 回车手输 + 刷新 + 计数。
+     只换「挑包」的控件，过滤语义不变：选中后仍走 logcat_pidof 把 pid:/pkg:
+     写进过滤框（多选 pid / 单 pid 两条分支与旧版完全一致）。
+     - lcPkgCache: {serial, pkgs:[...]}，包列表来自 logcat_packages(serial,false)
+       （第三方 + 系统全取，车机预置应用也能筛到）
+     - lcPkgCurrent: 当前选中的包名（按钮显示用）
+     - lcPkgAppliedTerm: 上次由下拉写进过滤框的 term（pid:N / pkg:name），
+       供「（全部）」精确清除，不误删用户手写的其它条件 */
+  const LC_PKG_ROWS_MAX = 300;
+  let lcPkgCache = null;
+  let lcPkgLoading = false;
+  let lcPkgCurrent = "";
+  let lcPkgAppliedTerm = "";
+
+  function lcPkgRows() {
+    if (!lcPkgCache) return [];
+    const kw = ((els.lcPkgSearch && els.lcPkgSearch.value) || "").trim().toLowerCase();
+    const out = [];
+    (lcPkgCache.pkgs || []).forEach((pkg) => {
+      const score = kw ? pkgFuzzyScore(kw, pkg.toLowerCase()) : 0;
+      if (kw && score < 0) return;
+      out.push({ pkg: pkg, score: score });
+    });
+    out.sort((a, b) => (b.score - a.score)
+      || (a.pkg < b.pkg ? -1 : a.pkg > b.pkg ? 1 : 0));
+    return out;
+  }
+
+  function syncLcPkgBtn() {
+    if (!els.lcPkg || !els.lcPkgLabel) return;
+    els.lcPkgLabel.textContent = lcPkgCurrent || "（全部）";
+    els.lcPkg.classList.toggle("is-set", !!lcPkgCurrent);
+    els.lcPkg.title = lcPkgCurrent
+      ? "当前按包过滤：" + lcPkgCurrent + "（点击更换）"
+      : "选择要过滤的包（支持模糊搜索，含系统应用）";
+  }
+
+  function renderLcPkgList() {
+    if (!els.lcPkgList) return;
+    const list = els.lcPkgList;
+    list.innerHTML = "";
+    const tip = (text) => {
+      const d = document.createElement("div");
+      d.className = "pkg-tip";
+      d.textContent = text;
+      list.appendChild(d);
+    };
+    const setCount = (text) => { if (els.lcPkgCount) els.lcPkgCount.textContent = text; };
+    if (lcPkgLoading) { setCount(""); tip("正在读取设备上的应用…"); return; }
+    if (!lcPkgCache) {
+      setCount("");
+      tip(lcSerial ? "点「刷新」读取设备上的应用" : "请先在左侧勾选一台设备");
+      return;
+    }
+    const rows = lcPkgRows();
+    setCount(rows.length
+      ? ("共 " + rows.length + " 个"
+         + (rows.length > LC_PKG_ROWS_MAX ? "，显示前 " + LC_PKG_ROWS_MAX : ""))
+      : "无匹配");
+    if (!rows.length) { tip("（无匹配应用，可直接回车使用输入的包名）"); return; }
+    rows.slice(0, LC_PKG_ROWS_MAX).forEach((r) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "pkg-item" + (r.pkg === lcPkgCurrent ? " on" : "");
+      item.dataset.pkg = r.pkg;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", r.pkg === lcPkgCurrent ? "true" : "false");
+      const name = document.createElement("span");
+      name.className = "pkg-item-n";
+      name.textContent = r.pkg;
+      item.appendChild(name);
+      list.appendChild(item);
+    });
+  }
+
+  // 拉包列表：设备确定后拉一次；force=true 用于「刷新」按钮。
+  function loadLcPkgs(force) {
     if (!els.lcPkg) return;
     if (!lcSerial) {
-      els.lcPkg.innerHTML = '<option value="">（全部）</option>';
+      lcPkgCache = null; lcPkgLoading = false;
+      syncLcPkgBtn(); renderLcPkgList();
+      return;
+    }
+    if (!force && lcPkgCache && lcPkgCache.serial === lcSerial) {
+      renderLcPkgList();
       return;
     }
     const serial = lcSerial;
-    // 第二个参数传 false：取设备上的**全部**已安装应用（第三方 + 系统）。
-    // 不传时后端默认 third_party_only=True，只跑 pm list packages -3，
-    // 车机预置应用 / 系统应用就永远筛不到（下拉里只剩两三个第三方包）。
+    lcPkgLoading = true;
+    renderLcPkgList();
     callApi(api.logcat_packages(serial, false)).then((r) => {
+      lcPkgLoading = false;
       if (serial !== lcSerial) return;   // 期间又切了设备，丢弃过期结果
       const pkgs = (r && Array.isArray(r.packages)) ? r.packages : [];
-      let html = '<option value="">（全部）</option>';
-      pkgs.forEach((p) => {
-        // 包名原样输出到 value；显示上把包名截断得更紧凑些，长包名不撑破布局
-        html += '<option value="' + escAttr(p) + '">' + escHtml(p) + '</option>';
-      });
-      els.lcPkg.innerHTML = html;
+      lcPkgCache = { serial: serial, pkgs: pkgs };
+      renderLcPkgList();
+    }).catch(() => {
+      lcPkgLoading = false;
+      if (serial !== lcSerial) return;
+      lcPkgCache = null; renderLcPkgList();
+    });
+  }
+
+  // 兼容原三处调用点（切设备 / tab prepare / 开始监控）：按当前设备刷新包列表
+  function refreshLcPackages() { loadLcPkgs(false); }
+
+  function openLcPkgPop() {
+    if (!els.lcPkgPop) return;
+    els.lcPkgPop.classList.remove("hidden");
+    if (els.lcPkg) els.lcPkg.setAttribute("aria-expanded", "true");
+    if (els.lcPkgSearch) { els.lcPkgSearch.value = ""; els.lcPkgSearch.focus(); }
+    renderLcPkgList();
+    loadLcPkgs(false);
+  }
+  function closeLcPkgPop() {
+    if (!els.lcPkgPop || els.lcPkgPop.classList.contains("hidden")) return;
+    els.lcPkgPop.classList.add("hidden");
+    if (els.lcPkg) els.lcPkg.setAttribute("aria-expanded", "false");
+  }
+
+  // 选中一个包：写 pid:/pkg: 到过滤框（覆盖式，与原 select change 完全一致）
+  function applyLcPkg(name) {
+    name = (name || "").trim();
+    if (!name) return;
+    if (!lcSerial) { pushStatus("warn", "请先在左侧勾选一台设备"); return; }
+    const serial = lcSerial;
+    callApi(api.logcat_pidof(serial, name)).then((r) => {
+      const pids = (r && Array.isArray(r.pids)) ? r.pids : [];
+      if (serial !== lcSerial) return;   // 迟到的解析结果不再改写当前过滤框
+      if (!pids.length) {
+        // 包没在跑：明确说出来，同时记下「已提示」，免得监控中的 5 秒重解析再补一句
+        lcPkgEmptyWarned[lcPkgPidKey(serial, name.toLowerCase())] = true;
+        pushStatus("warn", "⚠ 包 " + name + " 当前没有在运行（pid 为空），"
+                  + "先把它启动起来再过滤");
+        return;
+      }
+      let term;
+      if (pids.length === 1) {
+        term = "pid:" + pids[0];
+        els.lcFilter.value = term;
+      } else {
+        // 多进程包（含 :remote）用空格 AND 永远不成立，改用 pkg: 按集合匹配
+        lcApplyPkgPids(lcSerial, name.toLowerCase(), pids);
+        term = "pkg:" + name;
+        els.lcFilter.value = term;
+      }
+      lcPkgCurrent = name;
+      lcPkgAppliedTerm = term;
+      syncLcPkgBtn();
+      triggerLcFilter();
     }).catch(() => {});
+  }
+
+  // 回车：有匹配取最相关的一条；无匹配则当「手动输入的包名」直接解析
+  function applyLcPkgTyped() {
+    const raw = ((els.lcPkgSearch && els.lcPkgSearch.value) || "").trim();
+    if (!raw) { closeLcPkgPop(); return; }
+    const rows = lcPkgRows();
+    applyLcPkg(rows.length ? rows[0].pkg : raw);
+    closeLcPkgPop();
+  }
+
+  // 「（全部）」：精确移除上次由下拉写入的过滤项，不动用户手写的其它条件
+  function clearLcPkg() {
+    if (lcPkgAppliedTerm) {
+      const cur = (els.lcFilter.value || "").trim();
+      const parts = cur ? cur.split(/\s+/).filter((t) => t !== lcPkgAppliedTerm) : [];
+      els.lcFilter.value = parts.join(" ");
+      lcPkgAppliedTerm = "";
+      triggerLcFilter();
+    }
+    lcPkgCurrent = "";
+    syncLcPkgBtn();
+    closeLcPkgPop();
+  }
+
+  function bindLcPkgPicker() {
+    if (!els.lcPkg || !els.lcPkgPop) return;
+    syncLcPkgBtn();
+    els.lcPkg.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (els.lcPkgPop.classList.contains("hidden")) openLcPkgPop();
+      else closeLcPkgPop();
+    });
+    // 弹层内点击不冒泡到 document（否则「点选项」会先被外面的关闭逻辑吃掉）
+    els.lcPkgPop.addEventListener("click", (ev) => ev.stopPropagation());
+    document.addEventListener("click", closeLcPkgPop);
+    if (els.lcPkgSearch) {
+      els.lcPkgSearch.addEventListener("input", renderLcPkgList);
+      els.lcPkgSearch.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); applyLcPkgTyped(); }
+        else if (ev.key === "Escape") { ev.preventDefault(); closeLcPkgPop(); }
+      });
+    }
+    if (els.lcPkgList) {
+      // 事件委托：列表可能有几百行，逐行绑监听会在每次重绘后堆积
+      els.lcPkgList.addEventListener("click", (ev) => {
+        const it = ev.target && ev.target.closest ? ev.target.closest(".pkg-item") : null;
+        if (!it) return;
+        applyLcPkg(it.dataset.pkg || "");
+        closeLcPkgPop();
+      });
+    }
+    if (els.lcPkgClear) els.lcPkgClear.addEventListener("click", clearLcPkg);
+    if (els.lcPkgRefresh) els.lcPkgRefresh.addEventListener("click", () => loadLcPkgs(true));
   }
   function appendLcTerm(term) {
     // 追加到现有表达式末尾（不覆盖用户已写的条件）；已存在则不重复添加。
@@ -5852,7 +6042,8 @@
 
   // 模糊匹配：先按子串命中（越靠前分越高），再退化成「按顺序出现即可」
   // （com.kwo 也能命中 com.tencent.kuwo）。完全不命中返回 -1。
-  function perfPkgScore(needle, hay) {
+  // 性能监控「应用包名」与 Logcat「按包」两处共用同一套匹配口径。
+  function pkgFuzzyScore(needle, hay) {
     if (!needle) return 0;
     const at = hay.indexOf(needle);
     if (at >= 0) return 1000 - at;
@@ -5876,7 +6067,7 @@
     all.forEach((pkg) => {
       const isSys = sys.has(pkg);
       if (isSys && !withSys) return;
-      const score = kw ? perfPkgScore(kw, pkg.toLowerCase()) : 0;
+      const score = kw ? pkgFuzzyScore(kw, pkg.toLowerCase()) : 0;
       if (kw && score < 0) return;
       rows.push({ pkg: pkg, sys: isSys, score: score });
     });
@@ -8192,38 +8383,9 @@
       persistPref("lc_only_exc", !!els.lcOnlyExc.checked);
       if (lcSerial) renderLogcat();
     });
-    // 「按包」下拉：选中即把 pid: 条件写进过滤框（而不是 pkg:）——下拉里的包
-    // 我们在选中这一刻就能解析出 pid，写成显式 pid: 后表达式是可读、可编辑、
-    // 可复制的，用户也能在此基础上再补 -tag: 之类的排除条件。
-    if (els.lcPkg) {
-      els.lcPkg.addEventListener("change", () => {
-        const name = els.lcPkg.value;
-        if (!name) return;
-        if (!lcSerial) return;
-        const serial = lcSerial;      // 响应回来时用户可能已切设备，缓存要记在发起方设备上
-        callApi(api.logcat_pidof(serial, name)).then((r) => {
-          const pids = (r && Array.isArray(r.pids)) ? r.pids : [];
-          if (serial !== lcSerial) return;   // 迟到的解析结果不再改写当前过滤框
-          if (!pids.length) {
-            // 包没在跑：明确说出来，否则用户以为过滤坏了。同时记下「已提示」，
-            // 免得监控中的 5 秒重解析再补一句重复的警告。
-            lcPkgEmptyWarned[lcPkgPidKey(serial, name.toLowerCase())] = true;
-            pushStatus("warn", "⚠ 包 " + name + " 当前没有在运行（pid 为空），"
-                      + "先把它启动起来再过滤");
-            return;
-          }
-          // 多进程包（如含 :remote）会产生多个 pid，用空格 AND 会变成「同时等于
-          // 两个 pid」永远不成立；所以多 pid 时改用 pkg: 交给后端/前端按集合匹配。
-          if (pids.length === 1) {
-            els.lcFilter.value = "pid:" + pids[0];
-          } else {
-            lcApplyPkgPids(lcSerial, name.toLowerCase(), pids);
-            els.lcFilter.value = "pkg:" + name;
-          }
-          triggerLcFilter();
-        }).catch(() => {});
-      });
-    }
+    // 「按包」可搜索下拉：交互同性能监控「应用包名」（搜索 / 点选 / 回车手输），
+    // 选中后的 pid:/pkg: 写入逻辑见 applyLcPkg，与原 select change 完全一致。
+    bindLcPkgPicker();
     // 自动滚动 / 缓冲区：不触发重渲染，只记忆选择（下次启动 / 下次抓取生效）
     els.lcAuto.addEventListener("change", () => persistPref("lc_autoscroll", !!els.lcAuto.checked));
     els.lcBuf.addEventListener("change", () => persistPref("lc_buffer", els.lcBuf.value));

@@ -124,10 +124,10 @@ async function boot(opts) {
     await waitFor(() => countFn(calls, "logcat_packages") === 1, 4000, "切到 Logcat");
     ok(countFn(calls, "logcat_packages") === 1,
        "切到 Logcat 页时打了一次设备拉包列表");
-    const sel = doc.getElementById("lc-pkg");
-    await waitFor(() => sel.options.length >= 2, 4000, "包列表填充");
-    ok(sel.options.length >= 2,
-       "「按包过滤」下拉被填充（全部 + 1 个包）", sel.options.length + " 项");
+    const rows = () => doc.querySelectorAll("#lc-pkg-list .pkg-item").length;
+    await waitFor(() => rows() >= 1, 4000, "包列表填充");
+    ok(rows() >= 1,
+       "「按包过滤」可搜索列表被填充（1 个包）", rows() + " 项");
   }
 
   console.log("\n[3] 切到关于页 → 更新状态才回填");
@@ -160,9 +160,9 @@ async function boot(opts) {
     await waitFor(() => countFn(calls, "logcat_packages") === 1, 4000, "启动即准备");
     ok(countFn(calls, "logcat_packages") === 1,
        "启动恢复到 Logcat 页时立刻准备了它（不用等用户再点一次）");
-    const sel = doc.getElementById("lc-pkg");
-    await waitFor(() => sel.options.length >= 2, 4000, "包列表填充");
-    ok(sel.options.length >= 2, "恢复的那一页数据直接就位", sel.options.length + " 项");
+    const rows = () => doc.querySelectorAll("#lc-pkg-list .pkg-item").length;
+    await waitFor(() => rows() >= 1, 4000, "包列表填充");
+    ok(rows() >= 1, "恢复的那一页数据直接就位", rows() + " 项");
   }
 
   console.log("\n" + "=".repeat(46));
