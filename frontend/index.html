@@ -699,6 +699,14 @@
               <input id="file-upload" type="file" hidden>
             </label>
           </div>
+          <!-- 常用路径：地址栏下方的快速跳转条。点击 chip = 把路径填进地址栏并跳转；
+               chip 右侧 × 删除；末尾「＋」添加（默认带入当前浏览目录）。
+               持久化键 file_fav_paths（config.json，后端按未知键原样保留，与
+               cmd_history 同一约定），默认值 ["/sdcard"]。 -->
+          <div class="file-bar file-fav" id="file-fav-bar">
+            <span class="lbl">常用路径</span>
+            <div class="file-fav-chips" id="file-fav-chips"></div>
+          </div>
           <div class="file-bar file-batch">
             <label class="chk"><input type="checkbox" id="file-sel-all">全选</label>
             <button id="file-batch-dl" class="btn" disabled data-icon="download">下载选中</button>

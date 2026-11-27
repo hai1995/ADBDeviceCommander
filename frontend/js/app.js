@@ -106,6 +106,7 @@
     perfThClose: $("perf-th-close"), perfThReset: $("perf-th-reset"),
     // files
     fileDevNow: $("file-dev-now"), filePath: $("file-path"), fileUp: $("file-up"),
+    fileFavChips: $("file-fav-chips"),
     fileRefresh: $("file-refresh"), fileMkdir: $("file-mkdir"),
     fileTouch: $("file-touch"), fileUpload: $("file-upload"),
     fileUploadBtn: $("file-upload-btn"),
@@ -255,6 +256,83 @@
       cmdHistory.splice(0, cmdHistory.length - CMD_HIST_MAX);
     // 节流落盘：翻历史时不会持续持久化，只有 Enter 执行时才走到这里
     try { persistPref("cmd_history", JSON.stringify(cmdHistory)); } catch (e) {}
+  }
+
+  /* 文件区「常用路径」（地址栏下方的快速跳转条）。
+     点击 chip = 把路径填进地址栏并跳转；chip 上的 × 删除；末尾「＋」添加
+     （默认带入当前浏览目录）。持久化键 file_fav_paths，与 cmd_history 同一
+     约定：后端 sanitize_prefs 按未知键原样保留，前端只管读写。
+     默认值 ["/sdcard"]——第一次用就有东西可点，删光后下次启动也回到默认。 */
+  const FILE_FAV_DEFAULT = ["/sdcard"];
+  const FILE_FAV_MAX = 24;            // 上限防失控：chip 一行排不下会折行撑高文件区
+  let fileFavPaths = null;            // null = 尚未从 config.json 恢复（渲染前先落默认）
+  function _loadFileFavPaths(s) {
+    let arr = null;
+    try {
+      if (Array.isArray(s)) arr = s;
+      else if (typeof s === "string" && s.trim()) arr = JSON.parse(s);
+    } catch (e) { /* 手改坏了就当没配过，落默认值 */ }
+    fileFavPaths = (Array.isArray(arr) ? arr : FILE_FAV_DEFAULT)
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .slice(0, FILE_FAV_MAX);
+    if (!fileFavPaths.length) fileFavPaths = FILE_FAV_DEFAULT.slice();
+    renderFileFavChips();
+  }
+  function _persistFileFavPaths() {
+    try { persistPref("file_fav_paths", JSON.stringify(fileFavPaths)); } catch (e) {}
+  }
+  function renderFileFavChips() {
+    const box = els.fileFavChips;
+    if (!box || !Array.isArray(fileFavPaths)) return;
+    box.innerHTML = "";
+    fileFavPaths.forEach((p) => {
+      const chip = document.createElement("span");
+      chip.className = "fav-chip";
+      chip.title = "跳转到 " + p;
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "fav-go";
+      go.textContent = p;
+      go.addEventListener("click", () => {
+        if (!fileSerial) return pushStatus("warn", "请先勾选设备");
+        els.filePath.value = p; gotoPath();
+      });
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "fav-del";
+      del.textContent = "×";
+      del.title = "从常用路径移除 " + p;
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        fileFavPaths = fileFavPaths.filter((x) => x !== p);
+        if (!fileFavPaths.length) fileFavPaths = FILE_FAV_DEFAULT.slice();
+        renderFileFavChips(); _persistFileFavPaths();
+      });
+      chip.appendChild(go); chip.appendChild(del);
+      box.appendChild(chip);
+    });
+    // 「＋」添加：默认带入当前浏览目录，用户可改成任意路径。
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "fav-chip fav-add";
+    add.textContent = "＋";
+    add.title = "添加常用路径（默认带入当前浏览目录）";
+    add.addEventListener("click", () => {
+      askInput({ title: "添加常用路径", label: "设备路径：", ok: "添加",
+                 value: filePath || "/", placeholder: "/sdcard/DCIM",
+                 hint: "点击常用路径 chip 即可快速填入地址栏并跳转" }).then((n) => {
+        if (n === null) return;
+        const v = String(n || "").trim();
+        if (!v) return;
+        if (!v.startsWith("/")) return pushStatus("err", "⚠ 常用路径须以 / 开头（设备绝对路径）");
+        if (fileFavPaths.includes(v)) return pushStatus("warn", "⚠ 该路径已在常用路径里");
+        fileFavPaths.push(v);
+        if (fileFavPaths.length > FILE_FAV_MAX) fileFavPaths.shift();
+        renderFileFavChips(); _persistFileFavPaths();
+      });
+    });
+    box.appendChild(add);
   }
   // 预注册一批常见 adb 命令作为 Tab 补全候选（第一词补全用）。
   // allCommands 里是用户的卡片命令，而 adb / powershell 原生命令不属于
@@ -1257,6 +1335,8 @@
     onAbout(p);
     // 指令台历史（跨工作区共享、持久化）：从 config.json 恢复。
     _loadCmdHistory(p.settings && p.settings.cmd_history);
+    // 文件区常用路径（同 cmd_history 约定）：从 config.json 恢复，恢复不了落默认 /sdcard。
+    _loadFileFavPaths(p.settings && p.settings.file_fav_paths);
     // 主 tab 回到上次停留项：必须排在 renderCommands 之后 —— 切到「性能监控」
     // 要按已勾选的设备渲染目标设备条，切到「设备指令」要求指令卡已经画好。
     // 设备勾选态若还没下发，devices 事件到达时 renderPerfDev 会再补一次。

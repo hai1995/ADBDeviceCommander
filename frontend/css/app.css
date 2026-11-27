@@ -1883,6 +1883,38 @@ body.col-resizing .splitter::before { background: var(--accent); box-shadow: 0 0
 }
 .file-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 0; flex-wrap: wrap; }
 .file-dev { color: var(--accent); font-size: var(--fs-md); font-family: var(--font-mono); }
+
+/* 常用路径条：地址栏下方一排 chip。点击跳转、× 删除、＋ 添加。
+   紧凑排版，不挤占文件表的高度预算：chip 高度压到与 .btn.tiny 同档。 */
+.file-fav { margin-top: 5px; }
+.file-fav .lbl { font-family: var(--font-display); letter-spacing: .1em; color: var(--muted); font-size: var(--fs-sm); }
+.file-fav-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.fav-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  background: rgba(255, 255, 255, .06); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 0 4px 0 0; overflow: hidden;
+  transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+.fav-chip:hover { background: var(--accent-soft); border-color: var(--accent-deep); }
+.fav-chip .fav-go {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  color: var(--text-2); font: var(--fs-sm)/1 var(--font-mono);
+  padding: 5px 4px 5px 9px; max-width: 260px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fav-chip .fav-go:hover { color: var(--accent); }
+.fav-chip .fav-del {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  color: var(--muted); font-size: var(--fs-md); line-height: 1;
+  padding: 5px 4px;
+}
+.fav-chip .fav-del:hover { color: #ff7a7a; }
+.fav-chip.fav-add {
+  padding: 0; cursor: pointer; color: var(--muted);
+  font: 600 var(--fs-sm)/1 var(--font-display);
+}
+.fav-chip.fav-add:hover { color: var(--accent); }
+:root[data-theme="light"] .fav-chip { background: rgba(10, 30, 40, .05); }
 .file-table-wrap { flex: 1; overflow: auto; min-height: 0; }
 .file-table { width: 100%; border-collapse: collapse; font-size: var(--fs-md); }
 .file-table th {
