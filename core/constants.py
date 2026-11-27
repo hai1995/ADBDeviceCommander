@@ -65,9 +65,17 @@ LOGCAT_BUFFERS = {
 # 因此 tag 与冒号之间必须允许空白（\s*），否则这类行整行判成「非 threadtime」
 # 而走原样透传分支 —— 级别 / 仅异常 / 关键字过滤会对它们全部失效，libc 的
 # native crash 也不再被识别为异常。
+#
+# 部分厂商 ROM 会在 tag 后附一段带方括号的子模块名（方括号内可含空格），例如：
+#   11-27 16:51:00.859  3374  3698 I VIB_COLLECTION[ HeartbeatManager ]: send heart signal.
+# 这类行的 tag 已不是单个 \S+ token；若仍用 (\S+?) 解析，整行同样会判成非
+# threadtime 而走原样透传分支 —— 后果与上面一样：级别 / 仅异常 / 关键字过滤
+# 对它们全部失效。用户按关键字（如 DataCollectManager）过滤时，会看到大量
+# 不含该词的合法日志行漏过，误以为「过滤失效、下方一堆无关项」。
+# 故 tag 组允许跟一个可选的 [..] 段（内部可为含空格的任意文本）。
 LOGCAT_RE = re.compile(
     # group(1)=pid, (2)=tid, (3)=level, (4)=tag, (5)=msg
-    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(\S+?)\s*:(.*)$",
+    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(\S+?(?:\[[^\]]*\])?)\s*:(.*)$",
 )
 
 # 异常/崩溃特征：Java 堆栈、AndroidRuntime、Native crash、信号量崩溃、ANR 等。

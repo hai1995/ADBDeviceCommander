@@ -9166,3 +9166,50 @@ MF 架构（v24 续流 + v25 单文件）：screenrecord 到 170 秒退出后由
   `.options` / `change` 的断言，改为新列表项点选。
 - 全量回归：Python 1748 passed / 1 skipped，前端 106 个测试文件 0 失败，
   pyflakes / ruff / node --check 全通过。
+
+---
+
+## 2026-11-27 修复 Logcat 过滤失效：厂商方括号 tag 被判成非 threadtime 行
+
+你反馈：实时监控按 `DataCollectManager` 过滤时，下方仍出现一堆 `VIB_COLLECTION[
+HeartbeatManager ]: send heart signal` 等无关行。
+
+### 根因
+
+`core/constants.py` 的 `LOGCAT_RE` 里 tag 组是 `(\S+?)`，不允许空格。部分厂商 ROM
+（车机）输出这种格式：
+
+```
+11-27 16:51:00.859  3374  3698 I VIB_COLLECTION[ HeartbeatManager ]: send heart signal.
+```
+
+tag 后跟一个带空格的方括号子模块名，`\S+?` 匹配失败 → `classify_line()` 返回 None
+→ 被当成「非 threadtime 行（标题/分隔线）」走原样透传分支。后果：
+
+- 后端 `_classify_and_filter`、`match_filter` 对它完全不生效（级别 / 仅异常 /
+  关键字过滤全部跳过）；
+- 前端 `linePassesFilter` 的 `if (!ln.level) return true` 也无条件保留它。
+
+于是按 `DataCollectManager` 过滤时，这些合法但不相关的行全部漏过，界面右上角
+也不显示「命中 N 行」（因为 `f.kw` 虽非空、但过滤判定对透传行不起作用）。
+
+### 修复
+
+把 `LOGCAT_RE` 的 tag 组从 `(\S+?)` 改为 `(\S+?(?:\[[^\]]*\])?)`，允许 tag 后跟
+一个可选的 `[..]` 段（内部可为含空格的任意文本）。这类行现在被正确解析为
+`tag="VIB_COLLECTION[ HeartbeatManager ]"`，参与全部过滤判定。
+
+- 用 `DataCollectManager` 过滤：VIB 行被拦掉，DCM 行保留 ✓
+- 搜 `HeartbeatManager` / `tag:VIB_COLLECTION` / `pid:3374`：VIB 行仍正常命中 ✓
+- 级别过滤 / 仅异常过滤：对这类行恢复生效 ✓
+- 原有 AOSP 格式（chatty / libc / AndroidRuntime 补空格对齐）行为不变 ✓
+
+只改后端正则一处：前端拿到的是后端已分类的 `ln` 对象（`level/tag/msg` 已填好），
+解析正确后前端过滤自然生效，无需改动前端。
+
+### 验证
+
+- `tests/test_core_logcat_classify.py` 新增 5 项：方括号 tag 解析、关键字过滤
+  （VIB 行拦掉 / DCM 行保留 / 正向搜子模块名不误杀）、级别与仅异常过滤。
+- 全量回归：Python 1753 passed / 1 skipped，前端 106 个测试文件 0 失败，
+  pyflakes / ruff / node --check 全通过。

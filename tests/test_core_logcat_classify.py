@@ -111,6 +111,62 @@ def test_banner_line_bypasses_filters():
 
 
 # --------------------------------------------------------------------------- #
+# 厂商 ROM 在 tag 后附「带方括号的子模块名」（括号内可含空格）：
+#   11-27 16:51:00.859  3374  3698 I VIB_COLLECTION[ HeartbeatManager ]: send heart signal.
+# 这类行是**合法 threadtime 行**。旧正则 tag 组用 (\S+?) 不允许空格，整行判成
+# 非 threadtime → 走原样透传 → 级别/仅异常/关键字过滤对它全部失效。用户按
+# DataCollectManager 过滤时，一屏无关行漏过，误以为「过滤失效」。
+# --------------------------------------------------------------------------- #
+BRACKET_TAG_CASES = [
+    ("11-27 16:51:00.859  3374  3698 I VIB_COLLECTION[ HeartbeatManager ]: send heart signal.",
+     "I", "VIB_COLLECTION[ HeartbeatManager ]", "send heart signal."),
+    ("11-27 16:51:02.205  3427  6018 D LOG_COLLECTION[ UploadManager ]: upload interval.",
+     "D", "LOG_COLLECTION[ UploadManager ]", "upload interval."),
+    # 方括号内无空格也要能解析
+    ("11-27 16:51:06.000  1  1 I TAG[SubMod]: hi",
+     "I", "TAG[SubMod]", "hi"),
+]
+
+
+@pytest.mark.parametrize("raw,level,tag,msg", BRACKET_TAG_CASES)
+def test_bracket_submodule_tag_is_parsed(raw, level, tag, msg):
+    rec = classify_line(raw)
+    assert rec is not None, "带方括号子模块的 threadtime 行必须能被识别：%r" % raw
+    assert (rec["level"], rec["tag"]) == (level, tag)
+    assert rec["msg"].strip() == msg
+    assert rec["pid"] and rec["tid"]
+
+
+def test_bracket_tag_rows_obey_keyword_filter():
+    """回归：按 DataCollectManager 过滤时，VIB_COLLECTION[...] 行不得漏过。
+
+    这正是用户截图里的现象——过滤框写了 DataCollectManager，下方却是一堆
+    VIB_COLLECTION[ HeartbeatManager ] 的无关行。旧实现因解析失败把它们当
+    非 threadtime 行原样透传，绕过所有过滤。
+    """
+    vib = "11-27 16:51:00.859  3374  3698 I VIB_COLLECTION[ HeartbeatManager ]: send heart signal."
+    dcm = "11-27 16:51:05.847  1705  1705 E DataCollectManager: eventId = monitorSystem"
+    levels = set("VDIWEF")
+    # 无关行被拦掉；目标行保留
+    assert LogcatMonitor._classify_and_filter(vib, levels, "DataCollectManager", False) is None
+    assert LogcatMonitor._classify_and_filter(dcm, levels, "DataCollectManager", False) is not None
+    # 但直接搜子模块名 / tag / pid 时，这类行仍应正常命中（不能因修复而误杀）
+    for kw in ("HeartbeatManager", "tag:VIB_COLLECTION", "tag:HeartbeatManager", "pid:3374"):
+        assert LogcatMonitor._classify_and_filter(vib, levels, kw, False) is not None, kw
+
+
+def test_bracket_tag_rows_obey_level_and_exc_filters():
+    """级别 / 仅异常过滤同样要作用于带方括号 tag 的行。"""
+    vib = "11-27 16:51:00.859  3374  3698 I VIB_COLLECTION[ HeartbeatManager ]: send heart signal."
+    # 只留 E：I 级 VIB 行应被拦掉
+    assert LogcatMonitor._classify_and_filter(vib, {"E"}, "", False) is None
+    # 仅异常：普通 VIB 行应被拦掉
+    assert LogcatMonitor._classify_and_filter(vib, set("VDIWEF"), "", True) is None
+    # 级别放行：I 级应保留
+    assert LogcatMonitor._classify_and_filter(vib, {"I"}, "", False) is not None
+
+
+# --------------------------------------------------------------------------- #
 # 异常判定的「廉价预筛」：结果必须与直接跑正则完全一致
 # --------------------------------------------------------------------------- #
 # 预筛（core.logcat._EXC_HINTS）在正则之前用子串查找做快速否定，把绝大多数
