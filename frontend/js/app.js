@@ -2735,14 +2735,33 @@
   }
 
   /* ---------------- Logcat ---------------- */
+  function _newLcBuf() {
+    // baseT/baseE：清空基线（见 onLogcat 的 clear 分支）。null = 未清空过，
+    // 计数直接用后端会话累计值。
+    return { lines: [], total: 0, exc: 0, baseT: null, baseE: null };
+  }
+  function _resetLcBuf(prev) {
+    // 清空后计数从零起算。后端 logcat_clear 只推事件、worker 的 total/exc
+    // 是**会话累计值**且不会归零 —— 若清空后直接拿 append 里的累计 total
+    // 回填计数，第一条新日志一到，计数就跳回清空前的数字（视图空了、计数
+    // 却很大，自相矛盾）。故清空时把「清空那一刻的累计值」记成基线，之后
+    // 显示值 = 累计值 - 基线。基线本身也是累计口径：二次清空时用
+    // base + total 还原累计值再记新基线。
+    const cumT = prev ? ((prev.baseT || 0) + (prev.total || 0)) : 0;
+    const cumE = prev ? ((prev.baseE || 0) + (prev.exc || 0)) : 0;
+    const b = _newLcBuf();
+    b.baseT = cumT || null;
+    b.baseE = cumE || null;
+    return b;
+  }
   function lcBuffersFor(serial) {
-    if (!lcBuffers[serial]) lcBuffers[serial] = { lines: [], total: 0, exc: 0 };
+    if (!lcBuffers[serial]) lcBuffers[serial] = _newLcBuf();
     return lcBuffers[serial];
   }
   function onLogcat(p) {
     const serial = p.serial;
     if (p.status === "clear") {
-      lcBuffers[serial] = { lines: [], total: 0, exc: 0 };
+      lcBuffers[serial] = _resetLcBuf(lcBuffers[serial]);
       clearLcQueue();
     }
     if (p.status === "append") {
@@ -2755,10 +2774,18 @@
       // 累计值优先信任后端（后端按整段统计，前端收到的可能只是被过滤/截断的部分）：
       // 只在后端没给值时才在前端累加。否则「异常数」会永远停在 0——因为本批行
       // 里的 exc 标记可能全为 false，而后端统计的异常在更早的批次里。
-      if (p.total != null) buf.total = p.total;
-      else buf.total += lines.length;
-      if (p.exc != null) buf.exc = p.exc;
-      else for (const ln of lines) if (ln.exc) buf.exc += 1;
+      // 有清空基线时显示「清空后」的计数（见 _resetLcBuf）：后端 total 不会因
+      // 清空归零，直接回填会让计数跳回清空前的数字。
+      if (p.total != null) {
+        buf.total = buf.baseT != null ? Math.max(0, p.total - buf.baseT) : p.total;
+      } else {
+        buf.total += lines.length;
+      }
+      if (p.exc != null) {
+        buf.exc = buf.baseE != null ? Math.max(0, p.exc - buf.baseE) : p.exc;
+      } else {
+        for (const ln of lines) if (ln.exc) buf.exc += 1;
+      }
       if (buf.lines.length > LC_MAX_LINES)
         buf.lines.splice(0, buf.lines.length - LC_MAX_LINES);
       // 增量追加：入队后分帧渲染，避免一次插上千行形成长任务（卡顿主因）
@@ -2767,22 +2794,35 @@
         return;
       }
     }
-    // 会话类事件的按钮态保持无条件更新（历史行为：事件流即真相）；
-    // 但「清队列 + 丢弃开关」只对当前监控设备生效 —— 后台设备的监控启停
-    // 不该把前台的渲染机掐掉（多设备同时监控时）。
+    // 会话类事件的按钮态：只反映**当前监控设备**（lcSerial）的会话。设备移除
+    // 回收 / 双监控竞态下，后台设备的 stopped/running/error 也会推过来 ——
+    // 无条件更新会把前台正在监控的界面错误拨回「空闲」（停止按钮禁用，但
+    // 日志还在滚），再把新一轮 running 拨回「采集中」的闪烁也随之而来。
+    // lcSerial 为 null 时维持旧行为（事件流即真相）：界面从未锁定设备，来什么
+    // 就显示什么。pushStatus 提示始终照发（哪台设备出问题用户都该知道）。
+    const isBg = lcSerial != null && serial !== lcSerial;
     if (p.status === "running") {
       if (serial === lcSerial) lcDropping = false;
-      els.lcStatus.textContent = "采集中…"; setLcRunning(true);
+      if (!isBg) {
+        els.lcStatus.textContent = "采集中…"; setLcRunning(true);
+      }
     }
     if (p.status === "stopped") {
       // stopped 时清掉待渲染队列并打上丢弃开关 —— 设备被移除强停（无点击）
-      // 的路径也靠它即时收住渲染机。
-      if (serial === lcSerial) { lcDropping = true; clearLcQueue(); }
-      els.lcStatus.textContent = "空闲"; setLcRunning(false);
+      // 的路径也靠它即时收住渲染机。「丢弃开关」仍严格按 serial === lcSerial：
+      // lcSerial 为 null（从未锁定设备）时是 stale 的死会话行，不该因它开门。
+      if (serial === lcSerial) lcDropping = true;
+      if (!isBg) {
+        clearLcQueue();
+        els.lcStatus.textContent = "空闲"; setLcRunning(false);
+      }
     }
     if (p.status === "error") {
       if (serial === lcSerial) lcDropping = true;
-      els.lcStatus.textContent = "错误"; setLcRunning(false); pushStatus("err", "⚠ " + (p.text || "logcat 错误"));
+      if (!isBg) {
+        els.lcStatus.textContent = "错误"; setLcRunning(false);
+      }
+      pushStatus("err", "⚠ " + (p.text || "logcat 错误"));
     }
     updateLcCounter(serial);
   }
@@ -7999,7 +8039,9 @@
     els.lcClear.addEventListener("click", () => {
       // 未选设备时 lcSerial 为 null，直接写 lcBuffers[null] 会留下垃圾键
       if (!lcSerial) return pushStatus("warn", "请先开始监控并选择设备");
-      lcBuffers[lcSerial] = { lines: [], total: 0, exc: 0 };
+      // 基线口径与后端 clear 事件一致（见 _resetLcBuf）：记下清空前的累计值，
+      // 后续计数从零起算，而不是被下一条 append 的会话累计值冲回旧数字。
+      lcBuffers[lcSerial] = _resetLcBuf(lcBuffers[lcSerial]);
       renderLogcat();
       callApi(api.logcat_clear(lcSerial));
     });
@@ -8923,8 +8965,9 @@
     clearLcQueue();
     // 同时丢弃上一轮的日志缓冲：否则新会话的 append 会接在旧 lines 数组尾部，
     // 一旦触发重渲染（改级别 / 关键字 / 仅异常），上一轮的日志会重新冒出来
-    // （视图已清空，缓冲却还留着旧行）。
-    if (lcSerial) lcBuffers[lcSerial] = { lines: [], total: 0, exc: 0 };
+    // （视图已清空，缓冲却还留着旧行）。新会话 = 新 worker，total 从 0 重新
+    // 累计，清空基线一并归零（_newLcBuf），否则上一轮的基线会吃掉新会话的计数。
+    if (lcSerial) lcBuffers[lcSerial] = _newLcBuf();
     updateLcCounter(null);
     // 返回 Promise：调用方据此判断后端是否真的启动了（失败要回滚按钮态）
     // 注意：关键字只在前端做即时过滤（见 linePassesFilter / renderLogcat），

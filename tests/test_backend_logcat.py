@@ -1855,3 +1855,37 @@ def test_pkg_pid_refresh_runs_while_logs_keep_flowing(monkeypatch):
     time.sleep(0.2)
     assert len(calls) >= 3, (
         "持续日志下 pkg: 的 pid 未定期刷新（只解析了 %d 次）" % len(calls))
+
+
+def test_pkg_pid_refresh_does_not_block_consumer(monkeypatch):
+    """pkg: 的 pid 解析在后台线程做：解析耗时再长，消费循环也照常推日志。
+
+    回归：解析原先在消费循环里**同步**跑 adb（pidof/ps 超时最长 6 秒），
+    设备忙时每 PKG_PID_REFRESH_S 就把消费线程卡住一次 —— 批量推送停摆、
+    行队列打满、实时视图肉眼可见地顿一下。异步后解析耗时与推送互不阻塞。
+    """
+    bus = _FakeBus()
+    mon = ls.LogcatMonitor(bus, adb_path="adb")
+
+    def slow_resolve(serial, kw):
+        time.sleep(0.3)                       # 模拟设备忙时的 pidof 慢查询
+        return {"com.demo.app": {"100"}}
+
+    monkeypatch.setattr(mon, "_resolve_pkg_pids", slow_resolve)
+    monkeypatch.setattr(ls, "PKG_PID_REFRESH_S", 0.05)
+    monkeypatch.setattr(ls, "BOOT_WINDOW_SEC", 0.01)
+    line = "08-29 10:00:00.000  100  100 I Tag: flood\n"
+    monkeypatch.setattr(ls.subprocess, "Popen",
+                        lambda cmd, **kw: _FakeLogcatProc([line]))
+    assert mon.start("A1", ["main"], keyword="pkg:com.demo.app") is True
+    time.sleep(1.0)
+    mon.stop("A1")
+    time.sleep(0.3)
+    appends = [e for e in bus.events
+               if e["kind"] == "logcat" and e["payload"].get("status") == "append"]
+    total = sum(len(p["payload"].get("lines") or []) for p in appends)
+    # 1 秒、限速 2500 行/秒、解析每 0.05s 一次且每次 0.3s：同步实现里消费线程
+    # 几乎全程被解析占住，1 秒只能推进零星几行；异步实现除启动爆发窗口外
+    # 全速推进（这里只要求显著多于同步版可能给出的量级，避免测成时序脆断）。
+    assert total >= 1000, (
+        "pid 解析阻塞了消费循环（1 秒只推了 %d 行）" % total)

@@ -337,10 +337,19 @@ class LogcatMonitor:
         # keyword 在会话内固定：预解析一次过滤词，消费循环每行复用（原先每行
         # 都 str.split + 建 tuple list，日志洪流下每秒数千次无谓分配）。
         filter_terms = split_filter_terms(keyword) if keyword else []
-        # pkg: 过滤需要把包名解析成 pid 集合。pid 会随应用重启变化，所以在
-        # 消费循环的空闲分支里定期重解析（见下方 pkg_refresh_at）。
+        # pkg: 过滤需要把包名解析成 pid 集合。pid 会随应用重启变化，所以定期
+        # 重解析 —— 但解析必须在**后台线程**里做（见 _pkg_refresh_worker），
+        # 消费循环只在解析完成时无锁换入新结果，永不阻塞。
         pkg_pids = self._resolve_pkg_pids(serial, keyword)
-        pkg_refresh_at = time.time() + (PKG_PID_REFRESH_S if pkg_pids else 0)
+        pkg_state = {
+            "pids": pkg_pids,
+            # on：表达式里有没有 pkg: 词（_resolve_pkg_pids 有词就必落键，
+            # 即使 pidof 解析为空 —— 「包还没跑」也要继续刷新等它起来）
+            "on": bool(pkg_pids),
+            "busy": False,          # 解析线程在跑
+            "due": False,           # 到点待解析
+            "done_at": time.time(), # 上一次解析完成的时刻
+        }
         # 启动爆发期：先用定长窗口接住历史 dump，只留最近的若干行。
         # deque(maxlen) 让淘汰从 O(n) 的头删变成 O(1)；丢弃计数仍在 append 前
         # 显式累加（deque 自动淘汰没有回调，计数语义必须与旧版一致）。
@@ -398,13 +407,27 @@ class LogcatMonitor:
                 if stop_ev.is_set():
                     break
                 now = time.time()
-                # pkg: 的 pid 会随应用重启变化，按墙钟每 PKG_PID_REFRESH_S 重解析。
-                # 必须放在循环顶部：早前放在「队列超时（这段没有新日志）」分支里，
-                # 日志持续不断时那个分支永远进不去，pid 就一直停在启动时那一份 ——
-                # 应用重启后按包过滤突然「一行都没有」，而界面看不出任何原因。
-                if pkg_refresh_at and now >= pkg_refresh_at:
-                    pkg_pids = self._resolve_pkg_pids(serial, keyword)
-                    pkg_refresh_at = time.time() + PKG_PID_REFRESH_S
+                # pkg: 的 pid 会随应用重启变化，按墙钟定期重解析。必须放在循环
+                # 顶部：早前放在「队列超时（这段没有新日志）」分支里，日志持续
+                # 不断时那个分支永远进不去，pid 就一直停在启动时那一份 —— 应用
+                # 重启后按包过滤突然「一行都没有」，而界面看不出任何原因。
+                # 解析本身挪到后台线程：原先在消费循环里同步跑 adb（pidof/ps
+                # 超时最长 6 秒），设备忙时每 PKG_PID_REFRESH_S 就把消费线程
+                # 卡住一次 —— 批量推送停摆、行队列被打满、实时视图肉眼可见地
+                # 顿一下。异步后循环只在「解析完成」时换入新结果（GIL 下单
+                # 引用赋值原子），解析期间沿用上一份 pid（最多旧一个周期）。
+                if (pkg_state["on"] and not pkg_state["busy"]
+                        and (pkg_state["due"]
+                             or time.time() - pkg_state["done_at"]
+                             >= PKG_PID_REFRESH_S)):
+                    pkg_state["due"] = False
+                    pkg_state["busy"] = True
+                    threading.Thread(
+                        target=self._pkg_refresh_worker,
+                        args=(serial, keyword, pkg_state),
+                        daemon=True, name=f"logcat-pkg-{serial}").start()
+                if not pkg_state["busy"]:
+                    pkg_pids = pkg_state["pids"]
                 try:
                     raw = q.get(timeout=_FLUSH_MS)
                 except queue.Empty:
@@ -554,6 +577,25 @@ class LogcatMonitor:
                 continue
             out[name] = pkg_pids_of(self.adb_path, serial, name)
         return out
+
+    def _pkg_refresh_worker(self, serial, keyword, state):
+        """pkg: pid 的后台解析线程（调度见消费循环顶部的说明）。
+
+        只做 adb 解析 + 把结果写回 state。异常吞掉并交付空映射 —— 解析失败
+        与「包没在跑」对过滤而言是同一件事（宁可少匹配，也不静默放行）。
+        busy 在 finally 里复位：解析无论成败，消费循环都能拿到 done_at 并
+        安排下一轮；daemon 线程的异常没人接，绝不外抛。
+        """
+        try:
+            pids = self._resolve_pkg_pids(serial, keyword)
+        except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
+            pids = {}
+        finally:
+            # 先放结果、再记完成时刻、最后解忙 —— 消费循环只在 not busy 时
+            # 读 pids，顺序保证它看到的是配套的（pids, done_at）组合。
+            state["pids"] = pids
+            state["done_at"] = time.time()
+            state["busy"] = False
 
     @staticmethod
     def _classify_and_filter(raw, levels, keyword, only_exc, stats=None,
