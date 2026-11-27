@@ -147,7 +147,16 @@
 //     时间轴；另加单调门控（rel_ts 非递减），杜绝设备热切换/乱序块的时间回退。
 //   ③ dropped_/queue_peak_ms_ 改原子：它们被 WASAPI 采集线程与 worker 并发写、
 //     stats 跨线程读，原来是非原子 long long/int（数据竞争 UB）。
-static const char* const kBuildId = "mf-20261126-throttle-v35";
+// v36: 全走 MF —— 录屏不再依赖 ffmpeg，未勾麦克风时走"无音轨纯视频"模式。
+// 约定 adc_session_create 的 arate<=0（Python mic_fmt=None）表示无音轨：
+//   ① create() 不订阅 g_audio（不启动 WASAPI 回调，绝不"偷偷录音"）；
+//   ② ensure_writer() 跳过 config_audio_stream（不建 AAC 轨，MP4 只有视频流）；
+//   ③ drain_audio() 无音轨时跳过排空与补静音（无 AAC 流可写，补静音会向
+//      astream_=0 写样本导致 E_INVALIDARG / 假失败）；
+//   ④ finalize()/close_writer() 照常 Finalize + 发布：单视频流 MP4 合法可播。
+// 带声路径（arate>0）行为与 v35 完全一致，一行未动。长视频靠 v24 续流 +
+// v25 单文件（MF_SINGLE_FILE）写成 1 个完整 MP4，不需要 ffmpeg 分段合并。
+static const char* const kBuildId = "mf-20261127-nofilemux-v36";
 
 extern "C" const char* adc_build_id(void) { return kBuildId; }
 
@@ -290,7 +299,7 @@ static int next_annexb_nal(const unsigned char* p, size_t len, size_t& pos,
         size_t start = pos + sc, end = start;
         // [根因修复 v13·花屏] 原循环 `while (end + 3 <= len)` 在 buffer 末尾会
         // 提前 2 字节退出：end 最多停在 len-3，导致每条 NAL 尾部被截掉 1~2 个
-        // 真实载荷字节。切片(slice)尾部被截 → 解码出现马赛克/花屏。本地 ffmpeg
+        // 真实载荷字节。切片(slice)尾部被截 → 解码出现马赛克/花屏。本地解码
         // 实证：17/17 条 NAL 被截、帧解码报 non-existing PPS；改为扫到 len 并对
         // 起始码判断逐项加长度守卫后 0/17 截断、15 帧全部正常解码。
         while (end < len) {
@@ -658,8 +667,13 @@ public:
         // [修复] 必须同步置位 subscribed_，否则 unsubscribe_() 里的
         // `if (!subscribed_) return` 永远跳过真正的退订，session 销毁后
         // 采集线程仍持有本对象指针并回调 on_audio → use-after-free 崩溃。
-        g_audio.subscribe(this);
-        subscribed_.store(true);
+        // [v36 无音轨模式] arate<=0 表示纯视频录制：不订阅 WASAPI 采集，
+        // 绝不在用户未勾麦克风时"偷偷录音"，也省去无意义的音频队列回调。
+        // unsubscribe_() 靠 subscribed_ 门控，未订阅时是 no-op，安全。
+        if (arate_ > 0) {
+            g_audio.subscribe(this);
+            subscribed_.store(true);
+        }
         // [修复-首段 0xC00D4A45] 首段 writer 不再在此提前创建。此刻还没有视频帧，
         // SPS/PPS 为空；若此时 AddStream 视频流，config_video_stream 无法注入
         // MF_MT_MPEG_SEQUENCE_HEADER，MP4 sink 在 Finalize 时生成不了 stsd box →
@@ -841,6 +855,9 @@ public:
 
     /* 最终排空 + 补静音到 stop 时刻（不改已有时间戳）。 */
     int drain_audio() {
+        // [v36 无音轨模式] 纯视频会话没有 AAC 轨，既无队列可排也不能补静音
+        // （补静音会向 astream_=0 写样本 → E_INVALIDARG / 假失败）。直接返回。
+        if (arate_ <= 0) return 0;
         // [修复-真机 overflow] 移除 overflow 致命分支：即使中途丢过音频块，也要
         // 把队列里剩的正常写入并 close_writer 发布成可播放 MP4。丢块数由 dropped_
         // 统计暴露（stats），用户保住视频远比"因几秒音频积压整段报废"重要。
@@ -1129,7 +1146,9 @@ private:
         if (seg_no_ == 1) first_tmp_out = tmp;
 
         IF_FAILED_RETURN(config_video_stream(), "配置视频流失败");
-        IF_FAILED_RETURN(config_audio_stream(), "配置音频流失败");
+        // [v36 无音轨模式] arate<=0 时不建 AAC 轨：MP4 只有单个视频流，
+        // 合法可播。带声路径（arate>0）行为不变。
+        if (arate_ > 0) IF_FAILED_RETURN(config_audio_stream(), "配置音频流失败");
         IF_FAILED_RETURN(writer_->BeginWriting(), "BeginWriting 失败");
         writing_ = true;
         seg_start_hns_ = qpc_now_hns();

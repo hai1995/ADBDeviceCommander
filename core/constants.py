@@ -401,7 +401,7 @@ def parse_ls_output(text: str):
 def no_window_flags() -> int:
     """Windows 下隐藏子进程控制台窗口的 creationflags（非 Windows 恒为 0）。
 
-    打包成 --windowed 的 GUI 进程本身没有控制台，而 adb / ffmpeg 都是控制台程序，
+    打包成 --windowed 的 GUI 进程本身没有控制台，而 adb 等外部子进程是控制台程序，
     默认会新建一个黑窗：设备轮询每 5s 一次，表现为「一闪一闪的黑框」。
     """
     import subprocess as _sp
@@ -411,7 +411,7 @@ def no_window_flags() -> int:
 
 
 def adb_kwargs(timeout=None, **extra) -> dict:
-    """adb / ffmpeg 子进程的统一参数：UTF-8 解码 + 隐藏控制台窗口。
+    """adb 子进程的统一参数：UTF-8 解码 + 隐藏控制台窗口。
 
     * adb 输出固定为 UTF-8（设备端中文文件名/日志），而中文 Windows 的默认编码
       是 cp936；不显式指定 encoding 就会解码成乱码。

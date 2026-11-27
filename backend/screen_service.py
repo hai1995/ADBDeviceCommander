@@ -4,8 +4,10 @@ backend.screen_service —— 截图 + 录屏（视频，不含音频合成）�
   * screenshot(serial, save_dir)              对单台设备 exec-out screencap -p 写 PNG
   * VideoRecorder                              adb screenrecord 起/停 + 拉回本地
 
-音频（设备端 tinycap / 电脑麦克风）与 ffmpeg 合成在 audio_service 中，
-由 controller 在录屏会话里按需协同。本模块只负责「视频」这条线。
+[v36 全走 MF] 录屏主路径已改由 mf_capture_service + native SinkWriter 同源
+写入（画面 + 麦克风直接合成 MP4），不再经过本模块的 VideoRecorder 与事后
+合成。本模块保留 VideoRecorder 供投屏等其它用途；录屏只走「视频」这条线的
+历史职责已移交。
 
 面向用户的状态文案一律由 controller 统一下发：本模块只**返回**结果
 （路径 / 错误原因），不自行 push 事件——否则同一件事会被 controller 与

@@ -100,12 +100,12 @@ class AutoRefreshMixin:
     def _teardown_dead_recordings(self, serials, hit_limit=()):
         """（后台 worker）收尾自行退出的录屏：与手动停止同一条完整路径。
 
-        serials 是「被外力打断」的设备（文案强调视频不完整）；hit_limit 是
-        「跑到 180 秒上限」的设备（正常收尾，只说明为什么停了）。
+        serials 是「被外力打断」的设备；hit_limit 是「跑到续流上限」的设备
+        （正常收尾，只说明为什么停了）。
 
         只收尾「仍在当前会话里」的设备；会话已被其他路径（用户点停止 /
-        设备移除强停）结束掉时直接返回。残片视频不合成音频、源文件保留在
-        保存目录；其余仍在录的设备会被优雅停掉并一并合成/打包。
+        设备移除强停）结束掉时直接返回。已录部分保留在保存目录；其余仍在录的
+        设备会被优雅停掉并一并收尾/打包。
         """
         with self._rec_lock:
             sess = self._rec_session
@@ -116,9 +116,6 @@ class AutoRefreshMixin:
             limited = {s for s in hit_limit if s in videos}
             if not dead and not limited:
                 return
-            # 记下死亡设备，供 _session_teardown 把失败文案从「收尾失败」
-            # 换成更准确的「被意外中断（视频不完整）」。
-            sess["dead"] = set(sess.get("dead") or set()) | dead
         # 以下播报放在锁外：_rec_lock 保护的是会话状态，往界面推事件不需要它，
         # 占着锁推只会让并发的「开始/停止」多等一会儿。
         if limited:

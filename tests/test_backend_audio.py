@@ -154,8 +154,8 @@ def test_wav_ok(tmp_path):
     empty = tmp_path / "e.wav"
     empty.write_bytes(b"")
     # 只有 44 字节头、data 长度为 0 的「空音频」：最关键的一条回归。
-    # 它曾被 _wav_ok 判为可用 → 喂给 ffmpeg → 产出 258 字节 duration=N/A 的空壳 mp4，
-    # 用户表现为「合成出来的视频打不开」。
+    # 它曾被 _wav_ok 误判为可用，导致后续音频链路拿到一段没有真实采样的数据
+    # （表现为「合成出来的视频打不开」）。零长度音频必须在这里就被拒掉。
     silent = tmp_path / "silent.wav"
     silent.write_bytes(_wav_bytes(pcm=b""))
     assert au._wav_ok(str(good)) is True
@@ -163,181 +163,6 @@ def test_wav_ok(tmp_path):
     assert au._wav_ok(str(empty)) is False
     assert au._wav_ok(str(silent)) is False, "零长度音频必须判为不可用（否则产出空壳视频）"
     assert au._wav_ok(str(tmp_path / "missing.wav")) is False
-
-
-def test_ffmpeg_mux_avoids_shortest_truncating_video(monkeypatch, tmp_path):
-    """合成**不能**用全局 -shortest：它会按最短流截断，把视频一起砍短。
-
-    回归：6s 视频 + 2s 音频时，旧命令（-shortest + amix duration=shortest）产出
-    只有 2s 的成片 —— 用户「录了 1 分钟的视频，成片只剩几秒」。
-    """
-    import backend.audio_service as au
-    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
-    monkeypatch.setattr(au, "_media_duration", lambda p: "6.0")
-    monkeypatch.setattr(au, "_mp4_playable", lambda p: True)
-    captured = []
-
-    def fake_run(cmd, **kw):
-        captured.append(list(cmd))
-        open(cmd[-1], "wb").write(b"fake" * 2048)
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(au.subprocess, "run", fake_run)
-    video = tmp_path / "v.mp4"
-    video.write_bytes(b"fake video")
-    a1 = tmp_path / "a.wav"
-    a1.write_bytes(_wav_bytes())
-    out = tmp_path / "out.mp4"
-    res = au.ffmpeg_mux(str(video), [str(a1)], str(out))
-    assert res == str(out), "应返回合成输出路径"
-    cmd = captured[0]
-    assert "-shortest" not in cmd, "不得使用 -shortest（会按最短流截断整段输出）"
-    amix = [c for c in cmd if c.startswith("amix=")]
-    assert amix and ":duration=longest" in amix[0], \
-        "amix 应用 duration=longest，再由 -t 按视频时长收尾"
-    assert "apad" in amix[0], "音频不足时应 apad 补静音，避免末尾无声冻帧"
-    assert cmd[cmd.index("-map") + 1] == "0:v:0", "视频流应直接 copy，不进滤镜图"
-    assert "-t" in cmd, "应按视频时长截断，避免音频更长时拖出冻帧尾巴"
-
-
-def test_ffmpeg_mux_rejects_unplayable_output(monkeypatch, tmp_path):
-    """ffmpeg 退出码 0 也可能产出空壳 mp4；必须复核并回退（返回 None + 删除坏文件）。"""
-    import backend.audio_service as au
-    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
-    monkeypatch.setattr(au, "_media_duration", lambda p: "6.0")
-    monkeypatch.setattr(au, "_mp4_playable", lambda p: False)   # 复核不通过
-
-    def fake_run(cmd, **kw):
-        open(cmd[-1], "wb").write(b"tiny")   # 258 字节空壳那种
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(au.subprocess, "run", fake_run)
-    video = tmp_path / "v.mp4"
-    video.write_bytes(b"fake video")
-    a1 = tmp_path / "a.wav"
-    a1.write_bytes(_wav_bytes())
-    out = tmp_path / "out.mp4"
-    assert au.ffmpeg_mux(str(video), [str(a1)], str(out)) is None
-    assert not out.exists(), "坏产物应被删除，不留给用户"
-
-
-def test_ffmpeg_mux_skips_silent_audio(monkeypatch, tmp_path):
-    """空音频应被直接过滤掉：没有可用音频时返回 None，调用方回退「保留无音轨视频」。"""
-    import backend.audio_service as au
-    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
-    video = tmp_path / "v.mp4"
-    video.write_bytes(b"fake video")
-    silent = tmp_path / "silent.wav"
-    silent.write_bytes(_wav_bytes(pcm=b""))
-    out = tmp_path / "out.mp4"
-    assert au.ffmpeg_mux(str(video), [str(silent)], str(out)) is None
-    assert au.ffmpeg_mux(str(video), [], str(out)) is None
-
-
-# ---------------------------------------------------------------------------
-# 视频时长解析：ffprobe 缺失时不能传 `-t 0`（会产出空壳 mp4、音频全丢）
-# ---------------------------------------------------------------------------
-def _mp4_box(btype: bytes, body: bytes) -> bytes:
-    return (8 + len(body)).to_bytes(4, "big") + btype + body
-
-
-def _mvhd_v0(timescale: int, duration: int) -> bytes:
-    """version 0 的 mvhd 盒（version+flags+creation+modification+timescale+duration）。"""
-    body = (b"\x00\x00\x00\x00"
-            + (0).to_bytes(4, "big") * 2
-            + timescale.to_bytes(4, "big")
-            + duration.to_bytes(4, "big"))
-    return _mp4_box(b"mvhd", body)
-
-
-def _mvhd_v1(timescale: int, duration: int) -> bytes:
-    """version 1 的 mvhd 盒（创建/修改时间为 64 位，时长为 64 位）。"""
-    body = (b"\x01\x00\x00\x00"
-            + (0).to_bytes(8, "big") * 2
-            + timescale.to_bytes(4, "big")
-            + duration.to_bytes(8, "big"))
-    return _mp4_box(b"mvhd", body)
-
-
-def test_mp4_duration_parses_moov_at_file_head(tmp_path):
-    """moov 在文件头部（ftyp 之后）时应正确解析出时长。"""
-    import backend.audio_service as au
-    data = (_mp4_box(b"ftyp", b"isom" + b"\x00" * 8)
-            + _mp4_box(b"moov", _mvhd_v0(1000, 6000)))
-    p = tmp_path / "head.mp4"
-    p.write_bytes(data)
-    assert au._mp4_duration(str(p)) == "6.000"
-
-
-def test_mp4_duration_parses_moov_at_file_tail(tmp_path):
-    """screenrecord 的 moov 写在文件**尾部**（mdat 之后），也必须能解析。"""
-    import backend.audio_service as au
-    data = (_mp4_box(b"ftyp", b"isom" + b"\x00" * 8)
-            + _mp4_box(b"mdat", b"\x00" * 4096)
-            + _mp4_box(b"moov", _mvhd_v1(90000, 270000)))
-    p = tmp_path / "tail.mp4"
-    p.write_bytes(data)
-    assert au._mp4_duration(str(p)) == "3.000"
-
-
-def test_mp4_duration_returns_none_on_garbage(tmp_path):
-    """非 MP4 / 缺 moov / 时长为 0 的文件必须返回 None（绝不抛异常）。"""
-    import backend.audio_service as au
-    assert au._mp4_duration(str(tmp_path / "missing.mp4")) is None
-    p = tmp_path / "no_moov.mp4"
-    p.write_bytes(_mp4_box(b"ftyp", b"isom" + b"\x00" * 8) + b"\x00" * 64)
-    assert au._mp4_duration(str(p)) is None
-    zero = tmp_path / "zero.mp4"
-    zero.write_bytes(_mp4_box(b"moov", _mvhd_v0(1000, 0)))
-    assert au._mp4_duration(str(zero)) is None
-
-
-def test_ffmpeg_mux_falls_back_to_header_duration(monkeypatch, tmp_path):
-    """ffprobe 取不到时长（只装了 ffmpeg）时，应本地解析 MP4 头拿到时长再合成。"""
-    import backend.audio_service as au
-    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
-    monkeypatch.setattr(au, "_media_duration", lambda p: None)   # ffprobe 缺失
-    monkeypatch.setattr(au, "_mp4_playable", lambda p: True)
-    captured = []
-
-    def fake_run(cmd, **kw):
-        captured.append(list(cmd))
-        open(cmd[-1], "wb").write(b"fake" * 2048)
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(au.subprocess, "run", fake_run)
-    video = tmp_path / "v.mp4"
-    video.write_bytes(_mp4_box(b"ftyp", b"isom" + b"\x00" * 8)
-                      + _mp4_box(b"moov", _mvhd_v0(1000, 6000)))
-    a1 = tmp_path / "a.wav"
-    a1.write_bytes(_wav_bytes())
-    out = tmp_path / "out.mp4"
-    assert au.ffmpeg_mux(str(video), [str(a1)], str(out)) == str(out)
-    cmd = captured[0]
-    assert cmd[cmd.index("-t") + 1] == "6.000", "应使用本地解析出的视频时长"
-
-
-def test_ffmpeg_mux_aborts_when_duration_unknown(monkeypatch, tmp_path):
-    """时长彻底取不到时**不得**调用 ffmpeg：`-t 0` 会截出空壳、没有 `-t` 则
-    apad 无限补静音导致 ffmpeg 永不收尾。应直接返回 None，保留无音轨原视频。"""
-    import backend.audio_service as au
-    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
-    monkeypatch.setattr(au, "_media_duration", lambda p: None)
-    called = []
-
-    def fake_run(cmd, **kw):
-        called.append(list(cmd))
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(au.subprocess, "run", fake_run)
-    video = tmp_path / "v.mp4"
-    video.write_bytes(b"not an mp4 at all")
-    a1 = tmp_path / "a.wav"
-    a1.write_bytes(_wav_bytes())
-    out = tmp_path / "out.mp4"
-    assert au.ffmpeg_mux(str(video), [str(a1)], str(out)) is None
-    assert not called, "时长未知时不应调用 ffmpeg（避免空壳产物/挂死）"
-    assert not out.exists()
 
 
 def test_device_audio_stop_uses_int_then_term(monkeypatch, tmp_path):
@@ -597,7 +422,7 @@ def test_wav_duration_uses_real_file_length(tmp_path):
 
     回归：旧实现用**头里的** riff_size 反算「剩余字节」，等于用头校验头 ——
     一段只剩几十字节的残录音仍被算成「有几十 KB 音频」，通过 _wav_ok 后
-    直接喂给 ffmpeg。
+    被当成有效音频进入后续链路。
     """
     import backend.audio_service as au
 
@@ -885,103 +710,6 @@ def test_open_prepares_full_wavehdr(monkeypatch):
 
 
 
-# ---------------------------------------------------------------------------
-# ffmpeg 内置路径解析：打包用户零配置、离线可用
-# ---------------------------------------------------------------------------
-def test_ffmpeg_exe_prefers_bundled(monkeypatch, tmp_path):
-    """内置副本存在时必须优先用它——打包用户不依赖机器是否装过 ffmpeg。"""
-    import core.ffmpeg_bin as fb
-
-    fake = tmp_path / "ffmpeg.exe"
-    fake.write_bytes(b"fake")
-    monkeypatch.setattr(fb, "_bundled_ffmpeg", lambda: str(fake))
-    monkeypatch.setattr(fb, "_imageio_ffmpeg", lambda: "/some/imageio/ffmpeg")
-    monkeypatch.setattr(fb.shutil, "which", lambda name: "/usr/bin/ffmpeg")
-    assert fb.ffmpeg_exe() == str(fake)
-    assert fb.ffmpeg_source() == "bundled"
-
-
-def test_ffmpeg_exe_falls_back_to_imageio_then_path(monkeypatch):
-    """没有内置副本时依次回落到 imageio-ffmpeg、PATH，最后才是裸名字。"""
-    import core.ffmpeg_bin as fb
-
-    monkeypatch.setattr(fb, "_bundled_ffmpeg", lambda: None)
-    monkeypatch.setattr(fb, "_imageio_ffmpeg", lambda: "/some/imageio/ffmpeg")
-    monkeypatch.setattr(fb.shutil, "which", lambda name: "/usr/bin/ffmpeg")
-    assert fb.ffmpeg_exe() == "/some/imageio/ffmpeg"
-    assert fb.ffmpeg_source() == "imageio"
-
-    monkeypatch.setattr(fb, "_imageio_ffmpeg", lambda: None)
-    assert fb.ffmpeg_exe() == "/usr/bin/ffmpeg"
-    assert fb.ffmpeg_source() == "path"
-
-    monkeypatch.setattr(fb.shutil, "which", lambda name: None)
-    assert fb.ffmpeg_exe() == "ffmpeg"
-    assert fb.ffmpeg_source() == "missing"
-
-
-def test_ffmpeg_mux_uses_resolved_path(monkeypatch, tmp_path):
-    """合成命令的 argv[0] 必须是解析出的 ffmpeg 路径，不能写死 "ffmpeg"。"""
-    import backend.audio_service as au
-
-    resolved = "/opt/app/ffmpeg.exe"
-    monkeypatch.setattr(au, "ffmpeg_exe", lambda: resolved)
-    monkeypatch.setattr(au, "_have_ffmpeg", lambda: True)
-    monkeypatch.setattr(au, "_media_duration", lambda p: "3.0")
-    monkeypatch.setattr(au, "_mp4_playable", lambda p: True)
-    captured = []
-
-    def fake_run(cmd, **kw):
-        captured.append(list(cmd))
-        open(cmd[-1], "wb").write(b"x" * 4096)
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(au.subprocess, "run", fake_run)
-    video = tmp_path / "v.mp4"
-    video.write_bytes(b"video")
-    a1 = tmp_path / "a.wav"
-    a1.write_bytes(_wav_bytes())
-    out = tmp_path / "out.mp4"
-    assert au.ffmpeg_mux(str(video), [str(a1)], str(out)) == str(out)
-    assert captured[0][0] == resolved, "合成必须用解析出的 ffmpeg 路径"
-
-
-def test_bundled_ffmpeg_found_by_versioned_name(monkeypatch, tmp_path):
-    """内置 ffmpeg 保留 imageio 的版本化文件名（ffmpeg-win-x86_64-v7.1.exe）
-    时也能被找到——--add-binary 用 DEST="." 放到包根，不做重命名。
-    """
-    import core.ffmpeg_bin as fb
-
-    versioned = tmp_path / "ffmpeg-win-x86_64-v7.1.exe"
-    versioned.write_bytes(b"fake")
-    assert fb._find_in_dir(str(tmp_path)) == str(versioned)
-
-
-def test_exact_name_beats_glob(monkeypatch, tmp_path):
-    """目录里同时有 ffmpeg.exe 和版本化名字时，优先精确名 ffmpeg.exe。"""
-    import core.ffmpeg_bin as fb
-
-    (tmp_path / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")).write_bytes(b"exact")
-    (tmp_path / ("ffmpeg-win-x86_64-v7.1.exe" if os.name == "nt"
-                 else "ffmpeg-linux-x86_64")).write_bytes(b"versioned")
-    found = fb._find_in_dir(str(tmp_path))
-    assert found and os.path.basename(found) in ("ffmpeg.exe", "ffmpeg"), found
-
-
-def test_ffmpeg_exe_finds_bundled_in_meipass(monkeypatch, tmp_path):
-    """模拟 PyInstaller 打包态：版本化命名的 ffmpeg 在 _MEIPASS 里能被找到。"""
-    import core.ffmpeg_bin as fb
-
-    fake = tmp_path / "ffmpeg-win-x86_64-v7.1.exe"
-    fake.write_bytes(b"fake")
-    monkeypatch.setattr(fb.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(fb.sys, "_MEIPASS", str(tmp_path), raising=False)
-    monkeypatch.setattr(fb.sys, "executable", str(tmp_path / "app.exe"))
-    assert fb.ffmpeg_exe() == str(fake)
-    assert fb.ffmpeg_source() == "bundled"
-
-
-# ---------------------------------------------------------------------------
 # MicRecorder 流式写盘：根治 _chunks 无界累积（长录音 OOM）
 # ---------------------------------------------------------------------------
 def _streaming_recorder(tmp_path, channels=2, rate=44100, bits=16):

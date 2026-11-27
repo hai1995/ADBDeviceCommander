@@ -1,9 +1,12 @@
 """
-backend.audio_service —— 音频采集（电脑麦克风 / 设备端）+ ffmpeg 合成。
+backend.audio_service —— 音频采集（电脑麦克风 / 设备端）。
 
   * MicRecorder        Windows 下用 WinMM waveIn 录电脑麦克风到本地 WAV
   * DeviceAudioCapture 设备端用 tinycap 录设备声音（需固件带 tinycap）
-  * ffmpeg_mux(...)    把视频 + 若干 WAV 混流为一个带音视频的 MP4（尽力而为）
+
+[v36 全走 MF] 录屏的音视频合成已全部由 Windows 系统媒体基础（native SinkWriter）
+完成，本模块的 ffmpeg 合成链（ffmpeg_mux 等）已移除。这里的两个采集类保留给
+其它仍需要的场景；录屏主路径不再使用它们。
 
 所有函数不依赖 UI；通过 controller 的 bus 推送 tool 状态。非 Windows 平台 MicRecorder
 会在 start() 抛出可读错误，由调用方提示「仅 Windows 支持电脑麦克风」。
@@ -24,7 +27,6 @@ from core.constants import (
     safe_name,
     unique_path,
 )
-from core.ffmpeg_bin import ffmpeg_exe
 from core.longpath import long_path, path_exists, path_getsize
 
 # MMSYSERR / WAVERR 里最常见的几个：报错时直接翻成人话，用户才知道该动哪里。
@@ -76,19 +78,13 @@ def _check_mmresult(mr, what):
     raise RuntimeError("{} 失败，错误码 {}（{}）".format(what, mr, _MM_ERROR_TEXT.get(mr, "未知错误")))
 
 
-def _have_ffmpeg():
-    try:
-        r = subprocess.run([ffmpeg_exe(), "-version"], **adb_kwargs(10))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-        return r.returncode == 0
-    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-        return False
 
 
 def _wav_duration(path):
     """读出 WAV 的 data 段字节数（不是秒数）；解析不出返回 None。
 
     只认「标准 44 字节 RIFF/WAVE 头 + fmt + data」的 PCM WAV —— 也就是本模块自己
-    写出的那种。tinycap 写出的头有时字段顺序不同，宁可判为不可用也不要喂给 ffmpeg。
+    写出的那种。tinycap 写出的头有时字段顺序不同，宁可判为不可用也不要当有效音频。
     """
     try:
         # 长路径安全：读侧也必须加前缀，否则超过 260 字符时 getsize 直接抛
@@ -112,14 +108,14 @@ def _wav_duration(path):
                     f.seek(csize + (csize & 1), os.SEEK_CUR)
                 elif cid == b"data":
                     # 必须先见过 fmt 块：只有 RIFF/WAVE + data 而没有 fmt 的文件
-                    # 不是可解码的 PCM（可能是个坏文件或别的容器），喂给 ffmpeg
-                    # 只会得到一个 0 秒的空壳视频。
+                    # 不是可解码的 PCM（可能是个坏文件或别的容器），当有效音频
+                    # 只会得到一段空录音。
                     if not fmt_seen:
                         return None
                     # 文件实际长度才是权威：有的写头时把长度写大，有的干脆
                     # 写 0xFFFFFFFF（流式 WAV）。早前用**头里的** riff_size 反算
                     # 「剩余字节」，等于用头校验头 —— 一段被截断的残录音仍会被
-                    # 认为「有几十 KB 音频」，通过 _wav_ok 后直接喂给 ffmpeg。
+                    # 认为「有几十 KB 音频」，通过 _wav_ok 后被当成有效录音。
                     actual = max(0, total - f.tell())
                     if actual <= 0:
                         return None          # data 段一个字节都没有
@@ -135,9 +131,8 @@ def _wav_ok(path):
     """WAV 是否**真正可用**：头合法 **且** 含实际音频数据。
 
     早期实现只查「头是 RIFF/WAVE 且体积 >= 44 字节」，于是「录了 0 字节」的空音频
-    （正好 44 字节）会被判为可用并喂给 ffmpeg —— ffmpeg 对纯静音/零长度输入会输出一个
-    258 字节、`duration=N/A` 的空壳 mp4，用户表现为「合成出来的视频打不开」。
-    这里额外要求 data 段有真实字节数。
+    （正好 44 字节）会被判为可用——把它当有效录音会让下游拿到一段无实际声音的
+    轨道。这里额外要求 data 段有真实字节数。
     """
     try:
         # 长路径安全：Windows 上 os.path.exists 对超长路径返回 False（不报错），
@@ -157,196 +152,14 @@ def _wav_ok(path):
         return False
 
 
-def _mp4_playable(path):
-    """合成产物是否是一个真能播的 mp4（含视频流、时长 > 0、体积合理）。
-
-    ffmpeg 退出码为 0 **不代表**产物可用：音频为空/过短时它会成功输出一个几百字节、
-    没有有效时长的空壳文件。这里用 ffprobe（或退化为扫 moov + 体积兜底）复核，
-    避免把坏文件当成功结果交给用户。
-    """
-    try:
-        # 长路径安全：同 _wav_ok —— 超长路径下 exists 返回 False，会把正常的
-        # mp4 判成「不可播放」，合成结果被白白丢掉。
-        if not path_exists(path):
-            return False
-        size = path_getsize(path)
-        # 正常 1 帧视频都远大于 4KB；低于此值基本可判定为空壳
-        if size < 4096:
-            return False
-        with contextlib.suppress(Exception):
-            r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
-                **adb_kwargs(20))
-            if r.returncode == 0:
-                return "video" in (r.stdout or "")
-        # 没有 ffprobe 时退化为「体积 + moov 头」兜底判断
-        with open(long_path(path), "rb") as f:
-            return b"moov" in f.read(min(size, 4 * 1024 * 1024))
-    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-        return False
 
 
-def _mp4_duration(path):
-    """从 MP4 的 moov/mvhd 盒子里解析时长（秒，字符串）；解析不出返回 None。
-
-    不依赖 ffprobe：个别环境只装了 ffmpeg 却没装 ffprobe（或不在 PATH），
-    `_media_duration` 会取不到值。旧实现在此时给 ffmpeg 传 `-t 0`——按 0 秒
-    截断，产出空壳 mp4（随后被 `_mp4_playable` 拒掉并回退，音频整体丢失）。
-    这里按盒子结构顺序 seek 扫描（screenrecord 的 moov 在文件**尾部**，
-    不能只读文件头），拿到 mvhd 的 timescale/duration 后换算。
-    """
-    try:
-        total = path_getsize(path)
-        if total < 16:
-            return None
-        with open(long_path(path), "rb") as f:
-            moov = None
-            pos = 0
-            while pos + 8 <= total:
-                f.seek(pos)
-                hdr = f.read(8)
-                if len(hdr) < 8:
-                    break
-                bsize = int.from_bytes(hdr[:4], "big")
-                btype = hdr[4:8]
-                if bsize == 1:                       # 64 位扩展大小
-                    ext = f.read(8)
-                    if len(ext) < 8:
-                        break
-                    bsize = int.from_bytes(ext, "big")
-                    body = pos + 16
-                elif bsize == 0:                     # 延伸到文件尾
-                    bsize = total - pos
-                    body = pos + 8
-                else:
-                    body = pos + 8
-                if bsize < 8 or pos + bsize > total:
-                    break
-                if btype == b"moov":
-                    moov = (body, bsize - 8)
-                    break
-                pos += bsize
-            if moov is None:
-                return None
-            pos, end = moov[0], moov[0] + moov[1]
-            while pos + 8 <= end:
-                f.seek(pos)
-                hdr = f.read(8)
-                if len(hdr) < 8:
-                    break
-                bsize = int.from_bytes(hdr[:4], "big")
-                btype = hdr[4:8]
-                if bsize == 1:
-                    ext = f.read(8)
-                    bsize = int.from_bytes(ext, "big")
-                    sub_body = pos + 16
-                elif bsize == 0:
-                    bsize = end - pos
-                    sub_body = pos + 8
-                else:
-                    sub_body = pos + 8
-                if bsize < 8 or pos + bsize > end:
-                    break
-                if btype == b"mvhd":
-                    f.seek(sub_body)
-                    ver = f.read(1)
-                    f.read(3)                         # flags
-                    if ver == b"\x01":                # version 1：64 位时间戳
-                        f.read(16)
-                    else:
-                        f.read(8)
-                    timescale = int.from_bytes(f.read(4), "big")
-                    if ver == b"\x01":
-                        duration = int.from_bytes(f.read(8), "big")
-                    else:
-                        duration = int.from_bytes(f.read(4), "big")
-                    if timescale > 0 and duration > 0:
-                        return f"{duration / float(timescale):.3f}"
-                    return None
-                pos += bsize
-        return None
-    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-        return None
 
 
-def _video_duration(path):
-    """视频时长（秒，字符串）：ffprobe 优先，取不到再本地解析 MP4 头兜底。"""
-    d = _media_duration(path)
-    if d:
-        return d
-    return _mp4_duration(path)
 
 
-def ffmpeg_mux(video_path, audio_paths, out_path):
-    """把 video + 若干 wav 合成为带音视频的 mp4；成功返回路径，否则 None。
-
-    关键修正（均为「合成结果播放不了」的根因）：
-
-    1. **不全局用 -shortest**：它按「最短的流」截断整段输出，音频只录到一半时会连
-       视频一起砍掉（实测 6s 视频 + 2s 音频 → 成片只剩 2s）。改为只让**音频**收尾在
-       视频时长内（`-shortest` 仅作用于 filter_complex 的音频输出），视频完整保留。
-    2. **音频不足则补静音**：音频比视频短时用 `apad` 补齐，长了则 `atrim` 截断，
-       保证音轨与画面等长—— 否则末尾会有一段无声冻帧。
-    3. **复核产物**：`returncode == 0` 不代表产物可播（零长度音频会产出 258 字节的
-       空壳 mp4，duration=N/A）。产出后用 `_mp4_playable` 复核，不通过则删除并返回
-       None，让调用方回退到「保留无音轨视频」。
-    4. **时长取不到就不合成**：`apad` 会无限补静音，没有 `-t` ffmpeg 永远不会收尾；
-       而传 `-t 0` 会截出空壳文件。故时长（ffprobe / 本地解析 MP4 头都取不到）未知
-       时直接返回 None，调用方保留无音轨的原始视频，绝不产出坏文件。
-    """
-    if not _have_ffmpeg():
-        return None
-    # 长路径安全：视频落在用户的保存目录里，路径可以超长。
-    if not (video_path and path_exists(video_path)):
-        return None
-    audios = [a for a in (audio_paths or []) if a and _wav_ok(a)]
-    if not audios:
-        return None
-    duration = _video_duration(video_path)
-    if not duration:
-        return None
-    cmd = [ffmpeg_exe(), "-y", "-i", video_path]
-    for a in audios:
-        cmd += ["-i", a]
-    # 视频流直接复制（不重编码，保留 screenrecord 的原始画质与速度）；
-    # 音频把所有输入混为单条立体声。
-    # 两处容易踩的坑（实测报错）：
-    #   a) 视频**不能**进 filter_complex（写成 [0:v]copy 会报 "Streamcopy requested for
-    #      output stream fed from a complex filtergraph"），用 -map 0:v:0 直接引用原流。
-    #   b) apad 也**不能**用独立的 -af（与复杂滤镜图同时作用于同一流会报
-    #      "Simple and complex filtering cannot be used together"），必须写进滤镜图里。
-    mix = f"amix=inputs={len(audios):d}:duration=longest:dropout_transition=0,apad[a]"
-    cmd += ["-filter_complex", mix,
-            "-map", "0:v:0", "-map", "[a]",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            "-t", duration,
-            out_path]
-    try:
-        r = subprocess.run(cmd, **adb_kwargs(300))  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-        if r.returncode == 0 and path_exists(out_path):
-            # 复核：ffmpeg 成功也可能产出空壳（音频为空/过短时）
-            if _mp4_playable(out_path):
-                return out_path
-            _silent_remove(out_path)
-        else:
-            _silent_remove(out_path)
-    except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-        _silent_remove(out_path)
-    return None
 
 
-def _media_duration(path):
-    """用 ffprobe 取媒体时长（秒，字符串）；取不到返回 None。"""
-    with contextlib.suppress(Exception):
-        r = subprocess.run(  # noqa: PLW1510  失败不致命，调用方自行核对 returncode
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", path], **adb_kwargs(20))
-        if r.returncode == 0:
-            v = (r.stdout or "").strip().rstrip(",")
-            return v if v and v != "N/A" else None
-    return None
 
 
 def _silent_remove(path):

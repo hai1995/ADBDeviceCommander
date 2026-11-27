@@ -1,5 +1,13 @@
 # 修复说明
 
+- **彻底移除 ffmpeg 依赖·录屏全走 MF（v36，最新一轮）**：录屏不再有任何 ffmpeg
+  兜底/合成/分段合并路径，勾不勾麦克风都走系统媒体基础 SinkWriter 同源写入。
+  native 新增**无音轨纯视频模式**（`arate<=0`：不订阅 WASAPI、不建 AAC 轨、
+  跳过排空补静音），未勾麦克风产出纯视频 MP4 而非"偷偷录音"。长视频靠 v24 续流
+  + v25 单文件写成 1 个完整 MP4（无拼接点 1 秒缺口、无音画错位），天然满足过去的
+  "分段合并"需求且更优。删除 `core/ffmpeg_bin.py`、`backend/video_join.py`、
+  audio_service 合成链、record 老路径与 build 内置 ffmpeg 打包；前端/文档/
+  测试同步清理过时文案。详见文末 v36 节。
 - **编排层缺陷修复（v35 后续审查）**：同源录制 Python 编排层两处真实缺陷：
   ①`start()` 里 `session_create` 走 worker.call，可能抛 MFNativeError（worker
   已死/native 崩溃）——start() 契约是返回 (ok, 原因)，异常必须就地转成可读失败，
@@ -9065,3 +9073,64 @@ core/logcat.py、frontend Logcat 面板与事件链路）做整段审查。后�
   取消电量温度后的显示与落盘、perf_start 第 4 参、启动恢复、全取消防呆、
   收藏指标自动切换、非法配置回退、字符串配置、CSS 隐藏规则）。
   全量 Python 1801 passed / 1 skipped，前端 105 个测试文件 0 失败。
+
+---
+
+## 2026-11-27 彻底移除 ffmpeg 依赖——录屏全走 MF（v36）
+
+你明确要求：录屏已完全不需要 ffmpeg，把项目里涉及到的地方全部移除；并在澄清
+"能否支持长视频分段合并"时确认——**只要 MF 能支持长视频，就全走 MF、彻底去掉
+ffmpeg 依赖**。
+
+### 为什么 MF 天然满足"长视频分段合并"，无需 ffmpeg
+
+老架构：每段 screenrecord 独立落一个 mp4，收尾用 `ffmpeg -f concat -c copy`
+把各段拼成一个——有拼接点约 1 秒画面缺口、N-1 处音画错位、依赖本机 ffmpeg。
+
+MF 架构（v24 续流 + v25 单文件）：screenrecord 到 170 秒退出后由编排层自动重拉，
+但画面**始终写入同一个 SinkWriter**，整场只 Finalize 出 1 个从头到尾的完整 MP4。
+没有分段文件也就没有合并动作，拼接点缺口与音画错位从根上不存在——这是比老式
+"分段 + concat"更优的解法，所以可以放心彻底删除 ffmpeg。
+
+### 核心改动
+
+- **native 无音轨纯视频模式**（`native/adc_mf_sink.cpp`，指纹
+  `mf-20261127-nofilemux-v36`）：以 `arate<=0` 表示无音轨——`create()` 不订阅
+  WASAPI、`ensure_writer()` 不建 AAC 轨、`drain_audio()` 直接返回（不排空、不补
+  静音）。带声路径（arate>0）行为与 v35 完全一致，一行未动。
+- **Python 会话层**：`MFCaptureSession.start()` 在无麦克风时把 `(0,0,0)` 传给
+  native、不启音频排空定时器；`MFCaptureService.start_all(..., with_audio=)` 新增
+  开关，无音轨时不启动麦克风。
+- **controller 全走 MF**：`screen_record_start` 无条件走 MF，MF 不可用时明确报
+  `reason="mf_unavailable"`（不再回退）；`stop`/`cancel` 无条件走 `_mf_teardown`
+  / `_mf_discard`。成功提示区分带声 MP4 / 纯视频 MP4。
+- **删除的业务代码**：`core/ffmpeg_bin.py`、`backend/video_join.py`、
+  `backend/audio_service.py` 的 ffmpeg 合成链（`ffmpeg_mux`/`_have_ffmpeg`/
+  `_mp4_playable`/`_mp4_duration`/`_video_duration`/`_media_duration`）、
+  `backend/controllers/record.py` 的老路径函数（`_screen_record_start_locked`/
+  `_mic_start`/`_session_teardown`/`_session_discard`/`_merge_device_segments` 等）、
+  `backend/controller.py` 的导出、`build.py` 的 `bundled_ffmpeg_path` 与内置 ffmpeg
+  打包逻辑。保留 `MicRecorder` / `DeviceAudioCapture` 采集类供其它用途。
+- **刻意保留**：`backend/mirror_service.py` 的 `ffplay`/播放器探测——那是**投屏**
+  播放器（与录屏无关），不属于本次移除范围。
+
+### 前端 / 文档同步
+
+- 录屏说明从"约每 3 分钟自动分段续录 + 停止后合并 + 拼接点 1 秒缺口 + 依赖
+  ffmpeg"改为"约每 3 分钟自动续流 + 全程写入同一个完整 MP4 + 无拼接缺口 +
+  无需 ffmpeg"，如实说明 57 分钟上限仍在、仅 Windows 可用。
+- `README.md` / `使用说明.txt` / `native/README.md` 的所有"回退 ffmpeg 兜底 /
+  需 PATH 有 ffmpeg / 内置 ffmpeg"过时描述清理（保留"无需 ffmpeg"的准确陈述）。
+
+### 测试
+
+- 删除测试已移除函数的用例：`test_backend_video_join.py`（整文件）、
+  `test_record_seg_edr_workdir.py`（整文件）、`test_backend_audio.py` 中 14 项
+  ffmpeg 合成链用例；`test_backend_controller.py` 删除老路径 mux/分段测试并注入
+  `FakeMFCapture`。
+- 改写：`test_backend_record_mf_path.py`（未勾麦也走 MF 无音轨、带麦走带声、
+  MF 不可用明确报错）、`test_backend_logcat.py` / `test_backend_record_logcat_coverage.py`
+  （收尾改走 `_mf_teardown`）、`test_native_sink_guards.py`（v36 指纹 + 无音轨守卫）、
+  `test_backend_controller.py` 相关 3 项断言、前端 `rec_limit_hint.test.cjs` 文案断言。
+- 全量回归：Python `pytest tests -q --ignore=tests/frontend` 与前端 `node run-all.cjs`
+  均通过（详见提交记录）。

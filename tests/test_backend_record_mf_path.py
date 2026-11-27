@@ -1,8 +1,9 @@
-"""RecordMixin 的同源录制（MF）门控分流测试。
+"""RecordMixin 的全走 MF（同源录制）分流测试。
 
-验证：mf_capture 可用时 start/stop/cancel 走 MF 路径；不可用时回退老
-ffmpeg 路径；MF 会话结构带 'mf' 标记；shutdown 取消而非发布半成品。
-真机 native 行为不在此覆盖。
+[v36 全走 MF] 录屏不再依赖 ffmpeg：无论是否勾麦克风都走 MF（未勾麦走
+native 无音轨纯视频模式 with_audio=False）；MF 不可用时明确报错，不再
+回退到已删除的 ffmpeg 路径。验证 start/stop/cancel 都走 MF、会话结构带
+'mf' 标记、异常撤销清理 native。真机 native 行为不在此覆盖。
 """
 import os
 import sys
@@ -37,8 +38,10 @@ class FakeMFCapture:
     def build_id(self):
         return self._build_id
 
-    def start_all(self, serials, save_dir, stems, sizes, endpoint):
-        self.calls.append(("start_all", list(serials), save_dir))
+    def start_all(self, serials, save_dir, stems, sizes, endpoint,
+                  with_audio=True):
+        self.calls.append(("start_all", list(serials), save_dir,
+                           bool(with_audio)))
         if not self._available:
             return False, "dll 缺失", {}
         self.started = {s: f"{save_dir}\\tmp_{s}.mp4" for s in serials}
@@ -124,7 +127,8 @@ def test_start_mf_partial_failure_is_reported(monkeypatch, tmp_path):
     api._push_status = lambda level, text, *a, **k: statuses.append((level, text))
 
     class PartialFake(FakeMFCapture):
-        def start_all(self, serials, save_dir, stems, sizes, endpoint):
+        def start_all(self, serials, save_dir, stems, sizes, endpoint,
+                      with_audio=True):
             # 只 SER1 成功；SER2 首帧超时失败
             self.started = {"SER1": f"{save_dir}\\tmp_SER1.mp4"}
             return True, "", dict(self.started)
@@ -136,25 +140,32 @@ def test_start_mf_partial_failure_is_reported(monkeypatch, tmp_path):
     assert errs, "失败设备 SER2 必须有点名提示，实际状态: %r" % statuses
 
 
-def test_start_without_mic_never_uses_mf(monkeypatch, tmp_path):
-    """未勾麦克风时绝不能走 MF：native 会无条件采麦克风 → 偷偷录音。
+def test_start_without_mic_uses_mf_without_audio(monkeypatch, tmp_path):
+    """[v36 全走 MF] 未勾麦克风时也走 MF，但必须 with_audio=False。
 
-    老路径的纯视频录制不需要 ffmpeg（无音频可合成），screenrecord 原生 mp4
-    直接落盘，行为与 MF 改造前一致。这是隐私/功能回归测试。
+    native 收到 arate=0 后不订阅 WASAPI、不建 AAC 轨，绝不"偷偷录音"。
+    这是隐私/功能回归：既全走 MF 去掉 ffmpeg，又不能录进用户的声音。
     """
     api = _api(monkeypatch, tmp_path)
-    fake = FakeMFCapture(available=True)   # 即使 dll 可用
+    fake = FakeMFCapture(available=True)
     api.mf_capture = fake
-
-    class FakeVideo:
-        def start(self, s, d, extra_name=None):
-            return True, f"{d}\\record_{s}.mp4"
-
-    api.video = FakeVideo()
     res = api.screen_record_start(serial="SER1", with_mic=False, save_dir=str(tmp_path))
     assert res["ok"] is True
-    assert "mf" not in api._rec_session
-    assert any(c[0] == "start_all" for c in fake.calls) is False
+    assert api._rec_session.get("mf") is True
+    starts = [c for c in fake.calls if c[0] == "start_all"]
+    assert len(starts) == 1 and starts[0][3] is False, (
+        f"未勾麦须走 MF 且 with_audio=False，实际: {starts}")
+
+
+def test_start_with_mic_uses_mf_with_audio(monkeypatch, tmp_path):
+    """[v36] 勾麦克风时走 MF 且 with_audio=True（带声录制路径不变）。"""
+    api = _api(monkeypatch, tmp_path)
+    fake = FakeMFCapture(available=True)
+    api.mf_capture = fake
+    res = api.screen_record_start(serial="SER1", with_mic=True, save_dir=str(tmp_path))
+    assert res["ok"] is True
+    starts = [c for c in fake.calls if c[0] == "start_all"]
+    assert len(starts) == 1 and starts[0][3] is True
 
 
 def test_stop_uses_mf_teardown(monkeypatch, tmp_path):
@@ -235,18 +246,14 @@ def test_cancel_uses_mf_discard(monkeypatch, tmp_path):
     assert any(c[0] == "cancel_all" for c in fake.calls)
 
 
-def test_start_falls_back_when_unavailable(monkeypatch, tmp_path):
-    """MF 不可用时走老路径：不应带 mf 标记。"""
+def test_start_reports_error_when_mf_unavailable(monkeypatch, tmp_path):
+    """[v36] MF 不可用时明确报错，不再回退到已删除的 ffmpeg 老路径。"""
     api = _api(monkeypatch, tmp_path)
     fake = FakeMFCapture(available=False)
     api.mf_capture = fake
-    # 老路径需要 video.start 成功；用假件顶掉
-    class FakeVideo:
-        def start(self, s, d, extra_name=None):
-            return True, f"{d}\\record_{s}.mp4"
-    api.video = FakeVideo()
-    api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
-    assert "mf" not in api._rec_session
+    res = api.screen_record_start(serial="SER1", save_dir=str(tmp_path))
+    assert res["ok"] is False and res["reason"] == "mf_unavailable", res
+    assert "录屏不可用" in res["error"]
     assert any(c[0] == "start_all" for c in fake.calls) is False
 
 

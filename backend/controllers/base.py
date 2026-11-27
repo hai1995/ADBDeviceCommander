@@ -57,9 +57,9 @@ class WebApiBase:
         self.logcat_capture = LogcatCapture(self.bus, self.state.adb_path)
         self.video = VideoRecorder(self.bus, self.state.adb_path)
         self.device_audio = DeviceAudioCapture(self.state.adb_path)
-        # 同源录制（方案 B）：MF SinkWriter + WASAPI，直接产出 H264+AAC MP4。
-        # 不可用时（非 Windows / 未编译 dll / 被拦截）available=False，
-        # controller 自动回退到原 ffmpeg 合成路径（兜底代码原样保留）。
+        # 同源录制：MF SinkWriter + WASAPI，直接产出 H264+AAC MP4（未勾麦为
+        # 无音轨纯视频）。v36 起录屏全走这条路径；不可用时（非 Windows / 未
+        # 编译 dll / 被拦截）available=False，controller 明确报错不再兜底。
         self.mf_capture = MFCaptureService(adb=self.state.adb_path)
         self.file_svc = FileService(self.state.adb_path)
         # 投屏：只负责「找 scrcpy + 拉起窗口」，进程句柄留在这里用于去重与收尾

@@ -5,7 +5,7 @@ backend.mf_native —— native MF/WASAPI 扩展（adc_mf_sink.dll）的 ctypes 
 
 1. **加载与可用性**：找到 dll 并绑定 C ABI；找不到/加载失败时给出明确、
    可显示的中文原因，**绝不抛裸异常**（非 Windows / 未编译 / 杀软拦截都要
-   能转成"同源录制不可用"提示，让上层决定是否回退 ffmpeg 兜底）。
+   能转成"录屏不可用"提示，由上层如实告知用户）。
 2. **线程约束**：`init/shutdown` 只能在同一个 MTA worker 线程调用。本模块
    提供 `MFWorker`——内部起一个常驻线程完成 CoInitializeEx(MTA)+MFStartup，
    所有 native 调用都投递到该线程执行并同步等结果（ctypes 调用在 worker

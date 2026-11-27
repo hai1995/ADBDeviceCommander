@@ -61,7 +61,7 @@ from backend.screen_service import (
     ScreenCapturer, VideoRecorder, KEY_POINTER_LOCATION, KEY_SHOW_TOUCHES,
 )
 from backend.audio_service import (
-    MicRecorder, DeviceAudioCapture, ffmpeg_mux, _have_ffmpeg,
+    MicRecorder, DeviceAudioCapture,
 )
 from backend.mf_capture_service import MFCaptureService
 from backend.file_service import FileService, push_timeout_for
@@ -152,7 +152,6 @@ __all__ = [
     "Workers",
     "_EXIT_RE",
     "_UPDATE_HOSTS",
-    "_have_ffmpeg",
     "_host_allowed",
     "adb_kwargs",
     "apkinfo",
@@ -163,7 +162,6 @@ __all__ = [
     "root_state",
     "devinfo",
     "diag",
-    "ffmpeg_mux",
     "find_player",
     "find_scrcpy",
     "get_pref",

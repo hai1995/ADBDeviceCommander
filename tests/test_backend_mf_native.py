@@ -1214,9 +1214,9 @@ def _drive_one_nal_with_rotation(monkeypatch, tmp_path, single_file):
 def test_single_file_mode_skips_rotate(monkeypatch, tmp_path):
     """[v25 回归] 单文件模式（默认）收到切段请求时不得切段。
 
-    v24 续流已让视频流全程连续，切段只会把一条连续流切成 p1/p2 多文件，而 MF
-    路径不合并（ffmpeg 已不随包发布）→ 完成提示"2 段视频，未能合并"。忽略该
-    请求后整场写同一个 writer，finalize 产出 1 个完整视频。
+    v24 续流已让视频流全程连续，切段只会把一条连续流切成 p1/p2 多文件；v36 起
+    录屏全走单文件、不再有分段合并。忽略该请求后整场写同一个 writer，finalize
+    产出 1 个完整视频。
     """
     sess, native = _drive_one_nal_with_rotation(monkeypatch, tmp_path, True)
     assert native.rotated == 0, "单文件模式不得调用 session_rotate"

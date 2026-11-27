@@ -1070,16 +1070,16 @@ def test_rec_death_stops_logcat_capture_in_sync(tmp_path, monkeypatch):
         "pointer_location_prev": {}, "show_touches_prev": {},
         "dead": {"D1"},
     }
-    # video 相关调用给安全桩：teardown 不应真去 stop 视频 / 读 overlay
-    monkeypatch.setattr(api.video, "is_recording", lambda s: False)
-    monkeypatch.setattr(api.video, "stop",
-                        lambda s: (False, None, "not recording"))
-    monkeypatch.setattr(api.video, "get_system_setting",
-                        lambda *a, **k: (True, "0"))
-    monkeypatch.setattr(api, "_set_device_setting", lambda *a, **k: (True, ""))
+    # [v36 全走 MF] 收尾只有 _mf_teardown 一条路径：给它一个 stop_all 桩，
+    # 核心断言不变——录屏收尾必须同步停 logcat、日志进同一产物包。
+    class _MFStub:
+        def stop_all(self):
+            return {"D1": ([], "")}
+
+    api.mf_capture = _MFStub()
     monkeypatch.setattr(api, "_zip_paths", lambda *a, **k: None)
 
-    files, _zpath = api._session_teardown(api._rec_session)
+    files, _zpath = api._mf_teardown(api._rec_session)
     assert "D1" in stopped, "录屏中断时必须同步停掉 logcat 抓取（时间轴要对齐）"
     assert log_path in files, "日志要跟着录屏进同一个产物包：%r" % (files,)
 

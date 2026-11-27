@@ -154,9 +154,9 @@ def _package_excluded(name: str) -> bool:
 # （0xC0000374）崩溃，导致整个打包失败。排除它既避开这个坑，exe 也更小。
 # ⚠️ 若将来项目真的要 import cryptography（或给 webview.start 传 ssl=True），
 #    必须先从这里移除——tests/test_build.py 的源码安全测试会拦住这种改动。
-# imageio_ffmpeg 也排除（防御性）：同源录制已不内置 ffmpeg，兜底改为依赖用户
-# PATH；保留排除项是为了万一开发机仍装着它，PyInstaller 静态分析不会把它的
-# 83MB 二进制拖进 onefile。若将来连兜底也删除，可一并移除此项。
+# [v36] imageio_ffmpeg 排除（防御性）：录屏已全走系统媒体基础，完全不依赖
+# ffmpeg。保留排除项是为了万一开发机仍装着它，PyInstaller 静态分析不会把它的
+# 83MB 二进制拖进 onefile。
 EXCLUDE_MODULES = ["pytest", "PIL", "cryptography", "imageio_ffmpeg"]
 
 # 可选加速依赖，默认**不进包**（用 --with-numpy 才带上）。
@@ -270,27 +270,12 @@ def ensure_deps(required, auto_install: bool) -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", dist_name])
 
 
-def bundled_ffmpeg_path():
-    """[兜底保留，未优化] 返回 ffmpeg 二进制路径或 None。
-
-    同源录制（MF SinkWriter）验收通过后会整段删除本函数、core/ffmpeg_bin.py
-    与 audio_service.ffmpeg_mux。当前按约束原样保留作兜底：内置二进制已从
-    打包中移除（包体回 ~14M、不引 GPL），兜底降级为依赖用户 PATH 的 ffmpeg。
-    """
-    try:
-        import imageio_ffmpeg
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:  # noqa: BLE001  没装依赖就降级为「依赖用户 PATH」
-        return None
-    return Path(exe) if exe and Path(exe).is_file() else None
-
-
 def bundled_native_dll():
     """返回同源录制 native 扩展 dll 的路径（Path），拿不到返回 None。
 
     由 native/CMakeLists.txt 编译后安装到 backend/adc_mf_sink.dll。源码态与
     PyInstaller 构建都从 backend/ 取；找不到时返回 None，打包照常进行，
-    运行时 controller 自动回退 ffmpeg 兜底路径。
+    但录屏功能在该包里不可用（v36 起无 ffmpeg 兜底，controller 明确报错）。
     """
     dll = ROOT / "backend" / "adc_mf_sink.dll"
     return dll if dll.is_file() else None
@@ -318,14 +303,14 @@ def pyinstaller_args(args) -> list:
     # 同源录制 native 扩展（adc_mf_sink.dll）：只依赖系统 DLL，编译后由
     # native/CMakeLists.txt 安装到 backend/。--add-binary 的 DEST 是「目标目录」
     # 不是文件名，用 "." 放到包根，运行时 backend/mf_native.py 从 _MEIPASS 加载。
-    # 找不到 dll 时**不阻断打包**：同源录制会让 controller 自动回退到 ffmpeg
-    # 兜底路径（依赖用户 PATH 的 ffmpeg），功能不丢失。
+    # [v36 全走 MF] 找不到 dll 时**不阻断打包**（便于开发/非 Windows 构建），
+    # 但录屏功能在该包里不可用：controller 会明确报错，不再有 ffmpeg 兜底。
     native_dll = bundled_native_dll()
     if native_dll is not None:
         out += ["--add-binary", f"{native_dll}{os.pathsep}."]
     else:
         print("[提示] 未找到 backend/adc_mf_sink.dll：本次打包不含同源录制扩展，"
-              "录屏将回退到 ffmpeg 合成路径（需用户机器 PATH 中有 ffmpeg）。",
+              "录屏功能不可用（Windows 上请用带 native 扩展的正式包）。",
               file=sys.stderr)
     for mod in EXCLUDE_MODULES:
         out += ["--exclude-module", mod]
@@ -716,7 +701,7 @@ def main(argv=None) -> int:
     ap.add_argument("--require-native", action="store_true",
                     help="要求 backend/adc_mf_sink.dll 必须存在（CI 发版闸门）："
                          "缺失即中止打包，绝不静默产出「无同源录制扩展」的包。"
-                         "开发态默认不加此开关，缺 dll 时仍可回退 ffmpeg 打包。")
+                         "开发态默认不加此开关，缺 dll 时仍可打包（但录屏不可用）。")
     ap.set_defaults(clean=True)
     args = ap.parse_args(argv)
 
@@ -734,7 +719,7 @@ def main(argv=None) -> int:
     elif args.no_deps:
         print("[1/4] 跳过依赖检查（--no-deps）")
     else:
-        # imageio-ffmpeg 已移除（同源录制不再内置 ffmpeg；兜底依赖用户 PATH）。
+        # imageio-ffmpeg 已移除（录屏全走系统媒体基础，不依赖 ffmpeg）。
         ensure_deps([("pyinstaller", "打包工具"), ("pywebview", "运行时宿主，打包期需可导入")],
                     auto_install=True)
 
@@ -753,9 +738,9 @@ def main(argv=None) -> int:
         return 0
 
     # [CI 发版闸门] --require-native：产物必须带上同源录制 native 扩展。
-    # 开发态默认关闭（缺 dll 回退 ffmpeg 仍能打包）；CI 的 release.yml / build.yml
-    # 在构建命令里显式打开——一旦 native 编译步骤没产出 dll，这里直接失败，绝不
-    # 静默打出一个「点开录屏就退化、用户却毫不知情」的残包。
+    # 开发态默认关闭（缺 dll 仍能打包，但录屏不可用）；CI 的 release.yml /
+    # build.yml 在构建命令里显式打开——一旦 native 编译步骤没产出 dll，这里
+    # 直接失败，绝不静默打出一个「点开录屏就没反应、用户却毫不知情」的残包。
     if getattr(args, "require_native", False) and bundled_native_dll() is None:
         print("[错误] 本次构建要求 native 扩展（--require-native），但 "
               "backend/adc_mf_sink.dll 不存在。\n"

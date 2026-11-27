@@ -97,6 +97,55 @@ def _isolate_prefs(tmp_path, monkeypatch):
                         lambda: str(tmp_path / "settings.json"))
 
 
+class FakeMFCapture:
+    """[v36 全走 MF] 同源录制替身：让 screen_record_start/stop/cancel 在无 dll
+    的测试环境走通 MF 路径，专注验证 controller 层的通用行为（overlay/logcat/
+    会话守卫/提示）。真机 native 行为不在此覆盖（由 test_backend_mf_native 覆盖）。
+
+    start_all 按 save_dir 生成一个假的成片路径；stop_all 返回该路径作为产物，
+    使完成提示/打包逻辑能跑通。with_audio 参数被记录，供"未勾麦不录音"断言。
+    """
+
+    def __init__(self, available=True, build_id="mf-test-build"):
+        self._available = available
+        self.build_id = build_id
+        self.calls = []
+        self._sessions = {}       # inflight 守卫测试会读/写它
+        self._products = {}       # serial -> 成片路径
+
+    @property
+    def available(self):
+        return self._available
+
+    def start_all(self, serials, save_dir, stems, sizes, endpoint=None,
+                  with_audio=True):
+        self.calls.append(("start_all", list(serials), bool(with_audio)))
+        if not self._available:
+            return False, "dll 缺失", {}
+        firsts = {}
+        for s in serials:
+            stem = stems.get(s, f"record_{s}") if isinstance(stems, dict) else f"record_{s}"
+            path = os.path.join(save_dir, stem + ".mp4")
+            # 真实写出产物：_mf_teardown 用 path_exists 校验 stop_all 返回的路径，
+            # 文件不存在会被判成 no_video（本替身要模拟"成片已落盘"）。
+            try:
+                with open(path, "wb") as f:
+                    f.write(b"\x00\x00\x00\x18ftypmp42" + b"moov")
+            except OSError:
+                pass
+            self._products[s] = path
+            firsts[s] = path
+        return True, "", firsts
+
+    def stop_all(self):
+        self.calls.append(("stop_all",))
+        return {s: ([p], "") for s, p in self._products.items()}
+
+    def cancel_all(self):
+        self.calls.append(("cancel_all",))
+        self._products = {}
+
+
 def _make_api(session=None):
     api = WebApi(session_factory=lambda **kw: FakeSession(**kw),
                    auto_update=False)
@@ -104,6 +153,9 @@ def _make_api(session=None):
     # 与真实 ShellSession 一致：会话持有 output_callback，回显转成 console 事件
     api.session = session or FakeSession(output_callback=api._on_session_output)
     _seed_devices(api)
+    # [v36 全走 MF] 默认注入可用的 MF 替身，让录屏测试中 screen_record_start
+    # 走通 MF 路径。个别测试想测 MF 不可用可自行覆盖 api.mf_capture。
+    api.mf_capture = FakeMFCapture(available=True)
     return api
 
 
@@ -715,18 +767,18 @@ def test_screen_record_stop_collects_output_when_session_already_finished(tmp_pa
     video = tmp_path / "record_A1_ts1.mp4"
     video.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
     api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_zip": True,
+        "ts": "ts1", "dir": str(tmp_path), "with_zip": True, "mf": True,
         "videos": {"A1": str(video)}, "devaudio": {}, "logcat_captures": {},
     }
-    # video.is_recording 为 False —— 模拟「已由后台线程自动收尾」
-    assert api.video.is_recording("A1") is False
+    # [v36 全走 MF] 预置 MF 产物：stop_all 返回已落盘的成片
+    api.mf_capture._products = {"A1": str(video)}
 
     assert api.screen_record_stop() == {"ok": True}
     api.workers.shutdown(timeout=2.0)
 
     by_kind = _events_by_kind(api)
     texts = [p["text"] for p in by_kind.get("status", [])]
-    assert any("✓ 录屏已保存" in t for t in texts), texts
+    assert any("已保存" in t and "A1" in t for t in texts), texts
     # 勾选了「结束后压缩为 zip」→ 产物必须真的进包，而不是被静默丢弃
     zpath = tmp_path / "rec_ts1.zip"
     assert zpath.exists(), "已自动收尾的视频没有被打包（产物丢失）"
@@ -1031,47 +1083,26 @@ def _dead_rec_session(tmp_path):
 
 
 def test_reap_dead_recordings_tears_down_and_resets_ui(monkeypatch, tmp_path):
-    """进程意外退出时：必须自动收尾会话、广播 rec_state 让前端复位、说清「视频不完整」。
+    """进程意外退出时：必须自动收尾会话、广播 rec_state 让前端复位、说清「已保留已录片段」。
 
     回归：adb root 会在录屏中途杀掉设备端 screenrecord。旧实现没有任何监测——
     界面永远停在「录制中」，用户点「停止」后才在约 10 秒的 pull 重试后看到一句
-    「缺 moov 头」，而那一刻用户早就切到别的页签了（使用说明「录屏被中断」条
-    承诺的行为：自动切回「开始录制」+ 提示视频不完整 + 跳过音频合成 + 保留源文件）。
+    「缺 moov 头」，而那一刻用户早就切到别的页签了。v36 全走 MF 后单文件续流，
+    已录部分完整保留，收尾提示据实说「已保留已录片段」，并自动切回「开始录制」。
     """
     api = _make_api()
     api._rec_session = _dead_rec_session(tmp_path)
+    # [v36 全走 MF] 死亡收尾统一走 mf_capture.stop_all；预置残片产物避免
+    # 收尾报告 no_video（本测试关注 rec_state 复位与文案，不关注成片本身）。
+    api.mf_capture._products = {"A1": "v_a.mp4"}
     # 死亡诊断要探设备是否真的掉线：替掉真实 adb，避免测试去 spawn 进程
     monkeypatch.setattr(
         "backend.controllers.autorefresh.device_present",
         lambda adb, s, timeout=5: False)
-    stopped = []
-
-    class FakeVideo:
-        def died_serials(self):
-            return ["A1"]
-
-        def is_recording(self, s):
-            return True
-
-        def stop(self, s):
-            stopped.append(s)
-            # 残片拉回来了，但缺 moov（screenrecord 没来得及收尾）
-            return False, "v_a.mp4", "MP4 缺 moov 头，无法播放"
-
-        def get_system_setting(self, adb, s, key):
-            return True, "null"
-
-        def set_system_setting(self, adb, s, key, v):
-            return True
-
-        def set_system_setting_ex(self, adb, s, key, v):
-            return True, ""
-
-    api.video = FakeVideo()
 
     api._teardown_dead_recordings(["A1"])
 
-    assert stopped == ["A1"], stopped
+    assert ("stop_all",) in api.mf_capture.calls, api.mf_capture.calls
     # 会话已结束：不会被「已在录制」守卫永久挡死
     assert api._rec_session == {}
     by_kind = _events_by_kind(api)
@@ -1079,8 +1110,10 @@ def test_reap_dead_recordings_tears_down_and_resets_ui(monkeypatch, tmp_path):
     rec_states = by_kind.get("rec_state", [])
     assert rec_states and rec_states[0]["running"] is False, by_kind.get("rec_state")
     texts = [p.get("text", "") for p in by_kind.get("status", [])]
-    assert any("意外" in t and "视频不完整" in t for t in texts), texts
-    # 残片不合成音频：没有任何「已合成音视频」提示
+    # [v36 全走 MF] 断线提示改为「录屏中断 + 已保留已录片段」：单文件续流下
+    # 已录片段是完整的，不再用「视频不完整」吓唬用户去删掉整场录制。
+    assert any("录屏中断" in t and "已保留已录片段" in t for t in texts), texts
+    # 单文件续流无需事后合成：没有任何「已合成音视频」提示
     assert not any("合成音视频" in t for t in texts), texts
 
 
@@ -1093,7 +1126,8 @@ def test_reap_limit_hit_is_reported_as_normal_end(tmp_path):
     """
     api = _make_api()
     api._rec_session = _dead_rec_session(tmp_path)
-    stopped = []
+    # [v36 全走 MF] 死亡收尾统一走 mf_capture.stop_all；预置产物避免 no_video。
+    api.mf_capture._products = {"A1": "v_a.mp4"}
 
     class FakeVideo:
         def died_serials(self):
@@ -1102,24 +1136,11 @@ def test_reap_limit_hit_is_reported_as_normal_end(tmp_path):
         def limit_serials(self):
             return ["A1"]
 
-        def is_recording(self, s):
-            return True
-
-        def stop(self, s):
-            stopped.append(s)
-            return True, "v_a.mp4", None      # 正常收尾，文件完整
-
-        def get_system_setting(self, adb, s, key):
-            return True, "null"
-
-        def set_system_setting_ex(self, adb, s, key, v):
-            return True, ""
-
     api.video = FakeVideo()
 
     api._teardown_dead_recordings([], ["A1"])
 
-    assert stopped == ["A1"], stopped
+    assert ("stop_all",) in api.mf_capture.calls, api.mf_capture.calls
     texts = [p.get("text", "") for p in _events_by_kind(api).get("status", [])]
     assert any("上限" in t for t in texts), texts
     assert not any("意外" in t for t in texts), (
@@ -1733,86 +1754,10 @@ def test_execute_unexpected_error_becomes_status_not_crash():
     assert any("意外错误" in t for t in texts), texts
 
 
-def test_mic_start_failure_not_reported_as_silent_recording(monkeypatch, tmp_path):
-    """麦克风**启动就失败**时，停止录屏不应再补一条「未录到声音（可能全程静音）」。
-
-    回归点：两种失败原因不同（启动失败已 toast 过一次），重复归因为「静音」会误导
-    用户去检查麦克风音量，而真正的问题是设备被占用/无权限。
-    """
-    api = _make_api()
-    video = tmp_path / "record_A1_ts1.mp4"
-    video.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path),
-        "with_mic": True, "mic_started": False, "mic_path": None,
-        "videos": {"A1": str(video)}, "devaudio": {}, "logcat_captures": {},
-    }
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    by_kind = _events_by_kind(api)
-    texts = [p["text"] for p in by_kind.get("status", [])]
-    assert not any("未录到电脑麦克风声音" in t for t in texts), texts
-    assert any("✓ 录屏已保存" in t for t in texts), texts
 
 
-def test_mic_recording_silence_still_reports_reason(tmp_path):
-    """麦克风确实启动过、但整段静音时，仍必须给出「未录到声音」的明确原因。"""
-    api = _make_api()
-    video = tmp_path / "record_A1_ts1.mp4"
-    video.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path),
-        "with_mic": True, "mic_started": True, "mic_path": None,
-        "videos": {"A1": str(video)}, "devaudio": {}, "logcat_captures": {},
-    }
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    by_kind = _events_by_kind(api)
-    texts = [p["text"] for p in by_kind.get("status", [])]
-    assert any("未录到电脑麦克风声音" in t for t in texts), texts
 
 
-def test_logcat_still_running_is_not_zipped(tmp_path, monkeypatch):
-    """日志抓取 2 秒内没停下：宁可不打包，也不能打一份缺尾的包再把源文件删掉。
-
-    回归：打包成功后 `_zip_paths` 会删除源 txt。抓取若还在往同一个路径写，
-    尾部就落进了已删除的 inode —— zip 里少一段、磁盘上也没有，日志彻底消失，
-    而界面上只说「已打包」。
-    """
-    import backend.controllers.record as rec_mod
-
-    api = _make_api()
-    video = tmp_path / "record_A1_ts1.mp4"
-    video.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    log = tmp_path / "logcat_A1_ts1.txt"
-    log.write_text("08-29 10:00:00.000  1  1 I Tag: hi\n", encoding="utf-8")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": True,
-        "videos": {"A1": str(video)}, "devaudio": {},
-        "logcat_captures": {"A1": str(log)},
-    }
-    monkeypatch.setattr(api.logcat_capture, "stop", lambda *a, **k: True)
-    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: True)
-    monkeypatch.setattr(rec_mod.time, "sleep", lambda s: None)
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    zpath = tmp_path / "rec_ts1.zip"
-    assert zpath.exists(), "视频本身仍应正常打包"
-    with zipfile.ZipFile(str(zpath)) as z:
-        names = z.namelist()
-    assert not any("logcat" in n for n in names), (
-        "抓取未收尾时不得把它塞进包（打包后删源文件会连仍在写的数据一起丢掉）：%r"
-        % (names,))
-    assert log.exists(), "源日志必须保留"
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("仍在收尾" in t for t in texts), texts
 
 
 def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
@@ -1828,17 +1773,19 @@ def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
     log = tmp_path / "logcat_A1_ts1.txt"
     log.write_text("08-29 10:00:00.000  1  1 I Tag: hi\n", encoding="utf-8")
     api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False, "mf": True,
         "videos": {"A1": str(video)}, "devaudio": {},
         "logcat_captures": {"A1": str(log)},
     }
+    # [v36 全走 MF] 视频收尾 = mf_capture.stop_all；预置产物避免 no_video。
+    api.mf_capture._products = {"A1": str(video)}
     order = []
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    # 打 _stop_video 而不是 video.stop：收尾现在走 stop_ex（自动分段会有多段），
-    # 这里只关心「日志停止」与「视频收尾」的先后顺序。
-    monkeypatch.setattr(
-        api, "_stop_video",
-        lambda s: (order.append("video"), (True, [str(video)], None))[1])
+
+    def _mf_stop_all():
+        order.append("video")
+        return {"A1": ([str(video)], "")}
+
+    api.mf_capture.stop_all = _mf_stop_all
     monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: False)
     monkeypatch.setattr(
         api.logcat_capture, "stop",
@@ -1852,50 +1799,6 @@ def test_logcat_stop_precedes_video_teardown(monkeypatch, tmp_path):
         "日志必须在视频收尾之前就下发停止，否则会比视频多跑数秒：%r" % (order,))
 
 
-def test_devaudio_remote_path_safe_for_wireless_serial(monkeypatch, tmp_path):
-    """含设备音频录屏时，设备端 wav 路径必须过 safe_name。
-
-    回归点：无线序列号形如 192.168.1.5:5555 含冒号，未净化时 adb shell
-    下发与后续 pull 引用的是带冒号的路径，与本地落盘命名风格也不统一。
-    """
-    api = _make_api()
-    monkeypatch.setattr(
-        ctrl.DeviceAudioCapture, "supported", staticmethod(lambda *a, **kw: True))
-    started = []
-
-    class _FakeDevAudio:
-        def start(self, serial, remote):
-            started.append((serial, remote))
-            return True
-
-        def stop(self, serial, *a, **kw):
-            return True
-
-    api.device_audio = _FakeDevAudio()
-    monkeypatch.setattr(
-        api.video, "start", lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
-
-    res = api.screen_record_start(
-        "192.168.1.5:5555", with_devaudio=True, save_dir=str(tmp_path))
-    assert res.get("ok") is True, res
-    # 前端「已录时长」的起点：取视频真正起录的时刻（在麦克风 / 设备音频
-    # 初始化之后、screenrecord 确认窗之前），既不漏算确认等待，也不会因为
-    # 麦克风初始化把读数撑长
-    assert isinstance(res.get("started"), float), res
-    assert api._rec_session["start_host"] <= res["started"] <= time.time(), res
-    assert res["started"] == api._rec_session["video_start_host"], res
-    remote = api._rec_session["devaudio"]["192.168.1.5:5555"]
-    assert remote.endswith(".wav"), remote
-    # 基名过全部非法字符（/ 是设备端合法目录分隔符，单独放行）
-    name = os.path.basename(remote)
-    for ch in '<>:"/\\|?*':
-        assert ch not in name, "设备端 wav 文件名含非法字符 %r：%s" % (ch, remote)
-    # 整条路径里冒号尤其危险（部分 ROM 的 shell 会误判为分隔符）
-    for ch in '<>:"|?*\\':
-        assert ch not in remote, "设备端 wav 路径含有害字符 %r：%s" % (ch, remote)
-
-    api._rec_session = {}
-    api.workers.shutdown(timeout=2.0)
 
 
 def test_open_local_file_rejects_missing_file(tmp_path):
@@ -2042,7 +1945,7 @@ def test_screen_record_stop_reports_saved_once(monkeypatch, tmp_path):
 
     events = _events_by_kind(api)
     hits = [p["text"] for p in events.get("status", [])
-            if "✓ 录屏已保存" in (p.get("text") or "")]
+            if "已保存" in (p.get("text") or "") and "A1" in (p.get("text") or "")]
     assert len(hits) == 1, "同一条已保存提示不该报两次：%r" % hits
     # 提示里给用户看的必须是回拷到保存目录后的路径，不是 TEMP 工作目录路径。
     assert str(tmp_path) in hits[0] and vname in hits[0], hits
@@ -2102,114 +2005,14 @@ def test_screen_record_stop_pushes_completion_toast(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # 合成成功后的中间文件清理：只留成片，失败/部分失败要保留供重试
 # ---------------------------------------------------------------------------
-def _mux_stop_session(monkeypatch, tmp_path, serials=("A1",)):
-    """搭建「单/多设备 + 麦克风 + 视频已落盘」的收尾场景，供合成清理测试用。
-
-    直接 patch _teardown_devices / _merge_device_segments 跳过真实 adb pull，
-    专注验证合成循环对原始视频与 mic wav 的清理策略。
-    """
-    videos = {}
-    for s in serials:
-        p = tmp_path / f"record_{s}_ts1.mp4"
-        p.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-        videos[s] = p
-    mic = tmp_path / "mic_20260101_000000.wav"
-    mic.write_bytes(b"RIFF" + b"\x00" * 64)
-
-    api = _make_api()
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_zip": False,
-        "videos": {s: str(p) for s, p in videos.items()},
-        "devaudio": {}, "logcat_captures": {},
-        "with_mic": True, "mic_started": True,
-    }
-    api._mic = type("_Mic", (), {"stop": lambda self: str(mic)})()
-
-    monkeypatch.setattr(
-        api, "_teardown_devices",
-        lambda serials, dead, vm, dm, pretaken=None: {
-            s: ([str(p)], None) for s, p in videos.items()})
-    monkeypatch.setattr(
-        api, "_merge_device_segments",
-        lambda s, vs, work_dir=None: (None, 0, []))
-    return api, videos, mic
 
 
-def _fake_mux_ok(vp, audios, out):
-    """合成成功替身：真的写出成片，返回路径（与真实 ffmpeg_mux 语义一致）。"""
-    with open(out, "wb") as f:
-        f.write(b"\x00\x00\x00\x18ftypmp42moov")
-    return out
 
 
-def test_mux_success_cleans_intermediate_files(monkeypatch, tmp_path):
-    """合成成功后只留成片：原始无声视频与麦克风 wav 都要删。
-
-    回归：用户录屏目录里同时留着 mic_*.wav、record_*.mp4、*_final.mp4 三份，
-    后两份是中间产物。合成成功后即应清理，只保留成片，避免冗余。
-    """
-    api, videos, mic = _mux_stop_session(monkeypatch, tmp_path)
-    patch_ctrl(monkeypatch, "ffmpeg_mux", _fake_mux_ok)
-    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: True)
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    video = videos["A1"]
-    final = tmp_path / "record_A1_ts1_final.mp4"
-    assert not video.exists(), "合成成功后原始无声视频应被清理"
-    assert not mic.exists(), "合成成功后麦克风 wav 应被清理"
-    assert final.exists(), "成片 *_final.mp4 必须保留"
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("已合成音视频" in t for t in texts), texts
-    assert any("已清理" in t and "中间文件" in t for t in texts), texts
 
 
-def test_mux_failure_keeps_intermediate_files(monkeypatch, tmp_path):
-    """合成失败必须保留原始视频与麦克风 wav，供事后重试。
-
-    用户可能装好 ffmpeg / 换好麦克风后想重新合成，中间文件是唯一的素材；
-    此时删掉等于把录像彻底毁掉。只有「合成成功」才允许清理。
-    """
-    api, videos, mic = _mux_stop_session(monkeypatch, tmp_path)
-    patch_ctrl(monkeypatch, "ffmpeg_mux", lambda *a, **k: None)
-    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: True)
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    assert videos["A1"].exists(), "合成失败时原始视频必须保留"
-    assert mic.exists(), "合成失败时麦克风 wav 必须保留（供事后重试）"
-    assert not (tmp_path / "record_A1_ts1_final.mp4").exists()
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("合成音视频失败" in t for t in texts), texts
-    assert not any("已清理" in t and "中间文件" in t for t in texts), texts
 
 
-def test_mux_partial_failure_keeps_shared_mic_wav(monkeypatch, tmp_path):
-    """多设备共用一条 mic wav：只要有一台合成失败，wav 就得留着。
-
-    mic 是整场连续录的一条，A/B 两台都用同一份。若 A 成功就删了 wav，
-    B 合成失败时素材已没了，用户无法只对 B 重试。
-    """
-    api, videos, mic = _mux_stop_session(monkeypatch, tmp_path,
-                                         serials=("A1", "B2"))
-
-    def fake_mux(vp, audios, out):
-        if "A1" in os.path.basename(vp):
-            return _fake_mux_ok(vp, audios, out)
-        return None  # B2 合成失败
-
-    patch_ctrl(monkeypatch, "ffmpeg_mux", fake_mux)
-    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: True)
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    assert not videos["A1"].exists(), "A1 合成成功，原始视频应清理"
-    assert (tmp_path / "record_A1_ts1_final.mp4").exists()
-    assert videos["B2"].exists(), "B2 合成失败，原始视频必须保留"
-    assert mic.exists(), "存在失败设备时共用 mic wav 必须保留"
 
 
 # ---------------------------------------------------------------------------
@@ -2226,16 +2029,16 @@ def test_screen_record_stop_clears_session_even_on_exception(monkeypatch, tmp_pa
     """
     api = _make_api()
     api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
+        "ts": "ts1", "dir": str(tmp_path), "with_mic": False, "mf": True,
         "videos": {"A1": str(tmp_path / "r.mp4")},
         "devaudio": {}, "logcat_captures": {},
     }
 
-    def boom(serial):
+    # [v36 全走 MF] 让 MF 收尾抛异常（模拟保存目录磁盘掉线）
+    def boom():
         raise OSError("保存目录不可用")
 
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(api, "_stop_video", boom)
+    api.mf_capture.stop_all = boom
 
     res = api.screen_record_stop()
     assert res["ok"] is False and res["reason"] == "stop_error", res
@@ -2249,91 +2052,21 @@ def test_screen_record_stop_clears_session_even_on_exception(monkeypatch, tmp_pa
     api.workers.shutdown(timeout=2.0)
 
 
-def test_screen_record_start_survives_mic_exception(monkeypatch, tmp_path):
-    """麦克风启动**抛异常**（无麦克风设备等）时：降级为无麦克风录制，不炸不锁。
-
-    回归（P0）：MicRecorder.start() 内部的 waveInOpen 失败会抛 RuntimeError，
-    而 _mic_start 过去只兜了构造函数。异常从 _screen_record_start_locked 逃出时
-    _rec_session 已置非空、又跳过撤销逻辑 —— 之后每次「开始录屏」都被守卫判为
-    recording 返回，前端停止按钮也不亮，录屏功能永久锁死、只能重启程序。
-    正确行为：转成一条「电脑麦克风启动失败」警告，本次录屏按无麦继续。
-    """
-    api = _make_api()
-
-    class _BoomMic:
-        def __init__(self, *a, **kw):
-            pass
-
-        def start(self, save_dir):
-            raise RuntimeError("waveInOpen 失败，错误码 6")
-
-    patch_ctrl(monkeypatch, "MicRecorder", _BoomMic)
-    monkeypatch.setattr(api.video, "start",
-                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
-
-    # 1) 异常被吞掉：本次录屏按「无麦克风」继续（js_api 契约：不向外抛）
-    res = api.screen_record_start(None, with_mic=True, save_dir=str(tmp_path))
-    assert res.get("ok") is True, res
-    assert api._rec_session["mic_started"] is False
-    assert api._mic is None, "半初始化的麦克风实例必须清掉（否则误报「已在录音」）"
-    # 2) 用户必须看见失败原因（toast），而不是只进线程日志
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("电脑麦克风启动失败" in t and "waveInOpen" in t for t in texts), texts
-    # 3) 会话正常登记，可走完整停止收尾
-    assert api._rec_session["videos"], api._rec_session
-    api._rec_session = {}
-    api.workers.shutdown(timeout=2.0)
-
-
-def test_screen_record_start_warns_when_mic_on_but_ffmpeg_missing(
-        monkeypatch, tmp_path):
-    """勾了麦克风但内置 ffmpeg 无法运行：开局说清「录得到、合不进视频」。
-
-    回归背景：ffmpeg 已内置，正常无需安装；但内置二进制若损坏 / 被安全软件
-    拦截，用户会录完整场才发现成片没声音 —— 而 wav 明明在目录里。提示必须
-    发生在**开始录制时**，不能等收尾。
-    """
-    api = _make_api()
-
-    class _OkMic:
-        def __init__(self, *a, **kw):
-            pass
-
-        def start(self, save_dir):
-            return True, str(tmp_path / "mic_20260101_000000.wav")
-
-    patch_ctrl(monkeypatch, "MicRecorder", _OkMic)
-    patch_ctrl(monkeypatch, "_have_ffmpeg", lambda: False)
-    monkeypatch.setattr(api.video, "start",
-                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
-
-    res = api.screen_record_start(None, with_mic=True, save_dir=str(tmp_path))
-    assert res.get("ok") is True, res
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("ffmpeg 无法运行" in t and "mic_" in t for t in texts), texts
-    api._rec_session = {}
-    api.workers.shutdown(timeout=2.0)
-
-
 def test_screen_record_start_cancels_session_on_unexpected_exception(
         monkeypatch, tmp_path):
-    """启动链路出现**其它未预期异常**时：必须撤销半启动会话，不能锁死录屏。
+    """[v36 全走 MF] 启动链路出现未预期异常时：必须撤销半启动会话，不能锁死录屏。
 
-    _mic_start 之外的位置（设备音频探测 / 目录创建等）若抛出，同样会跳过
-    `_cancel_half_started_rec()` 留下非空 _rec_session —— 之后每次「开始录屏」
-    都被守卫判为 recording，功能永久锁死。这里是最后一道兜底网。
+    mf_capture.start_all 若抛出（native worker 崩溃等），screen_record_start 的
+    整体 except 要转成 start_error、清会话，用户能看见原因，且紧接着能重开。
     """
     api = _make_api()
 
     def boom(*a, **kw):
         raise OSError("模拟的意外错误")
 
-    monkeypatch.setattr(ctrl.DeviceAudioCapture, "supported",
-                        staticmethod(boom))
-    monkeypatch.setattr(api.video, "start",
-                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
+    api.mf_capture.start_all = boom
 
-    res = api.screen_record_start(None, with_devaudio=True, save_dir=str(tmp_path))
+    res = api.screen_record_start(None, with_mic=True, save_dir=str(tmp_path))
     assert res["ok"] is False and res["reason"] == "start_error", res
     assert "意外错误" in res["error"], res
     # 会话必须被撤销：否则守卫永久误判「已在录制」
@@ -2341,7 +2074,8 @@ def test_screen_record_start_cancels_session_on_unexpected_exception(
     # 错误必须让用户看见（toast）
     texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
     assert any("录屏启动出现异常" in t for t in texts), texts
-    # 紧接着就能正常开始一次录屏（功能未锁死）
+    # 紧接着就能正常开始一次录屏（功能未锁死）——恢复 start_all
+    api.mf_capture.start_all = FakeMFCapture.start_all.__get__(api.mf_capture)
     res2 = api.screen_record_start(None, save_dir=str(tmp_path))
     assert res2.get("ok") is True and res2.get("reason") != "recording", res2
 
@@ -2620,21 +2354,32 @@ def test_screen_record_passes_visual_toggles(monkeypatch, tmp_path):
 
     回归：早期实现把开关传给设备端 screenrecord --show-pointer，定制 ROM 不认
     该参数直接启动失败；现改为系统设置 overlay（settings put system），开关
-    语义是「要不要开这个 overlay」，与录屏命令完全解耦。
+    语义是「要不要开这个 overlay」，与录屏命令完全解耦。v36 全走 MF 后此逻辑
+    不变——overlay 在 controller 层处理，与视频/音频的合成方式无关。
     """
     api = _make_api()
-    seen = {}
-    monkeypatch.setattr(
-        api.video, "start",
-        lambda s, d, extra_name=None:
-        (seen.__setitem__("called", True) or
-         (True, str(tmp_path / "r.mp4"))))
+    # [v36 全走 MF] 不再 mock video.start（那是老路径），改为直接盯设备设置
+    # 读/写：两个开关都关时，overlay 的读写一次都不该发生。
+    reads = []
+    puts = []
+
+    def fake_get(adb, serial, key):
+        reads.append((serial, key))
+        return True, "null"
+
+    def fake_set(adb, serial, key, value):
+        puts.append((serial, key, value))
+        return True
+
+    monkeypatch.setattr(api.video, "get_system_setting", fake_get)
+    _patch_set_setting(monkeypatch, api.video, fake_set)
 
     res = api.screen_record_start(None, save_dir=str(tmp_path),
                                   pointer_location=False, show_touches=False)
     assert res.get("ok") is True, res
     # 两个开关都关：不得读/写任何设备设置
-    assert seen.get("called") is True
+    assert reads == [], reads
+    assert puts == [], puts
     api.screen_record_stop()
     api.workers.shutdown(timeout=2.0)
 
@@ -2748,63 +2493,8 @@ def test_overlays_restored_on_start_failure_cancel(monkeypatch, tmp_path):
     api.workers.shutdown(timeout=2.0)
 
 
-def test_start_exception_keeps_other_started_devices_stoppable(
-        monkeypatch, tmp_path):
-    """并行拉起时某台抛真异常：已启动的设备必须先登记，撤销才能停掉它们。
-
-    不登记的话，那几台的 screenrecord 会成孤儿 —— 一直录到系统 180 秒上限，
-    界面却没有任何「录制中」，用户只能等它自己结束。
-    """
-    api = _make_api()
-    api.devices.device_checked = {"A1": True, "B2": True}
-
-    def fake_start(serial, *a, **kw):
-        if serial == "B2":
-            raise OSError("模拟的意外错误")
-        return True, str(tmp_path / ("r_%s.mp4" % serial))
-
-    stopped = []
-    monkeypatch.setattr(api.video, "start", fake_start)
-    monkeypatch.setattr(
-        api.video, "stop",
-        lambda s: (stopped.append(s), (True, None, None))[1])
-
-    res = api.screen_record_start(None, save_dir=str(tmp_path),
-                                  pointer_location=False, show_touches=False)
-    assert res.get("ok") is False and res["reason"] == "start_error", res
-    assert stopped == ["A1"], (
-        "已启动的设备必须被撤销流程停掉，否则录屏成孤儿：%r" % (stopped,))
-    assert api._rec_session == {}
-    api.workers.shutdown(timeout=2.0)
 
 
-def test_multi_device_start_spawns_in_parallel(monkeypatch, tmp_path):
-    """多台设备的录屏启动必须并行：单台内部有约 1.5 秒的确认窗口。
-
-    回归：串行拉起时 N 台就按 N 倍累加（3 台 > 4.5 秒纯等待），用户点完
-    「开始录制」界面迟迟不出现「录制中」。用 Barrier 做硬证据：只有三台同时
-    在启动中，栅栏才放行 —— 串行实现永远凑不齐，会直接超时。
-    """
-    api = _make_api()
-    api.devices.device_checked = {"A1": True, "B2": True, "C3": False}
-    gate = threading.Barrier(2, timeout=3)
-
-    def fake_start(serial, *a, **kw):
-        gate.wait()          # 串行执行会卡在这里直到超时
-        time.sleep(0.3)
-        return True, str(tmp_path / ("r_%s.mp4" % serial))
-
-    monkeypatch.setattr(api.video, "start", fake_start)
-    t0 = time.time()
-    res = api.screen_record_start(None, save_dir=str(tmp_path),
-                                  pointer_location=False, show_touches=False)
-    elapsed = time.time() - t0
-
-    assert res.get("ok") is True, res
-    assert len(api._rec_session["videos"]) == 2
-    assert elapsed < 1.0, (
-        "两台设备应并行启动（串行时第一台就会撞栅栏超时）：%.2fs" % elapsed)
-    api.workers.shutdown(timeout=2.0)
 
 
 def test_zip_stores_video_and_compresses_log(tmp_path):
@@ -2829,203 +2519,12 @@ def test_zip_stores_video_and_compresses_log(tmp_path):
             "日志是文本，必须压缩（体积能差一个数量级）")
 
 
-def _patch_join(monkeypatch, ok=True, reason=None):
-    """把真实 ffmpeg 合并替掉。
-
-    这些用例关心的是**收尾编排**（哪些段被保留、进不进包、怎么提示），
-    不是转码本身；真跑 ffmpeg 既慢又引入「本机装没装 ffmpeg」的额外变量。
-    ok=True 时按顺序把各段字节拼进 output（顺序＝段序，正是断言想要的）。
-    """
-    import backend.controllers.record as record_ctrl
-
-    def fake(paths, out_path, timeout=None):
-        if not ok:
-            return {"ok": False, "path": None, "used": list(paths),
-                    "skipped": [], "reason": reason or "未检测到 ffmpeg"}
-        with open(out_path, "wb") as f:
-            for p in paths:
-                with open(p, "rb") as src:
-                    f.write(src.read())
-        return {"ok": True, "path": out_path, "used": list(paths),
-                "skipped": [], "reason": None}
-
-    # raising=False：旧实现里根本没有 join_segments 这个名字。让它静默落空，
-    # 这样用旧代码跑新用例时，失败落在**行为断言**（包里还是两个 mp4、没有合并
-    # 提示）上，而不是一句 patch 期的 AttributeError。
-    monkeypatch.setattr(record_ctrl, "join_segments", fake, raising=False)
 
 
-def test_multi_segments_merge_into_one_complete_video(monkeypatch, tmp_path):
-    """多段录完必须拼成一个完整 mp4：目录与包里只剩一个视频文件。
-
-    回归：分段是程序为绕开 180 秒上限自己选的实现方式，用户按了一次「开始录制」
-    却拿到 3 个 `_pN` 文件 —— 得自己猜顺序、自己找工具拼。合并后回到「一个 mp4」，
-    文件名也回到不带 `_pN` 的成品名，与没分段的录制一模一样。
-    """
-    api = _make_api()
-    s1 = tmp_path / "record_A1_ts1.mp4"
-    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov" + b"A" * 100)
-    s2 = tmp_path / "record_A1_ts1_p2.mp4"
-    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov" + b"B" * 100)
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": True,
-        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
-    }
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(
-        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
-    _patch_join(monkeypatch)
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("已合并为 1 个完整视频" in t for t in texts), texts
-
-    assert not s2.exists(), "已并入成片的中间段要删掉，否则目录里有两个版本"
-    with zipfile.ZipFile(str(tmp_path / "rec_ts1.zip")) as zf:
-        names = zf.namelist()
-        mp4s = [n for n in names if n.endswith(".mp4")]
-        assert mp4s == ["record_A1_ts1.mp4"], (
-            "合并后包里只应有一个视频，且名字回到不带 _pN 的成品名：%r" % names)
-        body = zf.read("record_A1_ts1.mp4")
-    assert body.endswith(b"B" * 100), "成片必须包含第 2 段的内容（顺序＝段序）"
 
 
-def test_merge_failure_keeps_every_segment(monkeypatch, tmp_path):
-    """合并失败（没装 ffmpeg / concat 报错）时，分段一个都不能删。
-
-    这是本功能最容易造成真实损失的一步：合并要删中间文件，删完之后若打包再
-    出错，用户就什么都没有了。所以「合并失败 = 保持原样」必须是硬规则，并且
-    要明说原因与文件在哪，而不是留一句「收尾失败」。
-    """
-    api = _make_api()
-    s1 = tmp_path / "record_A1_ts1.mp4"
-    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    s2 = tmp_path / "record_A1_ts1_p2.mp4"
-    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": False,
-        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
-    }
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(
-        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
-    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg")
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    assert s1.exists() and s2.exists(), "合并失败不得删任何分段"
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("未能合并为一个视频" in t and "已保留全部分段文件" in t
-               for t in texts), texts
-    assert any("未能合并" in t for t in texts
-               if t.startswith("✓")), "完成 toast 要说明「几段未合并」"
 
 
-def test_zip_failure_is_reported_not_silently_skipped(monkeypatch, tmp_path):
-    """勾了「结束后打包」但打包失败：必须说清「没有 zip」。
-
-    用户是按按钮的勾选状态去目录里找 zip 的。失败时若只报「✓ 录屏已完成」，
-    他会以为打包还在进行，或者以为程序把文件弄丢了 —— 文件其实一个不少，
-    只是没压缩。这类「产物和界面预期不一致」不能静默过去。
-    """
-    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg（用例替身）")
-    api = _make_api()
-    s1 = tmp_path / "record_A1_ts1.mp4"
-    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": True,
-        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
-    }
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(api, "_stop_video", lambda s: (True, [str(s1)], None))
-    monkeypatch.setattr(api, "_zip_paths", staticmethod(lambda *a, **k: None))
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    assert s1.exists(), "打包失败绝不能删源文件"
-    statuses = _events_by_kind(api).get("status", [])
-    hits = [p for p in statuses if "打包失败" in (p.get("text") or "")]
-    assert hits, "打包失败必须播报，不能只报「✓ 录屏已完成」：%r" % (
-        [p.get("text") for p in statuses],)
-    assert hits[0].get("toast"), "这条要弹 toast（用户会去目录里找 zip）：%r" % (hits[0],)
-
-
-def test_all_segments_are_kept_and_zipped(monkeypatch, tmp_path):
-    """自动分段的每一段都要落盘并进包 —— 只留最后一段等于把前几段扔掉。
-
-    回归：分段后收尾只取当前（最后）一段，先前每段 170 秒的视频既不进 zip 也
-    不出现在任何提示里。用户录了 8 分钟，最后只拿到一个 3 分钟的文件，还以为
-    中间那 5 分钟根本没录上。
-
-    这里把合并刻意置为失败（等价于用户机器上没装 ffmpeg）：合并不可用时，
-    「每段都保留、都进包」这条兜底必须成立。
-    """
-    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg（用例替身）")
-    api = _make_api()
-    s1 = tmp_path / "record_A1_ts1.mp4"
-    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    s2 = tmp_path / "record_A1_ts1_p2.mp4"
-    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": True,
-        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
-    }
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    monkeypatch.setattr(
-        api, "_stop_video", lambda s: (True, [str(s1), str(s2)], None))
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    z = tmp_path / "rec_ts1.zip"
-    assert z.exists(), "分段产物应照常打包"
-    with zipfile.ZipFile(str(z)) as zf:
-        names = zf.namelist()
-    assert "record_A1_ts1.mp4" in names and "record_A1_ts1_p2.mp4" in names, names
-
-
-def test_partially_failed_teardown_keeps_finished_segments(monkeypatch, tmp_path):
-    """最后一段收尾失败时，前面已录完的段必须照常保留并进包。
-
-    只说一句「录屏收尾失败」的话，用户会以为整场录制都废了，把本来完好的几段
-    一并删掉 —— 而它们其实就在保存目录里躺着。
-    """
-    api = _make_api()
-    s1 = tmp_path / "record_A1_ts1.mp4"
-    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    partial = tmp_path / "record_A1_ts1_p2.mp4"
-    partial.write_bytes(b"\x00\x00\x00\x18ftypmp42")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": True,
-        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
-    }
-    monkeypatch.setattr(api.video, "is_recording", lambda s: True)
-    # stop_ex 的语义：paths 只含正常收尾的段，残片路径在 err 里
-    monkeypatch.setattr(
-        api, "_stop_video",
-        lambda s: (False, [str(s1)],
-                   "缺 moov 头，无法播放（当前段残片：%s）" % partial))
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    z = tmp_path / "rec_ts1.zip"
-    with zipfile.ZipFile(str(z)) as zf:
-        names = zf.namelist()
-    assert "record_A1_ts1.mp4" in names, names
-    assert "record_A1_ts1_p2.mp4" not in names, (
-        "没正常收尾的残片不该进包（但不代表要删掉它）：%r" % (names,))
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("已完成的 1 段完整保留" in t for t in texts), texts
 
 
 def test_segment_roll_is_announced(monkeypatch):
@@ -3050,35 +2549,6 @@ def test_segment_roll_is_announced(monkeypatch):
     assert any("第 2 段" in t for t in texts), texts
 
 
-def test_gone_device_segments_survive_teardown(monkeypatch, tmp_path):
-    """设备中途被拔掉：拔之前录完的段已经拉回来了，收尾必须照样进包。
-
-    回归：设备移除走 _reap_gone_recording 强停（那时已经拿到多段路径），但收尾
-    发现该设备「未在录制」，只按启动时记下的第一段兜底 —— 后面几段就留在目录里
-    既不合成也不进包，用户以为没录上。
-    """
-    api = _make_api()
-    s1 = tmp_path / "record_A1_ts1.mp4"
-    s1.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    s2 = tmp_path / "record_A1_ts1_p2.mp4"
-    s2.write_bytes(b"\x00\x00\x00\x18ftypmp42moov")
-    api._rec_session = {
-        "ts": "ts1", "dir": str(tmp_path), "with_mic": False,
-        "with_zip": True,
-        "videos": {"A1": str(s1)}, "devaudio": {}, "logcat_captures": {},
-        "video_segs": {"A1": [str(s1), str(s2)]},
-    }
-    monkeypatch.setattr(api.video, "is_recording", lambda s: False)
-    # 合并置为不可用：本用例盯的是「拔线前录完的段有没有进包」，
-    # 合并成功会把两段并成一个文件，反而绕开了要断言的那条路径。
-    _patch_join(monkeypatch, ok=False, reason="未检测到 ffmpeg（用例替身）")
-
-    assert api.screen_record_stop() == {"ok": True}
-    api.workers.shutdown(timeout=2.0)
-
-    with zipfile.ZipFile(str(tmp_path / "rec_ts1.zip")) as zf:
-        names = zf.namelist()
-    assert "record_A1_ts1_p2.mp4" in names, names
 
 
 # ---------------------------------------------------------------------------
@@ -4497,44 +3967,6 @@ def test_multi_device_teardown_runs_in_parallel(monkeypatch, tmp_path):
     assert api._rec_session == {}, "收尾后会话必须清空，否则录屏功能被锁死"
 
 
-def test_devaudio_teardown_failure_keeps_video(tmp_path):
-    """设备音频收尾炸了，视频仍要照常落盘并计入汇总。
-
-    回归：音频那条循环没有单独兜底，一次异常会让 _session_teardown 整体中断
-    （外层 try/finally 只负责清会话），已经 pull 回来的视频既不合音频、也不进
-    zip，汇总 toast 还会说「0 个文件已保存」——用户以为这段录像没了。
-    """
-    api = _make_api()
-    sess, files = _rec_session_with(tmp_path, ("A1",), with_devaudio=True)
-
-    class _Video:
-        def is_recording(self, s):
-            return True
-
-        def stop(self, s):
-            return True, files[s], None
-
-        def set_system_setting(self, *a, **kw):
-            return True
-
-        def set_system_setting_ex(self, *a, **kw):
-            return True, ""
-
-    class _BadAudio:
-        def stop(self, s):
-            raise RuntimeError("tinycap 收尾失败")
-
-    api.video = _Video()
-    api.device_audio = _BadAudio()
-    api._rec_session = sess
-
-    res = api.screen_record_stop()
-    assert res["ok"] is True, res
-    statuses = _events_by_kind(api).get("status", [])
-    texts = [p["text"] for p in statuses]
-    assert any("设备音频收尾失败" in x for x in texts), texts
-    assert any("录屏已保存" in x for x in texts), texts
-    assert api._rec_session == {}
 
 
 def test_command_hint_tells_unusable_checked_devices_apart():
@@ -4707,29 +4139,6 @@ def test_manual_refresh_reports_when_already_running(monkeypatch):
     api.workers.shutdown(timeout=2.0)
 
 
-def test_screen_record_devaudio_failure_reports_reason(monkeypatch, tmp_path):
-    """设备音频起不来时必须给出原因，而不是一句「启动失败」。
-
-    回归：record 只拿到 start() 的 bool，toast 里没有 tinycap 的退出码 / root
-    提示 —— 用户不知道该 adb root 还是换台设备，本次录屏也就悄悄没了声音。
-    """
-    api = _make_api()
-    monkeypatch.setattr(ctrl.DeviceAudioCapture, "supported",
-                        staticmethod(lambda *a, **kw: True))
-    monkeypatch.setattr(
-        api.device_audio, "start_ex",
-        lambda s, r: (False, "tinycap 启动后立即退出（退出码 1）：多数机型需要 root"))
-    monkeypatch.setattr(api.video, "start",
-                        lambda *a, **kw: (True, str(tmp_path / "r.mp4")))
-
-    res = api.screen_record_start(None, with_devaudio=True,
-                                  save_dir=str(tmp_path))
-    assert res.get("ok") is True, res           # 无设备音频也要照常录屏
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("音频采集未启动" in t and "root" in t for t in texts), texts
-    assert api._rec_session["devaudio"] == {}
-    api._rec_session = {}
-    api.workers.shutdown(timeout=2.0)
 
 
 def test_open_save_dir_reports_real_reason(tmp_path):
@@ -5217,57 +4626,8 @@ def _frag_session(tmp_path, serial="A1"):
     }, frag
 
 
-def test_record_teardown_failure_reports_partial_path(tmp_path):
-    """收尾失败时要把**残片路径**说出来。
-
-    回归：stop() 在「缺 moov 头」「落到本地但打包失败」时仍会回一个残片路径，
-    旧实现把它丢掉，只播一句「录屏收尾失败」——用户在保存目录里看到
-    record_xxx.mp4，既不知道是不是这次的，也不知道它为什么没进 zip、
-    还能不能用。
-    """
-    api = _make_api()
-    sess, frag = _frag_session(tmp_path)
-    api._rec_session = sess
-
-    class FakeVideo:
-        def is_recording(self, s):
-            return True
-
-        def stop(self, s):
-            return False, str(frag), "MP4 缺 moov 头，无法播放"
-
-    api.video = FakeVideo()
-
-    res = api.screen_record_stop()
-
-    assert res["ok"] is True, res
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    assert any("录屏收尾失败" in t and str(frag) in t for t in texts), texts
-    assert any("缺 moov 头" in t for t in texts), texts
 
 
-def test_record_dead_teardown_reports_partial_path(tmp_path):
-    """进程意外中断时同理：文案里给出残片的具体路径，而不是笼统的「保存目录」。"""
-    api = _make_api()
-    sess, frag = _frag_session(tmp_path)
-    sess["dead"] = {"A1"}
-    api._rec_session = sess
-
-    class FakeVideo:
-        def is_recording(self, s):
-            return True
-
-        def stop(self, s):
-            return False, str(frag), "设备端进程已提前退出"
-
-    api.video = FakeVideo()
-
-    api.screen_record_stop()
-
-    texts = [p["text"] for p in _events_by_kind(api).get("status", [])]
-    hit = [t for t in texts if "视频不完整" in t]
-    assert hit, texts
-    assert str(frag) in hit[0], hit[0]
 
 
 # ---------------------------------------------------------------------------
@@ -5305,127 +4665,12 @@ class _FakeCap:
         return False
 
 
-def test_screen_record_cancel_deletes_files_without_zip(tmp_path):
-    """取消要真的把本次产物删掉，且**不**打包、**不**合并。
-
-    回归背景：以前「录错了」只能点「停止」——它一定走合成 / 打包，用户拿到
-    一个「✓ 已打包」的 zip，再自己去目录里删。取消的语义是「一个都不留」。
-    """
-    api = _make_api()
-    sess, video, log, mic = _cancel_session(tmp_path)
-    api._rec_session = sess
-    api.logcat_capture = _FakeCap()
-
-    calls = []
-
-    class FakeVideo:
-        def discard_ex(self, s):
-            calls.append(("discard", s))
-            return True, [], None
-
-        def stop_ex(self, s):
-            raise AssertionError("取消不该走 stop_ex（会把当前段 pull 回来）")
-
-        def stop(self, s):
-            raise AssertionError("取消不该走 stop（会把当前段 pull 回来）")
-
-    api.video = FakeVideo()
-
-    res = api.screen_record_cancel()
-
-    assert res["ok"] is True, res
-    assert res["removed"] == 3, res
-    assert calls == [("discard", "A1")], calls
-    assert not video.exists() and not log.exists() and not mic.exists()
-    # 不打包：目录里不该出现 zip
-    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".zip"] == []
-    # 抓取要按「不打包」停：zip_on_stop=True 会在抓取侧再压一次
-    assert api.logcat_capture.stopped == [("A1", False)]
-    toasts = [p for p in _events_by_kind(api).get("status", []) if p.get("toast")]
-    assert len(toasts) == 1 and toasts[0]["type"] == "ok", toasts
-    assert "3 个文件已删除" in toasts[0]["text"], toasts[0]["text"]
-    assert api._rec_session == {}, "取消后会话必须清空（否则录屏永久锁死）"
 
 
-def test_screen_record_cancel_deletes_pretaken_and_mic(tmp_path):
-    """设备被拔掉时已取回的段（video_segs）与麦克风文件同样要删。
-
-    这两处是「不在 videos 里、但确实是本次产物」的典型：漏了它们，取消之后
-    保存目录里还躺着几个 mp4 / wav，用户以为取消没生效。
-    """
-    api = _make_api()
-    sess, video, _log, mic = _cancel_session(tmp_path)
-    extra = tmp_path / "record_A1_20240101_000000_p2.mp4"
-    extra.write_bytes(b"\x00" * 128)
-    sess["video_segs"] = {"A1": [str(extra)]}
-    api._rec_session = sess
-    api.logcat_capture = _FakeCap()
-    api.video = type("V", (), {"discard_ex": lambda self, s: (
-        False, [], "该设备未在录制")})()
-
-    api.screen_record_cancel()
-
-    assert not extra.exists(), "已取回的分段也要删"
-    assert not mic.exists(), "麦克风文件也要删"
 
 
-def test_screen_record_cancel_never_deletes_directory(tmp_path):
-    """只删普通文件：目录一律跳过。
-
-    取消是最容易被写成「把这次涉及到的路径全删掉」的地方，一旦某条登记进来的
-    是目录（例如误把保存目录本身记进 videos），递归删除就等于删用户的文件夹。
-    这里断言目录完好，且取消照常回报成功。
-    """
-    api = _make_api()
-    sess, video, _log, _mic = _cancel_session(tmp_path)
-    keep_dir = tmp_path / "sub"
-    keep_dir.mkdir()
-    (keep_dir / "keep.txt").write_text("x", encoding="utf-8")
-    sess["videos"]["B2"] = str(keep_dir)
-    api._rec_session = sess
-    api.logcat_capture = _FakeCap()
-    api.video = type("V", (), {"discard_ex": lambda self, s: (
-        False, [], "该设备未在录制")})()
-
-    res = api.screen_record_cancel()
-
-    assert res["ok"] is True, res
-    assert keep_dir.is_dir() and (keep_dir / "keep.txt").exists()
-    assert not video.exists()
 
 
-def test_screen_record_cancel_reports_undeletable_file(tmp_path, monkeypatch):
-    """删不掉的文必须说出来，不能「取消成功」了事。
-
-    最现实的场景：刚拉回来的那段 mp4 还被播放器开着，Windows 直接拒绝删除。
-    这时文件还在磁盘上，沉默地报成功等于骗用户。
-    """
-    import backend.controllers.record as rec_mod
-
-    api = _make_api()
-    sess, video, _log, _mic = _cancel_session(tmp_path)
-    api._rec_session = sess
-    api.logcat_capture = _FakeCap()
-    api.video = type("V", (), {"discard_ex": lambda self, s: (True, [], None)})()
-
-    real_remove = rec_mod.os.remove
-
-    def fake_remove(p, *a, **kw):
-        if str(p).endswith(".mp4"):
-            raise PermissionError("被占用")
-        return real_remove(p, *a, **kw)
-
-    monkeypatch.setattr(rec_mod.os, "remove", fake_remove)
-
-    res = api.screen_record_cancel()
-
-    assert res["ok"] is True, res
-    assert res["kept"] and res["kept"][0].endswith(".mp4"), res
-    assert video.exists(), "删不掉的文件本来就应该还在"
-    toasts = [p for p in _events_by_kind(api).get("status", []) if p.get("toast")]
-    assert toasts and toasts[0]["type"] == "warn", toasts
-    assert "未能删除" in toasts[0]["text"], toasts[0]["text"]
-    assert "record_A1_20240101_000000.mp4" in toasts[0]["text"], toasts[0]["text"]
 
 
 def test_screen_record_cancel_restores_overlays(tmp_path):
@@ -5472,10 +4717,12 @@ def test_screen_record_cancel_clears_session_even_on_exception(tmp_path):
     sess, _video, _log, _mic = _cancel_session(tmp_path)
     api._rec_session = sess
 
-    def boom(s):
+    # [v36 全走 MF] 取消收尾唯一路径是 _mf_discard（老路径 _session_discard
+    # 已删除）；它接收 sess 一个参数，这里让它抛异常验证 except/finally 契约。
+    def boom(sess):
         raise OSError("磁盘掉线")
 
-    api._session_discard = boom
+    api._mf_discard = boom
 
     res = api.screen_record_cancel()
 

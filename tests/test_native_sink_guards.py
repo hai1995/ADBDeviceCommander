@@ -502,7 +502,7 @@ def test_access_unit_assembled_across_native_calls():
 def test_annexb_nal_scan_does_not_truncate_tail_bytes():
     """[花屏回归·v13] NAL 扫描必须覆盖到 buffer 末尾，不能截掉尾部载荷。
 
-    本地 ffmpeg 实证：旧实现内层 `while (end + 3 <= len)` 在 buffer 末尾提前
+    本地解码实证：旧实现内层 `while (end + 3 <= len)` 在 buffer 末尾提前
     2 字节退出，17/17 条 NAL 的尾部被截 1~2 字节，切片数据损坏 → 整屏马赛克。
     修正为 `while (end < len)` 并对每个起始码判断逐项加 `end + k <= len` 守卫：
     0/17 截断、15 帧全部正常解码。此守卫锁定该扫描边界不被回退。
@@ -688,18 +688,42 @@ def test_finalize_stops_producer_then_drains_bounded():
     assert "drain_audio_queued() == 0" in code, "队列见底即提前退出"
 
 
-def test_build_id_v35():
-    """native 指纹升到 v35，真机据此确认整包含 v24~v35 全部录制/收尾修复。
+def test_build_id_v36():
+    """native 指纹升到 v36，真机据此确认整包含 v24~v36 全部录制/收尾修复。
 
-    v35 native 真语义改动（收尾卡死根治）：①SinkWriter 禁用默认节流
-    （MF_SINK_WRITER_DISABLE_THROTTLING）——WriteSample 永不阻塞 worker，
-    根治真机 6min 录制 phase=5(WriteSample-a) 卡死 271s、成片丢失；
-    ②音频时间戳门控（前置音频丢弃 + 单调非递减）；③dropped_/queue_peak_ms_
-    改原子修数据竞争。历史：v34 带外 phase 探针；v33 屏障不当唯一判据；
-    v32 adb 自愈守卫；v31 stop_all 两阶段收尾；v30 IDR 打 CleanPoint 根治花屏。
+    v36 native 真语义改动（全走 MF / 去 ffmpeg）：arate<=0 表示无音轨纯视频——
+    create() 不订阅 WASAPI、ensure_writer() 不建 AAC 轨、drain_audio() 跳过
+    排空与补静音，输出单视频流 MP4。带声路径（arate>0）行为同 v35。
+    历史：v35 收尾卡死根治（禁用 SinkWriter 默认节流 + 音频时间戳门控 +
+    dropped_/queue_peak_ms_ 原子化）；v34 带外 phase 探针；v33 屏障不当唯一
+    判据；v32 adb 自愈守卫；v31 stop_all 两阶段收尾；v30 IDR 打 CleanPoint。
     """
     src = _cpp()
-    assert 'kBuildId = "mf-20261126-throttle-v35"' in src, "native 指纹须为 v35"
+    assert 'kBuildId = "mf-20261127-nofilemux-v36"' in src, "native 指纹须为 v36"
+
+
+def test_no_audio_mode_skips_subscribe_stream_and_silence():
+    """[v36 无音轨模式] arate<=0 的纯视频会话三处守卫缺一不可。
+
+    全走 MF 后未勾麦克风也必须能录（且不能"偷偷录音"）：native 约定
+    arate<=0 为无音轨。①create() 不订阅 g_audio（否则采集线程回调录音）；
+    ②ensure_writer() 不建 AAC 轨（否则空音轨 Finalize 报 0xC00D4A45）；
+    ③drain_audio() 不补静音（否则向 astream_=0 写样本 E_INVALIDARG 假失败）。
+    带声路径（arate>0）必须仍走原逻辑，故三处都是条件守卫而非无条件删除。
+    """
+    src = _cpp()
+    # ① create() 里订阅受 arate_>0 门控
+    create = src[src.index("int create(std::string& first_tmp)"):
+                 src.index("size_t drain_audio_queued()")]
+    assert "if (arate_ > 0)" in create and "g_audio.subscribe(this)" in create
+    # ② ensure_writer() 里 config_audio_stream 受 arate_>0 门控
+    ew = src[src.index("HRESULT ensure_writer(std::string& first_tmp_out)"):
+             src.index("HRESULT config_video_stream()")]
+    assert "if (arate_ > 0)" in ew and "config_audio_stream()" in ew
+    # ③ drain_audio() 开头 arate_<=0 直接返回
+    da = src[src.index("int drain_audio()"):
+             src.index("int finalize(std::string& published)")]
+    assert "if (arate_ <= 0) return 0" in da
 
 
 def test_diag_phase_probe_is_out_of_band():

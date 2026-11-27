@@ -780,8 +780,8 @@
      后端请求仍可能在跑（对于 refresh 等后台操作，后端会通过事件总线推送
      结果，不受超时影响）。某些长操作应显式传 timeout=0 禁用超时：
      · take_events —— 只是从 deque 取事件，正常情况下微秒级返回；
-     · screen_record_stop / screen_record_cancel —— 收尾链路（拉视频 /
-       ffmpeg 合并 / 打包）远超 15 秒，超时只会制造「假失败 + 真成功」并存的
+     · screen_record_stop / screen_record_cancel —— 收尾链路（停 native 会话 /
+       等成片落盘 / 打包）远超 15 秒，超时只会制造「假失败 + 真成功」并存的
        报错，还会提前解锁按钮；后端各步有界、promise 必然落定，不怕等。 */
   const API_TIMEOUT_S = 15;
 
@@ -8638,13 +8638,13 @@
       pushStatus("info", "⏹ 正在停止录屏并收尾（停止设备端 → 拉取视频 → 打包），请稍候…");
       let res = null;
       try {
-        /* timeout=0：收尾链路是「停设备端 → 等写回 moov → 拉视频 → ffmpeg 合并
-           → 打包 zip」，多段大视频 + 慢 USB 时远超 15 秒。默认超时会让前端先报
-           一条「请求超时（15s）」的假失败（后端其实还在跑、最终会成功），还会
+        /* timeout=0：收尾链路是「停 native 会话 → 等成片落盘 → 打包 zip」，
+           长视频 finalize + 慢磁盘时远超 15 秒。默认超时会让前端先报一条
+           「请求超时（15s）」的假失败（后端其实还在跑、最终会成功），还会
            提前解锁按钮 —— 此时用户再点「开始录制」会撞上后端还没清完的会话。
-           后端全程通过事件总线推送各阶段进度（拉取 / 合并 / 打包），且整条链路
-           各步都有界（moov 等待、pull 重试、ffmpeg 自身退出），promise 一定会
-           落定，禁用超时不会挂死 UI。 */
+           后端全程通过事件总线推送各阶段进度（收尾 / 打包），且整条链路
+           各步都有界（finalize 超时、写盘），promise 一定会落定，禁用超时
+           不会挂死 UI。 */
         res = await callApi(api.screen_record_stop(), 0);
       } finally {
         setRecInFlight(false);

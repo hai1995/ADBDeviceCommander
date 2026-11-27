@@ -863,7 +863,7 @@ def test_native_dll_is_embedded_at_bundle_root(tmp_path, monkeypatch):
 
 
 def test_no_native_dll_still_builds(monkeypatch):
-    """没编译 native 扩展时仍能打包（回退 ffmpeg 兜底），不硬失败。"""
+    """没编译 native 扩展时仍能打包（该包录屏功能不可用），不硬失败。"""
     monkeypatch.setattr(build, "bundled_native_dll", lambda: None)
     args = build.pyinstaller_args(_args())
     add_binaries = [args[i + 1] for i, x in enumerate(args) if x == "--add-binary"]

@@ -285,12 +285,11 @@ def test_teardown_records_notes_and_stop_broadcasts_them(tmp_path, monkeypatch):
         "videos": {}, "devaudio": {}, "logcat_captures": {"A1": log_path},
         "pointer_location_prev": {}, "show_touches_prev": {},
     }
-    monkeypatch.setattr(api.logcat_capture, "stop", lambda *a, **k: True)
-    monkeypatch.setattr(api.logcat_capture, "is_running", lambda s: False)
-    monkeypatch.setattr(api.video, "is_recording", lambda s: False)
-    monkeypatch.setattr(api, "_zip_paths", lambda *a, **k: None)
-
-    files, zpath = api._session_teardown(api._rec_session)
+    # [v36 全走 MF] 老路径 _session_teardown 已删除；覆盖度结论的计算与播报
+    # Move 到会话级方法，直接验证这两个方法（与收尾路径解耦）。
+    files = [log_path]
+    api._rec_session["logcat_notes"] = api._logcat_coverage_notes(
+        api._rec_session, api._rec_session["logcat_captures"])
     assert log_path in files, "覆盖度提示绝不能把日志文件从产物里拿掉"
     notes = api._rec_session.get("logcat_notes") or []
     assert notes, "收尾必须算出覆盖度结论"

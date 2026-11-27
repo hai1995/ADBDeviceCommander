@@ -3,13 +3,13 @@ backend.mf_capture_service —— 同源录屏编排（adb 裸 H264 流 + native
 ================================================================================
 把两台设备各自的一条 adb `exec-out screenrecord --output-format=h264 -` 流，
 接到 native 的一个 `adc_session`（SinkWriter，H264+AAC 同源写入）里；麦克风
-由 native 内部 WASAPI 采集并广播给所有会话。直接产出带声 MP4，无 ffmpeg
-后处理。
+由 native 内部 WASAPI 采集并广播给所有会话。直接产出带声 MP4，无第三方后处理。
+未勾选麦克风时 native 走无音轨模式（arate=0，不订阅 WASAPI、不建 AAC 轨），
+产出纯视频 MP4——录屏全路径自 v36 起统一由本模块承担，不再有其它兜底。
 
 职责边界：
   * 本模块只管"视频流 → native session"这条数据通路与会话生命周期；
   * 设备选择 / overlay / logcat / 打包 / 状态文案仍由 controller 负责；
-  * ffmpeg 合成代码原样保留作兜底，本模块不修改、不优化它。
 
 沙箱/单测（Linux、无 dll）：`MFCaptureService(available=False)` 走纯 Python
 替身，记录调用序列供断言；真机由 backend.mf_native.MFNative 驱动。
@@ -63,9 +63,8 @@ MF_RESTART_MAX = 20
 # [v25 单文件完整录制] native 每 170s 的墙钟切段（ADC_ROTATE_PENDING）初衷是
 # 配合旧架构「screenrecord 180s 退出即断流」——每段对应一次进程生命周期。v24
 # 续流后视频流全程连续、同一个 SinkWriter 可持续写，切段反而把一条连续流切成
-# p1/p2 多文件；而 MF 路径从不合并（ffmpeg 已不随包发布），完成提示只能显示
-# 「N 段视频，未能合并」。默认忽略切段请求、整场写单个 writer，finalize 自然
-# 产出 1 个从头到尾的带声 MP4。置 False 可恢复分段（诊断/回退用）。
+# p1/p2 多文件。默认忽略切段请求、整场写单个 writer，finalize 自然产出 1 个
+# 从头到尾的完整 MP4（无拼接、无缺口）。置 False 可恢复分段（诊断用）。
 MF_SINGLE_FILE = True
 # [修复-长录制收尾·v17] 排空连续失败次数只作诊断统计（写入 stats），不再是
 # 停止排空的阈值。旧实现达阈值就 break + 记 _error，长录制下把 worker 繁忙
@@ -157,9 +156,15 @@ class MFCaptureSession:
 
     # ---- 启动 ----------------------------------------------------------
     def start(self):
-        """返回 (ok, 错误原因)。同步等首字节，秒退立即报错。"""
+        """返回 (ok, 错误原因)。同步等首字节，秒退立即报错。
+
+        [v36 无音轨模式] mic_fmt=None 表示纯视频录制：给 native 传 arate=0，
+        native 据此不订阅 WASAPI、不建 AAC 轨、不补静音，产出单视频流 MP4。
+        带声路径 mic_fmt=(rate,bits,ch) 行为与 v35 完全一致。
+        """
         self._read_done.clear()   # 防御会话复用：每次 start 重置读线程完成信号
-        arate, abits, ach = self.mic_fmt
+        # arate<=0 是 native 约定的"无音轨"信号（见 adc_mf_sink.cpp v36）。
+        arate, abits, ach = self.mic_fmt if self.mic_fmt else (0, 0, 0)
         # [EDR 误报缓解] native 只在 work_dir 里写 .tmp.mp4 / 改名 / 删除，
         # 用户保存目录不再出现"高熵半成品写入 → 改名 → 批量删"的勒索特征信号。
         native_dir = self.work_dir or self.save_dir
@@ -202,11 +207,14 @@ class MFCaptureSession:
         # [修复-真机 overflow] 启动音频排空定时器：每 200ms 经 worker 线程主动
         # 排空 native 音频队列。这样即使 screenrecord 的 H264 流稀疏/中断、
         # write_video 几乎不被调用，音频也持续写入 SinkWriter，不会积压溢出。
-        self._drain_stop.clear()
-        self._drain_thread = threading.Thread(
-            target=self._drain_loop, daemon=True,
-            name=f"mf-audio-drain-{safe_name(self.serial)}")
-        self._drain_thread.start()
+        # [v36 无音轨模式] 纯视频会话没有音频队列，不启定时器（省一次每 200ms
+        # 的 worker 调用，也避免对单视频流会话做无意义的 drain）。
+        if self.mic_fmt:
+            self._drain_stop.clear()
+            self._drain_thread = threading.Thread(
+                target=self._drain_loop, daemon=True,
+                name=f"mf-audio-drain-{safe_name(self.serial)}")
+            self._drain_thread.start()
         return True, ""
 
     def _drain_loop(self):
@@ -283,8 +291,8 @@ class MFCaptureSession:
                                 # false，所以忽略这一次后整场不再请求切段，后续帧
                                 # 继续写同一个 SinkWriter。时间戳基准（视频从 0
                                 # 累加、音频相对 seg_start_hns_）在单段下天然对齐，
-                                # finalize 直接产出 1 个完整带声 MP4，无需 ffmpeg。
-                                # 只有显式关闭 MF_SINGLE_FILE（诊断/回退）才切段。
+                                # finalize 直接产出 1 个完整 MP4。
+                                # 只有显式关闭 MF_SINGLE_FILE（诊断）才切段。
                                 if need_rotate:
                                     if MF_SINGLE_FILE:
                                         self._stats["rotate_skipped"] = \
@@ -629,8 +637,8 @@ class MFCaptureSession:
     def _has_moov(self, path):
         """[成片抢救 v34] 判断 MP4 是否已写入 moov atom（= 已 Finalize、可播放）。
 
-        与 video_join._has_moov 同判据：moov 在文件尾部，只扫头/尾各 4MB，长路径
-        安全。无 moov 的 .tmp.mp4 是未 Finalize 的半成品，绝不能当用户产物。
+        判据：moov 在文件尾部，只扫头/尾各 4MB，长路径安全。无 moov 的
+        .tmp.mp4 是未 Finalize 的半成品，绝不能当用户产物。
         """
         try:
             lpath = long_path(path)
@@ -886,62 +894,68 @@ class MFCaptureService:
         except Exception:  # noqa: BLE001  测试替身/老封装无此接口时降级为空
             return ""
 
-    def start_all(self, serials, save_dir, stems, sizes, mic_endpoint=None):
+    def start_all(self, serials, save_dir, stems, sizes, mic_endpoint=None,
+                  with_audio=True):
         """启动全部设备会话；任一失败撤销全部，返回 (ok, 原因, 首路径映射)。
 
         `stems`/`sizes` 是与 serials 等长的序列或 serial->值 的字典。
+        [v36 全走 MF] with_audio=False 表示纯视频录制：不启动 WASAPI 麦克风、
+        不校验音频格式，给会话传 mic_fmt=None（→ native arate=0 无音轨模式）。
+        默认 True 保持既有带声调用方零改动。
         """
         if not self.available:
             return False, self.error or "同源录制不可用", {}
         worker = self.native.start_worker()
-        # 麦克风：native 内部采集；先启动并用其回读的真实格式建会话。
-        # [修复] 失败路径必须与下方 mic_format 失败分支一样停掉 worker：
-        # worker 是常驻 MTA 线程（已 MFStartup）。这里若直接 return，controller
-        # 侧因会话尚未登记不会调 stop_all/cancel_all，worker 会一直挂到进程退出。
-        try:
-            rc = self.native.mic_start(mic_endpoint, *DEFAULT_MIC)
-            if rc != 0:
-                reason = self.native.last_error()   # 先取，stop 可能覆盖 native 末次错误
+        mic_fmt = None
+        if with_audio:
+            # 麦克风：native 内部采集；先启动并用其回读的真实格式建会话。
+            # [修复] 失败路径必须与下方 mic_format 失败分支一样停掉 worker：
+            # worker 是常驻 MTA 线程（已 MFStartup）。这里若直接 return，controller
+            # 侧因会话尚未登记不会调 stop_all/cancel_all，worker 会一直挂到进程退出。
+            try:
+                rc = self.native.mic_start(mic_endpoint, *DEFAULT_MIC)
+                if rc != 0:
+                    reason = self.native.last_error()   # 先取，stop 可能覆盖 native 末次错误
+                    worker.stop()
+                    self.native.worker = None
+                    return False, reason, {}
+                self._mic_started = True
+            except Exception as ex:  # noqa: BLE001
+                self._stop_mic()
                 worker.stop()
                 self.native.worker = None
-                return False, reason, {}
-            self._mic_started = True
-        except Exception as ex:  # noqa: BLE001
-            self._stop_mic()
-            worker.stop()
-            self.native.worker = None
-            return False, f"启动麦克风采集失败：{ex}", {}
-        # native 回读真实 mix format，顺序 (rate, bits, channels) 原样传给会话，
-        # 保证音频流媒体类型与实际采集一致（否则 Finalize 0xC00D4A45）。
-        # [修复] native 在无设备/未就绪时会报错误码，MFNative.mic_format 抛
-        # MFNativeError；这里必须接住并转成可读 reason，否则异常冒泡到
-        # controller 的 start_all 调用点（无 try）会变成 API 500。0 值同样
-        # 是非法的（会让 AddStream 失败），一并拦截。
-        try:
-            mic_fmt = self.native.mic_format()
-        except Exception as ex:  # noqa: BLE001
-            self._stop_mic()
-            worker.stop()
-            self.native.worker = None
-            return False, f"读取麦克风格式失败：{ex}", {}
-        if not mic_fmt or any(not isinstance(x, int) or x <= 0 for x in mic_fmt):
-            self._stop_mic()
-            worker.stop()
-            self.native.worker = None
-            return False, f"麦克风格式非法（{mic_fmt}），无法建音频流", {}
-        # [修复-0xC00D4A45 第三根因] 系统 AAC 编码器只接受 44100/48000 Hz、
-        # 1/2/6 声道。WASAPI mix format 若为 96000/192000 等或非常规声道数，
-        # SetInputMediaType/WriteSample 会失败 → 音频流 0 sample → Finalize
-        # 生成不了 esds box 报 0xC00D4A45。与其静默录出无声坏片，不如启动前
-        # 明确拒绝并给出可读原因（native 已把位深统一为 16，这里只校验 rate/ch）。
-        mic_rate, _mic_bits, mic_ch = mic_fmt
-        if mic_rate not in (44100, 48000) or mic_ch not in (1, 2, 6):
-            self._stop_mic()
-            worker.stop()
-            self.native.worker = None
-            return False, (
-                f"麦克风格式 {mic_rate}Hz/{mic_ch}声道 超出系统 AAC 编码器支持范围"
-                "（44.1/48kHz、1/2/6 声道），请在系统声音设置里把输入设备改为 48kHz 后重试"), {}
+                return False, f"启动麦克风采集失败：{ex}", {}
+            # native 回读真实 mix format，顺序 (rate, bits, channels) 原样传给会话，
+            # 保证音频流媒体类型与实际采集一致（否则 Finalize 0xC00D4A45）。
+            # [修复] native 在无设备/未就绪时会报错误码，MFNative.mic_format 抛
+            # MFNativeError；这里必须接住并转成可读 reason，否则异常冒泡到
+            # controller 的 start_all 调用点（无 try）会变成 API 500。0 值同样
+            # 是非法的（会让 AddStream 失败），一并拦截。
+            try:
+                mic_fmt = self.native.mic_format()
+            except Exception as ex:  # noqa: BLE001
+                self._stop_mic()
+                worker.stop()
+                self.native.worker = None
+                return False, f"读取麦克风格式失败：{ex}", {}
+            if not mic_fmt or any(not isinstance(x, int) or x <= 0 for x in mic_fmt):
+                self._stop_mic()
+                worker.stop()
+                self.native.worker = None
+                return False, f"麦克风格式非法（{mic_fmt}），无法建音频流", {}
+            # [修复-0xC00D4A45 第三根因] 系统 AAC 编码器只接受 44100/48000 Hz、
+            # 1/2/6 声道。WASAPI mix format 若为 96000/192000 等或非常规声道数，
+            # SetInputMediaType/WriteSample 会失败 → 音频流 0 sample → Finalize
+            # 生成不了 esds box 报 0xC00D4A45。与其静默录出无声坏片，不如启动前
+            # 明确拒绝并给出可读原因（native 已把位深统一为 16，这里只校验 rate/ch）。
+            mic_rate, _mic_bits, mic_ch = mic_fmt
+            if mic_rate not in (44100, 48000) or mic_ch not in (1, 2, 6):
+                self._stop_mic()
+                worker.stop()
+                self.native.worker = None
+                return False, (
+                    f"麦克风格式 {mic_rate}Hz/{mic_ch}声道 超出系统 AAC 编码器支持范围"
+                    "（44.1/48kHz、1/2/6 声道），请在系统声音设置里把输入设备改为 48kHz 后重试"), {}
         # [EDR 误报缓解] 建系统 TEMP 工作目录：native 的所有 .tmp.mp4 写入、
         # 改名、取消删除都落这里，用户保存目录不再出现勒索特征文件操作。
         # 所有设备会话共享一个目录（stem 不同天然隔离）；收尾不删，留待下次

@@ -6,13 +6,9 @@ from typing import ClassVar
 from backend.controller import (
     KEY_POINTER_LOCATION,
     KEY_SHOW_TOUCHES,
-    DeviceAudioCapture,
-    MicRecorder,
     PipeMirror,
     SnapMirror,
     ThreadPoolExecutor,
-    _have_ffmpeg,
-    ffmpeg_mux,
     find_player,
     find_scrcpy,
     load_prefs,
@@ -22,16 +18,13 @@ from backend.controller import (
     safe_name,
     scrcpy_probe_info,
     shutil,
-    tempfile,
     time,
     zipfile,
 )
 from backend.screen_service import device_clock
-from backend.video_join import join_segments
 from core.constants import LOGCAT_COVERAGE_WARN_S, unique_path
 from core.logcat import read_time_bounds
 from core.longpath import long_path, path_exists, path_isfile
-from core.tmpfiles import SEG_WORKDIR_PREFIX
 
 
 def _fmt_span(sec):
@@ -68,9 +61,9 @@ class RecordMixin:
 
     def _mf_usable(self):
         """本机是否可走同源录制。非 Windows / 未编译 dll 时返回 False，
-        controller 回退到 ffmpeg 兜底（老路径，行为与改动前一致）。
+        controller 明确报错（v36 起录屏全走 MF，不再有其它兜底路径）。
 
-        测试替身没装配 mf_capture 时也返回 False，确保既有测试零回归。
+        测试替身没装配 mf_capture 时也返回 False。
         """
         svc = getattr(self, "mf_capture", None)
         if svc is None:
@@ -86,8 +79,7 @@ class RecordMixin:
                                 zip_on_stop=False, logcat_levels=None,
                                 pointer_location=True, show_touches=True):
         """同源录制启动（须持 _rec_lock）。公开 start 的签名与返回结构不变。"""
-        # 守卫：与老路径 _screen_record_start_locked 一致。MF 分支过去没有这道
-        # 检查，录制中再次 start 会覆盖 _rec_session：第一场的 overlay 原值备份
+        # 守卫：录制中再次 start 会覆盖 _rec_session：第一场的 overlay 原值备份
         # 丢失、mf_capture.start_all 按 serial 顶掉旧 native 会话（旧会话再无引用、
         # 停止时不会 finalize，MP4 缺 moov、设备 overlay 无法恢复）。
         if self._rec_session:
@@ -114,11 +106,11 @@ class RecordMixin:
         # sizes 传字典：让所有设备都用探测到的统一分辨率（之前传 {} 导致探测
         # 结果被丢弃、native 用默认 1080x1920，与实际画面不符）。
         ok, reason, firsts = self.mf_capture.start_all(
-            serials, save_dir, stems, {s: size for s in serials}, None)
+            serials, save_dir, stems, {s: size for s in serials}, None,
+            with_audio=bool(with_mic))
         if not ok:
             self._push_toast(
-                "err", f"⚠ 同源录制启动失败：{reason}。（本次未产生视频；"
-                       f"如需继续，请用支持 ffmpeg 的环境）")
+                "err", f"⚠ 同源录制启动失败：{reason}（本次未产生视频）")
             return {"ok": False, "reason": "mf_start_failed", "error": reason}
         # 会话结构对齐老路径：videos 登记第一段占位路径，收尾统一由 MF 产出。
         self._rec_session = {
@@ -146,6 +138,11 @@ class RecordMixin:
                     started_caps += 1
             if started_caps:
                 self._push_status("info", "已同步开始 logcat 抓取（全部缓冲区 + 全部级别，随录屏停止）")
+            else:
+                # 一条都没起来（设备已有手动抓取在跑）：如实说明本次没有日志
+                # 文件，否则用户在包里找不到日志会以为程序弄丢了。
+                self._push_status(
+                    "warn", f"⚠ 本次录屏没有附带 logcat：{len(serials):d} 台设备均已存在进行中的抓取，录制产物里不会有日志文件")
         # 部分设备失败：start_all 只要有一台成功就返回 ok=True，失败设备的
         # 原因被丢弃（firsts 里没有它）。旧实现这里只播「✓ 已开始」，用户以
         # 为全录上了，事后才发现少了设备素材。逐台点名失败的 serial。
@@ -162,9 +159,10 @@ class RecordMixin:
             bid = self.mf_capture.build_id or ""
         native_tag = (f"，native 构建 {bid}" if bid else
                       "，native 构建未知(旧DLL? 0xC00D4A45 修复需重新编译 dll)")
+        audio_tag = (" + 麦克风语音由系统媒体基础合成带声 MP4" if with_mic
+                     else "，纯视频 MP4（未勾选麦克风）")
         self._push_status(
-            "ok", "✓ 已开始同源录制（H264 画面 + 麦克风语音由系统媒体基础直接合成带声 MP4"
-                  f"{native_tag}）")
+            "ok", f"✓ 已开始同源录制（H264 画面{audio_tag}{native_tag}）")
         return {"ok": True, "mic": None, "ts": sess_ts,
                 "started": self._rec_session["video_start_host"]}
 
@@ -245,35 +243,6 @@ class RecordMixin:
         removed, kept, total = self._delete_files(candidates)
         return removed, kept, total
 
-    def _mic_start(self, save_dir):
-        """启动电脑麦克风录音；任何一步失败都返回 (False, 人话原因)，**绝不外抛**。
-
-        早前这里只 try 了构造函数，`MicRecorder.start()` 裸调 —— 而 start() 内部的
-        `_open()` 在 `waveInOpen` 失败（无麦克风设备 / 被隐私策略禁用 / 设备被占用）
-        时会抛 RuntimeError。异常一路逃出 js_api 调用，且此时 `_screen_record_start_locked`
-        已把 `_rec_session` 置为非空：异常跳过 `_cancel_half_started_rec()`，会话残留
-        导致之后每次「开始录屏」都被守卫判为 recording 返回 —— 录屏功能永久锁死，
-        用户只能重启程序。故这里对 start() 同样兜住，并顺手清掉半初始化的实例
-        （否则 `_mic` 非 None 会让下次 `_mic_start` 误报「已在录音」）。
-        """
-        if self._mic is not None:
-            return False, "已在录音"
-        try:
-            self._mic = MicRecorder()
-        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-            self._mic = None
-            return False, str(e)
-        try:
-            ok, p = self._mic.start(save_dir)
-        except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-            with contextlib.suppress(Exception):
-                self._mic.stop()
-            self._mic = None
-            return False, str(e)
-        if not ok:
-            self._mic = None
-            return False, p
-        return True, p
 
     def screen_record_start(self, serial=None,
                             with_devaudio=False, with_mic=False, save_dir=None,
@@ -283,12 +252,12 @@ class RecordMixin:
         """启动录屏会话（可含设备音频 / 麦 / logcat）。
 
         整场录制由用户**手动停止**（点「停止」或关窗口），中间不需要任何操作：
-        单段到 170 秒会自动接下一段（Android screenrecord 单段硬上限 180 秒），
-        产物落在同一目录、按 _p2 / _p3 顺序命名，收尾时一并打包。早年的
-        「固定时长」（到点结束整场录制）已移除，与自动分段不是一回事。
+        screenrecord 单段硬上限 180 秒，程序按 170 秒自动续流，画面始终写入
+        同一个 SinkWriter，收尾产出 1 个完整 MP4（无 _p2/_p3 分段、无需合并）。
+        早年的「固定时长」（到点结束整场录制）已移除，与自动续流不是一回事。
         _rec_lock 保护整个会话生命周期，与 screen_record_stop / shutdown
         互斥：连点 start、start 与 stop 撞车，都不会再出现会话引用被覆盖、
-        漏停漏合成的情况。内部实现见 _screen_record_start_locked。
+        漏停漏收尾的情况。内部实现见 _mf_record_start_locked。
 
         logcat_levels：历史参数，已不生效 —— 录屏配套的 logcat 现在**一律全量**
         （`-b all` + 不过滤级别），见下方抓取调用的说明。保留形参只为兼容旧调用方
@@ -297,9 +266,10 @@ class RecordMixin:
         with_devaudio：保留但界面已撤掉 —— 设备端 tinycap 在多数机型上需要 root，
         无法稳定承诺；开关留着只会让人以为录进去的是设备声音。
         with_mic：界面已恢复「同步录制电脑麦克风」开关（默认关闭）。录的是**本机
-        麦克风**（说话声），不是电脑正在播放的声音；仅 Windows 支持。勾选后走同源
-        录制：画面（ADB 裸 H264）与麦克风（WASAPI）由系统媒体基础（Media Foundation）
-        直接合成带声 MP4，无需 ffmpeg；未勾选则走老路径的纯视频录制。
+        麦克风**（说话声），不是电脑正在播放的声音；仅 Windows 支持。全走同源录制：
+        画面（ADB 裸 H264）与麦克风（WASAPI）由系统媒体基础（Media Foundation）直接
+        合成带声 MP4；未勾选时 native 走无音轨模式，产出纯视频 MP4（不录音）。
+        v36 起不再有 ffmpeg / 老路径兜底，MF 不可用时明确报错。
 
         pointer_location：录屏画面常驻指针准星（设备系统设置
         `settings put system pointer_location 1`，画面 overlay，全版本可用；
@@ -316,18 +286,19 @@ class RecordMixin:
         """
         with self._rec_lock:
             try:
-                # [修复] 同源录制（MF）的唯一价值是"麦克风语音与画面同源合成
-                # 带声 MP4"：native 会话无条件建 AAC 轨、麦克风由 WASAPI 采集。
-                # 若用户没勾"同步录制电脑麦克风"却仍走 MF，等于**偷偷录音**——
-                # 既违背用户意愿，又把一条静音/无关声音的 AAC 轨塞进成片。
-                # 未勾麦克风时走老路径：纯视频录制本就不需要 ffmpeg（无音频可
-                # 合成），screenrecord 原生 mp4 直接落盘，行为与改造前一致。
-                if with_mic and self._mf_usable():
-                    return self._mf_record_start_locked(
-                        serial, with_devaudio, with_mic, save_dir,
-                        with_logcat, zip_on_stop, logcat_levels,
-                        pointer_location, show_touches)
-                return self._screen_record_start_locked(
+                # [v36 全走 MF] 录屏不再依赖 ffmpeg：无论是否勾选麦克风都走
+                # 同源录制。勾麦克风 → 带声 MP4；不勾 → native 无音轨纯视频
+                # MP4（arate=0，不订阅 WASAPI、不建 AAC 轨，绝不"偷偷录音"）。
+                # 长视频靠 v24 续流 + v25 单文件写成 1 个完整 MP4，无需分段合并。
+                # MF 不可用（非 Windows / dll 缺失 / 被拦截）时明确报错，不再
+                # 回退到已删除的 ffmpeg 兜底路径。
+                if not self._mf_usable():
+                    msg = ("录屏不可用：本机系统媒体基础组件（Windows Media "
+                           "Foundation）不可用或未编译。请在 Windows 上使用，"
+                           "并确认随包的 native 录制组件完整。")
+                    self._push_toast("err", "⚠ " + msg)
+                    return {"ok": False, "reason": "mf_unavailable", "error": msg}
+                return self._mf_record_start_locked(
                     serial, with_devaudio, with_mic, save_dir,
                     with_logcat, zip_on_stop, logcat_levels,
                     pointer_location, show_touches)
@@ -339,247 +310,6 @@ class RecordMixin:
                     "err", f"⚠ 录屏启动出现异常：{ex}（已自动撤销，可重试）")
                 return {"ok": False, "reason": "start_error", "error": str(ex)}
 
-    def _screen_record_start_locked(self, serial=None,
-                                    with_devaudio=False, with_mic=False,
-                                    save_dir=None, with_logcat=False,
-                                    zip_on_stop=False, logcat_levels=None,
-                                    pointer_location=True, show_touches=True):
-        # 守卫：已有录制会话进行中，避免重复点击覆盖会话引用导致漏停/漏合成
-        if self._rec_session:
-            # 已经在录、用户又点了一次「开始」：旧实现只回一个 reason 就返回，
-            # 前端把它原样拼进提示，用户看到的是「⚠ 录屏未能启动（recording）」
-            # —— 一句英文机器码，既没说清现在到底在不在录，也没给出下一步。
-            # 这里给一句人话：正在录几台、想重开该先停。
-            n = len(self._rec_session.get("videos") or {})
-            msg = f"正在录屏中{f'（{n:d} 台设备）' if n > 1 else ''}，如需重新开始请先点「停止录屏」"
-            self._push_status("info", "ℹ " + msg)
-            return {"ok": False, "reason": "recording", "message": msg}
-        serials = self._target_serials(serial)
-        if not serials:
-            self._push_status("err", "⚠ 录屏前请先勾选至少一个设备。")
-            return {"ok": False, "reason": "no_device"}
-        save_dir = save_dir or self._default_save_dir()
-        sess_ts = time.strftime("%Y%m%d_%H%M%S")
-        # [EDR 误报缓解 A 方案] 在系统 TEMP 建录制工作目录：screenrecord 分段、
-        # 麦克风 wav 等高熵中间产物全部落这里，用户保存目录（常是程序安装目录）
-        # 不再出现「写高熵 MP4 → 批量改名/删除」的勒索特征序列。成品只在收尾
-        # 成功后 copy 回 save_dir；工作目录收尾不删，下次启动由 sweep_workdirs
-        # 后台清理（与同源录制 MF 对称）。mkdtemp 失败时退回 save_dir 老行为。
-        work_dir = None
-        with contextlib.suppress(Exception):
-            work_dir = tempfile.mkdtemp(prefix=SEG_WORKDIR_PREFIX)
-        self._rec_session = {
-            "ts": sess_ts, "dir": save_dir, "work_dir": work_dir,
-            # 会话开始的本机时刻：收尾校验「配套 logcat 有没有晚于录制起点启动」
-            # 的基准（见 _logcat_coverage_notes）。
-            "start_host": time.time(),
-            "with_devaudio": with_devaudio, "with_mic": with_mic,
-            "with_logcat": bool(with_logcat), "with_zip": bool(zip_on_stop),
-            "mic_path": None, "mic_started": False,
-            "videos": {}, "devaudio": {},
-            "logcat_captures": {},
-            # 可视化 overlay 原值备份：serial -> "0"/"1"/"null"（None = delete 恢复）。
-            # 只登记「本次真的要恢复」的设备；读不到原值的设备不入表（不动它）。
-            "pointer_location_prev": {},
-            "show_touches_prev": {},
-        }
-        # 麦克风 wav 落到工作目录（有则），避免高熵音频直接写用户保存目录。
-        mic_dir = self._rec_session.get("work_dir") or save_dir
-        if with_mic:
-            ok, p = self._mic_start(mic_dir)
-            if ok:
-                self._rec_session["mic_path"] = p
-                self._rec_session["mic_started"] = True
-                # 明确告知「麦克风真的启动了、用的是系统默认输入设备」。
-                # Win32 桌面程序不会弹权限申请窗（那是 Store 应用的机制），用户
-                # 若只盯着「隐私 → 麦克风」列表就会以为没权限、没在录。一句
-                # 开局确认能把「到底录没录」摆到明面上，也点明设备来源，便于
-                # 录成静音时第一时间怀疑到「默认输入设备选错」而非权限。
-                self._push_status(
-                    "ok",
-                    "✓ 电脑麦克风已启动（使用系统默认输入设备）：本次录屏会带上本机说话声；"
-                    "若成片无声，请到系统「声音设置 → 输入」确认默认设备不是没有信号的虚拟麦克风"
-                    "（钉钉 / EV录屏 等会创建这类设备）。")
-                # ffmpeg 已内置，正常情况下这里必为真；仅当内置二进制损坏 / 被
-                # 安全软件拦截时才会走到下面。等录完再报「合成失败」时用户已经
-                # 录了一整场，所以开局就把丑话说在前面。麦克风仍照常录：wav 会
-                # 留在录制目录，事后可自行合成。
-                if not _have_ffmpeg():
-                    self._push_toast(
-                        "warn",
-                        "⚠ 内置的 ffmpeg 无法运行：麦克风会照常录成 mic_*.wav，但停止时"
-                        "无法把声音合成进视频（wav 保留在录制目录，可事后自行"
-                        "合成）。可尝试重启程序，或检查安全软件是否拦截了内置组件。")
-            else:
-                self._rec_session["mic_started"] = False
-                # 最常见的两种失败是「系统隐私设置没允许桌面应用用麦克风」和
-                # 「设备被别的程序占用」—— 错误码本身（如 4 / 1）用户看不懂，
-                # 这两句直接告诉人该去哪里改。
-                self._push_toast(
-                    "warn",
-                    "⚠ 电脑麦克风启动失败：{}（本次录屏将继续，但没有麦克风声音。"
-                    "排查：① 桌面程序不会弹「允许访问麦克风」的申请窗口——那是应用商店"
-                    "应用的机制，本程序只受系统「隐私和安全性 → 麦克风 → 让桌面应用"
-                    "访问麦克风」总开关控制，确认它是开；② 麦克风是否被其它程序占用；"
-                    "③ 系统「声音设置 → 输入」里默认设备是否为一个没有信号的虚拟麦克风）".format(p))
-        ok_any = False
-
-        def _spawn(s):
-            """拉起单台设备：设备音频（可选）+ screenrecord。
-
-            放进线程池是因为 `VideoRecorder.start` 内部有约 1.5 秒的「确认设备端
-            screenrecord 真的活着」窗口 —— 串行时 3 台设备就是 4.5 秒以上的纯
-            等待，用户点完「开始录制」界面迟迟没有「录制中」。各设备的 adb 调用
-            彼此独立（服务对象内部各自加锁），并行拉起即可。会话登记 / overlay
-            备份 / 状态播报仍回到主线程串行做：那些是共享状态，不能同时改。
-            """
-            da_tried = False
-            da, da_err, remote = False, "", ""
-            if with_devaudio and DeviceAudioCapture.supported(
-                    self.state.adb_path, s):
-                da_tried = True
-                # safe_name：无线序列号含冒号，设备端路径同样需要净化，
-                # 保证 adb shell 命令与后续 pull 的路径完全一致。
-                remote = "/data/local/tmp/adb_rec_{}_{}_audio.wav".format(
-                    safe_name(s), sess_ts)
-                # 带原因版本：tinycap 在多数机型上需要 root，会立刻退出。只说
-                # 「启动失败」用户不知道该 adb root 还是换台设备，最后只能放弃。
-                start_ex = getattr(self.device_audio, "start_ex", None)
-                if start_ex is not None:
-                    da_ok, da_err = start_ex(s, remote)
-                else:                       # 兼容只有 start() 的旧实现 / 替身
-                    da_ok, da_err = bool(self.device_audio.start(s, remote)), ""
-                da = bool(da_ok)
-            # 这里**不吞异常**：真正的抛出（不是各服务返回的 ok=False）会一路
-            # 冒到 screen_record_start 的兜底，把整场半启动会话撤销掉。并行化
-            # 只改「等多久」，不改这条失败语义。
-            t_start = time.time()   # 视频真正开始录的时刻（Popen 发起前）
-            # [EDR A 方案] 分段 mp4 pull 到 TEMP 工作目录而非用户保存目录。
-            pull_dir = self._rec_session.get("work_dir") or save_dir
-            ok, local = self.video.start(s, pull_dir, extra_name=sess_ts)
-            return s, {"da_tried": da_tried, "da": da, "da_err": da_err,
-                       "remote": remote, "ok": ok, "local": local,
-                       "t_start": t_start}
-
-        spawned = {}
-        errors = []
-        if len(serials) <= 1:
-            for s in serials:
-                try:
-                    rs, r = _spawn(s)
-                    spawned[rs] = r
-                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                    errors.append(ex)
-        else:
-            # 上限 4：再多设备同时拉起也挤在同一条 adb server 通道上。
-            with ThreadPoolExecutor(max_workers=min(4, len(serials))) as pool:
-                futures = [pool.submit(_spawn, s) for s in serials]
-            # 出了 with 所有任务都已结束，这里逐个取结果：先攒异常、不急着抛，
-            # 否则已启动的那几台还没来得及登记就被撤销流程漏掉（见下）。
-            for f in futures:
-                try:
-                    rs, r = f.result()
-                    spawned[rs] = r
-                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                    errors.append(ex)
-
-        if errors:
-            # 有设备抛了真异常 → 整场会话撤销（与串行时代一致）。但异常可能发生在
-            # 「另外几台已经启动成功」之后，撤销流程只停**会话里登记过**的设备；
-            # 不先把它们登进去，那几台的 screenrecord 就成了孤儿，一直录到系统
-            # 180 秒上限，界面还看不到任何「录制中」。
-            for s in serials:
-                r = spawned.get(s) or {}
-                if r.get("da"):
-                    self._rec_session["devaudio"][s] = r["remote"]
-                if r.get("ok"):
-                    self._rec_session["videos"][s] = r["local"]
-            raise errors[0]
-
-        # 视频真正开始录的本机时刻（只取启动成功的设备里最早的一台）。
-        # start_host 是在麦克风初始化、设备音频拉起**之前**记的，那些步骤
-        # 可能耗 1~2 秒；前端「已录时长」若拿它当起点，读数会比视频长一截。
-        t_starts = [r.get("t_start") for r in spawned.values()
-                    if r.get("ok") and r.get("t_start")]
-        if t_starts:
-            self._rec_session["video_start_host"] = min(t_starts)
-
-        for s in serials:
-            r = spawned[s]
-            da = r["da"]
-            if da:
-                self._rec_session["devaudio"][s] = r["remote"]
-            elif r["da_tried"]:
-                self._push_toast(
-                    "warn", "⚠ 设备 {} 音频采集未启动：{}"
-                            "（本次录屏不含设备声音）".format(s, r["da_err"] or "未知原因"))
-            ok, local = r["ok"], r["local"]
-            if ok:
-                ok_any = True
-                self._rec_session["videos"][s] = local
-                # 可视化 overlay：录屏真的起来了才开（并在收尾时恢复原值）。
-                # 开失败不阻断录屏——可视化是增强，不是必需品。
-                if pointer_location:
-                    self._enable_overlay(
-                        s, KEY_POINTER_LOCATION, "pointer_location_prev")
-                if show_touches:
-                    self._enable_overlay(s, KEY_SHOW_TOUCHES, "show_touches_prev")
-                self._push_status(
-                    "info", "录屏: {}{}".format(s, "（含设备音频）" if da else ""))
-            else:
-                self._push_status("err", f"⚠ 录屏启动失败 {s}: {local}")
-        # 同步抓取 logcat（走落盘抓取路径，避免占用实时监控渲染管线）
-        if with_logcat:
-            started_caps = 0
-            for s in serials:
-                # safe_name：无线序列号含冒号，Windows 下文件名非法
-                lp = os.path.join(
-                    save_dir, f"logcat_{safe_name(s)}_{sess_ts}.txt")
-                # 只有「本次录屏真的启动了这条抓取」才登记进会话。
-                # 用户若已手动开着同一台设备的 Logcat 抓取，start() 会返回 False
-                # （落在另一个文件上）；旧实现无视返回值照样登记，停止录屏时又把
-                # 那条手动抓取一并 stop 掉 —— 用户的抓取被静默掐断，而录屏承诺的
-                # txt 还因文件从未创建而不进 zip。
-                #
-                # 缓冲区用 `-b all`、级别不过滤（level_filter=None）：录屏配套的
-                # logcat 是「事后复现问题」的唯一物证，缺一条就可能正好缺在案发现
-                # 场上。曾按 main/system/events/crash 四缓冲 + 界面级别勾选抓，
-                # 结果是 radio 日志整段不见、用户少勾一级就丢掉整类线索，且事后
-                # 无法补救（录屏已经停了）。这里的取舍是「宁可文件大一点」。
-                if self.logcat_capture.start(
-                        s, lp, ["all"], level_filter=None):
-                    self._rec_session["logcat_captures"][s] = lp
-                    started_caps += 1
-                else:
-                    self._push_status(
-                        "warn", f"⚠ {s} 已有 logcat 抓取在进行，本次录屏未重复抓取")
-            # 只在**真的**起来了至少一条时才播报。原来无条件推「已同步开始
-            # logcat 抓取」：设备上已有抓取在跑时一条都没起，用户却被告知
-            # 日志已在抓，直到停止录屏、打开产物包才发现里面没有 txt ——
-            # 事后复现问题唯一的物证就这么无声地缺了。
-            if started_caps:
-                self._push_status(
-                    "info", "已同步开始 logcat 抓取（全部缓冲区 + 全部级别，随录屏停止）")
-            elif ok_any:
-                self._push_status(
-                    "warn", f"⚠ 本次录屏没有附带 logcat：{len(serials):d} 台设备均已存在进行中的抓取，录制产物里不会有日志文件")
-        if not ok_any:
-            # 全部设备启动失败：撤销本会话残留（麦 / 设备音频 / 同步 logcat
-            # 可能已启动）。若不清理，前端看不到「录制中」也就点不到停止，残留
-            # 的麦克风/设备端 tinycap 会一直录到程序关闭。
-            self._cancel_half_started_rec()
-            self._push_status(
-                "err", "⚠ 录屏未能启动：已自动撤销本会话，请检查设备与目录权限后重试。")
-            return {"ok": False, "reason": "start_failed"}
-
-        return {"ok": ok_any, "mic": self._rec_session.get("mic_path"),
-                "ts": sess_ts,
-                # 视频真正开始录的本机时刻（epoch 秒），前端据此显示已录时长。
-                # 不用 start_host：那个时刻在麦克风初始化 / 设备音频拉起之前，
-                # 读数会比视频长 1~2 秒；也不用接口返回时刻：那会漏掉拉起
-                # screenrecord 的确认等待，读数比视频短一截。
-                "started": (self._rec_session.get("video_start_host")
-                            or self._rec_session.get("start_host"))}
 
     def _cancel_half_started_rec(self):
         """撤销「启动失败 / 启动异常」的录屏会话残留（须在持有 _rec_lock 时调用）。
@@ -711,15 +441,12 @@ class RecordMixin:
             return {"ok": False, "reason": "no_session"}
         sess = self._rec_session
         # 整个收尾过程必须包在 try/finally 里：只要中途抛一次（例如保存目录所在
-        # 磁盘掉线 → screen_service._pull_and_finish 里的 os.makedirs 抛错），
-        # `self._rec_session = {}` 就永远执行不到，会话标记残留 → 之后每次点「开始
-        # 录屏」都被 `_screen_record_start_locked` 的守卫判为 recording，录屏功能
+        # 磁盘掉线、native finalize 异常），`self._rec_session = {}` 就永远执行不到，
+        # 会话标记残留 → 之后每次点「开始录屏」都被启动守卫判为 recording，录屏功能
         # 永久锁死且只能重启程序；异常还会逃出 js_api 调用，用户看不到任何提示。
         try:
-            if sess.get("mf"):
-                files, zpath = self._mf_teardown(sess)
-            else:
-                files, zpath = self._session_teardown(sess)
+            # [v36 全走 MF] 录屏收尾只有同源录制一条路径（ffmpeg 兜底已删除）。
+            files, zpath = self._mf_teardown(sess)
             self._push_status("info", "⏹ 录屏已停止")
             # 完成强提醒：收尾可能要拉文件 / 等设备端写 moov / 合成 / 打包，
             # 耗时以秒计，用户很可能已切去别的页签——一条汇总 toast 说清
@@ -768,12 +495,12 @@ class RecordMixin:
             self._rec_session = {}
 
     def screen_record_cancel(self):
-        """取消录屏：停止并**删除**本次产生的全部文件（不合并、不打包）。
+        """取消录屏：停止并**删除**本次产生的全部文件（不打包）。
 
         为什么需要单独一条路径：「录错了」是常态 —— 选错设备、场景不对、只是
-        想试试。在此之前用户唯一的出口是「停止」，而它会把几段视频合并、打包，
-        再告诉你「已完成」：几百 MB 的垃圾照样落盘，十几秒的 ffmpeg 拼接白白
-        烧掉，用户还得自己进目录一个个删。取消的语义是「这次的东西一个都不留」。
+        想试试。在此之前用户唯一的出口是「停止」，而它会把视频打包、再告诉你
+        「已完成」：几百 MB 的垃圾照样落盘，用户还得自己进目录一个个删。取消的
+        语义是「这次的东西一个都不留」。
 
         与停止一样，会话标记必须在 finally 里清掉：任何异常都不能让它残留，
         残留即之后每次「开始录屏」都被守卫判成 recording，功能永久锁死。
@@ -795,10 +522,8 @@ class RecordMixin:
             self._push_status("info", "ℹ 当前没有进行中的录屏（无需取消）")
             return {"ok": False, "reason": "no_session"}
         sess = self._rec_session
-        if sess.get("mf"):
-            removed, kept, total = self._mf_discard(sess)
-        else:
-            removed, kept, total = self._session_discard(sess)
+        # [v36 全走 MF] 取消收尾只有同源录制一条路径（ffmpeg 兜底已删除）。
+        removed, kept, total = self._mf_discard(sess)
         self._push_status("info", "🗑 录屏已取消（本次产物未保留）")
         if kept:
             # 删不掉必须说：通常是文件还被别的程序占着（播放器开着刚拉回来的
@@ -812,96 +537,6 @@ class RecordMixin:
                 "ok", f"✓ 已取消录屏：本次产生的 {removed:d} 个文件已删除（未合并、未打包）")
         return {"ok": True, "removed": removed, "kept": kept}
 
-    def _session_discard(self, sess):
-        """取消录屏的收尾主体：停止一切并**删掉**本场产物（须持 _rec_lock）。
-
-        返回 (已删除文件数, 未能删除的路径列表, 本次涉及的文件总数)。
-
-        刻意不复用 _session_teardown：那条路径的每一步都在「保住产物」（合成
-        音频、合并分段、打包、失败一个段都不删），这里每一步都在「确认产物不
-        存在」。两者共用一套代码，迟早有一边走错方向 —— 比如把「打包后删源
-        文件」这种副作用带进取消路径，或者反过来让取消的删除混进正常收尾里。
-        宁可重复几行，也不让「删用户的录像」和「保用户的录像」共用同一条链。
-        """
-        # 设备 overlay（指针位置 / 触摸圆点）必须先恢复：它们是设备系统设置，
-        # 与这次录的东西留不留毫无关系，取消也得把设备状态还回去。
-        self._restore_overlays(sess)
-        candidates = []
-        # 1) 同步 logcat：先**全部**下发停止（异步、立刻返回），最后再统一等它们
-        #    写完。逐台「停一台等一台」会把 N 台的等待串起来，而取消本该越快越好。
-        caps = dict(sess.get("logcat_captures") or {})
-        for s in list(caps.keys()):
-            with contextlib.suppress(Exception):
-                self.logcat_capture.stop(s, zip_on_stop=False)
-        candidates.extend(p for p in caps.values() if p)
-        # 2) 设备侧：停止录制并丢弃（不拉当前段），已拉回的段交给下面一起删。
-        videos_map = sess.get("videos", {}) or {}
-        devaudio_map = sess.get("devaudio", {}) or {}
-        pretaken = sess.get("video_segs", {}) or {}
-        serials = list(videos_map.keys()) + [
-            s for s in devaudio_map if s not in videos_map]
-        for s in serials:
-            if s in videos_map:
-                fn = getattr(self.video, "discard_ex", None)
-                try:
-                    if fn is not None:
-                        ok, paths, err = fn(s)
-                    else:
-                        # 旧实现 / 测试替身没有 discard_ex：退化为正常停止 + 删除
-                        # （多花一次 pull，但语义仍然是「一个都不留」）。
-                        ok, paths, err = self._stop_video(s)
-                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                    ok, paths, err = False, [], str(ex)
-                candidates.extend(paths or [])
-                # 「该设备未在录制」是正常情况（它已经自己收尾过了），不报警
-                if not ok and err and err != "该设备未在录制":
-                    self._push_status(
-                        "warn", "⚠ {} 取消时未能正常停止录屏（{}）；设备端可能还会"
-                                "录到 3 分钟上限才自行结束，该段不会保存".format(s, err))
-            if s in devaudio_map:
-                try:
-                    local_a = self.device_audio.stop(s)
-                except Exception as ex:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                    local_a = None
-                    self._push_status(
-                        "warn", f"⚠ {s} 取消时设备音频收尾失败：{ex}")
-                if local_a:
-                    candidates.append(local_a)
-        # 3) 电脑麦克风：stop() 会返回落盘路径，一并删。
-        if self._mic is not None:
-            mic = None
-            try:
-                mic = self._mic.stop()
-            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                mic = None
-            self._mic = None
-            if mic:
-                candidates.append(mic)
-        # 4) 会话登记过的本地路径：第 1 段（discard_ex 不拉它，但可能早已存在）、
-        #    麦克风文件、以及「设备被拔掉时已经取回的那几段」（video_segs）。
-        candidates.extend(p for p in videos_map.values() if p)
-        for ps in pretaken.values():
-            candidates.extend(ps or [])
-        if sess.get("mic_path"):
-            candidates.append(sess["mic_path"])
-        # 5) 等 logcat 把缓冲区写完再删：文件还在写的时候删，Windows 会直接拒绝
-        #    （PermissionError），结果就是「取消成功」但 txt 还在。
-        for s in list(caps.keys()):
-            for _ in range(20):
-                try:
-                    if not self.logcat_capture.is_running(s):
-                        break
-                except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                    break
-                time.sleep(0.1)
-        # [EDR A 方案] 工作目录里的分段 / wav 不在取消瞬间删除（批量删高熵 MP4
-        # 同样触发亚信），留待下次启动 sweep_workdirs 清理；只删用户保存目录里
-        # 的 logcat txt。取消语义不变（本次产物不保留），只是删除被推迟。
-        work_dir = sess.get("work_dir")
-        if work_dir:
-            candidates = [p for p in candidates
-                          if not self._in_work_dir(p, work_dir)]
-        return self._delete_files(candidates)
 
     @staticmethod
     def _delete_files(paths):
@@ -991,204 +626,6 @@ class RecordMixin:
         except Exception:  # noqa: BLE001  回拷失败保留 TEMP 路径，由上层统一上报
             return path
 
-    def _session_teardown(self, sess):
-        """录屏会话收尾主体（须在持有 _rec_lock 时调用；异常由调用方兜底）。
-
-        返回 (产出文件列表, zip 路径或 None)，供调用方弹「已完成」汇总 toast；
-        全失败的场景文件列表为空，此时明细 warn 已由内部逐条 toast。
-        """
-        # 可视化 overlay 必须**先于**视频收尾恢复：它们是设备系统设置，
-        # 早一点恢复，用户设备就少一瞬处于「开着准星/圆点」的意外状态。
-        self._restore_overlays(sess)
-        # 同步 logcat 必须**先于视频收尾**下发停止（stop 本身是异步的：置停止
-        # 标记 + 终止 adb，立刻返回）。视频 stop 要走「kill 设备端 → 等本地 adb
-        # 退出 → 轮询设备端文件就绪 → pull」，几台设备并行也要数秒；日志若等
-        # 它拉完再停，就会比视频多跑这几秒 —— 事后按时间轴对照视频找日志时，
-        # 两边差出的正是案发现场那一段。
-        for s in list(sess.get("logcat_captures", {}).keys()):
-            with contextlib.suppress(Exception):
-                self.logcat_capture.stop(s, zip_on_stop=False)
-        videos_map = sess.get("videos", {}) or {}
-        devaudio_map = sess.get("devaudio", {}) or {}
-        dead = sess.get("dead") or set()
-        serials = list(videos_map.keys()) + [
-            s for s in devaudio_map if s not in videos_map]
-        teardown = self._teardown_devices(
-            serials, dead, videos_map, devaudio_map,
-            pretaken=sess.get("video_segs") or {})
-        local_videos = {}
-        for s, (vs, _a) in teardown.items():
-            # 长路径安全：这些是**用户保存目录**里的录屏分段，路径可以超长。
-            # Windows 上 os.path.exists 对超长路径返回 False → 分段会被当成
-            # 「没落盘」丢弃，用户的录屏就此消失，界面上还不给任何提示。
-            keep = [p for p in (vs or []) if p and path_exists(p)]
-            if keep:
-                local_videos[s] = keep
-        # 自动分段是**实现手段**，不是用户要的东西：先把多段合并成一个完整 mp4，
-        # 再走下面的音频合成 / 打包。合并失败时保持分段原样（见
-        # _merge_device_segments：宁可给 N 个能播的段，也不给一个坏成片）。
-        # [EDR A 方案] 工作目录（有则为系统 TEMP）：分段/合成中间产物的删除全部
-        # 延迟到下次启动；成品在收尾末尾回拷到用户保存目录。
-        work_dir = sess.get("work_dir")
-        merged_segs = {}
-        for s in list(local_videos.keys()):
-            one, n_used, _skipped = self._merge_device_segments(
-                s, local_videos[s], work_dir=work_dir)
-            if one:
-                local_videos[s] = [one]
-                if n_used > 1:
-                    merged_segs[s] = n_used
-        # 完成提示要按「几段拼成的」说话：合并之后目录里只剩 1 个 mp4，
-        # 用户对不上「我录了 8 分钟」和「为什么文件只有一个」。
-        sess["merged_segs"] = merged_segs
-        local_devaudio = {s: a for s, (_v, a) in teardown.items() if a}
-        mic_path = None
-        if self._mic is not None:
-            try:
-                mic_path = self._mic.stop()
-            except Exception:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                mic_path = None
-            self._mic = None
-        rec_files = []   # 最终要打包的产出文件
-        # mic wav 是整场共用的一条：任一设备合成失败都要留着它供事后重试合成，
-        # 只有所有用到它的合成都成功，收尾时才删。这两个标志在下面的合成循环里维护。
-        mic_consumed_ok = False
-        mic_merge_failed = False
-        cleaned_sources = 0
-        # 「勾了麦却没声」只在麦克风**确实启动过**时才提示：启动就失败的场景
-        # 上面已经 toast 过「电脑麦克风启动失败」，不再重复归因为「全程静音」。
-        mic_lost = bool(sess.get("with_mic") and sess.get("mic_started")
-                        and not mic_path)
-        for s, vlist in local_videos.items():
-            audios = []
-            if local_devaudio.get(s):
-                audios.append(local_devaudio[s])
-            if mic_path:
-                audios.append(mic_path)
-            # 拼接前的段数（合并后 vlist 只剩 1 个文件，看不出原本被切过几段）
-            n_seg = merged_segs.get(s) or len(vlist)
-            if audios and n_seg > 1:
-                if s in merged_segs:
-                    # 音频是**整场连续**的一条，画面却在那 N-1 处拼接点各缺了
-                    # 约 1 秒：声音不会跟着跳，于是从第 2 段起会一点点超前画面。
-                    # 不按段切音频（需要每段的精确起始偏移，算错更难排查），
-                    # 但必须说出来 —— 否则用户对着成片听半天，只会觉得「音画不同步」。
-                    self._push_status(
-                        "warn", f"⚠ {s} 的音频是整场连续录的，画面在 {n_seg - 1:d} 处拼接点各缺约 1 秒，第 2 段起声音会超前画面（累计约 {n_seg - 1:d} 秒）")
-                else:
-                    # 音频是**整场连续**的一条，视频却被切成了多段。按段切音频需要
-                    # 每一段的起始偏移，任何一处算错都会让后几段音画错位 —— 那比
-                    # 干脆没有声音更难排查。这里只把音频并进第 1 段，其余段保留为
-                    # 无音轨视频，并明确说出来（不说的话用户会以为是合成失败）。
-                    self._push_status(
-                        "warn", f"⚠ {s} 共 {len(vlist):d} 段：音频只并入第 1 段，其余段为无音轨视频")
-            # 本设备这一场是否用到了麦克风 wav。mic wav 是整场共用的一条，
-            # 删不删由 mic_consumed_ok / mic_merge_failed 两个标志统一决定（见循环之后）。
-            uses_mic = bool(mic_path and mic_path in audios)
-            for idx, vlocal in enumerate(vlist):
-                if audios and idx == 0:
-                    final = (vlocal[:-4] + "_final.mp4") if vlocal.endswith(
-                        ".mp4") else (vlocal + ".final.mp4")
-                    merged = ffmpeg_mux(vlocal, audios, final)
-                    if merged:
-                        # [EDR A 方案] 成品从工作目录回拷到用户保存目录，提示与
-                        # 产物都用对外路径（不暴露 TEMP）。work_dir=None 时原样返回。
-                        pub = self._publish_product(merged, work_dir, sess["dir"])
-                        self._push_status("ok", f"✓ 已合成音视频: {pub}")
-                        rec_files.append(pub)
-                        # 合成成功：原始无声视频已无用。老行为是直接删；A 方案下
-                        # 它位于工作目录（TEMP），交给下次启动统一清理，收尾零删除。
-                        if self._remove_intermediate(vlocal, work_dir):
-                            cleaned_sources += 1
-                        if uses_mic:
-                            mic_consumed_ok = True
-                    else:
-                        # 合成失败/产出不可播放时**保留原视频**，并说清原因：
-                        # 「内置 ffmpeg 无法运行」只是其中一种，音频为空、ffmpeg 异常
-                        # 同样会走到这里。
-                        why = "" if _have_ffmpeg() else "（内置 ffmpeg 无法运行）"
-                        pub = self._publish_product(vlocal, work_dir, sess["dir"])
-                        self._push_toast(
-                            "warn", f"⚠ 合成音视频失败{why}，原始视频已保存（无音轨）: {pub}")
-                        if path_exists(pub):
-                            rec_files.append(pub)
-                        if uses_mic:
-                            # 留着 wav：用户装好 ffmpeg 后还能拿它重试合成。
-                            mic_merge_failed = True
-                else:
-                    pub = self._publish_product(vlocal, work_dir, sess["dir"])
-                    self._push_status("ok", f"✓ 录屏已保存: {pub}")
-                    if path_exists(pub):
-                        rec_files.append(pub)
-        if mic_lost:
-            # 空录音（麦克风被占用 / 全程静音 / 无录音权限）现在会返回 None 并删除坏文件，
-            # 这里明确告诉用户「为什么没有声音」，否则用户只看到成片没音轨。
-            self._push_toast(
-                "warn", "⚠ 未录到电脑麦克风声音（麦克风可能被占用、无权限或全程静音），"
-                        "已按无音轨保存视频。")
-        # 设备端音频被 pull 到 %TEMP% 的临时 wav（adb_devaudio_*.wav），唯一用途就是
-        # 喂给 ffmpeg 合成；合成结束后这些文件已无用，必须清理，否则每次录屏都会在
-        # TEMP 留下孤儿文件，长期累积会悄悄占满系统盘。
-        for lp in local_devaudio.values():
-            with contextlib.suppress(Exception):
-                if lp and os.path.exists(long_path(lp)):
-                    os.remove(long_path(lp))
-        # 麦克风 wav：合成成功后声音已进 final，原始 wav 不该再留在保存目录里。
-        # 但它是整场共用的一条，只要有一台设备合成失败就得留着（供事后重试），
-        # 只有所有用到它的合成都成功，才在这里删。
-        if mic_path and mic_consumed_ok and not mic_merge_failed:
-            if self._remove_intermediate(mic_path, work_dir):
-                cleaned_sources += 1
-        if cleaned_sources:
-            self._push_status(
-                "info",
-                f"ℹ 已清理 {cleaned_sources:d} 个合成中间文件（原始无声视频 / 麦克风 wav）")
-        # 同步 logcat 抓取收尾：**录屏结束，日志必须同时结束**。
-        # 日志的用途是事后按时间轴对照视频找问题，录像停了日志还在往下写、
-        # 或者日志比视频多跑一大截，两边就对不齐了。所以这里不做任何例外：
-        # 无论是用户点停止、还是录屏被意外中断，配套抓取都随会话一起停、并
-        # 一并打包（视频 + 日志一体包）。意外中断的断点由抓取侧写入的
-        # 「设备断开连接」缺口标记标明，分析时一眼能看出哪里缺了。
-        for s, p in list(sess.get("logcat_captures", {}).items()):
-            # 停止已在收尾开头下发（与视频同步），这里只等它把缓冲区写完再取
-            # 文件（最多 2 秒）。抓取正在等设备重连时，stop 会立刻打断等待，
-            # 不会把这段时间拖进收尾流程。
-            for _ in range(20):
-                if not self.logcat_capture.is_running(s):
-                    break
-                time.sleep(0.1)
-            if self.logcat_capture.is_running(s):
-                # 2 秒还没收尾（磁盘很慢 / 写盘阻塞）：绝不能把它塞进包里。
-                # 打包完会删源文件，而抓取还在往这个路径写 —— 尾部会落进已删除的
-                # inode：zip 里少一段、磁盘上也没有，日志就此彻底消失，且看不出来。
-                # 宁可不打包，保留原 txt 并说清位置。
-                self._push_toast(
-                    "warn",
-                    "⚠ {} 的 logcat 日志仍在收尾，未放入本次压缩包，"
-                    "原文件已保留：{}".format(s, p))
-                continue
-            if path_exists(p):
-                rec_files.append(p)
-        # 覆盖度校验必须放在打包之前：打包会删源 txt，之后就没法再读时间戳了。
-        # 结论只进内存（sess["logcat_notes"]），由调用方在「✓ 录屏已完成」之后
-        # 逐条播报 —— 从这里直接弹 toast 会被后面那条成功提示盖掉。
-        sess["logcat_notes"] = self._logcat_coverage_notes(
-            sess, sess.get("logcat_captures") or {})
-        # 结束录制后自动压缩为 zip（录屏 mp4 + 同步 logcat 一并打包）
-        zpath = None
-        if sess.get("with_zip") and rec_files:
-            z = os.path.join(sess["dir"], "rec_{}.zip".format(sess["ts"]))
-            # A 方案：打包后不删源（成品已回拷到保存目录，删除又构成可疑序列）。
-            if self._zip_paths(rec_files, z, cleanup=not bool(work_dir)):
-                zpath = z
-                self._push_status("ok", f"✓ 录制产物已打包: {zpath}")
-            else:
-                # 勾了「结束后打包」却没打成（磁盘满 / 目录被删 / 被占用）：
-                # 用户会照着按钮的勾选状态去目录里找 zip。必须说清「没有 zip」，
-                # 否则他会以为打包还在进行、或者以为程序把文件弄丢了。
-                self._push_toast(
-                    "warn", "⚠ 录制产物打包失败（文件已单独保存，可直接使用）：{}".format(sess.get("dir")))
-        return rec_files, zpath
 
     def _logcat_coverage_notes(self, sess, cap_map):
         """录屏收尾时校验「配套日志有没有覆盖本次录制」，返回 [(级别, 文案)]。
@@ -1307,87 +744,7 @@ class RecordMixin:
             else:
                 self._push_status(level, text)
 
-    def _merged_stem(self, vlist):
-        """多段录制的「基名」（不含扩展名）。
 
-        段文件名形如 `record_<serial>_<ts>.mp4`（第 1 段）与
-        `record_<serial>_<ts>_pN.mp4`（第 N 段），合并成功后成品要回到不带
-        `_pN` 的那个名字 —— 用户手上就只有一个 mp4，和没分段时一模一样。
-        第 1 段缺失（只拿到 `_p2` 起）时也照样能剥出基名。
-        """
-        stem = os.path.splitext(vlist[0])[0]
-        i = stem.rfind("_p")
-        if i > 0 and stem[i + 2:].isdigit():
-            return stem[:i]
-        return stem
-
-    def _merge_device_segments(self, serial, vlist, work_dir=None):
-        """把一台设备的多段录像合并为一个完整 mp4。
-
-        work_dir 非空（系统 TEMP 工作目录）时，并入成片的中间段**不立即删除**
-        （见 _remove_intermediate），留待下次启动 sweep_workdirs 后台清理 ——
-        这是 A 方案避开亚信勒索特征批量删的关键。work_dir=None 时保留旧行为。
-
-        返回 (成品路径或 None, 参与合并的段数, 未并进成片的残缺段列表)。
-
-        为什么必须在收尾里做（而不是留给用户手动拼）：分段是程序为了绕开
-        180 秒硬上限自己选的实现方式，用户从来没要求「几个 `_p2` 文件」。
-        把实现细节原样抛给用户，等于把「用 ffmpeg concat 还是别的方式」这种
-        内部决策变成他的作业 —— 而且 20 个分段的正确顺序、`-c copy` 的解码
-        参数一致性，都不是普通使用者该关心的事。
-
-        单段（绝大多数录制，不足 170 秒）直接返回原路径，不起 ffmpeg 进程。
-        """
-        vlist = [p for p in (vlist or []) if p]
-        if len(vlist) <= 1:
-            return (vlist[0] if vlist else None), len(vlist), []
-        stem = self._merged_stem(vlist)
-        out = stem + "_full.mp4"
-        self._push_status(
-            "info", f"⏳ {serial} 共 {len(vlist):d} 段，正在合并为一个完整视频…")
-        res = join_segments(vlist, out)
-        if not res.get("ok") or not res.get("path"):
-            # 合并失败 → **分段一个都不删**。用户拿到的是「N 个能播的段」，
-            # 而不是「一个播不了的成片」；宁可不合并，也不能悄悄把素材弄丢。
-            self._push_toast(
-                "warn",
-                f"⚠ {serial} 的 {len(vlist):d} 段未能合并为一个视频：{res.get('reason') or '未知原因'}。已保留全部分段文件（{'、'.join((os.path.basename(p) for p in vlist))}），可直接逐个播放")
-            return None, len(vlist), []
-        merged = res["path"]
-        used = res.get("used") or []
-        skipped = res.get("skipped") or []
-        final = merged
-        if merged != vlist[0] and len(used) > 1:
-            # 只有真的新建了合并文件（而不是退化成「只剩一段可用」）才删中间段：
-            # 目录里留 3 个分段 + 1 个成片，用户第一反应是「哪几个是最终版」，
-            # 打包时体积也白翻一倍。
-            for p in used:
-                if p and p != merged:
-                    # [EDR A 方案] 工作目录内的段不立即删（下次启动统一清理），
-                    # 避开"点停止瞬间批量删高熵 MP4"的勒索特征序列。
-                    self._remove_intermediate(p, work_dir)
-            want = stem + ".mp4"
-            try:
-                os.replace(long_path(merged), long_path(want))
-                final = want
-            except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                # 改不成名（目标被播放器占着等）不是失败：成片已经在 out 上，
-                # 只是名字带 `_full`。说清楚它到底叫什么，别让用户以为没合。
-                self._push_status(
-                    "warn", "⚠ {} 已合并但未能改名为 {}（{}），成片仍是 {}".format(serial, os.path.basename(want), e,
-                               os.path.basename(final)))
-        if len(used) > 1:
-            self._push_status(
-                "ok", f"✓ {serial} 已把 {len(used):d} 段合并为一个完整视频: {os.path.basename(final)}（拼接点有约 1 秒画面缺失，见录屏卡片提示）")
-        else:
-            # 多段里只有 1 段正常收尾（其余缺 moov）：它就是成片本身，
-            # 说「合并了 1 段」会让人以为拼过。
-            self._push_status(
-                "ok", f"✓ {serial} 只有 1 段正常收尾，已作为成片保留: {os.path.basename(final)}")
-        if skipped:
-            self._push_toast(
-                "warn", f"⚠ {serial} 有 {len(skipped):d} 段视频没正常收尾（缺 moov 头），未并入成片，残片保留在保存目录：{'、'.join((os.path.basename(p) for p in skipped))}")
-        return final, len(used), skipped
 
     def _stop_video(self, serial):
         """停止单台设备并取回**全部段**。返回 (ok, [本地路径...], err)。
@@ -1409,82 +766,6 @@ class RecordMixin:
             return False, [], "{}（残片：{}）".format(err or "收尾失败", lp)
         return False, [], err
 
-    def _teardown_devices(self, serials, dead, videos_map, devaudio_map,
-                          pretaken=None):
-        """逐设备收尾（拉视频 + 拉设备端音频），**多台设备并行**。
-
-        单台设备的 stop 要走「kill 设备端进程 → 等本地 adb 退出 → 轮询设备端
-        文件就绪 → pull」，而 _pull_and_finish 在设备端根本没生成文件时会把
-        6 次退避全部走完（约 9 秒）；设备端音频那条链同理（tinycap 的 wav 也
-        要等落盘）。串行时这些等待会被乘以台数：5 台设备点「停止」，要 40 秒
-        以上才见到「录屏已完成」，其间 _rec_lock 一直被占着，别的录屏动作全
-        排不上。各设备之间是彼此独立的 adb 调用、没有共享状态，直接并行。
-
-        返回 {serial: (本地视频路径列表, 本地音频路径或 None)}。列表是因为自动
-        分段：一台设备的一场录制会有多段（每段约 170 秒），每一段都要落盘、合成
-        与打包，只留最后一段等于把前几段直接扔掉。逐台兜住异常：一台收尾炸了
-        不该让其余设备连文件都拉不回来。
-        """
-        def one(s):
-            local_vs = []
-            if s in videos_map:
-                if self.video.is_recording(s):
-                    ok, paths, err = self._stop_video(s)
-                    paths = [p for p in (paths or []) if p]
-                    if ok:
-                        local_vs = paths
-                        if err:
-                            # 有段没取回来、当前段却是好的：不能静默。用户以为
-                            # 录了 8 分钟，包里只有 5 分钟，缺的那 3 分钟他会以为
-                            # 是「本来就没发生」。
-                            self._push_toast(
-                                "warn", f"⚠ {s} 部分分段未取回：{err}")
-                    else:
-                        # paths 里全是**已正常收尾**的段（残片只在 err 里说明），
-                        # 必须整体保留：只报一句「收尾失败」会让用户把前面几段
-                        # 本来完好的视频一并扔掉。
-                        local_vs = paths
-                        where = ""
-                        kept = (f"已完成的 {len(local_vs):d} 段完整保留：{'、'.join((os.path.basename(x) for x in local_vs))}。"
-                                if local_vs else "")
-                        if s in dead:
-                            # 进程意外死亡（续段失败 / adb root 等）：文案说清
-                            # 「视频不完整」，与普通收尾失败区分开。
-                            self._push_toast(
-                                "warn",
-                                "⚠ {} 录屏被意外中断，这一段视频不完整（{}）。"
-                                "{}{}未合成音频。".format(s, err or "设备端进程已提前退出",
-                                   where or "残片已保留在保存目录，", kept))
-                        else:
-                            self._push_toast(
-                                "warn", "⚠ 录屏收尾失败 {}：{}{}{}".format(s, err or "未知原因", where, kept))
-                else:
-                    # 会话已被其他路径收尾弹出（stop_all / 异常清理 / 设备被移除后
-                    # 强停）时，这里再用 stop() 只会得到「该设备未在录制」。必须用
-                    # 之前记录的路径兜底，否则这段视频既不合成音频、也不进 zip、
-                    # 界面也无提示。pretaken 是「设备被移除时已经取回的那几段」，
-                    # 没有它就只能拿到第一段。
-                    local_vs = list((pretaken or {}).get(s) or [])
-                    if not local_vs:
-                        first = videos_map.get(s)
-                        local_vs = [first] if first else []
-            local_a = None
-            if s in devaudio_map:
-                try:
-                    local_a = self.device_audio.stop(s)
-                except Exception as e:  # noqa: BLE001  有意捕获一切异常并回落到安全默认值
-                    # 音频收尾失败不能连累视频落盘，也不能让整轮收尾中断
-                    self._push_status(
-                        "warn", f"⚠ {s} 设备音频收尾失败：{e}")
-                    local_a = None
-            return s, (local_vs, local_a)
-
-        if len(serials) <= 1:
-            return dict(one(s) for s in serials)
-        # 上限 4：再多的设备同时 pull 也挤在同一条 adb server 通道上，
-        # 并发度拉满只会让每条都变慢，还平白多占内存。
-        with ThreadPoolExecutor(max_workers=min(4, len(serials))) as pool:
-            return dict(pool.map(one, serials))
 
     # 已经压缩过的容器格式：再走 DEFLATE 只烧 CPU，几乎不减小体积。
     _PRECOMPRESSED_EXT: ClassVar[set[str]] = {
